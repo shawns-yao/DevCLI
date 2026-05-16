@@ -4,8 +4,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.llm.LlmClient;
 import com.paicli.memory.MemoryManager;
+import com.paicli.plan.ResourceConflictDetector;
 import com.paicli.runtime.CancellationContext;
 import com.paicli.tool.ToolRegistry;
+import com.paicli.trace.TraceContext;
+import com.paicli.trace.TraceRecorder;
 import com.paicli.util.AnsiStyle;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -52,6 +55,7 @@ public class AgentOrchestrator {
     private final ToolRegistry toolRegistry;
     private final PrintStream out;
     private Supplier<String> externalContextSupplier = () -> "";
+    private final TraceRecorder traceRecorder = new TraceRecorder();
 
     // 执行步骤的数据结构（package-private 供测试访问）
     record ExecutionStep(String id, String description, String type,
@@ -135,6 +139,11 @@ public class AgentOrchestrator {
      */
     public String run(String userInput) {
         log.info("Multi-Agent run started: inputLength={}", userInput == null ? 0 : userInput.length());
+        TraceContext traceContext = TraceContext.root("team");
+        traceRecorder.record(traceContext, "run.start", Map.of(
+                "inputChars", userInput == null ? 0 : userInput.length(),
+                "workers", workers.size()
+        ));
         memoryManager.addUserMessage(userInput);
         if (CancellationContext.isCancelled()) {
             return "⏹️ 已取消当前多 Agent 任务。";
@@ -194,9 +203,18 @@ public class AgentOrchestrator {
                 worker.clearHistory();
             } else {
                 // 多步批次：真正并行执行，每步用独立的 PrintStream 缓冲，完成后按 step_id 顺序 flush
-                out.println("⚡ 批次 #" + batchIndex + "：" + executable.size()
-                        + " 个独立步骤并行执行（最多 " + workers.size() + " 个并发 Worker）\n");
-                runBatchParallel(executable, steps, retryCount);
+                List<List<ExecutionStep>> waves = ResourceConflictDetector.splitConflictFree(
+                        executable, ExecutionStep::id, ExecutionStep::description, ExecutionStep::type);
+                for (List<ExecutionStep> wave : waves) {
+                    traceRecorder.record(traceContext, "batch.wave", Map.of(
+                            "batchIndex", batchIndex,
+                            "size", wave.size(),
+                            "stepIds", wave.stream().map(ExecutionStep::id).toList().toString()
+                    ));
+                    out.println("⚡ 批次 #" + batchIndex + "：" + wave.size()
+                            + " 个独立步骤并行执行（最多 " + workers.size() + " 个并发 Worker）\n");
+                    runBatchParallel(wave, steps, retryCount);
+                }
             }
         }
 
