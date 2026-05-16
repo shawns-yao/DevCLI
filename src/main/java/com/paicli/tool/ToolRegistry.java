@@ -11,6 +11,7 @@ import com.paicli.browser.BrowserGuard;
 import com.paicli.context.ContextProfile;
 import com.paicli.lsp.LspDiagnosticReport;
 import com.paicli.lsp.LspManager;
+import com.paicli.mcp.protocol.McpSchemaValidator;
 import com.paicli.mcp.protocol.McpToolDescriptor;
 import com.paicli.rag.CodeRetriever;
 import com.paicli.rag.SearchResultFormatter;
@@ -777,6 +778,12 @@ public class ToolRegistry {
         try {
             McpRegisteredTool mcpTool = mcpTools.get(name);
             if (mcpTool != null) {
+                JsonNode mcpArgs = mapper.readTree(argumentsJson);
+                McpSchemaValidator.ValidationResult validation =
+                        McpSchemaValidator.validate(mcpTool.descriptor().inputSchema(), mcpArgs);
+                if (!validation.valid()) {
+                    return ToolOutput.text("MCP 参数校验失败: " + validation.message());
+                }
                 BrowserCheckResult browserCheck = checkBrowserTool(name, argumentsJson, false);
                 auditMetadata = browserCheck.metadata();
                 if (browserCheck.blocked()) {

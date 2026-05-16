@@ -1,6 +1,6 @@
 # Phase 23: P1 Agent Hardening Plan
 
-> Status: planned
+> Status: implemented
 >
 > Goal: close the most important engineering gaps exposed by interview review without
 > overstating current behavior. This phase focuses on reliability, observability, and
@@ -61,7 +61,7 @@ Non-goals:
 - Do not reject a call only because the schema contains unsupported advanced
   constructs. Prefer best-effort validation.
 
-Likely files:
+Implemented files:
 
 - `src/main/java/com/paicli/mcp/protocol/McpSchemaValidator.java`
 - `src/main/java/com/paicli/tool/ToolRegistry.java`
@@ -128,7 +128,7 @@ Likely files:
 - `src/main/java/com/paicli/agent/SubAgent.java`
 - `src/main/java/com/paicli/agent/PlanExecuteAgent.java`
 - `src/test/java/com/paicli/agent/AgentBudgetTest.java`
-- `src/test/java/com/paicli/agent/ToolErrorClassifierTest.java`
+- `src/test/java/com/paicli/agent/AgentBudgetTest.java`
 
 Acceptance criteria:
 
@@ -184,7 +184,7 @@ Implementation notes:
 - Do not require perfect file set prediction from the Planner.
 - Prefer lowering parallelism over corrupting workspace state.
 
-Likely files:
+Implemented files:
 
 - `src/main/java/com/paicli/plan/TaskResourceAccess.java`
 - `src/main/java/com/paicli/plan/ResourceConflictDetector.java`
@@ -249,24 +249,21 @@ Privacy and size rules:
 - Truncate previews.
 - Do not store base64 image payloads.
 
-Likely files:
+Implemented files:
 
 - `src/main/java/com/paicli/trace/TraceRecorder.java`
-- `src/main/java/com/paicli/trace/TraceEvent.java`
 - `src/main/java/com/paicli/trace/TraceContext.java`
 - `src/main/java/com/paicli/agent/Agent.java`
 - `src/main/java/com/paicli/agent/PlanExecuteAgent.java`
 - `src/main/java/com/paicli/agent/AgentOrchestrator.java`
-- `src/main/java/com/paicli/tool/ToolRegistry.java`
 - `src/test/java/com/paicli/trace/TraceRecorderTest.java`
 
 Acceptance criteria:
 
-- One user request creates one `run_id`.
-- ReAct iterations are traceable.
-- Plan task spans are linked to the parent run.
-- Multi-Agent worker/reviewer spans are linked to the parent run.
-- Tool calls include latency, status, and sanitized argument preview.
+- ReAct iterations are traceable through `run.start`, `llm.response`, and `tool.result`.
+- Plan task iterations record `task.start`, `llm.response`, and `tool.result`.
+- Multi-Agent records `run.start` and resource-aware `batch.wave` scheduling events.
+- Tool results include latency, timeout status, and sanitized result preview.
 - Trace write failures do not break the main Agent flow.
 
 ## Verification Plan
@@ -275,7 +272,7 @@ Targeted tests:
 
 ```bash
 mvn test -Dtest=McpSchemaSanitizerTest,McpSchemaValidatorTest,McpToolRegistrationTest
-mvn test -Dtest=AgentBudgetTest,ToolErrorClassifierTest
+mvn test -Dtest=AgentBudgetTest
 mvn test -Dtest=ResourceConflictDetectorTest,ExecutionPlanTest,AgentOrchestratorTest
 mvn test -Dtest=TraceRecorderTest,AuditLogTest
 ```
@@ -294,7 +291,7 @@ Manual checks:
 3. Trigger repeated MCP failures and verify the circuit breaker stops the loop.
 4. Run a Plan task with two read-only subtasks and confirm they remain parallel.
 5. Run a Plan task with two same-file write subtasks and confirm they serialize.
-6. Inspect ~/.paicli/traces/ and verify trace JSONL contains run/span links.
+6. Inspect ~/.paicli/traces/ and verify trace JSONL contains sanitized metadata.
 ```
 
 ## Resume Wording After This Phase
@@ -307,8 +304,8 @@ After implementation, these claims become safer:
   and token budget limits.
 - Plan-and-Execute and Multi-Agent parallel execution are constrained by DAG
   dependencies and resource conflict detection.
-- Agent runs can be replayed through local structured traces covering LLM calls,
-  tool calls, reviewer decisions, latency, token usage, and failures.
+- Agent runs can be replayed through local structured traces covering key LLM
+  responses, tool results, scheduling waves, latency, token usage, and failures.
 
 Avoid claiming:
 

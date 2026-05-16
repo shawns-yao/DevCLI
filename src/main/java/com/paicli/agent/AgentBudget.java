@@ -36,6 +36,7 @@ public class AgentBudget {
         WITHIN_BUDGET,
         TOKEN_BUDGET_EXCEEDED,
         STAGNATION_DETECTED,
+        REPEATED_TOOL_ERROR,
         HARD_ITERATION_LIMIT
     }
 
@@ -47,11 +48,14 @@ public class AgentBudget {
     private final int hardMaxIterations;
 
     private final Deque<String> recentToolSignatures = new ArrayDeque<>();
+    private final Deque<String> recentToolErrorSignatures = new ArrayDeque<>();
     private int iteration;
     private int totalInputTokens;
     private int totalOutputTokens;
     private int totalCachedInputTokens;
     private boolean stagnant;
+    private boolean repeatedToolError;
+    private String repeatedToolErrorSignature = "";
 
     public AgentBudget(int tokenBudget, int stagnationWindow, int hardMaxIterations) {
         if (tokenBudget <= 0) {
@@ -120,9 +124,32 @@ public class AgentBudget {
         }
     }
 
+    public void recordToolResult(String toolName, String result) {
+        String category = ToolErrorClassifier.classify(result);
+        if (category.isBlank()) {
+            recentToolErrorSignatures.clear();
+            return;
+        }
+        String signature = (toolName == null ? "" : toolName) + "|" + category;
+        recentToolErrorSignatures.addLast(signature);
+        while (recentToolErrorSignatures.size() > stagnationWindow) {
+            recentToolErrorSignatures.removeFirst();
+        }
+        if (recentToolErrorSignatures.size() == stagnationWindow) {
+            String first = recentToolErrorSignatures.peekFirst();
+            repeatedToolError = recentToolErrorSignatures.stream().allMatch(sig -> sig.equals(first));
+            if (repeatedToolError) {
+                repeatedToolErrorSignature = first;
+            }
+        }
+    }
+
     public ExitReason check() {
         if (stagnant) {
             return ExitReason.STAGNATION_DETECTED;
+        }
+        if (repeatedToolError) {
+            return ExitReason.REPEATED_TOOL_ERROR;
         }
         if (totalInputTokens + totalOutputTokens >= tokenBudget) {
             return ExitReason.TOKEN_BUDGET_EXCEEDED;
@@ -170,6 +197,9 @@ public class AgentBudget {
             case STAGNATION_DETECTED -> String.format(Locale.ROOT,
                     "检测到连续 %d 轮重复的工具调用，疑似死循环，已强制收尾",
                     stagnationWindow);
+            case REPEATED_TOOL_ERROR -> String.format(Locale.ROOT,
+                    "检测到连续 %d 轮重复的工具错误（%s），已停止重试并强制收尾",
+                    stagnationWindow, repeatedToolErrorSignature);
             case HARD_ITERATION_LIMIT -> String.format(Locale.ROOT,
                     "达到硬轮数上限（%d），已强制收尾", hardMaxIterations);
         };

@@ -79,6 +79,22 @@ class McpToolRegistrationTest {
     }
 
     @Test
+    void invalidMcpArgumentsAreRejectedBeforeInvoker(@TempDir Path tempDir) throws Exception {
+        withAuditDir(tempDir, () -> {
+            ToolRegistry registry = new ToolRegistry();
+            registry.registerMcpTool(requiredTextDescriptor(), args -> {
+                fail("invalid arguments must not reach MCP invoker");
+                return "unreachable";
+            });
+
+            String result = registry.executeTool("mcp__demo__required_echo", "{}");
+
+            assertTrue(result.contains("MCP 参数校验失败"));
+            assertTrue(result.contains("$.text is required"));
+        });
+    }
+
+    @Test
     void registerMcpToolRejectsNullArgs(@TempDir Path tempDir) throws Exception {
         withAuditDir(tempDir, () -> {
             ToolRegistry registry = new ToolRegistry();
@@ -118,6 +134,16 @@ class McpToolRegistrationTest {
                 "mcp__" + server + "__" + name,
                 "Echo input",
                 MAPPER.readTree("{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}")
+        );
+    }
+
+    private static McpToolDescriptor requiredTextDescriptor() throws Exception {
+        return new McpToolDescriptor(
+                "demo",
+                "required_echo",
+                "mcp__demo__required_echo",
+                "Echo required input",
+                MAPPER.readTree("{\"type\":\"object\",\"required\":[\"text\"],\"properties\":{\"text\":{\"type\":\"string\"}}}")
         );
     }
 

@@ -22,6 +22,8 @@ import com.paicli.util.AnsiStyle;
 import com.paicli.tool.ToolRegistry;
 import com.paicli.tool.ToolRegistry.ToolExecutionResult;
 import com.paicli.tool.ToolRegistry.ToolInvocation;
+import com.paicli.trace.TraceContext;
+import com.paicli.trace.TraceRecorder;
 import com.paicli.util.TerminalMarkdownRenderer;
 import com.paicli.image.ImageReferenceParser;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -52,6 +54,7 @@ public class Agent {
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private Renderer renderer;
+    private final TraceRecorder traceRecorder = new TraceRecorder();
     private Supplier<Boolean> hitlEnabledSupplier = () -> false;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
 
@@ -137,6 +140,11 @@ public class Agent {
 
         long startNanos = System.nanoTime();
         AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
+        TraceContext traceContext = TraceContext.root("react");
+        traceRecorder.record(traceContext, "run.start", java.util.Map.of(
+                "model", modelLabel(),
+                "inputChars", userInput == null ? 0 : userInput.length()
+        ));
         pushStatus(budget, startNanos, "running");
 
         // 主退出条件 = LLM 自己决定（不再调用工具就返回）；
@@ -174,6 +182,12 @@ public class Agent {
                         toolDefinitions,
                         streamRenderer
                 );
+                traceRecorder.record(traceContext, "llm.response", java.util.Map.of(
+                        "iteration", iteration,
+                        "toolCalls", response.toolCalls() == null ? 0 : response.toolCalls().size(),
+                        "inputTokens", response.inputTokens(),
+                        "outputTokens", response.outputTokens()
+                ));
                 LlmTraceLogger.logReasoning(log, "react iteration=" + iteration, llmClient, response.reasoningContent());
                 if (CancellationContext.isCancelled()) {
                     log.info("ReAct run cancelled after LLM response");
@@ -205,6 +219,14 @@ public class Agent {
 
                     List<ToolExecutionResult> toolResults = executeToolCalls(response.toolCalls(), iteration);
                     for (ToolExecutionResult toolResult : toolResults) {
+                        traceRecorder.record(traceContext, "tool.result", java.util.Map.of(
+                                "iteration", iteration,
+                                "tool", toolResult.name(),
+                                "elapsedMillis", toolResult.elapsedMillis(),
+                                "timedOut", toolResult.timedOut(),
+                                "resultPreview", preview(toolResult.result(), 300)
+                        ));
+                        budget.recordToolResult(toolResult.name(), toolResult.result());
                         memoryManager.addToolResult(toolResult.name(), toolResult.result());
                         conversationHistory.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
                     }

@@ -218,6 +218,7 @@ public class SubAgent {
 
                     List<ToolExecutionResult> toolResults = executeToolCalls(response.toolCalls());
                     for (ToolExecutionResult toolResult : toolResults) {
+                        budget.recordToolResult(toolResult.name(), toolResult.result());
                         conversationHistory.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
                     }
                     appendImageToolMessages(toolResults);

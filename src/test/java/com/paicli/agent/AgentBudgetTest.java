@@ -74,6 +74,31 @@ class AgentBudgetTest {
     }
 
     @Test
+    void repeatedToolErrorsTriggerCircuitBreaker() {
+        AgentBudget budget = new AgentBudget(1_000_000, 3, 50);
+
+        budget.recordToolResult("mcp__demo__search", "MCP 参数校验失败: $.query is required");
+        budget.recordToolResult("mcp__demo__search", "MCP 参数校验失败: $.query is required");
+        assertEquals(AgentBudget.ExitReason.WITHIN_BUDGET, budget.check());
+
+        budget.recordToolResult("mcp__demo__search", "MCP 参数校验失败: $.query is required");
+        assertEquals(AgentBudget.ExitReason.REPEATED_TOOL_ERROR, budget.check());
+        assertTrue(budget.describeExit(AgentBudget.ExitReason.REPEATED_TOOL_ERROR).contains("mcp__demo__search|schema"));
+    }
+
+    @Test
+    void successfulToolResultResetsErrorCircuitBreakerWindow() {
+        AgentBudget budget = new AgentBudget(1_000_000, 3, 50);
+
+        budget.recordToolResult("read_file", "工具执行失败: no such file");
+        budget.recordToolResult("read_file", "ok");
+        budget.recordToolResult("read_file", "工具执行失败: no such file");
+        budget.recordToolResult("read_file", "工具执行失败: no such file");
+
+        assertEquals(AgentBudget.ExitReason.WITHIN_BUDGET, budget.check());
+    }
+
+    @Test
     void invalidConstructorArgumentsRejected() {
         assertThrows(IllegalArgumentException.class, () -> new AgentBudget(0, 3, 50));
         assertThrows(IllegalArgumentException.class, () -> new AgentBudget(100, 1, 50));

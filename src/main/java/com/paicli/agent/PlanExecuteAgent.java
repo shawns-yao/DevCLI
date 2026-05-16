@@ -19,6 +19,8 @@ import com.paicli.util.AnsiStyle;
 import com.paicli.tool.ToolRegistry;
 import com.paicli.tool.ToolRegistry.ToolExecutionResult;
 import com.paicli.tool.ToolRegistry.ToolInvocation;
+import com.paicli.trace.TraceContext;
+import com.paicli.trace.TraceRecorder;
 import com.paicli.util.TerminalMarkdownRenderer;
 import com.paicli.image.ImageReferenceParser;
 import org.slf4j.Logger;
@@ -110,6 +112,7 @@ public class PlanExecuteAgent {
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
+    private final TraceRecorder traceRecorder = new TraceRecorder();
 
     public PlanExecuteAgent(LlmClient llmClient) {
         this(llmClient, (goal, plan) -> PlanReviewDecision.execute());
@@ -357,6 +360,20 @@ public class PlanExecuteAgent {
 
     private List<TaskExecutionResult> executeTaskBatch(ExecutionPlan plan, List<Task> executableTasks,
                                                        StreamState streamState) {
+        List<List<Task>> waves = ResourceConflictDetector.splitConflictFree(
+                executableTasks, Task::getId, Task::getDescription, task -> task.getType().name());
+        if (waves.size() > 1) {
+            List<TaskExecutionResult> results = new ArrayList<>();
+            for (List<Task> wave : waves) {
+                results.addAll(executeConflictFreeTaskBatch(plan, wave, streamState));
+            }
+            return results;
+        }
+        return executeConflictFreeTaskBatch(plan, executableTasks, streamState);
+    }
+
+    private List<TaskExecutionResult> executeConflictFreeTaskBatch(ExecutionPlan plan, List<Task> executableTasks,
+                                                                   StreamState streamState) {
         if (executableTasks.size() == 1) {
             Task task = executableTasks.get(0);
             log.info("Executing single task: {} type={}", task.getId(), task.getType());
@@ -464,17 +481,30 @@ public class PlanExecuteAgent {
         StringBuilder allResults = new StringBuilder();
         int iteration = 0;
         TaskStreamRenderer streamRenderer = new TaskStreamRenderer(task.getId(), streamState, out);
+        TraceContext traceContext = TraceContext.root("plan-task");
+        traceRecorder.record(traceContext, "task.start", Map.of(
+                "taskId", task.getId(),
+                "taskType", task.getType().name(),
+                "description", task.getDescription()
+        ));
 
         int totalInputTokens = 0;
         int totalOutputTokens = 0;
         int totalCachedInputTokens = 0;
+        AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
 
         while (iteration < MAX_TASK_ITERATIONS) {
             if (CancellationContext.isCancelled()) {
                 streamRenderer.finish();
                 return TaskRunResult.of("⏹️ 已取消任务 [" + task.getId() + "]。", streamRenderer.hasStreamedOutput());
             }
+            AgentBudget.ExitReason exitReason = budget.check();
+            if (exitReason != AgentBudget.ExitReason.WITHIN_BUDGET) {
+                streamRenderer.finish();
+                return TaskRunResult.of(budget.describeExit(exitReason), streamRenderer.hasStreamedOutput());
+            }
             iteration++;
+            budget.beginIteration();
 
             // 调 LLM 前评估 messages 是否接近 window 上限；超阈值压缩早期消息为摘要。
             injectPendingLspDiagnostics(messages, out);
@@ -485,6 +515,13 @@ public class PlanExecuteAgent {
                     toolRegistry.getToolDefinitions(),
                     streamRenderer
             );
+            traceRecorder.record(traceContext, "llm.response", Map.of(
+                    "taskId", task.getId(),
+                    "iteration", iteration,
+                    "toolCalls", response.toolCalls() == null ? 0 : response.toolCalls().size(),
+                    "inputTokens", response.inputTokens(),
+                    "outputTokens", response.outputTokens()
+            ));
             LlmTraceLogger.logReasoning(log,
                     "plan-task task=" + task.getId() + " iteration=" + iteration,
                     llmClient,
@@ -497,6 +534,7 @@ public class PlanExecuteAgent {
             totalInputTokens += response.inputTokens();
             totalOutputTokens += response.outputTokens();
             totalCachedInputTokens += response.cachedInputTokens();
+            budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
 
             log.info("Task {} iteration {} response: toolCalls={}, reasoningChars={}, contentChars={}",
                     task.getId(),
@@ -536,6 +574,15 @@ public class PlanExecuteAgent {
 
             List<ToolExecutionResult> toolResults = executeToolCalls(task.getId(), response.toolCalls());
             for (ToolExecutionResult toolResult : toolResults) {
+                traceRecorder.record(traceContext, "tool.result", Map.of(
+                        "taskId", task.getId(),
+                        "iteration", iteration,
+                        "tool", toolResult.name(),
+                        "elapsedMillis", toolResult.elapsedMillis(),
+                        "timedOut", toolResult.timedOut(),
+                        "resultPreview", preview(toolResult.result(), 300)
+                ));
+                budget.recordToolResult(toolResult.name(), toolResult.result());
                 memoryManager.addToolResult(toolResult.name(), toolResult.result());
                 allResults.append(toolResult.result()).append("\n");
                 messages.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
