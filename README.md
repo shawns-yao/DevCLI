@@ -15,6 +15,9 @@ mvn test -Pphase16-smoke
 # 常规快速回归，跳过外部进程 / 网络超时 / 命令超时类慢测试
 mvn test -Pquick
 
+# 本地性能基准，单独运行；结果受机器负载影响，不纳入 quick
+mvn test -DskipTests=false -Dtest=PaiCliResumeBenchmarkTest
+
 # 发版或大范围重构前再跑全量
 mvn test -DskipTests=false
 ```

@@ -465,7 +465,7 @@ public final class InlineRenderer implements Renderer {
         }
         LineReader reader = activePrintAboveReader();
         if (reader != null) {
-            reader.printAbove(text);
+            reader.printAbove(text.replace("\r\n", "\n").replace('\r', '\n'));
             return;
         }
         out.print(text);

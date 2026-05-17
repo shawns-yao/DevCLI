@@ -260,6 +260,31 @@ class MainInputNormalizationTest {
         assertFalse(Main.readEscCancel(null));
     }
 
+    @Test
+    void buildTerminalUsesDetectedConsoleEncoding() throws Exception {
+        String previous = System.getProperty("paicli.terminal.encoding");
+        System.setProperty("paicli.terminal.encoding", "UTF-8");
+        try (Terminal terminal = Main.buildTerminal()) {
+            assertEquals(StandardCharsets.UTF_8, terminal.encoding());
+            assertEquals(StandardCharsets.UTF_8, terminal.inputEncoding());
+            assertEquals(StandardCharsets.UTF_8, terminal.outputEncoding());
+        } finally {
+            restoreProperty("paicli.terminal.encoding", previous);
+        }
+    }
+
+    @Test
+    void consoleCharsetCanBeOverriddenForLegacyWindowsConsole() {
+        String previous = System.getProperty("paicli.terminal.encoding");
+        try {
+            System.setProperty("paicli.terminal.encoding", "GBK");
+
+            assertEquals(java.nio.charset.Charset.forName("GBK"), Main.consoleCharset());
+        } finally {
+            restoreProperty("paicli.terminal.encoding", previous);
+        }
+    }
+
     private static void restoreProperty(String key, String value) {
         if (value == null) {
             System.clearProperty(key);

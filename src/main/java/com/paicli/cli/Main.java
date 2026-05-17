@@ -69,6 +69,8 @@ import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -201,7 +203,7 @@ public class Main {
         }
         AtomicReference<LlmClient> llmClientRef = new AtomicReference<>(llmClient);
 
-        try (Terminal terminal = TerminalBuilder.builder().system(true).dumb(true).build()) {
+        try (Terminal terminal = buildTerminal()) {
             TerminalHitlHandler terminalHitlHandler = new TerminalHitlHandler(false);
             SwitchableHitlHandler hitlHandler = new SwitchableHitlHandler(terminalHitlHandler);
             HitlToolRegistry hitlToolRegistry = new HitlToolRegistry(hitlHandler);
@@ -961,6 +963,45 @@ public class Main {
         } finally {
             renderer.afterInput();
         }
+    }
+
+    static Terminal buildTerminal() throws IOException {
+        Charset consoleCharset = consoleCharset();
+        return TerminalBuilder.builder()
+                .system(true)
+                .dumb(true)
+                .encoding(consoleCharset)
+                .stdinEncoding(consoleCharset)
+                .stdoutEncoding(consoleCharset)
+                .stderrEncoding(consoleCharset)
+                .build();
+    }
+
+    static Charset consoleCharset() {
+        String override = firstNonBlank(System.getProperty("paicli.terminal.encoding"),
+                System.getenv("PAICLI_TERMINAL_ENCODING"));
+        if (override != null) {
+            try {
+                return Charset.forName(override);
+            } catch (Exception ignored) {
+                // Fall through to detected console encoding.
+            }
+        }
+
+        if (System.console() != null) {
+            return System.console().charset();
+        }
+
+        String nativeEncoding = System.getProperty("native.encoding");
+        if (nativeEncoding != null && !nativeEncoding.isBlank()) {
+            try {
+                return Charset.forName(nativeEncoding);
+            } catch (Exception ignored) {
+                // Fall through to UTF-8.
+            }
+        }
+
+        return StandardCharsets.UTF_8;
     }
 
     static boolean defaultSpaciousPrompt(boolean statusBarAvailable) {

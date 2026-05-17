@@ -196,6 +196,7 @@
                                 <exclude>**/mcp/transport/StreamableHttpTransportTest.java</exclude>
                                 <exclude>**/tool/ToolRegistryTest.java</exclude>
                                 <exclude>**/web/WebFetcherTest.java</exclude>
+                                <exclude>**/benchmark/**</exclude>
                             </excludes>
                         </configuration>
                     </plugin>
