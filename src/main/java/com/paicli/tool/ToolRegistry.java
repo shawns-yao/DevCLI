@@ -350,10 +350,12 @@ public class ToolRegistry {
     private void registerRagTools() {
         tools.put("search_code", new Tool(
                 "search_code",
-                "语义检索代码库，根据自然语言描述查找相关代码块；默认 top_k=5，可显式指定（上限 30）",
+                "检索代码库。mode 可选：auto/general/call_chain/definition/error_trace/config；调用链场景可用 graph_depth 0-3 控制图谱扩展。",
                 createParameters(
                         new Param("query", "string", "自然语言查询描述，例如'用户登录的实现'", true),
-                        new Param("top_k", "integer", "返回结果数量（默认 5，上限 30）", false)
+                        new Param("top_k", "integer", "返回结果数量（默认 5，上限 30）", false),
+                        new Param("mode", "string", "检索意图，可选 auto/general/call_chain/definition/error_trace/config；非法值自动降级", false),
+                        new Param("graph_depth", "integer", "调用链图谱扩展深度，范围 0-3；非调用链模式会自动收窄", false)
                 ),
                 args -> {
                     String query = args.get("query");
@@ -365,6 +367,13 @@ public class ToolRegistry {
                     } catch (NumberFormatException ignored) {
                     }
                     topK = Math.max(1, Math.min(topK, 30));
+                    Integer graphDepth = null;
+                    try {
+                        if (args.containsKey("graph_depth")) {
+                            graphDepth = Integer.parseInt(args.get("graph_depth"));
+                        }
+                    } catch (NumberFormatException ignored) {
+                    }
 
                     try (CodeRetriever retriever = new CodeRetriever(projectPath)) {
                         var stats = retriever.getStats();
@@ -372,7 +381,10 @@ public class ToolRegistry {
                             return "代码库尚未索引，请先使用 /index 命令索引当前项目。";
                         }
 
-                        List<VectorStore.SearchResult> results = retriever.hybridSearch(query, topK);
+                        List<VectorStore.SearchResult> results = retriever.search(query, topK, args.get("mode"), graphDepth);
+                        if (results.isEmpty()) {
+                            results = retriever.search(query, topK, "general", 1);
+                        }
                         if (results.isEmpty()) {
                             return "未找到与查询相关的代码。";
                         }

@@ -133,4 +133,42 @@ class CodeRetrieverTest {
             assertTrue(names.contains("UserMapper.selectById(Long id)"));
         }
     }
+
+    @Test
+    void definitionModeDisablesDeepGraphExpansion() throws Exception {
+        CodeChunk controller = CodeChunk.methodChunk(
+                "src/main/java/com/example/UserController.java",
+                "UserController.detail()",
+                "public UserVO detail(Long id) { return userService.detail(id); }",
+                10, 12
+        );
+        CodeChunk service = CodeChunk.methodChunk(
+                "src/main/java/com/example/UserService.java",
+                "UserService.detail(Long id)",
+                "UserVO loadProfile(Long id);",
+                5, 5
+        );
+        store.insertChunks(List.of(
+                new VectorStore.CodeChunkEntry(controller, new float[]{1.0f, 0.0f}),
+                new VectorStore.CodeChunkEntry(service, new float[]{0.0f, 1.0f})
+        ));
+        store.insertRelations(List.of(
+                new CodeRelation(controller.filePath(), "UserController.detail", null, "UserService.detail", "calls")
+        ));
+
+        EmbeddingClient stubClient = new EmbeddingClient("ollama", "stub", "http://localhost", "") {
+            @Override
+            public float[] embed(String text) {
+                return new float[]{1.0f, 0.0f};
+            }
+        };
+
+        try (CodeRetriever retriever = new CodeRetriever(testProject, stubClient)) {
+            List<VectorStore.SearchResult> results = retriever.search("UserController 在哪里定义", 1, "definition", 3);
+            List<String> names = results.stream().map(VectorStore.SearchResult::name).toList();
+
+            assertTrue(names.contains("UserController.detail()"));
+            assertFalse(names.contains("UserService.detail(Long id)"));
+        }
+    }
 }
