@@ -52,6 +52,14 @@ public class CodeRetriever implements AutoCloseable {
      * 混合检索：同时进行语义检索和关键词检索，合并去重
      */
     public List<VectorStore.SearchResult> hybridSearch(String query, int topK) throws Exception {
+        return search(query, topK, CodeSearchOptions.resolve("call_chain", query, GRAPH_MAX_DEPTH));
+    }
+
+    public List<VectorStore.SearchResult> search(String query, int topK, String mode, Integer graphDepth) throws Exception {
+        return search(query, topK, CodeSearchOptions.resolve(mode, query, graphDepth));
+    }
+
+    public List<VectorStore.SearchResult> search(String query, int topK, CodeSearchOptions options) throws Exception {
         Map<String, VectorStore.SearchResult> merged = new LinkedHashMap<>();
         Set<String> dualMatchBonused = new HashSet<>();
 
@@ -69,8 +77,10 @@ public class CodeRetriever implements AutoCloseable {
             }
         }
 
-        // 3. 图谱扩展：从入口代码块沿 calls / implements / extends / contains 最多扩展 3 跳。
-        expandGraphNeighbors(merged);
+        // 3. 图谱扩展：调用链场景最多 3 跳，定义/配置场景默认关闭。
+        if (options.graphDepth() > 0) {
+            expandGraphNeighbors(merged, options.graphDepth());
+        }
 
         // 4. 代码类型加分：method/class 比 file 更直接回答"怎么实现"
         List<VectorStore.SearchResult> ranked = new ArrayList<>();
@@ -107,7 +117,7 @@ public class CodeRetriever implements AutoCloseable {
         }
     }
 
-    private void expandGraphNeighbors(Map<String, VectorStore.SearchResult> merged) throws SQLException {
+    private void expandGraphNeighbors(Map<String, VectorStore.SearchResult> merged, int maxDepth) throws SQLException {
         List<VectorStore.SearchResult> seeds = merged.values().stream()
                 .sorted(Comparator.comparingDouble(VectorStore.SearchResult::similarity).reversed())
                 .limit(GRAPH_SEED_LIMIT)
@@ -115,16 +125,16 @@ public class CodeRetriever implements AutoCloseable {
         Set<String> visitedNodes = new HashSet<>();
         int[] added = {0};
         for (VectorStore.SearchResult seed : seeds) {
-            expandFrom(seed.name(), seed.similarity(), 1, visitedNodes, merged, added);
+            expandFrom(seed.name(), seed.similarity(), 1, maxDepth, visitedNodes, merged, added);
             if (added[0] >= GRAPH_TOTAL_CHUNK_LIMIT) {
                 break;
             }
         }
     }
 
-    private void expandFrom(String name, double parentScore, int depth, Set<String> visitedNodes,
+    private void expandFrom(String name, double parentScore, int depth, int maxDepth, Set<String> visitedNodes,
                             Map<String, VectorStore.SearchResult> merged, int[] added) throws SQLException {
-        if (name == null || name.isBlank() || depth > GRAPH_MAX_DEPTH || added[0] >= GRAPH_TOTAL_CHUNK_LIMIT) {
+        if (name == null || name.isBlank() || depth > maxDepth || added[0] >= GRAPH_TOTAL_CHUNK_LIMIT) {
             return;
         }
         String normalizedName = normalizeMethodName(name);
@@ -150,7 +160,7 @@ public class CodeRetriever implements AutoCloseable {
                     return;
                 }
             }
-            expandFrom(target, score, depth + 1, visitedNodes, merged, added);
+            expandFrom(target, score, depth + 1, maxDepth, visitedNodes, merged, added);
         }
     }
 
