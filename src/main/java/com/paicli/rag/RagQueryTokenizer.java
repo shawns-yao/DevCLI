@@ -19,6 +19,7 @@ import java.util.regex.Pattern;
 final class RagQueryTokenizer {
     private static final JiebaSegmenter SEGMENTER = JiebaSegmenterFactory.createSilently();
     private static final Pattern ASCII_TOKEN = Pattern.compile("[A-Za-z][A-Za-z0-9_.$-]{1,}");
+    private static final Pattern CAMEL_PART = Pattern.compile("[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|\\d+");
 
     private RagQueryTokenizer() {
     }
@@ -35,6 +36,7 @@ final class RagQueryTokenizer {
             String token = word.trim();
             if (isUsefulToken(token)) {
                 tokens.add(token);
+                addDomainAliases(tokens, token);
             }
         }
 
@@ -43,10 +45,66 @@ final class RagQueryTokenizer {
             String token = matcher.group();
             if (isUsefulToken(token)) {
                 tokens.add(token);
+                addCodeTokenParts(tokens, token);
             }
         }
 
         return tokens;
+    }
+
+    private static void addDomainAliases(Set<String> tokens, String token) {
+        switch (token.toLowerCase(Locale.ROOT)) {
+            case "注册" -> {
+                tokens.add("register");
+                tokens.add("registry");
+            }
+            case "工具" -> tokens.add("tool");
+            case "检索", "检索器" -> {
+                tokens.add("search");
+                tokens.add("retriever");
+            }
+            case "关系", "图谱" -> {
+                tokens.add("relation");
+                tokens.add("analyzer");
+            }
+            case "提取", "解析" -> {
+                tokens.add("resolve");
+                tokens.add("analyze");
+            }
+            case "向量" -> tokens.add("vector");
+            case "存储" -> tokens.add("store");
+            case "余弦" -> tokens.add("cosine");
+            case "相似度" -> tokens.add("similarity");
+            case "记忆" -> tokens.add("memory");
+            case "压缩" -> tokens.add("compress");
+            case "覆盖" -> tokens.add("override");
+            case "诊断" -> tokens.add("diagnostic");
+            case "耗时" -> tokens.add("duration");
+            default -> {
+            }
+        }
+    }
+
+    private static void addCodeTokenParts(Set<String> tokens, String token) {
+        String[] dottedParts = token.split("[.$_-]+");
+        for (String part : dottedParts) {
+            addTokenIfUseful(tokens, part);
+            Matcher camelMatcher = CAMEL_PART.matcher(part);
+            while (camelMatcher.find()) {
+                addTokenIfUseful(tokens, camelMatcher.group());
+            }
+        }
+    }
+
+    private static void addTokenIfUseful(Set<String> tokens, String token) {
+        if (!isUsefulToken(token)) {
+            return;
+        }
+        tokens.add(token);
+        String lower = token.toLowerCase(Locale.ROOT);
+        if (!lower.equals(token)) {
+            tokens.add(lower);
+        }
     }
 
     private static boolean isUsefulToken(String token) {

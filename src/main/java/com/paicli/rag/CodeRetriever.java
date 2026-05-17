@@ -70,7 +70,7 @@ public class CodeRetriever implements AutoCloseable {
             case AUTO, GENERAL -> searchGeneral(query, topK, options, merged, dualMatchBonused);
         }
 
-        return rankAndLimit(merged, topK);
+        return rankAndLimit(merged, query, topK);
     }
 
     private void searchGeneral(String query, int topK, CodeSearchOptions options,
@@ -101,7 +101,7 @@ public class CodeRetriever implements AutoCloseable {
                                     Map<String, VectorStore.SearchResult> merged,
                                     Set<String> dualMatchBonused) throws Exception {
         addKeywordResults(query, merged, dualMatchBonused);
-        if (merged.isEmpty()) {
+        if (merged.size() < Math.max(topK, 5)) {
             addSemanticResults(query, topK, merged, dualMatchBonused);
         }
     }
@@ -130,8 +130,8 @@ public class CodeRetriever implements AutoCloseable {
         }
     }
 
-    private List<VectorStore.SearchResult> rankAndLimit(Map<String, VectorStore.SearchResult> merged, int topK) {
-        // 代码类型加分：method/class 比 file 更直接回答"怎么实现"
+    private List<VectorStore.SearchResult> rankAndLimit(Map<String, VectorStore.SearchResult> merged, String query, int topK) {
+        Set<String> queryTokens = RagQueryTokenizer.tokenize(query);
         List<VectorStore.SearchResult> ranked = new ArrayList<>();
         for (VectorStore.SearchResult r : merged.values()) {
             double typeBoost = switch (r.chunkType()) {
@@ -139,12 +139,87 @@ public class CodeRetriever implements AutoCloseable {
                 case "class" -> 0.10;
                 default -> 0.0;
             };
-            ranked.add(typeBoost == 0.0 ? r : new VectorStore.SearchResult(
-                    r.filePath(), r.chunkType(), r.name(), r.content(), r.similarity() + typeBoost));
+            double rerankBoost = typeBoost + queryMatchBoost(r, queryTokens) - noisePenalty(r, queryTokens);
+            ranked.add(rerankBoost == 0.0 ? r : new VectorStore.SearchResult(
+                    r.filePath(), r.chunkType(), r.name(), r.content(), r.similarity() + rerankBoost));
         }
 
         ranked.sort(Comparator.comparingDouble(VectorStore.SearchResult::similarity).reversed());
         return limitPerFile(ranked, topK, 2);
+    }
+
+    private double queryMatchBoost(VectorStore.SearchResult result, Set<String> queryTokens) {
+        if (queryTokens.isEmpty()) {
+            return 0.0;
+        }
+        String nameLower = result.name().toLowerCase();
+        String fileLower = result.filePath().replace('\\', '/').toLowerCase();
+        String contentLower = result.content().toLowerCase();
+        double boost = 0.0;
+        int covered = 0;
+        for (String token : queryTokens) {
+            String tokenLower = token.toLowerCase();
+            if (tokenLower.length() < 2) {
+                continue;
+            }
+            boolean matched = false;
+            if (nameLower.equals(tokenLower)) {
+                boost += 0.70;
+                matched = true;
+            } else if (nameLower.startsWith(tokenLower + ".")
+                    || nameLower.contains("." + tokenLower) || nameLower.contains(tokenLower + "(")) {
+                boost += 0.18;
+                matched = true;
+            } else if (nameLower.contains(tokenLower)) {
+                boost += 0.10;
+                matched = true;
+            }
+            if (fileLower.endsWith("/" + tokenLower + ".java") || fileLower.contains("/" + tokenLower + "/")) {
+                boost += 0.16;
+                matched = true;
+            } else if (fileLower.contains(tokenLower)) {
+                boost += 0.06;
+                matched = true;
+            }
+            if (!matched && contentLower.contains(tokenLower)) {
+                boost += 0.02;
+                matched = true;
+            }
+            if (matched) {
+                covered++;
+            }
+        }
+        if (covered >= 2) {
+            boost += Math.min(0.20, covered * 0.03);
+        }
+        return Math.min(boost, 1.20);
+    }
+
+    private double noisePenalty(VectorStore.SearchResult result, Set<String> queryTokens) {
+        String path = result.filePath().replace('\\', '/').toLowerCase();
+        String tokenText = String.join(" ", queryTokens).toLowerCase();
+        double penalty = 0.0;
+        if ((path.contains("/src/test/") || path.contains("/test/"))
+                && !containsAny(tokenText, "test", "测试", "单测")) {
+            penalty += 0.12;
+        }
+        if ((path.contains("/docs/") || path.endsWith(".md"))
+                && !containsAny(tokenText, "doc", "docs", "readme", "文档")) {
+            penalty += 0.08;
+        }
+        if ("file".equals(result.chunkType())) {
+            penalty += 0.08;
+        }
+        return penalty;
+    }
+
+    private boolean containsAny(String text, String... needles) {
+        for (String needle : needles) {
+            if (text.contains(needle)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void mergeResult(Map<String, VectorStore.SearchResult> merged, VectorStore.SearchResult candidate,
