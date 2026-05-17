@@ -51,6 +51,17 @@ config       graph depth 0
 `hybridSearch` remains as a compatibility entry and maps to call-chain style
 retrieval with bounded graph expansion.
 
+Retrieval is now routed by resolved intent:
+
+- `general`: semantic recall first, then keyword recall, with light graph expansion
+- `call_chain`: keyword/entry recall plus semantic recall, then bounded graph expansion
+- `definition`: keyword/symbol recall first, semantic recall only when keyword recall is empty
+- `config`: keyword/config-key recall first, semantic recall only when keyword recall is empty
+- `error_trace`: error keyword recall first, semantic recall as a supplement, with light graph expansion
+
+This keeps natural-language discovery broad while avoiding unnecessary embedding
+calls and vector noise for exact definition/config queries.
+
 ## Explicit Non-Goal
 
 This phase does not add LLM reranking or LLM scoring. Retrieval ranking remains
@@ -71,3 +82,4 @@ Covered scenarios:
 - query intent overrides conflicting LLM-provided mode
 - graph depth is clamped and narrowed by mode
 - definition mode disables deep graph expansion
+- definition/config style modes prefer keyword recall before embedding fallback

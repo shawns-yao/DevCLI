@@ -63,26 +63,75 @@ public class CodeRetriever implements AutoCloseable {
         Map<String, VectorStore.SearchResult> merged = new LinkedHashMap<>();
         Set<String> dualMatchBonused = new HashSet<>();
 
-        // 1. 语义检索
+        switch (options.mode()) {
+            case DEFINITION, CONFIG -> searchPreciseFirst(query, topK, merged, dualMatchBonused);
+            case ERROR_TRACE -> searchErrorTrace(query, topK, options, merged, dualMatchBonused);
+            case CALL_CHAIN -> searchCallChain(query, topK, options, merged, dualMatchBonused);
+            case AUTO, GENERAL -> searchGeneral(query, topK, options, merged, dualMatchBonused);
+        }
+
+        return rankAndLimit(merged, topK);
+    }
+
+    private void searchGeneral(String query, int topK, CodeSearchOptions options,
+                               Map<String, VectorStore.SearchResult> merged,
+                               Set<String> dualMatchBonused) throws Exception {
+        addSemanticResults(query, topK, merged, dualMatchBonused);
+        addKeywordResults(query, merged, dualMatchBonused);
+        expandIfNeeded(merged, options.graphDepth());
+    }
+
+    private void searchCallChain(String query, int topK, CodeSearchOptions options,
+                                 Map<String, VectorStore.SearchResult> merged,
+                                 Set<String> dualMatchBonused) throws Exception {
+        addSemanticResults(query, topK, merged, dualMatchBonused);
+        addKeywordResults(query, merged, dualMatchBonused);
+        expandIfNeeded(merged, options.graphDepth());
+    }
+
+    private void searchErrorTrace(String query, int topK, CodeSearchOptions options,
+                                  Map<String, VectorStore.SearchResult> merged,
+                                  Set<String> dualMatchBonused) throws Exception {
+        addKeywordResults(query, merged, dualMatchBonused);
+        addSemanticResults(query, topK, merged, dualMatchBonused);
+        expandIfNeeded(merged, options.graphDepth());
+    }
+
+    private void searchPreciseFirst(String query, int topK,
+                                    Map<String, VectorStore.SearchResult> merged,
+                                    Set<String> dualMatchBonused) throws Exception {
+        addKeywordResults(query, merged, dualMatchBonused);
+        if (merged.isEmpty()) {
+            addSemanticResults(query, topK, merged, dualMatchBonused);
+        }
+    }
+
+    private void addSemanticResults(String query, int topK, Map<String, VectorStore.SearchResult> merged,
+                                    Set<String> dualMatchBonused) throws Exception {
         int semanticLimit = Math.max(topK * 2, 10);
         for (VectorStore.SearchResult result : semanticSearch(query, semanticLimit)) {
             mergeResult(merged, result, dualMatchBonused);
         }
+    }
 
-        // 2. 关键词检索
+    private void addKeywordResults(String query, Map<String, VectorStore.SearchResult> merged,
+                                   Set<String> dualMatchBonused) throws SQLException {
         Set<String> keywords = RagQueryTokenizer.tokenize(query);
         for (String keyword : keywords) {
             for (VectorStore.SearchResult result : keywordSearch(keyword)) {
                 mergeResult(merged, boostKeywordMatch(result, keyword), dualMatchBonused);
             }
         }
+    }
 
-        // 3. 图谱扩展：调用链场景最多 3 跳，定义/配置场景默认关闭。
-        if (options.graphDepth() > 0) {
-            expandGraphNeighbors(merged, options.graphDepth());
+    private void expandIfNeeded(Map<String, VectorStore.SearchResult> merged, int graphDepth) throws SQLException {
+        if (graphDepth > 0) {
+            expandGraphNeighbors(merged, graphDepth);
         }
+    }
 
-        // 4. 代码类型加分：method/class 比 file 更直接回答"怎么实现"
+    private List<VectorStore.SearchResult> rankAndLimit(Map<String, VectorStore.SearchResult> merged, int topK) {
+        // 代码类型加分：method/class 比 file 更直接回答"怎么实现"
         List<VectorStore.SearchResult> ranked = new ArrayList<>();
         for (VectorStore.SearchResult r : merged.values()) {
             double typeBoost = switch (r.chunkType()) {
