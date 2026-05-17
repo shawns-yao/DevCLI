@@ -206,7 +206,7 @@ class CodeRetrieverTest {
 
             assertFalse(results.isEmpty());
             assertEquals("UserService", results.get(0).name());
-            assertEquals(0, embeddingCalls);
+            assertEquals(1, embeddingCalls);
         }
     }
 
@@ -236,6 +236,41 @@ class CodeRetrieverTest {
             assertFalse(results.isEmpty());
             assertEquals("UserService", results.get(0).name());
             assertEquals(1, embeddingCalls);
+        }
+    }
+
+    @Test
+    void tokenizerSplitsCamelCaseAndRerankerPrefersExactSymbolMatches() throws Exception {
+        CodeChunk promptAssembler = CodeChunk.classChunk(
+                "src/main/java/com/paicli/prompt/PromptAssembler.java",
+                "PromptAssembler",
+                "public final class PromptAssembler { PromptContext assemble() { return null; } }",
+                1, 20
+        );
+        CodeChunk promptRepository = CodeChunk.classChunk(
+                "src/main/java/com/paicli/prompt/PromptRepository.java",
+                "PromptRepository",
+                "public final class PromptRepository { String systemPrompt() { return \"PromptAssembler\"; } }",
+                1, 20
+        );
+        store.insertChunks(List.of(
+                new VectorStore.CodeChunkEntry(promptAssembler, new float[]{0.0f, 1.0f}),
+                new VectorStore.CodeChunkEntry(promptRepository, new float[]{1.0f, 0.0f})
+        ));
+
+        EmbeddingClient stubClient = new EmbeddingClient("ollama", "stub", "http://localhost", "") {
+            @Override
+            public float[] embed(String text) {
+                return new float[]{1.0f, 0.0f};
+            }
+        };
+
+        try (CodeRetriever retriever = new CodeRetriever(testProject, stubClient)) {
+            List<VectorStore.SearchResult> results = retriever.search("PromptAssembler 如何组装 PromptContext", 2,
+                    "definition", null);
+
+            assertFalse(results.isEmpty());
+            assertEquals("PromptAssembler", results.get(0).name());
         }
     }
 }

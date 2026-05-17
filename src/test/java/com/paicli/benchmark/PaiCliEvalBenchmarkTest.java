@@ -189,6 +189,7 @@ class PaiCliEvalBenchmarkTest {
             int hitNodes = 0;
             int totalResults = 0;
             int noisyResults = 0;
+            List<RealRagEvalDetail> details = new ArrayList<>();
             long startedAt = System.nanoTime();
             try (CodeRetriever retriever = new CodeRetriever(projectPath, new KeywordEmbeddingClient())) {
                 for (RealRagEvalCase evalCase : cases) {
@@ -196,19 +197,25 @@ class PaiCliEvalBenchmarkTest {
                             evalCase.query(), 5, evalCase.mode(), evalCase.graphDepth());
                     totalResults += results.size();
                     Set<String> actual = new LinkedHashSet<>();
+                    List<String> topResults = new ArrayList<>();
                     for (VectorStore.SearchResult result : results) {
                         actual.add(result.name());
                         actual.add(result.filePath().replace('\\', '/'));
+                        topResults.add(result.name() + " @ " + result.filePath().replace('\\', '/'));
                     }
                     boolean caseHit = false;
+                    List<String> missed = new ArrayList<>();
                     for (String expected : evalCase.expectedContains()) {
                         expectedNodes++;
                         boolean matched = actual.stream().anyMatch(value -> value.contains(expected));
                         if (matched) {
                             hitNodes++;
                             caseHit = true;
+                        } else {
+                            missed.add(expected);
                         }
                     }
+                    int caseNoise = 0;
                     for (VectorStore.SearchResult result : results) {
                         String combined = (result.name() + " " + result.filePath())
                                 .replace('\\', '/')
@@ -218,16 +225,19 @@ class PaiCliEvalBenchmarkTest {
                                 .anyMatch(combined::contains);
                         if (!relevant) {
                             noisyResults++;
+                            caseNoise++;
                         }
                     }
                     if (caseHit) {
                         hitCases++;
                     }
+                    details.add(new RealRagEvalDetail(evalCase.query(), evalCase.mode(),
+                            evalCase.expectedContains(), topResults, missed, caseNoise));
                 }
             }
             return new RealProjectRagEvalMetrics(
                     cases.size(), hitCases, expectedNodes, hitNodes, totalResults, noisyResults,
-                    indexResult.chunkCount(), indexResult.relationCount(), elapsedMillis(startedAt));
+                    indexResult.chunkCount(), indexResult.relationCount(), elapsedMillis(startedAt), details);
         } finally {
             if (previousRagDir == null) {
                 System.clearProperty("paicli.rag.dir");
@@ -381,6 +391,19 @@ class PaiCliEvalBenchmarkTest {
         realRagNode.put("chunk_count", realProjectRag.chunkCount());
         realRagNode.put("relation_count", realProjectRag.relationCount());
         realRagNode.put("elapsed_ms", realProjectRag.elapsedMillis());
+        ArrayNode detailNodes = realRagNode.putArray("details");
+        for (RealRagEvalDetail detail : realProjectRag.details()) {
+            ObjectNode detailNode = detailNodes.addObject();
+            detailNode.put("query", detail.query());
+            detailNode.put("mode", detail.mode());
+            ArrayNode expectedNodes = detailNode.putArray("expected_contains");
+            detail.expectedContains().forEach(expectedNodes::add);
+            ArrayNode topResults = detailNode.putArray("top_results");
+            detail.topResults().forEach(topResults::add);
+            ArrayNode missed = detailNode.putArray("missed");
+            detail.missed().forEach(missed::add);
+            detailNode.put("noise_count", detail.noiseCount());
+        }
 
         ObjectNode compressionNode = root.putObject("long_context_anchor_eval");
         compressionNode.put("anchor_count", compression.anchorCount());
@@ -454,7 +477,8 @@ class PaiCliEvalBenchmarkTest {
             int noisyResults,
             int chunkCount,
             int relationCount,
-            long elapsedMillis) {
+            long elapsedMillis,
+            List<RealRagEvalDetail> details) {
         double recallAt5() {
             return caseCount == 0 ? 0.0 : (double) hitCases / caseCount;
         }
@@ -466,6 +490,15 @@ class PaiCliEvalBenchmarkTest {
         double noiseRatio() {
             return totalResults == 0 ? 0.0 : (double) noisyResults / totalResults;
         }
+    }
+
+    private record RealRagEvalDetail(
+            String query,
+            String mode,
+            Set<String> expectedContains,
+            List<String> topResults,
+            List<String> missed,
+            int noiseCount) {
     }
 
     private record CompressionEvalMetrics(

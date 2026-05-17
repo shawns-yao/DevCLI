@@ -195,7 +195,9 @@ public class VectorStore implements AutoCloseable {
     public List<SearchResult> searchByKeyword(String keyword) throws SQLException {
         String sql = """
                 SELECT file_path, chunk_type, name, content FROM code_chunks
-                WHERE project_path = ? AND (name LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\')
+                WHERE project_path = ? AND (name LIKE ? ESCAPE '\\'
+                    OR file_path LIKE ? ESCAPE '\\'
+                    OR content LIKE ? ESCAPE '\\')
                 """;
         List<SearchResult> results = new ArrayList<>();
         String escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
@@ -205,6 +207,7 @@ public class VectorStore implements AutoCloseable {
             ps.setString(1, projectPath);
             ps.setString(2, pattern);
             ps.setString(3, pattern);
+            ps.setString(4, pattern);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     results.add(new SearchResult(
