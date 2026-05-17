@@ -20,6 +20,7 @@ class CodeRetrieverTest {
     private VectorStore store;
     private String testProject;
     private String previousRagDir;
+    private int embeddingCalls;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -28,6 +29,7 @@ class CodeRetrieverTest {
         System.setProperty("paicli.rag.dir", tempDir.resolve("rag").toString());
         store = new VectorStore(testProject);
         store.clearProject();
+        embeddingCalls = 0;
     }
 
     @AfterEach
@@ -169,6 +171,71 @@ class CodeRetrieverTest {
 
             assertTrue(names.contains("UserController.detail()"));
             assertFalse(names.contains("UserService.detail(Long id)"));
+        }
+    }
+
+    @Test
+    void definitionModeUsesKeywordBeforeEmbedding() throws Exception {
+        CodeChunk service = CodeChunk.classChunk(
+                "src/main/java/com/example/UserService.java",
+                "UserService",
+                "public interface UserService { UserVO detail(Long id); }",
+                1, 3
+        );
+        CodeChunk unrelated = CodeChunk.classChunk(
+                "src/main/java/com/example/OrderService.java",
+                "OrderService",
+                "public interface OrderService { OrderVO detail(Long id); }",
+                1, 3
+        );
+        store.insertChunks(List.of(
+                new VectorStore.CodeChunkEntry(service, new float[]{0.0f, 1.0f}),
+                new VectorStore.CodeChunkEntry(unrelated, new float[]{1.0f, 0.0f})
+        ));
+
+        EmbeddingClient stubClient = new EmbeddingClient("ollama", "stub", "http://localhost", "") {
+            @Override
+            public float[] embed(String text) {
+                embeddingCalls++;
+                return new float[]{1.0f, 0.0f};
+            }
+        };
+
+        try (CodeRetriever retriever = new CodeRetriever(testProject, stubClient)) {
+            List<VectorStore.SearchResult> results = retriever.search("UserService 在哪里定义", 5, "definition", null);
+
+            assertFalse(results.isEmpty());
+            assertEquals("UserService", results.get(0).name());
+            assertEquals(0, embeddingCalls);
+        }
+    }
+
+    @Test
+    void preciseModeFallsBackToEmbeddingWhenKeywordMisses() throws Exception {
+        CodeChunk service = CodeChunk.classChunk(
+                "src/main/java/com/example/UserService.java",
+                "UserService",
+                "public interface UserService { UserVO detail(Long id); }",
+                1, 3
+        );
+        store.insertChunks(List.of(
+                new VectorStore.CodeChunkEntry(service, new float[]{1.0f, 0.0f})
+        ));
+
+        EmbeddingClient stubClient = new EmbeddingClient("ollama", "stub", "http://localhost", "") {
+            @Override
+            public float[] embed(String text) {
+                embeddingCalls++;
+                return new float[]{1.0f, 0.0f};
+            }
+        };
+
+        try (CodeRetriever retriever = new CodeRetriever(testProject, stubClient)) {
+            List<VectorStore.SearchResult> results = retriever.search("核心用户能力声明位置", 5, "definition", null);
+
+            assertFalse(results.isEmpty());
+            assertEquals("UserService", results.get(0).name());
+            assertEquals(1, embeddingCalls);
         }
     }
 }
