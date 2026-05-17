@@ -220,6 +220,40 @@ public class VectorStore implements AutoCloseable {
         return results;
     }
 
+    public List<SearchResult> findChunksByName(String name, int limit) throws SQLException {
+        if (name == null || name.isBlank() || limit <= 0) {
+            return List.of();
+        }
+        String sql = """
+                SELECT file_path, chunk_type, name, content FROM code_chunks
+                WHERE project_path = ? AND (name = ? OR name LIKE ? ESCAPE '\\')
+                ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END, chunk_type DESC, name
+                LIMIT ?
+                """;
+        List<SearchResult> results = new ArrayList<>();
+        String escaped = name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+        String prefixPattern = escaped + "(%";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, projectPath);
+            ps.setString(2, name);
+            ps.setString(3, prefixPattern);
+            ps.setString(4, name);
+            ps.setInt(5, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    results.add(new SearchResult(
+                            rs.getString("file_path"),
+                            rs.getString("chunk_type"),
+                            rs.getString("name"),
+                            rs.getString("content"),
+                            0.0
+                    ));
+                }
+            }
+        }
+        return results;
+    }
+
     /**
      * 图谱检索：查询与指定名称相关的所有关系
      */

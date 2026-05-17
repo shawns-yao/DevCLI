@@ -7,15 +7,19 @@ import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.ImportDeclaration;
 import com.github.javaparser.ast.Node;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
+import com.github.javaparser.ast.body.FieldDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
+import com.github.javaparser.ast.body.VariableDeclarator;
+import com.github.javaparser.ast.expr.Expression;
 import com.github.javaparser.ast.expr.MethodCallExpr;
-import com.github.javaparser.ast.type.ClassOrInterfaceType;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -89,11 +93,19 @@ public class CodeAnalyzer {
                 String methodName = method.getNameAsString();
                 relations.add(new CodeRelation(
                         filePath, className, filePath, className + "." + methodName, "contains"));
+                clazz.getImplementedTypes().forEach(impl -> relations.add(new CodeRelation(
+                        filePath, className + "." + methodName, null,
+                        impl.getNameAsString() + "." + methodName, "implements")));
+                clazz.getExtendedTypes().forEach(ext -> relations.add(new CodeRelation(
+                        filePath, className + "." + methodName, null,
+                        ext.getNameAsString() + "." + methodName, "extends")));
             });
 
-            // calls 关系：方法调用（简化处理，只记录方法名）
+            Map<String, String> receiverTypes = collectReceiverTypes(clazz);
+
+            // calls 关系：优先把 userService.login() 解析为 UserService.login，失败再退回方法名。
             clazz.findAll(MethodCallExpr.class).forEach(call -> {
-                String callee = call.getNameAsString();
+                String callee = resolveCallee(call, receiverTypes);
                 // 尝试获取调用者方法
                 Optional<MethodDeclaration> parentMethod = findParentMethod(call);
                 if (parentMethod.isPresent()) {
@@ -103,6 +115,33 @@ public class CodeAnalyzer {
                 }
             });
         });
+    }
+
+    private Map<String, String> collectReceiverTypes(ClassOrInterfaceDeclaration clazz) {
+        Map<String, String> receiverTypes = new HashMap<>();
+        clazz.findAll(FieldDeclaration.class).forEach(field -> {
+            String type = field.getElementType().asString();
+            for (VariableDeclarator variable : field.getVariables()) {
+                receiverTypes.put(variable.getNameAsString(), type);
+            }
+        });
+        clazz.findAll(VariableDeclarator.class).forEach(variable ->
+                receiverTypes.putIfAbsent(variable.getNameAsString(), variable.getType().asString()));
+        return receiverTypes;
+    }
+
+    private String resolveCallee(MethodCallExpr call, Map<String, String> receiverTypes) {
+        String methodName = call.getNameAsString();
+        Optional<Expression> scope = call.getScope();
+        if (scope.isEmpty()) {
+            return methodName;
+        }
+        String receiver = scope.get().toString();
+        String type = receiverTypes.get(receiver);
+        if (type == null || type.isBlank()) {
+            return methodName;
+        }
+        return type + "." + methodName;
     }
 
     private Optional<MethodDeclaration> findParentMethod(Node node) {
