@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.Files;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -36,5 +37,25 @@ class CodeAnalyzerTest {
         // 检查 imports 关系（非 JDK 导入）
         assertTrue(relations.stream().anyMatch(r ->
                 r.relationType().equals("imports") && r.fromName().equals("file")));
+    }
+
+    @Test
+    void resolvesFieldReceiverCallsToClassMethod(@org.junit.jupiter.api.io.TempDir Path tempDir) throws Exception {
+        Path file = tempDir.resolve("UserController.java");
+        Files.writeString(file, """
+                class UserController {
+                    private UserService userService;
+                    public void detail() {
+                        userService.detail();
+                    }
+                }
+                """);
+
+        List<CodeRelation> relations = analyzer.analyzeFile(file);
+
+        assertTrue(relations.stream().anyMatch(r ->
+                r.relationType().equals("calls")
+                        && r.fromName().equals("UserController.detail")
+                        && r.toName().equals("UserService.detail")));
     }
 }

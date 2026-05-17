@@ -16,6 +16,10 @@ import java.util.Set;
  * 代码检索器：语义检索 + 图谱检索的统一入口
  */
 public class CodeRetriever implements AutoCloseable {
+    private static final int GRAPH_MAX_DEPTH = 3;
+    private static final int GRAPH_SEED_LIMIT = 5;
+    private static final int GRAPH_RELATIONS_PER_NODE = 5;
+    private static final int GRAPH_TOTAL_CHUNK_LIMIT = 12;
     private final EmbeddingClient embeddingClient;
     private final VectorStore vectorStore;
 
@@ -65,7 +69,10 @@ public class CodeRetriever implements AutoCloseable {
             }
         }
 
-        // 3. 代码类型加分：method/class 比 file 更直接回答"怎么实现"
+        // 3. 图谱扩展：从入口代码块沿 calls / implements / extends / contains 最多扩展 3 跳。
+        expandGraphNeighbors(merged);
+
+        // 4. 代码类型加分：method/class 比 file 更直接回答"怎么实现"
         List<VectorStore.SearchResult> ranked = new ArrayList<>();
         for (VectorStore.SearchResult r : merged.values()) {
             double typeBoost = switch (r.chunkType()) {
@@ -98,6 +105,88 @@ public class CodeRetriever implements AutoCloseable {
                     candidate.filePath(), candidate.chunkType(), candidate.name(),
                     candidate.content(), best));
         }
+    }
+
+    private void expandGraphNeighbors(Map<String, VectorStore.SearchResult> merged) throws SQLException {
+        List<VectorStore.SearchResult> seeds = merged.values().stream()
+                .sorted(Comparator.comparingDouble(VectorStore.SearchResult::similarity).reversed())
+                .limit(GRAPH_SEED_LIMIT)
+                .toList();
+        Set<String> visitedNodes = new HashSet<>();
+        int[] added = {0};
+        for (VectorStore.SearchResult seed : seeds) {
+            expandFrom(seed.name(), seed.similarity(), 1, visitedNodes, merged, added);
+            if (added[0] >= GRAPH_TOTAL_CHUNK_LIMIT) {
+                break;
+            }
+        }
+    }
+
+    private void expandFrom(String name, double parentScore, int depth, Set<String> visitedNodes,
+                            Map<String, VectorStore.SearchResult> merged, int[] added) throws SQLException {
+        if (name == null || name.isBlank() || depth > GRAPH_MAX_DEPTH || added[0] >= GRAPH_TOTAL_CHUNK_LIMIT) {
+            return;
+        }
+        String normalizedName = normalizeMethodName(name);
+        if (!visitedNodes.add(normalizedName)) {
+            return;
+        }
+
+        List<CodeRelation> relations = vectorStore.getRelations(normalizedName).stream()
+                .filter(this::isGraphExpansionRelation)
+                .limit(GRAPH_RELATIONS_PER_NODE)
+                .toList();
+        for (CodeRelation relation : relations) {
+            String target = relatedTarget(normalizedName, relation);
+            if (target == null || target.isBlank()) {
+                continue;
+            }
+            double score = parentScore - (0.12 * depth) + relationBoost(relation.relationType());
+            for (VectorStore.SearchResult chunk : vectorStore.findChunksByName(target, 3)) {
+                mergeResult(merged, new VectorStore.SearchResult(
+                        chunk.filePath(), chunk.chunkType(), chunk.name(), chunk.content(), score), new HashSet<>());
+                added[0]++;
+                if (added[0] >= GRAPH_TOTAL_CHUNK_LIMIT) {
+                    return;
+                }
+            }
+            expandFrom(target, score, depth + 1, visitedNodes, merged, added);
+        }
+    }
+
+    private String relatedTarget(String current, CodeRelation relation) {
+        if (current.equals(relation.fromName())) {
+            return relation.toName();
+        }
+        if (current.equals(relation.toName())
+                && ("implements".equals(relation.relationType()) || "extends".equals(relation.relationType()))) {
+            return relation.fromName();
+        }
+        return null;
+    }
+
+    private boolean isGraphExpansionRelation(CodeRelation relation) {
+        return switch (relation.relationType()) {
+            case "calls", "implements", "extends", "contains" -> true;
+            default -> false;
+        };
+    }
+
+    private double relationBoost(String relationType) {
+        return switch (relationType) {
+            case "calls" -> 0.12;
+            case "implements", "extends" -> 0.08;
+            case "contains" -> 0.04;
+            default -> 0.0;
+        };
+    }
+
+    private String normalizeMethodName(String name) {
+        int paren = name.indexOf('(');
+        if (paren < 0) {
+            return name;
+        }
+        return name.substring(0, paren);
     }
 
     private VectorStore.SearchResult boostKeywordMatch(VectorStore.SearchResult result, String keyword) {
