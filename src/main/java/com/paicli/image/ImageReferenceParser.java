@@ -158,9 +158,14 @@ public class ImageReferenceParser {
         String pathPart;
         if (afterScheme.startsWith("/")) {
             pathPart = afterScheme;
+            if (pathPart.matches("^/[A-Za-z]:[\\\\/].*")) {
+                pathPart = pathPart.substring(1);
+            }
+        } else if (afterScheme.matches("^[A-Za-z]:[\\\\/].*")) {
+            pathPart = afterScheme;
         } else {
             int slashIdx = afterScheme.indexOf('/');
-            pathPart = slashIdx < 0 ? "/" + afterScheme : afterScheme.substring(slashIdx);
+            pathPart = slashIdx < 0 ? "/" + afterScheme : "//" + afterScheme;
         }
         return percentDecodeUtf8(pathPart);
     }

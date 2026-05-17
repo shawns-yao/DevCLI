@@ -5,6 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import okhttp3.*;
 
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
 import java.io.IOException;
 import java.util.concurrent.TimeUnit;
 
@@ -138,15 +141,64 @@ public class EmbeddingClient {
     }
 
     private static String getEnv(String key, String defaultValue) {
-        String value = System.getenv(key);
+        String value = System.getProperty(key);
         if (value != null && !value.isEmpty()) {
-            return value;
+            return value.trim();
         }
-        value = System.getProperty(key);
+
+        value = System.getenv(key);
         if (value != null && !value.isEmpty()) {
-            return value;
+            return value.trim();
+        }
+
+        value = readFromDotEnv(new File(".env"), key);
+        if (value != null && !value.isEmpty()) {
+            return value.trim();
+        }
+
+        value = readFromDotEnv(new File(System.getProperty("user.home"), ".env"), key);
+        if (value != null && !value.isEmpty()) {
+            return value.trim();
         }
         return defaultValue;
+    }
+
+    private static String readFromDotEnv(File file, String key) {
+        if (!file.exists()) {
+            return null;
+        }
+        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("#")) {
+                    continue;
+                }
+                int equalsIndex = line.indexOf('=');
+                if (equalsIndex <= 0) {
+                    continue;
+                }
+                String candidateKey = line.substring(0, equalsIndex).trim();
+                if (!key.equals(candidateKey)) {
+                    continue;
+                }
+                return stripOptionalQuotes(line.substring(equalsIndex + 1).trim());
+            }
+        } catch (IOException ignored) {
+            return null;
+        }
+        return null;
+    }
+
+    private static String stripOptionalQuotes(String value) {
+        if (value.length() >= 2) {
+            char first = value.charAt(0);
+            char last = value.charAt(value.length() - 1);
+            if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+                return value.substring(1, value.length() - 1);
+            }
+        }
+        return value;
     }
 
     public String getProvider() {

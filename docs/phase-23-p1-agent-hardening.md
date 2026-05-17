@@ -186,7 +186,6 @@ Implementation notes:
 
 Implemented files:
 
-- `src/main/java/com/paicli/plan/TaskResourceAccess.java`
 - `src/main/java/com/paicli/plan/ResourceConflictDetector.java`
 - `src/main/java/com/paicli/agent/PlanExecuteAgent.java`
 - `src/main/java/com/paicli/agent/AgentOrchestrator.java`
@@ -271,10 +270,10 @@ Acceptance criteria:
 Targeted tests:
 
 ```bash
-mvn test -Dtest=McpSchemaSanitizerTest,McpSchemaValidatorTest,McpToolRegistrationTest
-mvn test -Dtest=AgentBudgetTest
-mvn test -Dtest=ResourceConflictDetectorTest,ExecutionPlanTest,AgentOrchestratorTest
-mvn test -Dtest=TraceRecorderTest,AuditLogTest
+mvn -DskipTests=false -Dtest=McpSchemaSanitizerTest,McpSchemaValidatorTest,McpToolRegistrationTest test
+mvn -DskipTests=false -Dtest=AgentBudgetTest test
+mvn -DskipTests=false -Dtest=ResourceConflictDetectorTest,ExecutionPlanTest,AgentOrchestratorTest test
+mvn -DskipTests=false -Dtest=TraceRecorderTest,AuditLogTest test
 ```
 
 Regression tests:
