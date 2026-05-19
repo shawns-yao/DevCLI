@@ -60,6 +60,7 @@ public final class ResourceConflictDetector {
             String text = description == null ? "" : description;
             String lower = text.toLowerCase(Locale.ROOT);
             boolean write = normalizedType.contains("WRITE")
+                    || normalizedType.contains("FILEWRITE")
                     || lower.contains("写入")
                     || lower.contains("修改")
                     || lower.contains("删除")

@@ -333,10 +333,25 @@ public class AgentOrchestrator {
             statusMap.put(step.id(), step.status());
         }
 
-        return steps.stream()
+        List<ExecutionStep> normalExecutable = steps.stream()
                 .filter(step -> step.status() == StepStatus.PENDING)
+                .filter(step -> !isFinalIntegrationStep(step))
                 .filter(step -> step.dependencies().stream()
                         .allMatch(dep -> statusMap.get(dep) == StepStatus.COMPLETED))
+                .toList();
+        if (!normalExecutable.isEmpty()) {
+            return normalExecutable;
+        }
+
+        boolean hasRunningNonFinal = steps.stream()
+                .filter(step -> !isFinalIntegrationStep(step))
+                .anyMatch(step -> step.status() == StepStatus.RUNNING);
+        if (hasRunningNonFinal) {
+            return List.of();
+        }
+        return steps.stream()
+                .filter(step -> step.status() == StepStatus.PENDING)
+                .filter(this::isFinalIntegrationStep)
                 .toList();
     }
 
@@ -367,6 +382,13 @@ public class AgentOrchestrator {
         List<ExecutionStep> withFinal = new ArrayList<>(steps);
         withFinal.add(ExecutionStep.pending(finalId, description, "INTEGRATION", leafStepIds));
         return withFinal;
+    }
+
+    private boolean isFinalIntegrationStep(ExecutionStep step) {
+        String text = (step.id() + " " + step.type() + " " + step.description()).toLowerCase(Locale.ROOT);
+        return text.contains("final_integration")
+                || text.contains("最终集成")
+                || text.contains("integration");
     }
 
     /**
@@ -650,8 +672,8 @@ public class AgentOrchestrator {
 
             acceptedResult = retryResult.content();
             AgentMessage retryReview = reviewerForkContext == null
-                    ? reviewer.review(reviewTask, acceptedResult, out)
-                    : reviewer.reviewForked(reviewTask, acceptedResult, reviewerForkContext, out);
+                    ? reviewer.review(buildReviewTask(step), acceptedResult, out)
+                    : reviewer.reviewForked(buildReviewTask(step), acceptedResult, reviewerForkContext, out);
             reviewer.clearHistory();
 
             if (retryReview.type() == AgentMessage.Type.ERROR) {
@@ -684,6 +706,22 @@ public class AgentOrchestrator {
             context.append("原始用户任务：\n").append(currentUserTask).append("\n\n");
         }
         context.append("当前步骤：").append(currentStep.description()).append("\n\n");
+        if (isFinalIntegrationStep(currentStep)) {
+            context.append("所有步骤状态：\n");
+            for (ExecutionStep step : steps) {
+                if (!step.id().equals(currentStep.id())) {
+                    context.append("[").append(step.id()).append("] ")
+                            .append(step.status()).append(" - ")
+                            .append(step.description()).append("\n");
+                    if (step.result() != null && !step.result().isBlank()) {
+                        context.append("结果预览：")
+                                .append(step.result(), 0, Math.min(step.result().length(), 800))
+                                .append("\n");
+                    }
+                }
+            }
+            context.append("\n");
+        }
 
         for (ExecutionStep step : steps) {
             if (step.status() == StepStatus.COMPLETED && currentStep.dependencies().contains(step.id())) {
@@ -708,7 +746,28 @@ public class AgentOrchestrator {
             task.append("原始用户任务：\n").append(currentUserTask).append("\n\n");
         }
         task.append("当前步骤：").append(step.description());
+        if (requiresConcreteVerification(step)) {
+            task.append("\n\n审查要求：必须调用工具检查真实产物。")
+                    .append("至少确认相关文件/入口/API 是否存在；如果步骤涉及代码，运行可行的最小编译或自检命令。")
+                    .append("仅凭执行者文字说明不得批准。");
+        }
         return task.toString();
+    }
+
+    private boolean requiresConcreteVerification(ExecutionStep step) {
+        String text = (step.type() + " " + step.description()).toLowerCase(Locale.ROOT);
+        return text.contains("file")
+                || text.contains("write")
+                || text.contains("command")
+                || text.contains("code")
+                || text.contains("java")
+                || text.contains("cli")
+                || text.contains("api")
+                || text.contains("入口")
+                || text.contains("文件")
+                || text.contains("代码")
+                || text.contains("编译")
+                || isFinalIntegrationStep(step);
     }
 
     private String summarizeSteps(List<ExecutionStep> steps) {
