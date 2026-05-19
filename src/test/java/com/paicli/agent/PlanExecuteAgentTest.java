@@ -18,6 +18,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
 
@@ -31,7 +32,7 @@ class PlanExecuteAgentTest {
     Path tempDir;
 
     @Test
-    void shouldWritePlanExecutionArtifactsBackToShortTermMemoryOnly() throws Exception {
+    void shouldWritePlanExecutionArtifactsBackToWorkingMemoryOnly() throws Exception {
         Path sampleFile = Files.createFile(tempDir.resolve("sample.txt"));
         Files.writeString(sampleFile, "plan-memory-content");
 
@@ -58,51 +59,57 @@ class PlanExecuteAgentTest {
                 128000,
                 new LongTermMemory(tempDir.resolve("memory-store").toFile())
         );
-        ToolRegistry toolRegistry = new ToolRegistry();
-        toolRegistry.setProjectPath(tempDir.toString());
-        PlanExecuteAgent agent = new PlanExecuteAgent(
-                llmClient,
-                toolRegistry,
-                new StubPlanner(llmClient),
-                memoryManager,
-                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute()
-        );
+        try (memoryManager) {
+            ToolRegistry toolRegistry = new ToolRegistry();
+            toolRegistry.setProjectPath(tempDir.toString());
+            PlanExecuteAgent agent = new PlanExecuteAgent(
+                    llmClient,
+                    toolRegistry,
+                    new StubPlanner(llmClient),
+                    memoryManager,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute()
+            );
 
-        String result = agent.run("请读取测试文件并确认内容");
+            String result = agent.run("请读取测试文件并确认内容");
 
-        List<String> shortTermContents = memoryManager.getShortTermMemory().getAll().stream()
-                .map(entry -> entry.getContent())
-                .toList();
+            // v2（路径 B）：用户输入摘要进 volatile facts、工具结果原文进 recentToolResults，
+            // assistant 内容只进 conversationHistory（已不再回写到记忆笔记本）
+            assertTrue(result.contains("计划执行完成"));
 
-        assertTrue(result.contains("计划执行完成"));
-        assertTrue(shortTermContents.stream().anyMatch(content -> content.contains("请读取测试文件并确认内容")));
-        assertTrue(shortTermContents.stream().anyMatch(content -> content.contains("plan-memory-content")));
-        assertTrue(shortTermContents.stream().anyMatch(content -> content.contains("已读取并确认文件内容")));
-        assertEquals(0, memoryManager.getLongTermMemory().size());
+            String section = memoryManager.buildWorkingMemorySection();
+            assertTrue(section.contains("read_file"), "工具调用应记录到 working memory");
+            assertTrue(section.contains("plan-memory-content"), "工具返回的文件原文应保留在 working memory");
+            assertTrue(llmClient.messagesByCall.size() >= 2);
+            String secondSystem = llmClient.messagesByCall.get(1).get(0).content();
+            assertTrue(secondSystem.contains("Working Memory"), secondSystem);
+            assertTrue(secondSystem.contains("plan-memory-content"),
+                    "工具结果写入后，下一轮 task LLM 调用应刷新 Working Memory 段");
+            assertTrue(memoryManager.getWorkingMemory().getVolatileFacts().stream()
+                    .anyMatch(f -> f.contains("请读取测试文件")),
+                    "用户输入摘要应作为 volatile fact 记录");
+            assertEquals(0, memoryManager.getLongTermMemory().size(),
+                    "Plan 执行不应自动写长期记忆");
+        }
     }
 
     @Test
     void shouldNotExtractFactsWhenPlanIsCanceled() throws Exception {
         StubGLMClient llmClient = new StubGLMClient(List.of());
-        LongTermMemory longTermMemory = new LongTermMemory(tempDir.resolve("memory-store-cancel").toFile());
-        MemoryManager memoryManager = new MemoryManager(
-                llmClient,
-                4096,
-                128000,
-                longTermMemory
-        );
-        PlanExecuteAgent agent = new PlanExecuteAgent(
-                llmClient,
-                new ToolRegistry(),
-                new StubPlanner(llmClient),
-                memoryManager,
-                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.cancel()
-        );
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.resolve("memory-store-cancel").toFile());
+             MemoryManager memoryManager = new MemoryManager(llmClient, 4096, 128000, longTermMemory)) {
+            PlanExecuteAgent agent = new PlanExecuteAgent(
+                    llmClient,
+                    new ToolRegistry(),
+                    new StubPlanner(llmClient),
+                    memoryManager,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.cancel()
+            );
 
-        String result = agent.run("列出当前目录的文件");
+            String result = agent.run("列出当前目录的文件");
 
-        assertEquals("⏹️ 已取消本次计划执行。", result);
-        assertEquals(0, longTermMemory.size());
+            assertEquals("⏹️ 已取消本次计划执行。", result);
+            assertEquals(0, longTermMemory.size());
+        }
     }
 
     @Test
@@ -206,6 +213,7 @@ class PlanExecuteAgentTest {
 
     private static final class StubGLMClient extends GLMClient {
         private final Queue<StubResponse> responses;
+        private final List<List<Message>> messagesByCall = new ArrayList<>();
 
         private StubGLMClient(List<ChatResponse> responses) {
             super("test-key");
@@ -228,6 +236,7 @@ class PlanExecuteAgentTest {
 
         @Override
         public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {
+            messagesByCall.add(List.copyOf(messages));
             StubResponse stubResponse = responses.poll();
             if (stubResponse == null) {
                 throw new IOException("缺少预设响应");

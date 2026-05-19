@@ -70,7 +70,7 @@ final class PaiCliCompleter implements Completer {
             candidates.add(new Candidate(
                     value,
                     hint.display(),
-                    "PaiCLI 命令",
+                    "DevCLI 命令",
                     hint.description(),
                     null,
                     null,

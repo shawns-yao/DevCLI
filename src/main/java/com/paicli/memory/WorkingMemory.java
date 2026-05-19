@@ -1,0 +1,242 @@
+package com.paicli.memory;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+
+/**
+ * 当前会话工作记忆。
+ *
+ * <p>取代旧的 {@code ConversationMemory}（旧版本同时承担"对话原文笔记本"和"压缩状态"，
+ * 职责模糊导致两条数据流跟 {@code conversationHistory} 重复）。
+ *
+ * <p>WorkingMemory 的清晰职责：
+ * <ul>
+ *   <li>不参与 LLM messages 数组（messages 由 {@code Agent.conversationHistory} 维护）</li>
+ *   <li>作为 system prompt 的<b>派生视图</b>注入，解决"摘要泛化掉精确实体"的痛点</li>
+ *   <li>仅当前会话有效，不跨 session 持久化</li>
+ *   <li>三类内容互不重叠：</li>
+ * </ul>
+ *
+ * <p>三个 sub-store：
+ * <ol>
+ *   <li><b>recentToolResults</b>：最近 K 个工具调用的完整结果（不被截断到 500 字符）。
+ *       压缩摘要会泛化掉「读了 CodeRetriever.java 第 217 行」「mvn 输出 47.3s」「服务端口 8443」
+ *       这类精确实体；这里保留原文让 LLM 能回看具体证据。FIFO 淘汰。</li>
+ *   <li><b>taskState</b>：当前任务进度的键值对（"plan_task=task_3"、"react_iteration=12"、
+ *       "last_error=MCP schema missing required"）。让 LLM 在长会话里知道自己在哪。</li>
+ *   <li><b>volatileFacts</b>：当前会话临时事实（"刚跑过 mvn test"、"刚改了 X 文件"）。
+ *       FIFO 淘汰。避免 LLM 重复跑同一工具。</li>
+ * </ol>
+ *
+ * <p>跟其它三层 Memory 的关系：
+ * <ul>
+ *   <li>conversation history：真实 messages，{@code ConversationHistoryCompactor} 压它</li>
+ *   <li><b>working memory</b>（本类）：派生视图，作为 system prompt 段注入，不进 messages</li>
+ *   <li>long-term memory：跨会话持久化事实，按 query 检索注入</li>
+ *   <li>sticky memory：跨会话持久化强约束，每轮全量注入</li>
+ * </ul>
+ *
+ * <p>线程安全：ReAct / Plan 主循环通常是单线程，但 Multi-Agent 会让多个 SubAgent
+ * 并发回写工具证据到同一个 {@link MemoryManager}，因此所有读写方法都同步保护。
+ */
+public class WorkingMemory {
+
+    private static final Logger log = LoggerFactory.getLogger(WorkingMemory.class);
+
+    /** 默认保留最近多少个工具结果。超过 8 个的话注入 system prompt 会过长。 */
+    public static final int DEFAULT_MAX_TOOL_RESULTS = 8;
+    /** 默认保留多少个 volatile facts。 */
+    public static final int DEFAULT_MAX_VOLATILE_FACTS = 16;
+    /** 单条 tool 结果在注入时截断到此字符数。完整原文仍保留在 recentToolResults，仅渲染时截断。 */
+    public static final int TOOL_RESULT_RENDER_CHARS = 1_500;
+
+    private final int maxToolResults;
+    private final int maxVolatileFacts;
+    private final LinkedList<ToolEvidence> recentToolResults = new LinkedList<>();
+    private final LinkedList<String> volatileFacts = new LinkedList<>();
+    private final LinkedHashMap<String, String> taskState = new LinkedHashMap<>();
+
+    public WorkingMemory() {
+        this(DEFAULT_MAX_TOOL_RESULTS, DEFAULT_MAX_VOLATILE_FACTS);
+    }
+
+    public WorkingMemory(int maxToolResults, int maxVolatileFacts) {
+        this.maxToolResults = Math.max(1, maxToolResults);
+        this.maxVolatileFacts = Math.max(1, maxVolatileFacts);
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // recentToolResults
+    // ─────────────────────────────────────────────────────────
+
+    /**
+     * 记录一次工具调用结果。FIFO 淘汰旧条目。
+     *
+     * <p>注意：传入的 {@code result} 已经过 {@code ToolResultSizeManager} 处理（截断 /
+     * 落盘），所以这里存的就是 LLM 在 conversationHistory 里看到的同一份内容——保证
+     * "工具证据" 和 "对话历史" 内容一致。renderForPrompt 时再按
+     * {@link #TOOL_RESULT_RENDER_CHARS} 二次截断，让 system prompt 段不致太长。
+     *
+     * @param toolName  工具名（read_file / execute_command / mcp__xxx 等）
+     * @param argsJson  调用参数 JSON（用于 LLM 识别 "刚刚读的是哪个文件"）
+     * @param result    工具返回（已被 ToolResultSizeManager 处理过的版本）
+     */
+    public synchronized void recordToolResult(String toolName, String argsJson, String result) {
+        if (toolName == null || result == null) return;
+        recentToolResults.addLast(new ToolEvidence(
+                toolName,
+                argsJson == null ? "" : argsJson,
+                result,
+                Instant.now()));
+        while (recentToolResults.size() > maxToolResults) {
+            recentToolResults.removeFirst();
+        }
+    }
+
+    public synchronized List<ToolEvidence> getRecentToolResults() {
+        return Collections.unmodifiableList(new ArrayList<>(recentToolResults));
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // taskState
+    // ─────────────────────────────────────────────────────────
+
+    /**
+     * 设置一项任务状态（覆盖同名 key）。例：
+     * <ul>
+     *   <li>{@code setTaskState("plan_task", "task_3 (analyzing log)")}</li>
+     *   <li>{@code setTaskState("react_iteration", "12")}</li>
+     *   <li>{@code setTaskState("last_error", "MCP schema missing required")}</li>
+     * </ul>
+     */
+    public synchronized void setTaskState(String key, String value) {
+        if (key == null || key.isBlank()) return;
+        if (value == null || value.isBlank()) {
+            taskState.remove(key);
+        } else {
+            taskState.put(key, value);
+        }
+    }
+
+    public synchronized Optional<String> getTaskState(String key) {
+        return Optional.ofNullable(taskState.get(key));
+    }
+
+    public synchronized Map<String, String> taskStateSnapshot() {
+        return Collections.unmodifiableMap(new LinkedHashMap<>(taskState));
+    }
+
+    public synchronized void clearTaskState() {
+        taskState.clear();
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // volatileFacts
+    // ─────────────────────────────────────────────────────────
+
+    /**
+     * 添加一条本会话临时事实。例如 "刚跑过 mvn test -Pquick"、"刚改了 LongTermMemory.java"。
+     * FIFO 淘汰最旧。同内容重复添加会更新到末尾。
+     */
+    public synchronized void addVolatileFact(String fact) {
+        if (fact == null || fact.isBlank()) return;
+        String trimmed = fact.trim();
+        volatileFacts.remove(trimmed); // 去重 + 移到末尾
+        volatileFacts.addLast(trimmed);
+        while (volatileFacts.size() > maxVolatileFacts) {
+            volatileFacts.removeFirst();
+        }
+    }
+
+    public synchronized List<String> getVolatileFacts() {
+        return Collections.unmodifiableList(new ArrayList<>(volatileFacts));
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // 派生视图：注入 system prompt
+    // ─────────────────────────────────────────────────────────
+
+    /**
+     * 渲染为 system prompt 一段 Markdown。空内容返回空串（PromptAssembler 会跳过空段）。
+     */
+    public synchronized String renderForPrompt() {
+        StringBuilder sb = new StringBuilder();
+        if (!taskState.isEmpty()) {
+            sb.append("### 当前任务状态\n\n");
+            for (Map.Entry<String, String> e : taskState.entrySet()) {
+                sb.append("- ").append(e.getKey()).append(": ").append(e.getValue()).append('\n');
+            }
+            sb.append('\n');
+        }
+        if (!volatileFacts.isEmpty()) {
+            sb.append("### 本会话已发生的关键事件（避免重复执行）\n\n");
+            // 倒序，最新事件在前
+            List<String> reversed = new ArrayList<>(volatileFacts);
+            Collections.reverse(reversed);
+            for (String f : reversed) {
+                sb.append("- ").append(f).append('\n');
+            }
+            sb.append('\n');
+        }
+        if (!recentToolResults.isEmpty()) {
+            sb.append("### 最近工具调用证据（精确实体来源）\n\n");
+            // 倒序，最新调用在前
+            List<ToolEvidence> reversed = new ArrayList<>(recentToolResults);
+            Collections.reverse(reversed);
+            for (ToolEvidence ev : reversed) {
+                sb.append("- **").append(ev.toolName).append("**");
+                if (!ev.argsJson.isBlank()) {
+                    sb.append(" args: `").append(truncate(ev.argsJson, 120)).append('`');
+                }
+                sb.append('\n');
+                sb.append("  ```\n  ").append(truncate(ev.result, TOOL_RESULT_RENDER_CHARS)
+                        .replace("\n", "\n  ")).append("\n  ```\n");
+            }
+        }
+        return sb.toString().trim();
+    }
+
+    /** 状态摘要给 /memory 命令显示。 */
+    public synchronized String getStatusSummary() {
+        return String.format(Locale.ROOT,
+                "工作记忆: %d 工具证据 / %d 任务状态 / %d 临时事实",
+                recentToolResults.size(), taskState.size(), volatileFacts.size());
+    }
+
+    /** 清空整个 working memory（用于 /clear 命令）。 */
+    public synchronized void clear() {
+        recentToolResults.clear();
+        volatileFacts.clear();
+        taskState.clear();
+    }
+
+    private static String truncate(String s, int maxChars) {
+        if (s == null) return "";
+        return s.length() <= maxChars ? s : s.substring(0, maxChars) + "...(truncated)";
+    }
+
+    /** 单条工具调用证据。 */
+    public static final class ToolEvidence {
+        public final String toolName;
+        public final String argsJson;
+        public final String result;
+        public final Instant capturedAt;
+
+        ToolEvidence(String toolName, String argsJson, String result, Instant capturedAt) {
+            this.toolName = toolName;
+            this.argsJson = argsJson;
+            this.result = result;
+            this.capturedAt = capturedAt;
+        }
+    }
+}

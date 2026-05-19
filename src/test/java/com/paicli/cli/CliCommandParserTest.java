@@ -125,6 +125,32 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesSavePinLongForm() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/save --pin 用户偏好简体中文");
+
+        assertEquals(CliCommandParser.CommandType.MEMORY_PIN, command.type());
+        assertEquals("用户偏好简体中文", command.payload());
+    }
+
+    @Test
+    void parsesSavePinShortForm() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/save -p 项目根 /home/dev/myapp");
+
+        assertEquals(CliCommandParser.CommandType.MEMORY_PIN, command.type());
+        assertEquals("项目根 /home/dev/myapp", command.payload());
+    }
+
+    @Test
+    void plainSaveDoesNotMatchPin() {
+        // 防止误判：/save 后跟以 - 起头的内容（但不是 --pin / -p）应仍走 MEMORY_SAVE
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/save -- 这是一个事实");
+
+        assertEquals(CliCommandParser.CommandType.MEMORY_SAVE, command.type(),
+                "/save -- 不应被误判为 pin 命令");
+        assertEquals("-- 这是一个事实", command.payload());
+    }
+
+    @Test
     void parsesSearchWithoutPayload() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/search");
 

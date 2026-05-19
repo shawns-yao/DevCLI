@@ -12,15 +12,15 @@
   - GLM-5.1：`200000` window，`glm-prompt-cache`
   - DeepSeek V4：`1000000` window，`automatic-prefix-cache`
 - `ContextProfile`：
-  - short：`< 32000`
-  - balanced：`32000 <= window < 100000`
-  - long：`>= 100000`
+  - 不再按 short / balanced / long 做行为分档
+  - 所有模型统一按 `maxContextWindow` 派生预算和阈值
 - `AgentBudget` 动态预算：
   - 默认 `80% * maxContextWindow`
   - 仍可用 `-Dpaicli.react.token.budget=...` 覆盖
 - Memory 策略：
-  - short / balanced 保留压缩
-  - long 跳过自动摘要压缩，扩大短期记忆预算
+  - 所有 window 都保留 `ConversationHistoryCompactor` 自动摘要压缩
+  - 触发阈值统一为 `maxContextWindow × 90%`
+  - `WorkingMemory` 是当前会话工具证据 / 任务状态 / 临时事实的 prompt 派生视图，不是压缩器
 - RAG 策略：
   - `search_code` 未传 `top_k` 时按上下文模式自适应
   - short=5，balanced=10，long=20
@@ -58,7 +58,7 @@ src/main/java/com/paicli/context/
 - `LlmClient` / `GLMClient` / `DeepSeekClient`：模型能力声明
 - `AbstractOpenAiCompatibleClient`：解析 cached input tokens
 - `AgentBudget`：按模型上下文窗口动态计算 token 预算
-- `MemoryManager` / `TokenBudget` / `ConversationMemory`：长短上下文策略与预算同步
+- `MemoryManager` / `TokenBudget` / `WorkingMemory` / `ConversationHistoryCompactor`：长上下文策略、工作记忆视图与 messages 压缩
 - `ToolRegistry`：`search_code` 默认 topK 自适应
 - `McpServerManager`：生成 MCP resources prompt index
 - `Agent` / `PlanExecuteAgent` / `AgentOrchestrator` / `SubAgent`：注入长上下文策略与资源索引

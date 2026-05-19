@@ -293,9 +293,49 @@ public class Main {
             hitlToolRegistry.setSkillContextBuffer(skillContextBuffer);
 
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
+            Runtime.getRuntime().addShutdownHook(new Thread(reactAgent::close, "paicli-agent-shutdown"));
             reactAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
             reactAgent.setSkillRegistry(skillRegistry);
             reactAgent.setSkillContextBuffer(skillContextBuffer);
+
+            // === Sticky Memory 初始化（PR-B）===
+            // 三层文件式记忆 + pinned facts JSON。
+            // 启动时加载文件层；运行时变化（/save --pin 等）写 pinned_facts.json。
+            // 注入给 reactAgent / planAgent / orchestrator 三条主路径，让 system prompt 都能看到。
+            com.paicli.memory.StickyMemory stickyMemory = new com.paicli.memory.StickyMemory(
+                    com.paicli.memory.LongTermMemory.resolveMemoryDir());
+            stickyMemory.reloadFiles(java.nio.file.Path.of(".").toAbsolutePath().normalize());
+            reactAgent.setStickyMemorySupplier(stickyMemory::renderForPrompt);
+
+            // === Retrievable 区语义检索初始化（PR-C）===
+            // 用同一个 EmbeddingClient（启动期不强制连 Ollama）+ 独立 SQLite vector store。
+            // store 失败 / embed 失败时所有路径自动 fallback 到关键词检索，不影响 ReAct 主路径。
+            com.paicli.memory.MemoryVectorStore memoryVectorStore = new com.paicli.memory.MemoryVectorStore();
+            Runtime.getRuntime().addShutdownHook(new Thread(memoryVectorStore::close, "paicli-memvec-shutdown"));
+            com.paicli.rag.EmbeddingClient embeddingClient = new com.paicli.rag.EmbeddingClient();
+            // store 钩子：每次 LongTermMemory.store 后异步 embed 写向量库
+            reactAgent.getMemoryManager().getLongTermMemory().setVectorIndex(
+                    entry -> embedAndUpsert(memoryVectorStore, embeddingClient, entry),
+                    memoryVectorStore::delete,
+                    memoryVectorStore::clear);
+            // 检索通道：每次查询 embed 一次然后 top-k
+            reactAgent.getMemoryManager().getRetriever().setSemanticSearch((query, topK) -> {
+                if (!memoryVectorStore.isUsable() || query == null || query.isBlank()) {
+                    return java.util.List.of();
+                }
+                try {
+                    float[] vec = embeddingClient.embed(query);
+                    if (vec == null || vec.length == 0) return java.util.List.of();
+                    return memoryVectorStore.search(vec, topK,
+                                    com.paicli.memory.MemoryVectorStore.DEFAULT_SIMILARITY_THRESHOLD)
+                            .stream()
+                            .map(r -> new com.paicli.memory.MemoryRetriever.SemanticHit(r.factId(), r.similarity()))
+                            .toList();
+                } catch (Exception e) {
+                    // embed 失败（Ollama 不通 / API key 缺）静默 fallback 到关键词
+                    return java.util.List.of();
+                }
+            });
             DurableTaskManager taskManager = openTaskManager(llmClientRef);
             taskManager.start();
             Runtime.getRuntime().addShutdownHook(new Thread(taskManager::close, "paicli-task-shutdown"));
@@ -405,8 +445,10 @@ public class Main {
                     case MEMORY_STATUS -> {
                         ui.println("📋 记忆系统状态：");
                         ui.println(reactAgent.getMemoryManager().getSystemStatus());
+                        ui.println(stickyMemory.getStatusSummary());
                         ui.println("   /memory clear - 清空长期记忆");
-                        ui.println("   /save <事实> - 手动保存到长期记忆");
+                        ui.println("   /save <事实> - 手动保存到长期记忆（Retrievable）");
+                        ui.println("   /save --pin <事实> - 永久 pin 到 Sticky 区，每轮注入 system prompt");
                         ui.println();
                         continue;
                     }
@@ -422,7 +464,18 @@ public class Main {
                             ui.println("❌ 请提供要保存的内容，例如 /save 这个项目使用Java 17\n");
                         } else {
                             reactAgent.getMemoryManager().storeFact(fact);
-                            ui.println("💾 已保存到长期记忆: " + fact + "\n");
+                            ui.println("💾 已保存到长期记忆（Retrievable）: " + fact + "\n");
+                        }
+                        continue;
+                    }
+                    case MEMORY_PIN -> {
+                        String fact = command.payload();
+                        if (fact == null || fact.isEmpty()) {
+                            ui.println("❌ 请提供要 pin 的事实，例如 /save --pin 用户偏好简体中文\n");
+                        } else {
+                            com.paicli.memory.StickyMemory.PinnedFact pinned = stickyMemory.pin(fact, "user-cli");
+                            ui.println("📌 已 pin 到 Sticky 区: " + pinned.content);
+                            ui.println("   (id=" + pinned.id + " · 永久注入 system prompt，跨 session 保留)\n");
                         }
                         continue;
                     }
@@ -680,6 +733,7 @@ public class Main {
                     runTask = () -> {
                         PlanExecuteAgent planAgent = createPlanAgent(activeClient, reactAgent, terminal, lineReader, ui);
                         planAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
+                        planAgent.setStickyMemorySupplier(stickyMemory::renderForPrompt);
                         planAgent.setSkillRegistry(skillRegistry);
                         planAgent.setSkillContextBuffer(skillContextBuffer);
                         return planAgent.run(taskInput);
@@ -690,6 +744,7 @@ public class Main {
                     runTask = () -> {
                         AgentOrchestrator orchestrator = createTeamAgent(activeClient, reactAgent, ui);
                         orchestrator.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
+                        orchestrator.setStickyMemorySupplier(stickyMemory::renderForPrompt);
                         orchestrator.setSkillSystem(skillRegistry, skillContextBuffer);
                         return orchestrator.run(taskInput);
                     };
@@ -713,6 +768,7 @@ public class Main {
                 }
             }
             ui.println("\n👋 再见!");
+            reactAgent.close();
             renderer.close();
 
         } catch (IOException e) {
@@ -748,7 +804,7 @@ public class Main {
                 store.close();
             }, "paicli-runtime-api-shutdown"));
             server.start();
-            System.out.println("✅ PaiCLI Runtime API 已启动: http://127.0.0.1:" + server.port());
+            System.out.println("✅ DevCLI Runtime API 已启动: http://127.0.0.1:" + server.port());
             System.out.println("   认证: Authorization: Bearer <PAICLI_RUNTIME_API_KEY>");
             new CountDownLatch(1).await();
         } catch (InterruptedException e) {
@@ -778,8 +834,9 @@ public class Main {
     private static String runHeadlessTask(String prompt, LlmClient llmClient) {
         ToolRegistry registry = new ToolRegistry();
         registry.setProjectPath(Path.of(".").toAbsolutePath().normalize().toString());
-        Agent agent = new Agent(llmClient, registry);
-        return agent.run(prompt);
+        try (Agent agent = new Agent(llmClient, registry)) {
+            return agent.run(prompt);
+        }
     }
 
     private static DurableTaskManager openTaskManager(AtomicReference<LlmClient> llmClientRef) {
@@ -1301,8 +1358,8 @@ public class Main {
                 new SlashCommandHint("/skill on ", "/skill on <name>", "启用 skill"),
                 new SlashCommandHint("/skill off ", "/skill off <name>", "禁用 skill"),
                 new SlashCommandHint("/skill reload", "/skill reload", "重新扫描 skill 目录"),
-                new SlashCommandHint("/exit", "/exit", "退出 PaiCLI"),
-                new SlashCommandHint("/quit", "/quit", "退出 PaiCLI")
+                new SlashCommandHint("/exit", "/exit", "退出 DevCLI"),
+                new SlashCommandHint("/quit", "/quit", "退出 DevCLI")
         );
     }
 
@@ -2014,6 +2071,25 @@ public class Main {
     }
 
     /**
+     * PR-C：长期记忆向量同步。LongTermMemory.store 后调用，把 fact 内容 embed 后写入向量库。
+     * <p>失败模式：embed 失败（Ollama 不通 / API key 缺）静默跳过，不影响 store 主路径。
+     * 上层检索时会自动 fallback 到关键词检索。
+     */
+    private static void embedAndUpsert(com.paicli.memory.MemoryVectorStore store,
+                                        com.paicli.rag.EmbeddingClient embedder,
+                                        com.paicli.memory.MemoryEntry entry) {
+        if (!store.isUsable() || entry == null) return;
+        try {
+            float[] vec = embedder.embed(entry.getContent());
+            if (vec != null && vec.length > 0) {
+                store.upsert(entry.getId(), entry.getContent(), vec);
+            }
+        } catch (Exception e) {
+            // 静默：embed 失败让 fact 继续以"关键词可搜"形态留在 LongTermMemory
+        }
+    }
+
+    /**
      * 从 .env 文件加载 API Key
      */
     private static String loadApiKey() {
@@ -2179,11 +2255,12 @@ public class Main {
         String capabilities = "ReAct · Plan · MCP · Browser · Image · Tools · Memory · RAG";
         String state = mcp + " · " + skills + " · ReAct";
         List<String> lines = new ArrayList<>(List.of(
-                "   " + AnsiStyle.section("██████████") + "    " + AnsiStyle.emphasis("PaiCLI") + " " + AnsiStyle.section("π") + "  " + AnsiStyle.subtle("v" + VERSION),
-                "   " + AnsiStyle.section("  ██  ██") + "    " + AnsiStyle.subtle(ready),
-                "   " + AnsiStyle.section("  ██  ██") + "    " + AnsiStyle.subtle(state),
-                "   " + AnsiStyle.section("  ██  ██") + "    " + AnsiStyle.subtle(capabilities),
-                "   " + AnsiStyle.section("  ██  ██"),
+                "   " + AnsiStyle.section("██████╗  ███████╗██╗   ██╗") + "    " + AnsiStyle.emphasis("DevCLI") + "  " + AnsiStyle.subtle("v" + VERSION),
+                "   " + AnsiStyle.section("██╔══██╗ ██╔════╝██║   ██║") + "    " + AnsiStyle.subtle(ready),
+                "   " + AnsiStyle.section("██║  ██║ █████╗  ██║   ██║") + "    " + AnsiStyle.subtle(state),
+                "   " + AnsiStyle.section("██║  ██║ ██╔══╝  ╚██╗ ██╔╝") + "    " + AnsiStyle.subtle(capabilities),
+                "   " + AnsiStyle.section("██████╔╝ ███████╗ ╚████╔╝"),
+                "   " + AnsiStyle.section("╚═════╝  ╚══════╝  ╚═══╝"),
                 "",
                 "Tips for getting started:",
                 "1. Type " + AnsiStyle.emphasis("/") + " for commands and Tab completion",

@@ -61,21 +61,6 @@ public class TokenBudget {
     }
 
     /**
-     * 检查是否需要压缩。
-     *
-     * @param triggerRatio 触发压缩的占用率（0.0–1.0）；通常由 {@code ContextProfile.compressionTriggerRatio()} 提供
-     */
-    public boolean needsCompression(ConversationMemory memory, double triggerRatio) {
-        int compressionBudget = Math.min(memory.getMaxTokens(), getAvailableForConversation());
-        return memory.getTokenCount() >= compressionBudget * triggerRatio;
-    }
-
-    /** 兼容旧调用方：默认 0.9 触发率。 */
-    public boolean needsCompression(ConversationMemory memory) {
-        return needsCompression(memory, 0.9);
-    }
-
-    /**
      * 记录一次 LLM 调用的 token 消耗
      */
     public void recordUsage(int inputTokens, int outputTokens) {

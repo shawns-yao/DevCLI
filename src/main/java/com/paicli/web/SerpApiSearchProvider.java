@@ -32,6 +32,7 @@ public class SerpApiSearchProvider implements SearchProvider {
         this(apiKey, new OkHttpClient.Builder()
                 .connectTimeout(10, TimeUnit.SECONDS)
                 .readTimeout(15, TimeUnit.SECONDS)
+                .addInterceptor(new RetryInterceptor())
                 .build());
     }
 

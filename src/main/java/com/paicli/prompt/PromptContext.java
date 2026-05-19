@@ -7,6 +7,8 @@ public record PromptContext(
         String approvalMode,
         String memoryContext,
         String externalContext,
+        String stickyMemory,
+        String workingMemory,
         String skillIndex,
         Map<String, String> variables
 ) {
@@ -29,6 +31,8 @@ public record PromptContext(
         private String approvalMode = "suggest";
         private String memoryContext = "";
         private String externalContext = "";
+        private String stickyMemory = "";
+        private String workingMemory = "";
         private String skillIndex = "";
         private final Map<String, String> variables = new LinkedHashMap<>();
 
@@ -54,6 +58,21 @@ public record PromptContext(
             return this;
         }
 
+        public Builder stickyMemory(String stickyMemory) {
+            this.stickyMemory = normalize(stickyMemory);
+            return this;
+        }
+
+        /**
+         * 注入工作记忆（WorkingMemory 派生视图）。每轮 user 输入后由
+         * {@code MemoryManager.buildWorkingMemorySection()} 渲染：含最近工具证据 / 任务状态 /
+         * 临时事实。与 stickyMemory（稳定）区分：workingMemory 易变、当轮重新渲染。
+         */
+        public Builder workingMemory(String workingMemory) {
+            this.workingMemory = normalize(workingMemory);
+            return this;
+        }
+
         public Builder variable(String key, Object value) {
             if (key != null && !key.isBlank() && value != null) {
                 this.variables.put(key.trim(), String.valueOf(value));
@@ -62,7 +81,7 @@ public record PromptContext(
         }
 
         public PromptContext build() {
-            return new PromptContext(approvalMode, memoryContext, externalContext, skillIndex, Map.copyOf(variables));
+            return new PromptContext(approvalMode, memoryContext, externalContext, stickyMemory, workingMemory, skillIndex, Map.copyOf(variables));
         }
 
         private static String normalize(String value) {

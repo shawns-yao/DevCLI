@@ -44,6 +44,7 @@ public class SearxngSearchProvider implements SearchProvider {
         this(baseUrl, new OkHttpClient.Builder()
                 .connectTimeout(5, TimeUnit.SECONDS)
                 .readTimeout(15, TimeUnit.SECONDS)
+                .addInterceptor(new RetryInterceptor())
                 .build());
     }
 

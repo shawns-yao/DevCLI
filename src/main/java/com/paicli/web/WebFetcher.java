@@ -44,6 +44,7 @@ public class WebFetcher {
         this(maxBytes, new OkHttpClient.Builder()
                 .connectTimeout(10, TimeUnit.SECONDS)
                 .readTimeout(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .addInterceptor(new RetryInterceptor())
                 .callTimeout(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                 .build());
     }

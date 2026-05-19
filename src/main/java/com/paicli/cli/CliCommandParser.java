@@ -16,6 +16,7 @@ final class CliCommandParser {
         MEMORY_STATUS,
         MEMORY_CLEAR,
         MEMORY_SAVE,
+        MEMORY_PIN,
         INDEX_CODE,
         SEARCH_CODE,
         GRAPH_QUERY,
@@ -125,6 +126,15 @@ final class CliCommandParser {
 
         if (trimmed.equalsIgnoreCase("/save")) {
             return new ParsedCommand(CommandType.MEMORY_SAVE, null);
+        }
+
+        // /save --pin <事实>：写入 Sticky pinned facts，永久注入 system prompt
+        // /save -p <事实>：短形式
+        if (trimmed.regionMatches(true, 0, "/save --pin ", 0, 12)) {
+            return new ParsedCommand(CommandType.MEMORY_PIN, trimmed.substring(12).trim());
+        }
+        if (trimmed.regionMatches(true, 0, "/save -p ", 0, 9)) {
+            return new ParsedCommand(CommandType.MEMORY_PIN, trimmed.substring(9).trim());
         }
 
         if (trimmed.regionMatches(true, 0, "/save ", 0, 6)) {

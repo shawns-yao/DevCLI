@@ -3,6 +3,7 @@ package com.paicli.rag;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.paicli.web.RetryInterceptor;
 import okhttp3.*;
 
 import java.io.BufferedReader;
@@ -19,47 +20,89 @@ public class EmbeddingClient {
     private static final OkHttpClient HTTP_CLIENT = new OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(120, TimeUnit.SECONDS)
+            .addInterceptor(new RetryInterceptor())
             .build();
 
     private final String provider;
     private final String model;
     private final String baseUrl;
     private final String apiKey;
+    /**
+     * 单次 embed 调用的输入字符上限。
+     *
+     * <p>nomic-embed-text / GLM embedding-3 / OpenAI text-embedding-3-large
+     * 都接受 ~8K token 输入，对应 ~6K 中文字符或 ~24K 英文字符。
+     * 默认 6000 字符兼顾安全裕度（避免 byte-pair 编码后超 8192 token）。
+     * 通过 {@code EMBEDDING_MAX_INPUT_CHARS} 环境变量可覆盖。
+     */
+    private final int maxInputChars;
+
+    /** 默认输入字符上限，对应嵌入模型 ~8K token 容量留 25% 安全裕度。 */
+    private static final int DEFAULT_MAX_INPUT_CHARS = 6000;
 
     public EmbeddingClient() {
-        this.provider = getEnv("EMBEDDING_PROVIDER", "ollama");
+        this.provider = normalizeProvider(getEnv("EMBEDDING_PROVIDER", "ollama"));
         this.model = getEnv("EMBEDDING_MODEL", "nomic-embed-text:latest");
         this.baseUrl = getEnv("EMBEDDING_BASE_URL", inferDefaultUrl(provider));
         this.apiKey = getEnv("EMBEDDING_API_KEY", "");
+        this.maxInputChars = parsePositiveInt(getEnv("EMBEDDING_MAX_INPUT_CHARS", ""), DEFAULT_MAX_INPUT_CHARS);
     }
 
     public EmbeddingClient(String provider, String model, String baseUrl, String apiKey) {
-        this.provider = provider;
+        this.provider = normalizeProvider(provider);
         this.model = model;
         this.baseUrl = baseUrl;
         this.apiKey = apiKey;
+        this.maxInputChars = DEFAULT_MAX_INPUT_CHARS;
     }
 
-    // 安全截断长度（中文密集文本 2000 字符 ≈ 4000~6000 token，适配 8192 上下文模型）
-    private static final int MAX_INPUT_CHARS = 2000;
+    /**
+     * 校验并归一化 provider。
+     *
+     * <p>未知 provider 直接抛 {@link IllegalArgumentException}（Fail-Fast）。
+     * 旧版本会在 {@code embed()} 时静默 fallback 到 ollama，用户拼错 provider
+     * （比如 EMBEDDING_PROVIDER=deepseek）只会拿到 "connection refused" 之类
+     * 难以诊断的错误。这里在构造时就报错，错误信息直接告诉用户支持哪些 provider。
+     */
+    static String normalizeProvider(String raw) {
+        if (raw == null || raw.isBlank()) {
+            throw new IllegalArgumentException(
+                    "EMBEDDING_PROVIDER 不能为空，支持值: ollama / openai / zhipu / glm");
+        }
+        String lower = raw.trim().toLowerCase();
+        return switch (lower) {
+            case "ollama" -> "ollama";
+            case "openai" -> "openai";
+            // glm 是 zhipu 的别名，归一化成 zhipu 简化下游分支
+            case "zhipu", "glm" -> "zhipu";
+            default -> throw new IllegalArgumentException(
+                    "未知 EMBEDDING_PROVIDER='" + raw + "'，支持值: ollama / openai / zhipu / glm");
+        };
+    }
 
     /**
-     * 获取文本的向量表示
+     * 获取文本的向量表示。
+     *
+     * <p>空字符串 / null 输入会抛 {@link IOException}（Fail-Fast）：
+     * 旧版本返回 {@code new float[0]}，调用方写入零向量后所有余弦相似度计算
+     * 退化成 NaN，对应 fact 实际上从向量召回里失踪——非常难诊断。这里直接
+     * 拒绝，让上层（如 {@code MemoryVectorStore.upsert}）捕获并显式跳过。
      */
     public float[] embed(String text) throws IOException {
-        if (text == null || text.isEmpty()) {
-            return new float[0];
+        if (text == null || text.isBlank()) {
+            throw new IOException("EmbeddingClient.embed: 输入文本为空");
         }
 
-        // 截断过长文本，防止 API 报错
-        String input = text.length() > MAX_INPUT_CHARS
-                ? text.substring(0, MAX_INPUT_CHARS)
+        // 截断过长文本，防止 API 报错。阈值由构造期 maxInputChars 决定（默认 6000，可通过 EMBEDDING_MAX_INPUT_CHARS 覆盖）。
+        String input = text.length() > maxInputChars
+                ? text.substring(0, maxInputChars)
                 : text;
 
-        return switch (provider.toLowerCase()) {
+        return switch (provider) {
+            // provider 已经过 normalizeProvider 归一化为小写、glm→zhipu
             case "ollama" -> embedOllama(input);
-            case "openai", "zhipu", "glm" -> embedOpenAICompatible(input);
-            default -> embedOllama(input);
+            case "openai", "zhipu" -> embedOpenAICompatible(input);
+            default -> throw new IOException("BUG: provider 未在归一化列表中: " + provider);
         };
     }
 
@@ -132,12 +175,25 @@ public class EmbeddingClient {
         }
     }
 
-    private static String inferDefaultUrl(String provider) {
-        return switch (provider.toLowerCase()) {
+    private static String inferDefaultUrl(String normalizedProvider) {
+        // normalizedProvider 已经过 normalizeProvider 归一化（小写、glm→zhipu）
+        return switch (normalizedProvider) {
             case "ollama" -> "http://localhost:11434";
-            case "zhipu", "glm" -> "https://open.bigmodel.cn/api/paas/v4";
+            case "zhipu" -> "https://open.bigmodel.cn/api/paas/v4";
+            case "openai" -> "https://api.openai.com/v1";
             default -> "http://localhost:11434";
         };
+    }
+
+    /** 解析正整数 env 配置；非法 / 空 / 0 / 负数都退回默认值。 */
+    private static int parsePositiveInt(String raw, int defaultValue) {
+        if (raw == null || raw.isBlank()) return defaultValue;
+        try {
+            int v = Integer.parseInt(raw.trim());
+            return v > 0 ? v : defaultValue;
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 
     private static String getEnv(String key, String defaultValue) {
@@ -207,5 +263,10 @@ public class EmbeddingClient {
 
     public String getModel() {
         return model;
+    }
+
+    /** 当前实际生效的输入字符上限（受 EMBEDDING_MAX_INPUT_CHARS 控制）。 */
+    public int getMaxInputChars() {
+        return maxInputChars;
     }
 }
