@@ -20,6 +20,35 @@ class SkillContextBufferTest {
     }
 
     @Test
+    void snapshotDoesNotDrainBuffer() {
+        SkillContextBuffer buffer = new SkillContextBuffer();
+        buffer.push("web-access", "body content");
+
+        String snapshot = buffer.snapshot();
+
+        assertTrue(snapshot.contains("web-access"));
+        assertTrue(snapshot.contains("body content"));
+        assertEquals(1, buffer.size(), "snapshot 不应消费 buffer");
+
+        String drained = buffer.drain();
+        assertTrue(drained.contains("web-access"));
+        assertTrue(buffer.isEmpty(), "drain 仍应一次性消费 buffer");
+    }
+
+    @Test
+    void copyKeepsIndependentEntries() {
+        SkillContextBuffer buffer = new SkillContextBuffer();
+        buffer.push("web-access", "body content");
+
+        SkillContextBuffer copy = buffer.copy();
+        String copyDrained = copy.drain();
+
+        assertTrue(copyDrained.contains("web-access"));
+        assertEquals(1, buffer.size(), "draining copy should not affect original buffer");
+        assertTrue(buffer.drain().contains("body content"));
+    }
+
+    @Test
     void clearResetsBuffer() {
         SkillContextBuffer buffer = new SkillContextBuffer();
         buffer.push("a", "body a");

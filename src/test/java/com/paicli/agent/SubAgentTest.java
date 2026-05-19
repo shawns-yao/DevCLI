@@ -2,19 +2,24 @@ package com.paicli.agent;
 
 import com.paicli.llm.GLMClient;
 import com.paicli.llm.LlmClient;
+import com.paicli.skill.SkillContextBuffer;
+import com.paicli.skill.SkillRegistry;
+import com.paicli.skill.SkillStateStore;
 import com.paicli.tool.ToolRegistry;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.function.Consumer;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 class SubAgentTest {
 
@@ -138,10 +143,81 @@ class SubAgentTest {
         assertTrue(output.contains("答案"), "content should still appear");
     }
 
+    @Test
+    void shouldWriteLoadedSkillIntoSubAgentBufferForNextUserMessage(@TempDir Path tempDir) throws Exception {
+        Path skillRoot = tempDir.resolve("skills");
+        writeSkill(skillRoot, "parallel-skill", "desc", "loaded body for worker");
+        SkillRegistry registry = new SkillRegistry(null, skillRoot, null,
+                new SkillStateStore(tempDir.resolve("skills.json")));
+        registry.reload();
+
+        SkillContextBuffer globalBuffer = new SkillContextBuffer();
+        SkillContextBuffer subAgentBuffer = new SkillContextBuffer();
+        ToolRegistry tools = new ToolRegistry();
+        tools.setProjectPath(tempDir.toString());
+        tools.setSkillRegistry(registry);
+        tools.setSkillContextBuffer(globalBuffer);
+
+        MultiCallStreamClient llm = new MultiCallStreamClient(List.of(
+                new CallScript(
+                        listener -> {},
+                        new LlmClient.ChatResponse(
+                                "assistant",
+                                "加载 skill",
+                                null,
+                                List.of(new LlmClient.ToolCall(
+                                        "call_1",
+                                        new LlmClient.ToolCall.Function("load_skill", "{\"name\":\"parallel-skill\"}")
+                                )),
+                                10, 5
+                        )
+                ),
+                new CallScript(
+                        listener -> {},
+                        new LlmClient.ChatResponse("assistant", "完成", null, 8, 3)
+                ),
+                new CallScript(
+                        listener -> {},
+                        new LlmClient.ChatResponse("assistant", "第二次完成", null, 8, 3)
+                )
+        ));
+        SubAgent worker = new SubAgent("w1", AgentRole.WORKER, llm, tools);
+        worker.setSkillRegistry(registry);
+        worker.setSkillContextBuffer(subAgentBuffer);
+
+        worker.execute(AgentMessage.task("orchestrator", "任务"),
+                new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+
+        assertEquals(1, subAgentBuffer.size(),
+                "load_skill should write into the SubAgent-local buffer after the first external task");
+        assertTrue(globalBuffer.isEmpty(), "SubAgent load_skill must not write into the shared global buffer");
+
+        worker.execute(AgentMessage.task("orchestrator", "第二个任务"),
+                new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+
+        String nextExternalUser = llm.messagesByCall.get(2).stream()
+                .filter(message -> "user".equals(message.role()))
+                .reduce((first, second) -> second)
+                .orElseThrow()
+                .content();
+        assertTrue(nextExternalUser.contains("loaded body for worker"),
+                "load_skill should feed the SubAgent-local buffer into the next external user message");
+        assertTrue(subAgentBuffer.isEmpty(), "SubAgent-local buffer should be drained into the next user message");
+    }
+
     private boolean invokeShouldUseTools(SubAgent agent) throws Exception {
         Method method = SubAgent.class.getDeclaredMethod("shouldUseTools");
         method.setAccessible(true);
         return (boolean) method.invoke(agent);
+    }
+
+    private static void writeSkill(Path root, String name, String desc, String body) throws IOException {
+        Path skillDir = root.resolve(name);
+        Files.createDirectories(skillDir);
+        Files.writeString(skillDir.resolve("SKILL.md"),
+                "---\nname: " + name
+                        + "\ndescription: " + desc
+                        + "\n---\n" + body + "\n");
     }
 
     /**
@@ -175,6 +251,7 @@ class SubAgentTest {
 
     private static final class MultiCallStreamClient extends GLMClient {
         private final java.util.Iterator<CallScript> iter;
+        private final List<List<Message>> messagesByCall = new java.util.ArrayList<>();
 
         private MultiCallStreamClient(List<CallScript> scripts) {
             super("test-key");
@@ -191,6 +268,7 @@ class SubAgentTest {
             if (!iter.hasNext()) {
                 throw new IOException("脚本已耗尽，未预设第 N 次调用");
             }
+            messagesByCall.add(List.copyOf(messages));
             CallScript next = iter.next();
             next.streamScript().accept(listener);
             return next.response();

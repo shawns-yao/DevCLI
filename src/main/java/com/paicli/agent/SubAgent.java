@@ -24,11 +24,15 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 /**
@@ -41,12 +45,38 @@ public class SubAgent {
     private static final Logger log = LoggerFactory.getLogger(SubAgent.class);
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
 
+    /**
+     * Forked SubAgent execution starts from a frozen shared prefix, then appends a task-specific suffix.
+     * Keeping this prefix immutable makes parallel worker requests cache-friendly at the prompt boundary.
+     */
+    public record ForkContext(List<LlmClient.Message> sharedPrefix,
+                              List<LlmClient.Tool> toolDefinitions,
+                              String skillBodySnapshot,
+                              String modelName,
+                              String providerName,
+                              String fingerprint) {
+        public ForkContext {
+            sharedPrefix = List.copyOf(sharedPrefix == null ? List.of() : sharedPrefix);
+            toolDefinitions = toolDefinitions == null ? null : List.copyOf(toolDefinitions);
+            skillBodySnapshot = skillBodySnapshot == null ? "" : skillBodySnapshot;
+            modelName = modelName == null ? "" : modelName;
+            providerName = providerName == null ? "" : providerName;
+            fingerprint = fingerprint == null || fingerprint.isBlank()
+                    ? computeFingerprint(sharedPrefix, toolDefinitions, skillBodySnapshot, modelName, providerName)
+                    : fingerprint;
+        }
+    }
+
     private final String name;
     private final AgentRole role;
     private final LlmClient llmClient;
     private final ToolRegistry toolRegistry;
     private final List<LlmClient.Message> conversationHistory;
     private Supplier<String> externalContextSupplier = () -> "";
+    private Supplier<String> stickyMemorySupplier = () -> "";
+    private Supplier<String> memoryContextSupplier = () -> "";
+    private Supplier<String> workingMemorySupplier = () -> "";
+    private TriConsumer<String, String, String> toolResultConsumer = (name, args, result) -> {};
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private final ConversationHistoryCompactor historyCompactor;
@@ -67,6 +97,30 @@ public class SubAgent {
         refreshSystemPrompt();
     }
 
+    /**
+     * 注入 Sticky Memory 渲染源（PR-B）：与 Agent 一致语义，由 Main 启动时接进来。
+     * SubAgent 在 setStickyMemorySupplier 后不立即重建 system prompt——下次调 LLM 时
+     * 由 getSystemPrompt 拿到最新 sticky 内容。
+     */
+    public void setStickyMemorySupplier(Supplier<String> stickyMemorySupplier) {
+        this.stickyMemorySupplier = stickyMemorySupplier == null ? () -> "" : stickyMemorySupplier;
+        refreshSystemPrompt();
+    }
+
+    public void setMemoryContextSupplier(Supplier<String> memoryContextSupplier) {
+        this.memoryContextSupplier = memoryContextSupplier == null ? () -> "" : memoryContextSupplier;
+        refreshSystemPrompt();
+    }
+
+    public void setWorkingMemorySupplier(Supplier<String> workingMemorySupplier) {
+        this.workingMemorySupplier = workingMemorySupplier == null ? () -> "" : workingMemorySupplier;
+        refreshSystemPrompt();
+    }
+
+    public void setToolResultConsumer(TriConsumer<String, String, String> toolResultConsumer) {
+        this.toolResultConsumer = toolResultConsumer == null ? (name, args, result) -> {} : toolResultConsumer;
+    }
+
     public void setSkillRegistry(SkillRegistry skillRegistry) {
         this.skillRegistry = skillRegistry;
         refreshSystemPrompt();
@@ -81,9 +135,42 @@ public class SubAgent {
      */
     private String getSystemPrompt() {
         return promptAssembler.assemble(promptMode(), PromptContext.builder()
+                .memoryContext(buildMemoryContext())
                 .externalContext(buildExternalContext())
+                .stickyMemory(buildStickyMemory())
+                .workingMemory(buildWorkingMemory())
                 .skillIndex(buildSkillIndex())
                 .build());
+    }
+
+    private String buildMemoryContext() {
+        try {
+            String memory = memoryContextSupplier.get();
+            return memory == null ? "" : memory.trim();
+        } catch (Exception e) {
+            log.warn("Failed to render memory context in SubAgent {}", name, e);
+            return "";
+        }
+    }
+
+    private String buildWorkingMemory() {
+        try {
+            String memory = workingMemorySupplier.get();
+            return memory == null ? "" : memory.trim();
+        } catch (Exception e) {
+            log.warn("Failed to render working memory in SubAgent {}", name, e);
+            return "";
+        }
+    }
+
+    private String buildStickyMemory() {
+        try {
+            String sticky = stickyMemorySupplier.get();
+            return sticky == null ? "" : sticky.trim();
+        } catch (Exception e) {
+            log.warn("Failed to render sticky memory in SubAgent {}", name, e);
+            return "";
+        }
     }
 
     private PromptMode promptMode() {
@@ -95,11 +182,15 @@ public class SubAgent {
     }
 
     private void maybeCompactHistory(PrintStream out) {
+        maybeCompactHistory(conversationHistory, out);
+    }
+
+    private void maybeCompactHistory(List<LlmClient.Message> history, PrintStream out) {
         if (historyCompactor == null) return;
         ContextProfile profile = toolRegistry == null ? null : toolRegistry.getContextProfile();
         if (profile == null) return;
         try {
-            boolean compacted = historyCompactor.compactIfNeeded(conversationHistory, profile.compressionTriggerTokens());
+            boolean compacted = historyCompactor.compactIfNeeded(history, profile.compressionTriggerTokens());
             if (compacted && out != null) {
                 out.println("📦 [" + name + "] 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
             }
@@ -119,12 +210,20 @@ public class SubAgent {
     }
 
     private String prependSkillBodies(String content) {
+        return prependSkillBodies(content, true);
+    }
+
+    private String prependSkillBodies(String content, boolean consumeBuffer) {
         if (skillContextBuffer == null || skillContextBuffer.isEmpty()) {
             return content;
         }
-        String drained = skillContextBuffer.drain();
-        if (drained.isEmpty()) return content;
-        return drained + "\n" + content;
+        String skillBodies = consumeBuffer ? skillContextBuffer.drain() : skillContextBuffer.snapshot();
+        return prependSkillBodies(content, skillBodies);
+    }
+
+    private static String prependSkillBodies(String content, String skillBodies) {
+        if (skillBodies == null || skillBodies.isEmpty()) return content;
+        return skillBodies + "\n" + content;
     }
 
     private void refreshSystemPrompt() {
@@ -146,6 +245,15 @@ public class SubAgent {
         }
     }
 
+    public ForkContext createForkContext() {
+        List<LlmClient.Message> sharedPrefix = List.of(LlmClient.Message.system(getSystemPrompt()));
+        List<LlmClient.Tool> toolDefinitions = shouldUseTools() ? toolRegistry.getToolDefinitions() : null;
+        String skillBodySnapshot = skillContextBuffer == null ? "" : skillContextBuffer.snapshot();
+        String modelName = llmClient == null ? "" : llmClient.getModelName();
+        String providerName = llmClient == null ? "" : llmClient.getProviderName();
+        return new ForkContext(sharedPrefix, toolDefinitions, skillBodySnapshot, modelName, providerName, null);
+    }
+
     /**
      * 执行任务，返回结果消息（默认输出到 System.out）
      */
@@ -161,10 +269,28 @@ public class SubAgent {
         log.info("[{}] executing task from {}: type={}", name, task.fromAgent(), task.type());
         pruneHistoricalImagePayloads();
         refreshSystemPrompt();
-        String taskContent = prependSkillBodies(task.content());
+        return executeWithHistory(task, out, conversationHistory);
+    }
+
+    public AgentMessage executeForked(AgentMessage task, ForkContext forkContext, PrintStream out) {
+        ForkContext context = forkContext == null ? createForkContext() : forkContext;
+        List<LlmClient.Message> forkedHistory = new ArrayList<>(context.sharedPrefix());
+        return executeWithHistory(task, out, forkedHistory, context);
+    }
+
+    private AgentMessage executeWithHistory(AgentMessage task, PrintStream out, List<LlmClient.Message> history) {
+        return executeWithHistory(task, out, history, null);
+    }
+
+    private AgentMessage executeWithHistory(AgentMessage task, PrintStream out,
+                                            List<LlmClient.Message> history,
+                                            ForkContext forkContext) {
+        String taskContent = forkContext == null
+                ? prependSkillBodies(task.content(), true)
+                : prependSkillBodies(task.content(), forkContext.skillBodySnapshot());
 
         // 将任务注入对话
-        conversationHistory.add(ImageReferenceParser.userMessage(
+        history.add(ImageReferenceParser.userMessage(
                 taskContent,
                 Path.of(toolRegistry.getProjectPath())));
 
@@ -186,14 +312,17 @@ public class SubAgent {
 
             budget.beginIteration();
 
-            // 调 LLM 前评估 conversationHistory 是否接近 window 上限；超阈值压缩早期消息为摘要。
-            injectPendingLspDiagnostics(out);
-            maybeCompactHistory(out);
+            // 调 LLM 前刷新 system prompt 的易变段，再评估是否接近 window 上限。
+            if (forkContext == null && !history.isEmpty() && "system".equals(history.get(0).role())) {
+                history.set(0, LlmClient.Message.system(getSystemPrompt()));
+            }
+            injectPendingLspDiagnostics(history, out);
+            maybeCompactHistory(history, out);
 
             try {
                 LlmClient.ChatResponse response = llmClient.chat(
-                        conversationHistory,
-                        shouldUseTools() ? toolRegistry.getToolDefinitions() : null,
+                        history,
+                        toolDefinitionsFor(forkContext),
                         streamRenderer
                 );
                 LlmTraceLogger.logReasoning(log,
@@ -202,11 +331,12 @@ public class SubAgent {
                         response.reasoningContent());
 
                 budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
+                logPromptCacheDiagnostics(forkContext, response, budget);
 
                 if (response.hasToolCalls()) {
                     budget.recordToolCalls(response.toolCalls());
                     printToolCalls(out, response.toolCalls());
-                    conversationHistory.add(LlmClient.Message.assistant(
+                    history.add(LlmClient.Message.assistant(
                             response.reasoningContent(),
                             response.content(),
                             response.toolCalls()
@@ -219,14 +349,15 @@ public class SubAgent {
                     List<ToolExecutionResult> toolResults = executeToolCalls(response.toolCalls());
                     for (ToolExecutionResult toolResult : toolResults) {
                         budget.recordToolResult(toolResult.name(), toolResult.result());
-                        conversationHistory.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
+                        toolResultConsumer.accept(toolResult.name(), toolResult.argumentsJson(), toolResult.result());
+                        history.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
                     }
-                    appendImageToolMessages(toolResults);
+                    appendImageToolMessages(history, toolResults);
                     continue;
                 }
 
                 // 没有工具调用，返回最终结果
-                conversationHistory.add(LlmClient.Message.assistant(response.content()));
+                history.add(LlmClient.Message.assistant(response.content()));
 
                 streamRenderer.finish();
 
@@ -257,6 +388,17 @@ public class SubAgent {
         return execute(enrichedTask, out);
     }
 
+    public AgentMessage executeForkedWithContext(AgentMessage task, String context,
+                                                 ForkContext forkContext, PrintStream out) {
+        String enrichedContent = task.content();
+        if (context != null && !context.isEmpty()) {
+            enrichedContent = context + "\n\n当前任务：" + task.content();
+        }
+        AgentMessage enrichedTask = new AgentMessage(task.fromAgent(), task.fromRole(),
+                enrichedContent, task.type());
+        return executeForked(enrichedTask, forkContext, out);
+    }
+
     /**
      * 检查结果（Reviewer 专用）
      */
@@ -268,6 +410,13 @@ public class SubAgent {
         String reviewInput = "原始任务：" + originalTask + "\n\n执行结果：\n" + executionResult;
         AgentMessage reviewTask = AgentMessage.task("orchestrator", reviewInput);
         return execute(reviewTask, out);
+    }
+
+    public AgentMessage reviewForked(String originalTask, String executionResult,
+                                     ForkContext forkContext, PrintStream out) {
+        String reviewInput = "原始任务：" + originalTask + "\n\n执行结果：\n" + executionResult;
+        AgentMessage reviewTask = AgentMessage.task("orchestrator", reviewInput);
+        return executeForked(reviewTask, forkContext, out);
     }
 
     /**
@@ -305,13 +454,49 @@ public class SubAgent {
         return role == AgentRole.WORKER;
     }
 
+    private List<LlmClient.Tool> toolDefinitionsFor(ForkContext forkContext) {
+        if (!shouldUseTools()) {
+            return null;
+        }
+        if (forkContext != null) {
+            return forkContext.toolDefinitions() == null ? null : forkContext.toolDefinitions();
+        }
+        return toolRegistry.getToolDefinitions();
+    }
+
+    private void logPromptCacheDiagnostics(ForkContext forkContext,
+                                           LlmClient.ChatResponse response,
+                                           AgentBudget budget) {
+        if (forkContext == null || response == null) {
+            return;
+        }
+        int input = Math.max(0, response.inputTokens());
+        int cached = Math.max(0, Math.min(input, response.cachedInputTokens()));
+        int hitPct = input == 0 ? 0 : (int) Math.round(cached * 100.0 / input);
+        log.info("[{}] fork cache diagnostics: fingerprint={}, provider={}, model={}, iteration={}, input={}, cached={}, hitPct={}%",
+                name,
+                forkContext.fingerprint(),
+                forkContext.providerName(),
+                forkContext.modelName(),
+                budget.iteration(),
+                input,
+                cached,
+                hitPct);
+    }
+
     private void injectPendingLspDiagnostics(PrintStream out) {
+        injectPendingLspDiagnostics(conversationHistory, out);
+    }
+
+    private void injectPendingLspDiagnostics(List<LlmClient.Message> history, PrintStream out) {
         LspDiagnosticReport report = toolRegistry.flushPendingLspDiagnostics();
         if (report == null || report.isEmpty()) {
             return;
         }
-        conversationHistory.add(LlmClient.Message.user(report.promptText()));
-        out.println(report.displayText());
+        history.add(LlmClient.Message.user(report.promptText()));
+        if (out != null) {
+            out.println(report.displayText());
+        }
         log.info("[{}] injected LSP diagnostics into sub-agent conversation", name);
     }
 
@@ -328,10 +513,17 @@ public class SubAgent {
         if (invocations.size() > 1) {
             log.info("[{}] executing {} tool calls in parallel", name, invocations.size());
         }
-        return toolRegistry.executeTools(invocations);
+        AtomicReference<List<ToolExecutionResult>> results = new AtomicReference<>(List.of());
+        toolRegistry.runWithSkillContextBuffer(skillContextBuffer,
+                () -> results.set(toolRegistry.executeTools(invocations)));
+        return results.get();
     }
 
     private void appendImageToolMessages(List<ToolExecutionResult> toolResults) {
+        appendImageToolMessages(conversationHistory, toolResults);
+    }
+
+    private void appendImageToolMessages(List<LlmClient.Message> history, List<ToolExecutionResult> toolResults) {
         if (toolResults == null || toolResults.isEmpty()) {
             return;
         }
@@ -342,7 +534,7 @@ public class SubAgent {
             List<LlmClient.ContentPart> parts = new ArrayList<>();
             parts.add(LlmClient.ContentPart.text("工具 " + result.name() + " 返回了图片内容，请结合上面的工具文本结果分析。"));
             parts.addAll(result.imageParts());
-            conversationHistory.add(LlmClient.Message.user(parts));
+            history.add(LlmClient.Message.user(parts));
         }
     }
 
@@ -420,6 +612,52 @@ public class SubAgent {
 
     public AgentRole getRole() {
         return role;
+    }
+
+    private static String computeFingerprint(List<LlmClient.Message> sharedPrefix,
+                                             List<LlmClient.Tool> toolDefinitions,
+                                             String skillBodySnapshot,
+                                             String modelName,
+                                             String providerName) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("provider=").append(providerName == null ? "" : providerName).append('\n');
+        sb.append("model=").append(modelName == null ? "" : modelName).append('\n');
+        sb.append("messages=").append(sharedPrefix == null ? 0 : sharedPrefix.size()).append('\n');
+        if (sharedPrefix != null) {
+            for (LlmClient.Message message : sharedPrefix) {
+                sb.append(message.role()).append(':').append(message.content()).append('\n');
+            }
+        }
+        sb.append("tools=").append(toolDefinitions == null ? 0 : toolDefinitions.size()).append('\n');
+        if (toolDefinitions != null) {
+            for (LlmClient.Tool tool : toolDefinitions) {
+                sb.append(tool.name()).append(':')
+                        .append(tool.description()).append(':')
+                        .append(tool.parameters() == null ? "" : tool.parameters().toString())
+                        .append('\n');
+            }
+        }
+        sb.append("skills=").append(skillBodySnapshot == null ? "" : skillBodySnapshot);
+        return sha256Prefix(sb.toString());
+    }
+
+    private static String sha256Prefix(String value) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < Math.min(8, hash.length); i++) {
+                sb.append(String.format("%02x", hash[i]));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            return Integer.toHexString(value.hashCode());
+        }
+    }
+
+    @FunctionalInterface
+    public interface TriConsumer<A, B, C> {
+        void accept(A a, B b, C c);
     }
 
     /**

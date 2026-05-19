@@ -8,6 +8,16 @@
 
 `ROADMAP.md` 代表演进方向，不代表已交付。
 
+## 输出风格
+
+- 默认简短回答，严禁长篇大论、冗余铺垫、重复表达和过度展开。
+- 语言极度凝练，只说核心重点；删掉多余解释、铺垫话术和延伸赘述。
+- 如确需扩展，先给结论，再给最少必要依据。
+- 谈及 Planner/Worker/Reviewer 架构时，三角色职责一句话极简概括，不拆分长讲。
+- 区分测试任务时，直接点明旧任务弊端、新任务优势，不讲冗长原理。
+- 表达观点直击结论，短句输出，拒绝大段文案。
+- 涉及架构测试、任务选型、对比差异时，全部压缩精简，言简意赅。
+
 ## 项目快照
 
 - 项目名：`PaiCLI`
@@ -42,6 +52,8 @@ mvn test -DskipTests=false                  # 全量回归
 | ReAct | `Agent.java` | 默认模式 |
 | Plan-and-Execute | `PlanExecuteAgent.java` | `/plan` |
 | Multi-Agent | `AgentOrchestrator.java` | `/team` |
+
+Multi-Agent 并行批次使用 `SubAgent.ForkContext` 共享冻结 system prompt 前缀、exact tool definitions 快照、skill body 快照和 fork fingerprint；每个子任务只追加自己的 user 后缀，避免并行 Worker / Reviewer 因历史或动态工具差异破坏 prompt cache 命中。
 
 内置工具 9 个：`read_file` / `write_file` / `list_dir` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn`
 
@@ -98,7 +110,7 @@ src/main/java/com/paicli/
 
 - 长期记忆只通过 `/save` 或用户明确要求保存；不要自动提取事实
 - 长期记忆只保存跨会话稳定事实，不保存临时指令
-- 两道压缩不要混淆：shortTermMemory 压缩 vs conversationHistory 压缩（后者是防 window 超限的关键）
+- `ConversationHistoryCompactor` 是唯一治理 LLM messages 窗口的压缩点；`WorkingMemory` 是当前会话派生视图，不是压缩器
 
 ### HITL + 策略层
 

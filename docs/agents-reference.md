@@ -85,16 +85,15 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 - `ContextProfile` 计算 short/balanced/long 模式
 - GLM-5.1: 200k / DeepSeek V4: 1M / StepFun: 256k / Kimi K2.6: 256k
-- long 模式(>=100k)：跳过 Memory 自动摘要，search_code topK=20，MCP resources 自动索引
+- long 模式(>=100k)：提高 compression trigger，search_code topK=20，MCP resources 自动索引
 - prompt caching：能力声明 + cached usage 解析
 
 ### Memory System
 
-- 两道压缩：
-  1. `ContextCompressor` 压缩 shortTermMemory
-  2. `ConversationHistoryCompactor` 压缩 conversationHistory（真正发给 LLM 的消息）
-- 第二道压缩切割在 user message 边界，保留最近 3 个 user 起算的尾部
-- 三条路径(ReAct/Plan/SubAgent)都接入第二道压缩
+- `ConversationHistoryCompactor` 是唯一压缩真实 LLM messages 的窗口治理点
+- 压缩切割在 user message 边界，保留最近 3 个 user 起算的尾部
+- 三条路径(ReAct/Plan/SubAgent)都接入 conversationHistory 压缩
+- `WorkingMemory` 只保存当前会话工具证据 / 任务状态 / 临时事实，作为 system prompt 派生视图注入，不参与压缩
 - 长期记忆只通过 `/save` 或用户明确要求保存
 - 长期记忆只保存跨会话稳定事实，不保存临时指令
 
@@ -104,6 +103,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 流程：规划 → 按依赖分配 Worker → Reviewer 审查 → 未通过重试(最多 2 次)
 - SubAgent IOException 返回 ERROR 类型
 - 所有子代理共享 ToolRegistry 和 MemoryManager
+- 并行批次通过 `SubAgent.ForkContext` 创建 cache-safe fork：冻结 system prompt 前缀、exact tool definitions 快照、skill body 快照、provider/model 和 fork fingerprint；同批 Worker / Reviewer 从同一 prefix fork，本步骤上下文只进入末尾 user message，提升稳定前缀的 prompt cache 命中概率
 
 ### HITL System
 
@@ -287,4 +287,4 @@ EMBEDDING_BASE_URL=http://localhost:11434
 
 不覆盖：真实 LLM 联调、真实 Embedding API、真实 MCP server 联调、终端完整手工体验。
 
-完整测试类列表：CliCommandParserTest / MainBrowserCommandTest / PlanReviewInputParserTest / MainInputNormalizationTest / ExecutionPlanTest / MemoryEntryTest / ConversationMemoryTest / LongTermMemoryTest / MemoryRetrieverTest / MemoryManagerTest / ExplicitMemoryHintsTest / ContextProfileTest / PlanExecuteAgentTest / AgentMemoryHintTest / AgentRoleTest / AgentMessageTest / AgentOrchestratorTest / EmbeddingClientTest / SearchResultTest / NetworkPolicyTest / HtmlExtractorTest / WebFetcherTest / SearchProviderFactoryTest / ZhipuSearchProviderTest / VectorStoreTest / CodeChunkerTest / CodeAnalyzerTest / CodeIndexTest / ApprovalPolicyTest / ApprovalResultTest / HitlToolRegistryTest / TerminalHitlHandlerTest / ToolRegistryTest / BrowserSessionTest / BrowserConnectivityCheckTest / SensitivePagePolicyTest / BrowserGuardTest / McpSchemaSanitizerTest / McpConfigLoaderTest / JsonRpcClientTest / McpToolBridgeTest / McpResourceCacheTest / AtMentionParserTest / AtMentionExpanderTest / AtMentionCompleterTest / NotificationRouterTest / PathGuardTest / CommandGuardTest / AuditLogTest / SkillFrontmatterParserTest / SkillRegistryTest / SkillStateStoreTest / SkillBuiltinExtractorTest / SkillContextBufferTest / SkillIndexFormatterTest / LoadSkillToolTest / SkillCommandHandlerTest
+完整测试类列表：CliCommandParserTest / MainBrowserCommandTest / PlanReviewInputParserTest / MainInputNormalizationTest / ExecutionPlanTest / MemoryEntryTest / ConversationHistoryCompactorTest / LongTermMemoryTest / MemoryRetrieverTest / MemoryManagerTest / ExplicitMemoryHintsTest / ContextProfileTest / PlanExecuteAgentTest / AgentMemoryHintTest / AgentRoleTest / AgentMessageTest / AgentOrchestratorTest / EmbeddingClientTest / SearchResultTest / NetworkPolicyTest / HtmlExtractorTest / WebFetcherTest / SearchProviderFactoryTest / ZhipuSearchProviderTest / VectorStoreTest / CodeChunkerTest / CodeAnalyzerTest / CodeIndexTest / ApprovalPolicyTest / ApprovalResultTest / HitlToolRegistryTest / TerminalHitlHandlerTest / ToolRegistryTest / BrowserSessionTest / BrowserConnectivityCheckTest / SensitivePagePolicyTest / BrowserGuardTest / McpSchemaSanitizerTest / McpConfigLoaderTest / JsonRpcClientTest / McpToolBridgeTest / McpResourceCacheTest / AtMentionParserTest / AtMentionExpanderTest / AtMentionCompleterTest / NotificationRouterTest / PathGuardTest / CommandGuardTest / AuditLogTest / SkillFrontmatterParserTest / SkillRegistryTest / SkillStateStoreTest / SkillBuiltinExtractorTest / SkillContextBufferTest / SkillIndexFormatterTest / LoadSkillToolTest / SkillCommandHandlerTest

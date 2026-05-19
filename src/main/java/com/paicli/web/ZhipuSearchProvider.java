@@ -60,6 +60,7 @@ public class ZhipuSearchProvider implements SearchProvider {
         this(apiKey, searchEngine, new OkHttpClient.Builder()
                 .connectTimeout(10, TimeUnit.SECONDS)
                 .readTimeout(20, TimeUnit.SECONDS)
+                .addInterceptor(new RetryInterceptor())
                 .build());
     }
 

@@ -10,16 +10,32 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Memory 管理器 - Memory 系统的门面类
+ * Memory 管理器 —— Memory 系统的门面类。
  *
- * 统一管理短期记忆、长期记忆、上下文压缩和检索，
- * 为 Agent 提供简洁的记忆存取接口。
+ * <p>v2 重构（路径 B）：把旧版"短期记忆笔记本"重定位为 {@link WorkingMemory}（工作记忆）。
+ *
+ * <p>四层职责切片（不重叠）：
+ * <ol>
+ *   <li><b>Conversation History</b>（不在本类管理）：真实 LLM messages，
+ *       {@code Agent.conversationHistory} 维护，{@code ConversationHistoryCompactor} 压缩</li>
+ *   <li><b>Working Memory</b>（本类持有）：当前会话工作状态（最近工具证据 / 任务状态 / 临时事实），
+ *       作为 system prompt <b>派生视图</b>注入，不进 messages。仅当前会话有效</li>
+ *   <li><b>Long-Term Memory</b>（本类持有）：跨会话持久化事实，按 query 检索 top-k 注入</li>
+ *   <li><b>Sticky Memory</b>（{@code StickyMemory} 单独管理）：跨会话持久化强约束，每轮全量注入</li>
+ * </ol>
+ *
+ * <p>历史包袱已清理：
+ * <ul>
+ *   <li>删除 {@code ConversationMemory}（旧短期记忆笔记本，与 conversationHistory 职责重叠）</li>
+ *   <li>删除 {@code ContextCompressor.compress()}（压完摘要无人消费的死代码）</li>
+ *   <li>删除 {@code compressIfNeeded()}（压缩职责已交给 ConversationHistoryCompactor）</li>
+ *   <li>删除 {@code MemoryRetriever.retrieve()}（混合短期+长期检索的死代码，主路径只用 retrieveLongTerm）</li>
+ * </ul>
  */
-public class MemoryManager {
+public class MemoryManager implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(MemoryManager.class);
-    private final ConversationMemory shortTermMemory;
+    private final WorkingMemory workingMemory;
     private final LongTermMemory longTermMemory;
-    private final ContextCompressor compressor;
     private final MemoryRetriever retriever;
     private TokenBudget tokenBudget;
     private ContextProfile contextProfile;
@@ -29,8 +45,8 @@ public class MemoryManager {
     }
 
     /**
-     * @param llmClient      LLM 客户端（用于压缩时的摘要生成）
-     * @param shortTermBudget 短期记忆 token 预算
+     * @param llmClient      LLM 客户端（v2 不再需要——压缩走 ConversationHistoryCompactor，留参数兼容旧测试）
+     * @param shortTermBudget 历史参数名，v2 已迁移到 WorkingMemory，仅用于设置 ContextProfile.shortTermMemoryBudget
      * @param contextWindow  模型上下文窗口大小
      */
     public MemoryManager(LlmClient llmClient, int shortTermBudget, int contextWindow) {
@@ -43,75 +59,74 @@ public class MemoryManager {
 
     private MemoryManager(LlmClient llmClient, ContextProfile contextProfile, LongTermMemory longTermMemory) {
         this.contextProfile = contextProfile;
-        this.shortTermMemory = new ConversationMemory(contextProfile.shortTermMemoryBudget());
+        this.workingMemory = new WorkingMemory();
         this.longTermMemory = longTermMemory != null ? longTermMemory : new LongTermMemory();
-        this.compressor = new ContextCompressor(llmClient);
-        this.retriever = new MemoryRetriever(shortTermMemory, this.longTermMemory);
+        this.retriever = new MemoryRetriever(this.longTermMemory);
         this.tokenBudget = new TokenBudget(contextProfile.maxContextWindow());
     }
 
     public void setLlmClient(LlmClient llmClient) {
-        this.compressor.setLlmClient(llmClient);
         applyContextProfile(ContextProfile.from(llmClient));
     }
 
     public void applyContextProfile(ContextProfile contextProfile) {
         this.contextProfile = contextProfile;
         this.tokenBudget = new TokenBudget(contextProfile.maxContextWindow());
-        this.shortTermMemory.setMaxTokens(contextProfile.shortTermMemoryBudget());
     }
 
+    // ─────────────────────────────────────────────────────────
+    // 写入 WorkingMemory（不进 LLM messages，作为 system prompt 派生视图）
+    // ─────────────────────────────────────────────────────────
+
     /**
-     * 添加用户消息到短期记忆
+     * 添加用户消息——v2 不再写笔记本，仅添加为 volatile fact 标注「最近一次用户输入」便于
+     * LLM 在长会话里识别用户最新请求。Conversation History 由 Agent 直接维护。
      */
     public void addUserMessage(String content) {
-        MemoryEntry entry = new MemoryEntry(
-                "user-" + UUID.randomUUID().toString().substring(0, 8),
-                content,
-                MemoryEntry.MemoryType.CONVERSATION,
-                Map.of("source", "user"),
-                MemoryEntry.estimateTokens(content)
-        );
-        shortTermMemory.store(entry);
-        compressIfNeeded();
+        if (content == null || content.isBlank()) return;
+        // 取首 60 字符做 fact，避免 prompt 膨胀
+        String preview = content.length() > 60 ? content.substring(0, 60) + "..." : content;
+        workingMemory.addVolatileFact("用户最新输入: " + preview);
     }
 
     /**
-     * 添加助手回复到短期记忆
+     * 添加助手回复——v2 不再写笔记本。conversationHistory 已经是真实记录。
+     * 保留方法签名是为了兼容 Agent / SubAgent 的调用约定。
      */
     public void addAssistantMessage(String content) {
-        MemoryEntry entry = new MemoryEntry(
-                "assistant-" + UUID.randomUUID().toString().substring(0, 8),
-                content,
-                MemoryEntry.MemoryType.CONVERSATION,
-                Map.of("source", "assistant"),
-                MemoryEntry.estimateTokens(content)
-        );
-        shortTermMemory.store(entry);
-        compressIfNeeded();
+        // no-op：assistant 内容已在 conversationHistory 里，重复存到 working memory 没有用
     }
-
-    // 工具结果在记忆中的最大长度（完整结果已在任务消息历史里，记忆只需保留摘要）
-    private static final int MAX_TOOL_RESULT_CHARS = 500;
 
     /**
-     * 添加工具执行结果到短期记忆（截断过长结果，避免快速撑满预算）
+     * 添加工具执行结果到 WorkingMemory.recentToolResults。
+     * 注意：完整 result 不再截断到 500 字符；摘要不会保留的精确实体（路径/数字/错误码）
+     * 在这里以原文形式保留，作为 system prompt "## 最近工具调用证据" 段注入 LLM。
      */
     public void addToolResult(String toolName, String result) {
-        String truncated = result.length() > MAX_TOOL_RESULT_CHARS
-                ? result.substring(0, MAX_TOOL_RESULT_CHARS) + "...(已截断)"
-                : result;
-        String content = "[" + toolName + "] " + truncated;
-        MemoryEntry entry = new MemoryEntry(
-                "tool-" + UUID.randomUUID().toString().substring(0, 8),
-                content,
-                MemoryEntry.MemoryType.TOOL_RESULT,
-                Map.of("source", "tool", "toolName", toolName),
-                MemoryEntry.estimateTokens(content)
-        );
-        shortTermMemory.store(entry);
-        compressIfNeeded();
+        addToolResult(toolName, "", result);
     }
+
+    /**
+     * 带 args 的版本：让 LLM 能识别"刚刚 read_file 读的是哪个路径"。
+     */
+    public void addToolResult(String toolName, String argsJson, String result) {
+        if (toolName == null || result == null) return;
+        workingMemory.recordToolResult(toolName, argsJson, result);
+    }
+
+    /** 设置任务状态（plan_task / react_iteration / last_error 等）。 */
+    public void setTaskState(String key, String value) {
+        workingMemory.setTaskState(key, value);
+    }
+
+    /** 添加一条本会话临时事实。 */
+    public void addVolatileFact(String fact) {
+        workingMemory.addVolatileFact(fact);
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // 写入 LongTermMemory
+    // ─────────────────────────────────────────────────────────
 
     /**
      * 存储关键事实到长期记忆
@@ -127,23 +142,37 @@ public class MemoryManager {
         longTermMemory.store(entry);
     }
 
+    // ─────────────────────────────────────────────────────────
+    // 读取（注入到 system prompt）
+    // ─────────────────────────────────────────────────────────
+
     /**
-     * 检索与查询最相关的记忆
+     * 检索与 query 最相关的长期记忆。短期记忆走 {@link WorkingMemory#renderForPrompt()}
+     * 直接注入，不参与 query-based 检索。
      */
     public List<MemoryEntry> retrieveRelevant(String query, int limit) {
-        return retriever.retrieve(query, limit);
+        return retriever.retrieveLongTerm(query, limit);
     }
 
     /**
-     * 构建用于 LLM 的记忆上下文
+     * 构建用于 LLM 的长期记忆上下文（按 query 检索 top-k）。
      */
     public String buildContextForQuery(String query, int maxTokens) {
         return retriever.buildContextForQuery(query, maxTokens);
     }
 
     /**
-     * 记录 token 使用
+     * 渲染 working memory 派生视图为 system prompt 段落。
+     * Agent / PlanExecuteAgent / SubAgent 通过这条路径把工作记忆注入给 LLM。
      */
+    public String buildWorkingMemorySection() {
+        return workingMemory.renderForPrompt();
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // Token 统计
+    // ─────────────────────────────────────────────────────────
+
     public void recordTokenUsage(int inputTokens, int outputTokens) {
         tokenBudget.recordUsage(inputTokens, outputTokens);
     }
@@ -152,38 +181,16 @@ public class MemoryManager {
         tokenBudget.recordUsage(inputTokens, outputTokens, cachedInputTokens);
     }
 
-    /**
-     * 检查并触发压缩（由 Agent 在 LLM 调用前主动调用）
-     *
-     * @return 是否执行了压缩
-     */
-    public boolean compressIfNeeded() {
-        // 压缩永远可触发，模式概念已删除。触发条件仅看占用率是否到达 ContextProfile 配置的阈值（默认 90%）。
-        if (!tokenBudget.needsCompression(shortTermMemory, contextProfile.compressionTriggerRatio())) {
-            return false;
-        }
-        int beforeTokens = shortTermMemory.getTokenCount();
-        log.info("上下文占用达到压缩阈值（{}%），触发短期记忆压缩",
-                (int) (contextProfile.compressionTriggerRatio() * 100));
-        String summary = compressor.compress(shortTermMemory);
-        if (summary != null) {
-            int afterTokens = shortTermMemory.getTokenCount();
-            String preview = summary.substring(0, Math.min(100, summary.length()));
-            log.info("短期记忆压缩完成: {} -> {} tokens, summaryPreview={}", beforeTokens, afterTokens, preview);
-        }
-        return summary != null;
-    }
+    // ─────────────────────────────────────────────────────────
+    // 清理
+    // ─────────────────────────────────────────────────────────
 
-    /**
-     * 清空短期记忆（保留长期记忆）
-     */
+    /** 清空工作记忆（用于 /clear 命令；长期记忆保持不变）。 */
     public void clearShortTerm() {
-        shortTermMemory.clear();
+        workingMemory.clear();
     }
 
-    /**
-     * 清空长期记忆
-     */
+    /** 清空长期记忆（用于 /memory clear 命令）。 */
     public void clearLongTerm() {
         longTermMemory.clear();
     }
@@ -193,14 +200,37 @@ public class MemoryManager {
      */
     public String getSystemStatus() {
         return "上下文策略: " + contextProfile.summary() + "\n" +
-                shortTermMemory.getStatusSummary() + "\n" +
+                workingMemory.getStatusSummary() + "\n" +
                 longTermMemory.getStatusSummary() + "\n" +
                 tokenBudget.getUsageReport();
     }
 
+    // ─────────────────────────────────────────────────────────
     // Getter
-    public ConversationMemory getShortTermMemory() { return shortTermMemory; }
+    // ─────────────────────────────────────────────────────────
+
+    public WorkingMemory getWorkingMemory() { return workingMemory; }
+
+    /**
+     * @deprecated v2 重构后短期记忆已升级为 {@link WorkingMemory}；保留旧方法名兼容老测试。
+     *             调用方应迁移到 {@link #getWorkingMemory()}。
+     */
+    @Deprecated
+    public WorkingMemory getShortTermMemory() { return workingMemory; }
+
     public LongTermMemory getLongTermMemory() { return longTermMemory; }
+    public MemoryRetriever getRetriever() { return retriever; }
     public TokenBudget getTokenBudget() { return tokenBudget; }
     public ContextProfile getContextProfile() { return contextProfile; }
+
+    /**
+     * 关闭底层记忆资源。Main 长进程不需要主动调（JVM 退出释放）；
+     * 主要给单元测试用，避免 SQLite 文件锁阻碍 @TempDir 清理。
+     */
+    @Override
+    public void close() {
+        if (longTermMemory != null) {
+            longTermMemory.close();
+        }
+    }
 }

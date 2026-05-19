@@ -30,8 +30,7 @@ public class Task {
         PENDING,       // 等待执行
         RUNNING,       // 执行中
         COMPLETED,     // 已完成
-        FAILED,        // 失败
-        SKIPPED        // 跳过
+        FAILED         // 失败
     }
 
     public Task(String id, String description, TaskType type) {
@@ -91,11 +90,6 @@ public class Task {
     public void markFailed(String error) {
         this.status = TaskStatus.FAILED;
         this.error = error;
-        this.endTime = System.currentTimeMillis();
-    }
-
-    public void markSkipped() {
-        this.status = TaskStatus.SKIPPED;
         this.endTime = System.currentTimeMillis();
     }
 

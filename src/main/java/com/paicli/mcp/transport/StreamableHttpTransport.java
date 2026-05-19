@@ -3,6 +3,7 @@ package com.paicli.mcp.transport;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.paicli.mcp.protocol.McpInitializeRequest;
+import com.paicli.web.RetryInterceptor;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -27,6 +28,7 @@ public class StreamableHttpTransport implements McpTransport {
             .readTimeout(60, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
             .callTimeout(60, TimeUnit.SECONDS)
+            .addInterceptor(new RetryInterceptor())
             .build();
     private final String url;
     private final Map<String, String> headers;
@@ -107,11 +109,13 @@ public class StreamableHttpTransport implements McpTransport {
         headers.forEach(builder::header);
         // close 是 best-effort：server 已经关停 / 网络不通时不应该让 PaiCLI 退出卡住。
         // 主 client 的 callTimeout 是 60s，这里用 5s 短超时单独发请求。
-        OkHttpClient closeClient = client.newBuilder()
+        // 显式重建拦截器列表（不含 RetryInterceptor），close 不应该被自动重试。
+        OkHttpClient.Builder closeBuilder = client.newBuilder()
                 .callTimeout(5, TimeUnit.SECONDS)
                 .readTimeout(5, TimeUnit.SECONDS)
-                .connectTimeout(2, TimeUnit.SECONDS)
-                .build();
+                .connectTimeout(2, TimeUnit.SECONDS);
+        closeBuilder.interceptors().removeIf(i -> i instanceof RetryInterceptor);
+        OkHttpClient closeClient = closeBuilder.build();
         try (Response ignored = closeClient.newCall(builder.build()).execute()) {
             // best effort
         } catch (IOException ignored) {

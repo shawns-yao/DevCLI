@@ -326,7 +326,6 @@ public class ExecutionPlan {
             case RUNNING -> "▶️";
             case COMPLETED -> "✅";
             case FAILED -> "❌";
-            case SKIPPED -> "⏭️";
         };
     }
 

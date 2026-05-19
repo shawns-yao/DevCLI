@@ -19,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 /**
  * Agent 编排器 - Multi-Agent 系统的"主"
@@ -54,7 +55,11 @@ public class AgentOrchestrator {
     private final MemoryManager memoryManager;
     private final ToolRegistry toolRegistry;
     private final PrintStream out;
+    private String currentUserTask = "";
     private Supplier<String> externalContextSupplier = () -> "";
+    private Supplier<String> stickyMemorySupplier = () -> "";
+    private com.paicli.skill.SkillRegistry skillRegistry;
+    private com.paicli.skill.SkillContextBuffer skillContextBuffer;
     private final TraceRecorder traceRecorder = new TraceRecorder();
 
     // 执行步骤的数据结构（package-private 供测试访问）
@@ -118,20 +123,40 @@ public class AgentOrchestrator {
     }
 
     /**
+     * 注入 Sticky Memory（PR-B）：把 supplier 同时下发到 planner / workers / reviewer，
+     * 让团队三角色都看到统一的稳定事实层。
+     */
+    public void setStickyMemorySupplier(Supplier<String> stickyMemorySupplier) {
+        this.stickyMemorySupplier = stickyMemorySupplier == null ? () -> "" : stickyMemorySupplier;
+        planner.setStickyMemorySupplier(this.stickyMemorySupplier);
+        workers.forEach(worker -> worker.setStickyMemorySupplier(this.stickyMemorySupplier));
+        reviewer.setStickyMemorySupplier(this.stickyMemorySupplier);
+    }
+
+    /**
      * 把 Skill 系统下发给所有 SubAgent。Multi-Agent 三个角色共享同一 SkillRegistry（索引一致），
-     * 但共享同一 SkillContextBuffer——简化实现，避免角色级 buffer 隔离的工程开销。
-     * 任务书 §3.6 描述的"角色独立 buffer"作为可观察的优化项暂未启用。
+     * 每个角色拿到 SkillContextBuffer 的独立副本，避免并行 Worker / Reviewer 互相消费 skill body。
+     * SubAgent 调用 load_skill 时会通过 ToolRegistry 的线程本地覆盖写回自己的 buffer。
      */
     public void setSkillSystem(com.paicli.skill.SkillRegistry skillRegistry,
                                com.paicli.skill.SkillContextBuffer skillContextBuffer) {
-        planner.setSkillRegistry(skillRegistry);
-        planner.setSkillContextBuffer(skillContextBuffer);
-        for (SubAgent worker : workers) {
-            worker.setSkillRegistry(skillRegistry);
-            worker.setSkillContextBuffer(skillContextBuffer);
-        }
-        reviewer.setSkillRegistry(skillRegistry);
-        reviewer.setSkillContextBuffer(skillContextBuffer);
+        this.skillRegistry = skillRegistry;
+        this.skillContextBuffer = skillContextBuffer;
+        configureSubAgent(planner);
+        workers.forEach(this::configureSubAgent);
+        configureSubAgent(reviewer);
+    }
+
+    private void configureSubAgent(SubAgent agent) {
+        agent.setExternalContextSupplier(externalContextSupplier);
+        agent.setStickyMemorySupplier(stickyMemorySupplier);
+        agent.setMemoryContextSupplier(() -> memoryManager.buildContextForQuery(
+                "multi-agent " + agent.getRole().name().toLowerCase(Locale.ROOT),
+                memoryManager.getContextProfile().memoryContextTokens()));
+        agent.setWorkingMemorySupplier(memoryManager::buildWorkingMemorySection);
+        agent.setToolResultConsumer(memoryManager::addToolResult);
+        agent.setSkillRegistry(skillRegistry);
+        agent.setSkillContextBuffer(skillContextBuffer == null ? null : skillContextBuffer.copy());
     }
 
     /**
@@ -145,6 +170,7 @@ public class AgentOrchestrator {
                 "workers", workers.size()
         ));
         memoryManager.addUserMessage(userInput);
+        currentUserTask = userInput == null ? "" : userInput;
         if (CancellationContext.isCancelled()) {
             return "⏹️ 已取消当前多 Agent 任务。";
         }
@@ -173,6 +199,7 @@ public class AgentOrchestrator {
         if (steps.isEmpty()) {
             return "❌ 规划失败：无法解析执行计划\n原始输出:\n" + planResult.content();
         }
+        steps = appendFinalIntegrationStep(steps);
 
         out.println(AnsiStyle.heading("📋 执行计划"));
         out.println(summarizeSteps(steps) + "\n");
@@ -313,6 +340,35 @@ public class AgentOrchestrator {
                 .toList();
     }
 
+    List<ExecutionStep> appendFinalIntegrationStep(List<ExecutionStep> steps) {
+        if (steps == null || steps.isEmpty()) {
+            return steps;
+        }
+        boolean exists = steps.stream().anyMatch(step -> {
+            String text = (step.id() + " " + step.description()).toLowerCase(Locale.ROOT);
+            return text.contains("final_integration") || text.contains("最终集成") || text.contains("integration");
+        });
+        if (exists) {
+            return steps;
+        }
+        Set<String> depended = steps.stream()
+                .flatMap(step -> step.dependencies().stream())
+                .collect(Collectors.toSet());
+        List<String> leafStepIds = steps.stream()
+                .map(ExecutionStep::id)
+                .filter(id -> !depended.contains(id))
+                .toList();
+        String finalId = "step_" + (steps.size() + 1);
+        String description = """
+                最终集成验收：基于原始用户任务检查并补齐整体功能入口、跨模块联动、默认参数、错误处理和端到端可运行性。
+                如果任务要求 CLI/API 入口，必须确保入口存在且可调用；如果前面步骤遗漏模块，直接补齐缺失实现。
+                完成后运行最小编译或自检命令，修复发现的问题。
+                """;
+        List<ExecutionStep> withFinal = new ArrayList<>(steps);
+        withFinal.add(ExecutionStep.pending(finalId, description, "INTEGRATION", leafStepIds));
+        return withFinal;
+    }
+
     /**
      * 解析检查者的审批结果
      *
@@ -434,6 +490,10 @@ public class AgentOrchestrator {
         BlockingQueue<SubAgent> workerPool = new LinkedBlockingQueue<>(workers);
         Map<String, ByteArrayOutputStream> buffers = new ConcurrentHashMap<>();
         List<Future<?>> futures = new ArrayList<>();
+        SubAgent.ForkContext workerForkContext = workers.get(0).createForkContext();
+        SubAgent reviewerForkTemplate = new SubAgent("reviewer-fork-template", AgentRole.REVIEWER, llmClient, toolRegistry);
+        configureSubAgent(reviewerForkTemplate);
+        SubAgent.ForkContext reviewerForkContext = reviewerForkTemplate.createForkContext();
 
         for (ExecutionStep step : batch) {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -445,9 +505,11 @@ public class AgentOrchestrator {
                 SubAgent worker = null;
                 SubAgent localReviewer = new SubAgent(
                         "reviewer-" + step.id(), AgentRole.REVIEWER, llmClient, toolRegistry);
+                configureSubAgent(localReviewer);
                 try {
                     worker = workerPool.take();
-                    runStep(step, steps, retryCount, worker, localReviewer, context, stepOut);
+                    runStep(step, steps, retryCount, worker, localReviewer, context, stepOut,
+                            workerForkContext, reviewerForkContext);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     updateStep(steps, step.id(), step.withFailed("并行执行被中断"));
@@ -498,6 +560,15 @@ public class AgentOrchestrator {
                          Map<String, Integer> retryCount,
                          SubAgent worker, SubAgent reviewer, String context,
                          PrintStream out) {
+        runStep(step, steps, retryCount, worker, reviewer, context, out, null, null);
+    }
+
+    private void runStep(ExecutionStep step, List<ExecutionStep> steps,
+                         Map<String, Integer> retryCount,
+                         SubAgent worker, SubAgent reviewer, String context,
+                         PrintStream out,
+                         SubAgent.ForkContext workerForkContext,
+                         SubAgent.ForkContext reviewerForkContext) {
         out.println("🛠️ " + worker.getName() + " 执行步骤 [" + step.id() + "]: " + step.description());
         if (CancellationContext.isCancelled()) {
             updateStep(steps, step.id(), step.withFailed("用户取消"));
@@ -506,7 +577,9 @@ public class AgentOrchestrator {
         }
 
         AgentMessage taskMsg = AgentMessage.task("orchestrator", step.description());
-        AgentMessage result = worker.executeWithContext(taskMsg, context, out);
+        AgentMessage result = workerForkContext == null
+                ? worker.executeWithContext(taskMsg, context, out)
+                : worker.executeForkedWithContext(taskMsg, context, workerForkContext, out);
         if (CancellationContext.isCancelled()) {
             updateStep(steps, step.id(), step.withFailed("用户取消"));
             out.println("⏹️ 步骤 [" + step.id() + "] 已取消\n");
@@ -525,13 +598,16 @@ public class AgentOrchestrator {
         }
 
         out.println("🔍 " + reviewer.getName() + " 正在审查步骤 [" + step.id() + "] 的结果...");
-        AgentMessage reviewResult = reviewer.review(step.description(), result.content(), out);
+        String reviewTask = buildReviewTask(step);
+        AgentMessage reviewResult = reviewerForkContext == null
+                ? reviewer.review(reviewTask, result.content(), out)
+                : reviewer.reviewForked(reviewTask, result.content(), reviewerForkContext, out);
         reviewer.clearHistory();
 
         if (reviewResult.type() == AgentMessage.Type.ERROR) {
             log.warn("Reviewer failed for step {}: {}", step.id(), reviewResult.content());
-            out.println("⚠️ 步骤 [" + step.id() + "] 审查阶段 LLM 调用失败，保留当前执行结果\n");
-            updateStep(steps, step.id(), step.withResult(result.content()));
+            out.println("❌ 步骤 [" + step.id() + "] 审查阶段 LLM 调用失败，阻止下游步骤继续执行\n");
+            updateStep(steps, step.id(), step.withFailed("审查 LLM 故障：" + reviewResult.content()));
             return;
         }
 
@@ -555,7 +631,9 @@ public class AgentOrchestrator {
             out.println("   反馈: " + issues + "\n");
 
             String feedbackContext = context + "\n\n之前的执行结果被审查拒绝，原因：\n" + issues;
-            AgentMessage retryResult = worker.executeWithContext(taskMsg, feedbackContext, out);
+            AgentMessage retryResult = workerForkContext == null
+                    ? worker.executeWithContext(taskMsg, feedbackContext, out)
+                    : worker.executeForkedWithContext(taskMsg, feedbackContext, workerForkContext, out);
             if (retryResult.type() == AgentMessage.Type.ERROR) {
                 log.warn("Step {} retry {} failed at LLM layer: {}", step.id(), retries, retryResult.content());
                 issues = "重试时 LLM 调用失败：" + retryResult.content();
@@ -571,13 +649,18 @@ public class AgentOrchestrator {
             }
 
             acceptedResult = retryResult.content();
-            AgentMessage retryReview = reviewer.review(step.description(), acceptedResult, out);
+            AgentMessage retryReview = reviewerForkContext == null
+                    ? reviewer.review(reviewTask, acceptedResult, out)
+                    : reviewer.reviewForked(reviewTask, acceptedResult, reviewerForkContext, out);
             reviewer.clearHistory();
 
             if (retryReview.type() == AgentMessage.Type.ERROR) {
+                // 与首次审查失败保持一致：reviewer LLM 故障不应被误判为通过。
+                // 退出重试循环，由下方的 updateStep 保留当前结果，但 approved 维持 false，
+                // 让用户从日志看到"reviewer 故障"并自行决定是否信任产出。
                 log.warn("Reviewer failed for step {} retry {}: {}", step.id(), retries, retryReview.content());
-                approved = true;
-                issues = "";
+                out.println("⚠️ 步骤 [" + step.id() + "] 审查阶段 LLM 调用失败，保留当前执行结果\n");
+                issues = "审查 LLM 故障：" + retryReview.content();
                 break;
             }
 
@@ -585,17 +668,22 @@ public class AgentOrchestrator {
             issues = parseReviewIssues(retryReview.content());
         }
 
-        updateStep(steps, step.id(), step.withResult(acceptedResult));
         if (approved) {
+            updateStep(steps, step.id(), step.withResult(acceptedResult));
             out.println("✅ 步骤 [" + step.id() + "] 重试后审查通过\n");
         } else {
-            out.println("⚠️ 步骤 [" + step.id() + "] 超过最大重试次数，保留当前结果\n");
+            updateStep(steps, step.id(), step.withFailed(issues));
+            out.println("❌ 步骤 [" + step.id() + "] 审查未通过，阻止下游步骤继续执行\n");
         }
     }
 
     private String buildStepContext(List<ExecutionStep> steps, ExecutionStep currentStep) {
         StringBuilder context = new StringBuilder();
         context.append("总任务上下文：\n");
+        if (currentUserTask != null && !currentUserTask.isBlank()) {
+            context.append("原始用户任务：\n").append(currentUserTask).append("\n\n");
+        }
+        context.append("当前步骤：").append(currentStep.description()).append("\n\n");
 
         for (ExecutionStep step : steps) {
             if (step.status() == StepStatus.COMPLETED && currentStep.dependencies().contains(step.id())) {
@@ -612,6 +700,15 @@ public class AgentOrchestrator {
         }
 
         return context.toString();
+    }
+
+    private String buildReviewTask(ExecutionStep step) {
+        StringBuilder task = new StringBuilder();
+        if (currentUserTask != null && !currentUserTask.isBlank()) {
+            task.append("原始用户任务：\n").append(currentUserTask).append("\n\n");
+        }
+        task.append("当前步骤：").append(step.description());
+        return task.toString();
     }
 
     private String summarizeSteps(List<ExecutionStep> steps) {

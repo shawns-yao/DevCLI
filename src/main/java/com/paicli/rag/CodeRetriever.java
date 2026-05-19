@@ -78,7 +78,7 @@ public class CodeRetriever implements AutoCloseable {
                                Set<String> dualMatchBonused) throws Exception {
         addSemanticResults(query, topK, merged, dualMatchBonused);
         addKeywordResults(query, merged, dualMatchBonused);
-        expandIfNeeded(merged, options.graphDepth());
+        expandIfNeeded(merged, options.graphDepth(), dualMatchBonused);
     }
 
     private void searchCallChain(String query, int topK, CodeSearchOptions options,
@@ -86,7 +86,7 @@ public class CodeRetriever implements AutoCloseable {
                                  Set<String> dualMatchBonused) throws Exception {
         addSemanticResults(query, topK, merged, dualMatchBonused);
         addKeywordResults(query, merged, dualMatchBonused);
-        expandIfNeeded(merged, options.graphDepth());
+        expandIfNeeded(merged, options.graphDepth(), dualMatchBonused);
     }
 
     private void searchErrorTrace(String query, int topK, CodeSearchOptions options,
@@ -94,7 +94,7 @@ public class CodeRetriever implements AutoCloseable {
                                   Set<String> dualMatchBonused) throws Exception {
         addKeywordResults(query, merged, dualMatchBonused);
         addSemanticResults(query, topK, merged, dualMatchBonused);
-        expandIfNeeded(merged, options.graphDepth());
+        expandIfNeeded(merged, options.graphDepth(), dualMatchBonused);
     }
 
     private void searchPreciseFirst(String query, int topK,
@@ -124,9 +124,10 @@ public class CodeRetriever implements AutoCloseable {
         }
     }
 
-    private void expandIfNeeded(Map<String, VectorStore.SearchResult> merged, int graphDepth) throws SQLException {
+    private void expandIfNeeded(Map<String, VectorStore.SearchResult> merged, int graphDepth,
+                                Set<String> dualMatchBonused) throws SQLException {
         if (graphDepth > 0) {
-            expandGraphNeighbors(merged, graphDepth);
+            expandGraphNeighbors(merged, graphDepth, dualMatchBonused);
         }
     }
 
@@ -241,7 +242,8 @@ public class CodeRetriever implements AutoCloseable {
         }
     }
 
-    private void expandGraphNeighbors(Map<String, VectorStore.SearchResult> merged, int maxDepth) throws SQLException {
+    private void expandGraphNeighbors(Map<String, VectorStore.SearchResult> merged, int maxDepth,
+                                      Set<String> dualMatchBonused) throws SQLException {
         List<VectorStore.SearchResult> seeds = merged.values().stream()
                 .sorted(Comparator.comparingDouble(VectorStore.SearchResult::similarity).reversed())
                 .limit(GRAPH_SEED_LIMIT)
@@ -249,7 +251,7 @@ public class CodeRetriever implements AutoCloseable {
         Set<String> visitedNodes = new HashSet<>();
         int[] added = {0};
         for (VectorStore.SearchResult seed : seeds) {
-            expandFrom(seed.name(), seed.similarity(), 1, maxDepth, visitedNodes, merged, added);
+            expandFrom(seed.name(), seed.similarity(), 1, maxDepth, visitedNodes, merged, added, dualMatchBonused);
             if (added[0] >= GRAPH_TOTAL_CHUNK_LIMIT) {
                 break;
             }
@@ -257,7 +259,8 @@ public class CodeRetriever implements AutoCloseable {
     }
 
     private void expandFrom(String name, double parentScore, int depth, int maxDepth, Set<String> visitedNodes,
-                            Map<String, VectorStore.SearchResult> merged, int[] added) throws SQLException {
+                            Map<String, VectorStore.SearchResult> merged, int[] added,
+                            Set<String> dualMatchBonused) throws SQLException {
         if (name == null || name.isBlank() || depth > maxDepth || added[0] >= GRAPH_TOTAL_CHUNK_LIMIT) {
             return;
         }
@@ -277,14 +280,16 @@ public class CodeRetriever implements AutoCloseable {
             }
             double score = parentScore - (0.12 * depth) + relationBoost(relation.relationType());
             for (VectorStore.SearchResult chunk : vectorStore.findChunksByName(target, 3)) {
+                // 关键：传入主流程级别的 dualMatchBonused，避免 graph 扩展为已被双重命中的节点
+                // 重新加 +0.1 bonus 导致分数虚高、graph 结果挤掉真正语义相关的结果。
                 mergeResult(merged, new VectorStore.SearchResult(
-                        chunk.filePath(), chunk.chunkType(), chunk.name(), chunk.content(), score), new HashSet<>());
+                        chunk.filePath(), chunk.chunkType(), chunk.name(), chunk.content(), score), dualMatchBonused);
                 added[0]++;
                 if (added[0] >= GRAPH_TOTAL_CHUNK_LIMIT) {
                     return;
                 }
             }
-            expandFrom(target, score, depth + 1, maxDepth, visitedNodes, merged, added);
+            expandFrom(target, score, depth + 1, maxDepth, visitedNodes, merged, added, dualMatchBonused);
         }
     }
 

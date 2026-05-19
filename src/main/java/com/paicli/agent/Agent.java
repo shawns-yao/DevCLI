@@ -43,7 +43,7 @@ import java.util.function.Supplier;
 /**
  * Agent 核心类 - 实现 ReAct 循环
  */
-public class Agent {
+public class Agent implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(Agent.class);
     private LlmClient llmClient;
     private final ToolRegistry toolRegistry;
@@ -51,6 +51,7 @@ public class Agent {
     private final MemoryManager memoryManager;
     private final ConversationHistoryCompactor historyCompactor;
     private Supplier<String> externalContextSupplier = () -> "";
+    private Supplier<String> stickyMemorySupplier = () -> "";
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private Renderer renderer;
@@ -82,6 +83,14 @@ public class Agent {
 
     public void setExternalContextSupplier(Supplier<String> externalContextSupplier) {
         this.externalContextSupplier = externalContextSupplier == null ? () -> "" : externalContextSupplier;
+    }
+
+    /**
+     * 注入 Sticky Memory 渲染源（PR-B）：返回的 Markdown 整段会作为 system prompt 的
+     * "Sticky Memory" 段注入。Main 启动时构造 StickyMemory 后通过此 setter 接进来。
+     */
+    public void setStickyMemorySupplier(Supplier<String> stickyMemorySupplier) {
+        this.stickyMemorySupplier = stickyMemorySupplier == null ? () -> "" : stickyMemorySupplier;
     }
 
     public void setSkillRegistry(SkillRegistry skillRegistry) {
@@ -121,7 +130,7 @@ public class Agent {
     public String run(String userInput) {
         log.info("ReAct run started: inputLength={}", userInput == null ? 0 : userInput.length());
         pruneHistoricalImagePayloads();
-        // 存入短期记忆
+        // 写入当前会话工作记忆；真实 messages 由 conversationHistory 维护。
         memoryManager.addUserMessage(userInput);
         storeExplicitBrowserMemoryHint(userInput);
 
@@ -152,12 +161,13 @@ public class Agent {
         while (true) {
             if (CancellationContext.isCancelled()) {
                 log.info("ReAct run cancelled before iteration");
+                streamRenderer.finish();   // 兜底 flush，避免 pending 文本残留终端导致下一次输入错位
                 pushStatus(budget, startNanos, "idle");
                 return "⏹️ 已取消当前任务。";
             }
-            // 调 LLM 前评估 conversationHistory 是否接近 window 上限；超阈值就把早期消息压缩成摘要。
-            // 这是与第 3 期 Memory 短期记忆压缩并行的另一道压缩——后者只压 shortTermMemory，
-            // 真正决定下一轮 LLM input token 的是这里。
+            // 调 LLM 前刷新 system prompt 的易变段（Working Memory / Sticky / Skill index），
+            // 再评估 conversationHistory 是否接近 window 上限；超阈值就把早期 messages 压缩成摘要。
+            updateSystemPromptWithMemory(memoryContext);
             injectPendingLspDiagnostics();
             maybeCompactHistory();
             AgentBudget.ExitReason exitReason = budget.check();
@@ -166,6 +176,7 @@ public class Agent {
                 log.warn("ReAct run exhausted budget: reason={}, iteration={}, tokens={}/{}",
                         exitReason, budget.iteration(),
                         budget.totalInputTokens() + budget.totalOutputTokens(), budget.tokenBudget());
+                streamRenderer.finish();   // 兜底：budget 耗尽时上一次迭代的 pending 文本必须 flush
                 pushStatus(budget, startNanos, "idle");
                 return "❌ " + description;
             }
@@ -227,7 +238,7 @@ public class Agent {
                                 "resultPreview", preview(toolResult.result(), 300)
                         ));
                         budget.recordToolResult(toolResult.name(), toolResult.result());
-                        memoryManager.addToolResult(toolResult.name(), toolResult.result());
+                        memoryManager.addToolResult(toolResult.name(), toolResult.argumentsJson(), toolResult.result());
                         conversationHistory.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
                     }
                     appendImageToolMessages(toolResults);
@@ -278,7 +289,7 @@ public class Agent {
         conversationHistory.clear();
         conversationHistory.add(systemMsg);
 
-        // 清空短期记忆
+        // 清空当前会话工作记忆
         memoryManager.clearShortTerm();
     }
 
@@ -293,8 +304,20 @@ public class Agent {
         return promptAssembler.assemble(PromptMode.AGENT, PromptContext.builder()
                 .memoryContext(memoryContext)
                 .externalContext(buildExternalContext())
+                .stickyMemory(buildStickyMemory())
+                .workingMemory(memoryManager.buildWorkingMemorySection())
                 .skillIndex(buildSkillIndex())
                 .build());
+    }
+
+    private String buildStickyMemory() {
+        try {
+            String sticky = stickyMemorySupplier.get();
+            return sticky == null ? "" : sticky.trim();
+        } catch (Exception e) {
+            log.warn("Failed to render sticky memory", e);
+            return "";
+        }
     }
 
     private void maybeCompactHistory() {
@@ -383,6 +406,17 @@ public class Agent {
      */
     public MemoryManager getMemoryManager() {
         return memoryManager;
+    }
+
+    /**
+     * 关闭底层 MemoryManager（释放 SQLite 长期记忆连接）。
+     * 主要给单元测试 / 短生命周期场景用；Main 长进程不需要主动调，JVM 退出释放。
+     */
+    @Override
+    public void close() {
+        if (memoryManager != null) {
+            memoryManager.close();
+        }
     }
 
     private void storeExplicitBrowserMemoryHint(String userInput) {

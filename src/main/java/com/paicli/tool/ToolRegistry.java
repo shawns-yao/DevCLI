@@ -76,6 +76,7 @@ public class ToolRegistry {
     private java.util.function.Consumer<String> memorySaver;
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
+    private final ThreadLocal<SkillContextBuffer> skillContextBufferOverride = new ThreadLocal<>();
     private java.util.function.BiConsumer<String, String[]> writeFileObserver = (p, ba) -> {};
     private LspManager lspManager = new LspManager(projectPath);
     private SnapshotService snapshotService = SnapshotService.forProject(Path.of(projectPath));
@@ -111,6 +112,8 @@ public class ToolRegistry {
         this.projectPath = projectPath;
         this.pathGuard = new PathGuard(projectPath);
         this.lspManager.setProjectPath(projectPath);
+        // 把 projectPath 同步给 ToolExecutionResult，让 ToolResultSizeManager 落盘时使用正确的根目录
+        ToolExecutionResult.setActiveProjectPath(projectPath);
         if (!customSnapshotService) {
             this.snapshotService.close();
             this.snapshotService = SnapshotService.forProject(Path.of(projectPath));
@@ -164,6 +167,39 @@ public class ToolRegistry {
 
     public SkillContextBuffer getSkillContextBuffer() {
         return skillContextBuffer;
+    }
+
+    /**
+     * 当前线程临时覆盖 load_skill 写入目标。
+     *
+     * Multi-Agent 并行执行时多个 SubAgent 共享同一个 ToolRegistry，但每个 SubAgent
+     * 需要把 load_skill 结果写回自己的 SkillContextBuffer。ThreadLocal 只包住本次
+     * 工具执行，避免不同并行 worker 互相 drain / push 同一个 buffer。
+     */
+    public void runWithSkillContextBuffer(SkillContextBuffer buffer, Runnable action) {
+        if (action == null) {
+            return;
+        }
+        SkillContextBuffer previous = skillContextBufferOverride.get();
+        if (buffer == null) {
+            skillContextBufferOverride.remove();
+        } else {
+            skillContextBufferOverride.set(buffer);
+        }
+        try {
+            action.run();
+        } finally {
+            if (previous == null) {
+                skillContextBufferOverride.remove();
+            } else {
+                skillContextBufferOverride.set(previous);
+            }
+        }
+    }
+
+    private SkillContextBuffer activeSkillContextBuffer() {
+        SkillContextBuffer override = skillContextBufferOverride.get();
+        return override == null ? skillContextBuffer : override;
     }
 
     /**
@@ -480,8 +516,9 @@ public class ToolRegistry {
                         injected = injected.substring(0, max)
                                 + "\n\n...(skill body truncated, full content via /skill show " + name + ")";
                     }
-                    if (skillContextBuffer != null) {
-                        skillContextBuffer.push(name, injected);
+                    SkillContextBuffer targetBuffer = activeSkillContextBuffer();
+                    if (targetBuffer != null) {
+                        targetBuffer.push(name, injected);
                     }
                     return "已加载 skill '" + name + "' 的完整指引（" + originalLen
                             + " bytes），将在下一轮上下文中以 \"## 已加载 Skill：" + name + "\" 段出现。";
@@ -882,6 +919,7 @@ public class ToolRegistry {
         }
 
         int parallelism = Math.min(invocations.size(), MAX_PARALLEL_TOOLS);
+        SkillContextBuffer activeSkillBuffer = activeSkillContextBuffer();
         ExecutorService executor = Executors.newFixedThreadPool(parallelism, r -> {
             Thread thread = new Thread(r, "paicli-tool-executor");
             thread.setDaemon(true);
@@ -895,8 +933,11 @@ public class ToolRegistry {
                             return ToolExecutionResult.failed(invocation, "用户取消了此次工具调用");
                         }
                         long startedAt = System.nanoTime();
-                        ToolOutput output = executeToolOutput(invocation.name(), invocation.argumentsJson());
-                        return ToolExecutionResult.completed(invocation, output, elapsedMillis(startedAt));
+                        java.util.concurrent.atomic.AtomicReference<ToolOutput> output =
+                                new java.util.concurrent.atomic.AtomicReference<>(ToolOutput.text(""));
+                        runWithSkillContextBuffer(activeSkillBuffer,
+                                () -> output.set(executeToolOutput(invocation.name(), invocation.argumentsJson())));
+                        return ToolExecutionResult.completed(invocation, output.get(), elapsedMillis(startedAt));
                     })
                     .toList();
 
@@ -1053,15 +1094,36 @@ public class ToolRegistry {
     public record ToolExecutionResult(String id, String name, String argumentsJson,
                                       String result, long elapsedMillis, boolean timedOut,
                                       List<com.paicli.llm.LlmClient.ContentPart> imageParts) {
+        // 当前 ToolRegistry 实例的 projectPath。在 completed(...) 工厂方法里读取。
+        // 用 ThreadLocal 也行；这里用线程安全的 volatile 静态字段——所有 ToolRegistry
+        // 共享同一个 size manager 配置，简单。
+        private static volatile String activeProjectPath = System.getProperty("user.dir");
+
+        static void setActiveProjectPath(String projectPath) {
+            if (projectPath != null && !projectPath.isBlank()) {
+                activeProjectPath = projectPath;
+            }
+        }
+
         private static ToolExecutionResult completed(ToolInvocation invocation, ToolOutput output, long elapsedMillis) {
+            String rawResult = output == null ? "" : output.text();
+            List<com.paicli.llm.LlmClient.ContentPart> images = output == null ? List.of() : output.imageParts();
+            // 工具结果尺寸治理：> 5K 截断，> 50K 落盘 + 预览。
+            // 见 ToolResultSizeManager 的白名单（read_file / list_dir 等）。
+            String managedResult = ToolResultSizeManager.process(
+                    invocation.name(),
+                    invocation.id(),
+                    activeProjectPath,
+                    images != null && !images.isEmpty(),
+                    rawResult);
             return new ToolExecutionResult(
                     invocation.id(),
                     invocation.name(),
                     invocation.argumentsJson(),
-                    output == null ? "" : output.text(),
+                    managedResult,
                     elapsedMillis,
                     false,
-                    output == null ? List.of() : output.imageParts());
+                    images);
         }
 
         private static ToolExecutionResult completed(ToolInvocation invocation, String result, long elapsedMillis) {

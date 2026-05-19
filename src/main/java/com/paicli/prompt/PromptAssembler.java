@@ -27,8 +27,15 @@ public class PromptAssembler {
         append(prompt, repository.loadRequired("personalities/calm.md"));
         append(prompt, applyVariables(repository.loadRequired(mode.resourcePath()), ctx));
         append(prompt, repository.loadRequired("approvals/" + approvalMode(ctx) + ".md"));
+        // Sticky 区紧跟 base/personality/mode/approval 之后注入：
+        // 它是稳定层（启动加载，会话内极少变化），放前面让 KV cache 命中前缀更长。
+        append(prompt, dynamicSection("Sticky Memory", ctx.stickyMemory()));
         append(prompt, dynamicSection("Project Context", ctx.memoryContext(), ctx.externalContext()));
         append(prompt, dynamicSection("Skills", ctx.skillIndex()));
+        // Working Memory 是当前会话工作状态（最近工具证据 / 任务状态 / 临时事实），
+        // 放在 Sticky / Project / Skills 之后、context-management 之前——
+        // 易变层放后面，让前面的稳定段尽可能命中 KV cache。
+        append(prompt, dynamicSection("Working Memory", ctx.workingMemory()));
         append(prompt, repository.loadRequired("context/context-management.md"));
         append(prompt, repository.loadRequired("handoff.md"));
 

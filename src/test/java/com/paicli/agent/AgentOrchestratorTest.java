@@ -7,6 +7,7 @@ import com.paicli.llm.GLMClient;
 import com.paicli.llm.LlmClient;
 import com.paicli.memory.LongTermMemory;
 import com.paicli.memory.MemoryManager;
+import com.paicli.skill.SkillContextBuffer;
 import com.paicli.tool.ToolRegistry;
 
 import java.io.File;
@@ -17,6 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
@@ -184,6 +186,80 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    void shouldAppendFinalIntegrationStepDependingOnLeaves() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        List<AgentOrchestrator.ExecutionStep> steps = List.of(
+                AgentOrchestrator.ExecutionStep.pending("step_1", "模型", "FILE_WRITE", List.of()),
+                AgentOrchestrator.ExecutionStep.pending("step_2", "服务", "FILE_WRITE", List.of("step_1")),
+                AgentOrchestrator.ExecutionStep.pending("step_3", "导出", "FILE_WRITE", List.of("step_1"))
+        );
+
+        List<AgentOrchestrator.ExecutionStep> withFinal = orchestrator.appendFinalIntegrationStep(steps);
+
+        assertEquals(4, withFinal.size());
+        AgentOrchestrator.ExecutionStep finalStep = withFinal.get(3);
+        assertEquals("step_4", finalStep.id());
+        assertEquals(List.of("step_2", "step_3"), finalStep.dependencies());
+        assertTrue(finalStep.description().contains("最终集成验收"));
+    }
+
+    @Test
+    void shouldNotAppendDuplicateFinalIntegrationStep() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        List<AgentOrchestrator.ExecutionStep> steps = List.of(
+                AgentOrchestrator.ExecutionStep.pending("step_1", "模型", "FILE_WRITE", List.of()),
+                AgentOrchestrator.ExecutionStep.pending("step_2", "final_integration", "INTEGRATION", List.of("step_1"))
+        );
+
+        assertSame(steps, orchestrator.appendFinalIntegrationStep(steps));
+    }
+
+    @Test
+    void shouldPropagateOriginalUserTaskToWorkerAndReviewer(@TempDir Path tempDir) {
+        String fullRequirement = "完整需求：必须生成 public final class，private constructor，public static 方法";
+        List<String> workerInputs = new CopyOnWriteArrayList<>();
+        List<String> reviewerInputs = new CopyOnWriteArrayList<>();
+
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                return response("""
+                        {
+                          "summary": "实现工具类",
+                          "steps": [
+                            {"id": "s1", "description": "实现 StringStats 工具类", "type": "FILE_WRITE", "dependencies": []}
+                          ]
+                        }
+                        """);
+            }
+            if (body.contains("原始任务")) {
+                reviewerInputs.add(body);
+                return response("""
+                        {"approved": true, "summary": "通过", "issues": []}
+                        """);
+            }
+            if (body.contains("实现 StringStats 工具类")) {
+                workerInputs.add(body);
+                return response("worker result");
+            }
+            return response("fallback");
+        };
+
+        DispatchingStubGLMClient llmClient = new DispatchingStubGLMClient(dispatcher);
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(llmClient, new ToolRegistry(), mm);
+
+            orchestrator.run(fullRequirement);
+
+            assertFalse(workerInputs.isEmpty(), "worker should be invoked");
+            assertFalse(reviewerInputs.isEmpty(), "reviewer should be invoked");
+            assertTrue(workerInputs.get(0).contains(fullRequirement),
+                    "worker context should include the original user task");
+            assertTrue(reviewerInputs.get(0).contains(fullRequirement),
+                    "reviewer context should include the original user task");
+        }
+    }
+
+    @Test
     void shouldParseReviewApproval() {
         AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
 
@@ -277,16 +353,63 @@ class AgentOrchestratorTest {
                         """)
         ));
 
-        AgentOrchestrator orchestrator = new AgentOrchestrator(
-                llmClient,
-                new ToolRegistry(),
-                new NoOpMemoryManager(tempDir.toFile())
-        );
+        AgentOrchestrator orchestrator;
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            orchestrator = new AgentOrchestrator(
+                    llmClient,
+                    new ToolRegistry(),
+                    mm
+            );
 
-        String finalResult = orchestrator.run("测试重试逻辑");
+            String finalResult = orchestrator.run("测试重试逻辑");
 
-        assertTrue(finalResult.contains("第三次执行结果"));
-        assertFalse(finalResult.contains("第二次执行结果"));
+            assertTrue(finalResult.contains("第三次执行结果"));
+            assertFalse(finalResult.contains("第二次执行结果"));
+        }
+    }
+
+    @Test
+    void shouldNotMarkApprovedWhenReviewerLlmFailsDuringRetry(@TempDir Path tempDir) {
+        // 回归测试 P0 bug：reviewer LLM 调用在重试阶段失败时，旧代码会把 approved 设为 true
+        // 让用户看到 "重试后审查通过" 但实际 reviewer 根本没回复。
+        // 修复后行为：reviewer 未通过/故障时标记 FAILED，不能放行下游依赖。
+        java.io.ByteArrayOutputStream stdoutCapture = new java.io.ByteArrayOutputStream();
+        StubGLMClient llmClient = new StubGLMClient(List.of(
+                response("""
+                        {
+                          "summary": "单步任务",
+                          "steps": [
+                            {"id": "s1", "description": "执行任务", "type": "COMMAND", "dependencies": []}
+                          ]
+                        }
+                        """),
+                response("初始执行结果"),
+                response("""
+                        {"approved": false, "summary": "首次未通过", "issues": ["补充细节"]}
+                        """),
+                response("重试执行结果")
+                // 第 4 次 chat 调用（重试后再次审查）会因为队列耗尽抛 IOException，
+                // 模拟 "reviewer LLM 在重试阶段调用失败" 的真实场景
+        ));
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    llmClient,
+                    new ToolRegistry(),
+                    mm,
+                    new java.io.PrintStream(stdoutCapture, true, java.nio.charset.StandardCharsets.UTF_8)
+            );
+
+            String finalResult = orchestrator.run("测试 reviewer 故障不应误判通过");
+            assertTrue(finalResult.contains("未完全完成"), finalResult);
+        }
+
+        String stdout = stdoutCapture.toString(java.nio.charset.StandardCharsets.UTF_8);
+        // 修复前：日志会显示 "重试后审查通过"
+        assertFalse(stdout.contains("重试后审查通过"),
+                "reviewer LLM 故障时不应宣称审查通过");
+        assertTrue(stdout.contains("审查阶段 LLM 调用失败") || stdout.contains("审查未通过"),
+                "应明确告知用户 reviewer 故障，stdout=" + stdout);
     }
 
     @Test
@@ -325,18 +448,100 @@ class AgentOrchestratorTest {
         };
 
         DispatchingStubGLMClient llmClient = new DispatchingStubGLMClient(dispatcher);
-        AgentOrchestrator orchestrator = new AgentOrchestrator(
-                llmClient,
-                new ToolRegistry(),
-                new NoOpMemoryManager(tempDir.toFile())
-        );
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    llmClient,
+                    new ToolRegistry(),
+                    mm
+            );
 
-        String finalResult = orchestrator.run("测试并行执行");
+            String finalResult = orchestrator.run("测试并行执行");
 
-        assertTrue(finalResult.contains("任务A"), "finalResult should mention task A");
-        assertTrue(finalResult.contains("任务B"), "finalResult should mention task B");
-        // 两个 Worker 同时持有 chat() 调用 → 并发峰值至少为 2
-        assertEquals(2, peakConcurrency.get(), "Expected two workers to run concurrently");
+            assertTrue(finalResult.contains("任务A"), "finalResult should mention task A");
+            assertTrue(finalResult.contains("任务B"), "finalResult should mention task B");
+            // 两个 Worker 同时持有 chat() 调用 → 并发峰值至少为 2
+            assertEquals(2, peakConcurrency.get(), "Expected two workers to run concurrently");
+        }
+    }
+
+    @Test
+    void shouldUseSharedPromptPrefixForParallelWorkers(@TempDir Path tempDir) {
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                return response("""
+                        {
+                          "summary": "并行两步",
+                          "steps": [
+                            {"id": "a", "description": "任务A", "type": "ANALYSIS", "dependencies": []},
+                            {"id": "b", "description": "任务B", "type": "ANALYSIS", "dependencies": []}
+                          ]
+                        }
+                        """);
+            }
+            if (body.contains("原始任务")) {
+                return response("""
+                        {"approved": true, "summary": "通过", "issues": []}
+                        """);
+            }
+            if (body.contains("任务A")) {
+                return response("任务A 的结果");
+            }
+            if (body.contains("任务B")) {
+                return response("任务B 的结果");
+            }
+            return response("fallback");
+        };
+
+        RecordingDispatchingStubGLMClient llmClient = new RecordingDispatchingStubGLMClient(dispatcher);
+        ToolRegistry toolRegistry = new ToolRegistry();
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    llmClient,
+                    toolRegistry,
+                    mm
+            );
+            orchestrator.setExternalContextSupplier(() -> "稳定外部上下文");
+            orchestrator.setStickyMemorySupplier(() -> "稳定长期记忆");
+            SkillContextBuffer skillBuffer = new SkillContextBuffer();
+            skillBuffer.push("parallel-skill", "并行 worker 都应该看到这段 skill");
+            orchestrator.setSkillSystem(null, skillBuffer);
+
+            orchestrator.run("测试并行共享 prompt prefix");
+
+            List<List<LlmClient.Message>> workerCalls = llmClient.calls.stream()
+                    .filter(messages -> messages.size() == 2)
+                    .filter(messages -> {
+                        String lastUser = DispatchingStubGLMClient.findLastUser(messages);
+                        return lastUser.contains("当前任务：任务A") || lastUser.contains("当前任务：任务B");
+                    })
+                    .toList();
+
+            assertEquals(2, workerCalls.size(), "should record the two parallel worker calls");
+            assertFalse(workerCalls.get(0).isEmpty());
+            assertFalse(workerCalls.get(1).isEmpty());
+            assertEquals(workerCalls.get(0).get(0).role(), workerCalls.get(1).get(0).role());
+            assertEquals(workerCalls.get(0).get(0).content(), workerCalls.get(1).get(0).content(),
+                    "parallel workers should share an identical frozen system prompt prefix");
+            assertTrue(workerCalls.get(0).get(0).content().contains("稳定长期记忆"),
+                    "parallel worker prefix should include sticky memory");
+            assertTrue(workerCalls.get(0).get(0).content().contains("用户最新输入"),
+                    "parallel worker prefix should include working memory");
+            assertNotEquals(DispatchingStubGLMClient.findLastUser(workerCalls.get(0)),
+                    DispatchingStubGLMClient.findLastUser(workerCalls.get(1)),
+                    "task-specific suffixes should remain independent");
+            assertTrue(DispatchingStubGLMClient.findLastUser(workerCalls.get(0)).contains("parallel-skill"),
+                    "first worker should see the fork skill snapshot");
+            assertTrue(DispatchingStubGLMClient.findLastUser(workerCalls.get(1)).contains("parallel-skill"),
+                    "second worker should see the same fork skill snapshot");
+            assertEquals(1, skillBuffer.size(), "fork skill snapshot should not drain the shared skill buffer");
+
+            List<List<LlmClient.Tool>> workerTools = llmClient.toolsByCall.stream()
+                    .filter(tools -> tools != null && !tools.isEmpty())
+                    .toList();
+            assertTrue(workerTools.size() >= 2, "worker calls should receive exact tool snapshots");
+            assertSame(workerTools.get(0), workerTools.get(1),
+                    "parallel forked workers should reuse the same tool definitions snapshot");
+        }
     }
 
     private static LlmClient.ChatResponse awaitBarrierThenReturn(CountDownLatch latch,
@@ -381,17 +586,19 @@ class AgentOrchestratorTest {
                 response("")
         ));
 
-        AgentOrchestrator orchestrator = new AgentOrchestrator(
-                llmClient,
-                new ToolRegistry(),
-                new NoOpMemoryManager(tempDir.toFile())
-        );
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    llmClient,
+                    new ToolRegistry(),
+                    mm
+            );
 
-        String finalResult = orchestrator.run("测试失败阻塞");
+            String finalResult = orchestrator.run("测试失败阻塞");
 
-        assertTrue(finalResult.contains("未完全完成"));
-        assertTrue(finalResult.contains("[step_1] ❌ 第一步"));
-        assertTrue(finalResult.contains("[step_2] ⏳ 第二步"));
+            assertTrue(finalResult.contains("未完全完成"));
+            assertTrue(finalResult.contains("[step_1] ❌ 第一步"));
+            assertTrue(finalResult.contains("[step_2] ⏳ 第二步"));
+        }
     }
 
     private static LlmClient.ChatResponse response(String content) {
@@ -467,6 +674,37 @@ class AgentOrchestratorTest {
                 }
             }
             return "";
+        }
+    }
+
+    private static final class RecordingDispatchingStubGLMClient extends GLMClient {
+        private final Function<String, ChatResponse> dispatcher;
+        private final List<List<Message>> calls = new CopyOnWriteArrayList<>();
+        private final List<List<Tool>> toolsByCall = new CopyOnWriteArrayList<>();
+
+        private RecordingDispatchingStubGLMClient(Function<String, ChatResponse> dispatcher) {
+            super("test-key");
+            this.dispatcher = dispatcher;
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools) throws IOException {
+            return chat(messages, tools, StreamListener.NO_OP);
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {
+            calls.add(List.copyOf(messages));
+            toolsByCall.add(tools);
+            String lastUserMessage = DispatchingStubGLMClient.findLastUser(messages);
+            ChatResponse response = dispatcher.apply(lastUserMessage);
+            if (response == null) {
+                throw new IOException("无匹配响应，最后的 user 消息: " + lastUserMessage);
+            }
+            if (response.content() != null && !response.content().isEmpty()) {
+                listener.onContentDelta(response.content());
+            }
+            return response;
         }
     }
 }

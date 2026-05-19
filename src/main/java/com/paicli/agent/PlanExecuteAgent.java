@@ -109,6 +109,7 @@ public class PlanExecuteAgent {
     private final ConversationHistoryCompactor historyCompactor;
     private final PrintStream out;
     private Supplier<String> externalContextSupplier = () -> "";
+    private Supplier<String> stickyMemorySupplier = () -> "";
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
@@ -172,6 +173,13 @@ public class PlanExecuteAgent {
 
     public void setExternalContextSupplier(Supplier<String> externalContextSupplier) {
         this.externalContextSupplier = externalContextSupplier == null ? () -> "" : externalContextSupplier;
+    }
+
+    /**
+     * 注入 Sticky Memory 渲染源（PR-B）：与 Agent 一致语义，由 Main 启动时接进来。
+     */
+    public void setStickyMemorySupplier(Supplier<String> stickyMemorySupplier) {
+        this.stickyMemorySupplier = stickyMemorySupplier == null ? () -> "" : stickyMemorySupplier;
     }
 
     public void setSkillRegistry(SkillRegistry skillRegistry) {
@@ -454,13 +462,6 @@ public class PlanExecuteAgent {
      */
     private TaskRunResult executeTask(String goal, ExecutionPlan plan, Task task,
                                       StreamState streamState, PrintStream out) throws IOException {
-        String prompt = promptAssembler.assemble(PromptMode.PLAN, PromptContext.builder()
-                .variable("taskType", task.getType())
-                .variable("taskDescription", task.getDescription())
-                .externalContext(buildExternalContext())
-                .skillIndex(buildSkillIndex())
-                .build());
-
         // 注入长期记忆上下文
         String memoryContext = memoryManager.buildContextForQuery(
                 task.getDescription(),
@@ -472,7 +473,7 @@ public class PlanExecuteAgent {
         taskInput = prependSkillBodies(taskInput);
 
         List<LlmClient.Message> messages = new ArrayList<>(Arrays.asList(
-                LlmClient.Message.system(prompt),
+                LlmClient.Message.system(buildTaskSystemPrompt(task)),
                 ImageReferenceParser.userMessage(
                         taskInput,
                         Path.of(toolRegistry.getProjectPath()))
@@ -506,7 +507,8 @@ public class PlanExecuteAgent {
             iteration++;
             budget.beginIteration();
 
-            // 调 LLM 前评估 messages 是否接近 window 上限；超阈值压缩早期消息为摘要。
+            // 调 LLM 前刷新 Working Memory 等易变 system prompt 段，再评估是否需要压缩 messages。
+            messages.set(0, LlmClient.Message.system(buildTaskSystemPrompt(task)));
             injectPendingLspDiagnostics(messages, out);
             maybeCompactHistory(messages, out);
 
@@ -583,7 +585,7 @@ public class PlanExecuteAgent {
                         "resultPreview", preview(toolResult.result(), 300)
                 ));
                 budget.recordToolResult(toolResult.name(), toolResult.result());
-                memoryManager.addToolResult(toolResult.name(), toolResult.result());
+                memoryManager.addToolResult(toolResult.name(), toolResult.argumentsJson(), toolResult.result());
                 allResults.append(toolResult.result()).append("\n");
                 messages.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
             }
@@ -598,6 +600,17 @@ public class PlanExecuteAgent {
         return TaskRunResult.of(fallbackResult, streamRenderer.hasStreamedOutput());
     }
 
+    private String buildTaskSystemPrompt(Task task) {
+        return promptAssembler.assemble(PromptMode.PLAN, PromptContext.builder()
+                .variable("taskType", task.getType())
+                .variable("taskDescription", task.getDescription())
+                .externalContext(buildExternalContext())
+                .stickyMemory(buildStickyMemory())
+                .workingMemory(memoryManager.buildWorkingMemorySection())
+                .skillIndex(buildSkillIndex())
+                .build());
+    }
+
     private String buildExternalContext() {
         if (!memoryManager.getContextProfile().mcpResourceIndexEnabled()) {
             return "";
@@ -607,6 +620,16 @@ public class PlanExecuteAgent {
             return context == null ? "" : context.trim();
         } catch (Exception e) {
             log.warn("Failed to build external context for plan task", e);
+            return "";
+        }
+    }
+
+    private String buildStickyMemory() {
+        try {
+            String sticky = stickyMemorySupplier.get();
+            return sticky == null ? "" : sticky.trim();
+        } catch (Exception e) {
+            log.warn("Failed to render sticky memory for plan task", e);
             return "";
         }
     }

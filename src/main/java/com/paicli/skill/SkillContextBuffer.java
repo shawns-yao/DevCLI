@@ -46,7 +46,23 @@ public final class SkillContextBuffer {
         }
         List<Map.Entry<String, String>> snapshot = new ArrayList<>(entries.entrySet());
         entries.clear();
+        return format(snapshot);
+    }
 
+    /**
+     * 返回当前 skill body 的只读快照，不清空 buffer。
+     *
+     * Forked SubAgent 并行执行会使用这个方法把同一轮已加载 skill 固化进 fork 后缀，
+     * 避免多个 Worker 并发 drain 同一个 buffer，导致只有第一个 Worker 看到 skill 内容。
+     */
+    public synchronized String snapshot() {
+        if (entries.isEmpty()) {
+            return "";
+        }
+        return format(new ArrayList<>(entries.entrySet()));
+    }
+
+    private static String format(List<Map.Entry<String, String>> snapshot) {
         StringBuilder sb = new StringBuilder();
         for (Map.Entry<String, String> e : snapshot) {
             sb.append("## 已加载 Skill：").append(e.getKey()).append('\n')
@@ -67,5 +83,11 @@ public final class SkillContextBuffer {
 
     public synchronized void clear() {
         entries.clear();
+    }
+
+    public synchronized SkillContextBuffer copy() {
+        SkillContextBuffer copy = new SkillContextBuffer();
+        copy.entries.putAll(this.entries);
+        return copy;
     }
 }

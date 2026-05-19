@@ -62,4 +62,41 @@ class PromptAssemblerTest {
         assertThrows(IllegalStateException.class,
                 () -> assembler.assemble(PromptMode.AGENT, PromptContext.empty()));
     }
+
+    @Test
+    void stickyMemoryGetsInjectedAsDedicatedSection() {
+        // PR-B：StickyMemory.renderForPrompt() 输出应被 PromptAssembler 包成 ## Sticky Memory 段
+        PromptAssembler assembler = PromptAssembler.createDefault();
+
+        String prompt = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
+                .stickyMemory("### 用户偏好\n- 用简体中文\n- 不引入 SymbolSolver")
+                .memoryContext("## 相关记忆\n历史项目 X")
+                .build());
+
+        // 必有 Sticky Memory 段
+        assertTrue(prompt.contains("## Sticky Memory"),
+                "stickyMemory 非空时应被包成 ## Sticky Memory 段");
+        assertTrue(prompt.contains("用简体中文"));
+        assertTrue(prompt.contains("不引入 SymbolSolver"));
+
+        // KV cache 顺序：Sticky Memory 应在 Project Context 之前（更稳定的层在前）
+        int stickyIdx = prompt.indexOf("## Sticky Memory");
+        int projectIdx = prompt.indexOf("## Project Context");
+        assertTrue(stickyIdx > 0 && projectIdx > 0);
+        assertTrue(stickyIdx < projectIdx,
+                "KV cache 友好布局：Sticky 应在 Project Context 之前");
+    }
+
+    @Test
+    void emptyStickyDoesNotCreateEmptySection() {
+        PromptAssembler assembler = PromptAssembler.createDefault();
+
+        String prompt = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
+                .stickyMemory("")
+                .memoryContext("## 相关记忆\n仅长期记忆")
+                .build());
+
+        assertTrue(!prompt.contains("## Sticky Memory"),
+                "stickyMemory 为空时不应产生空段污染 prompt");
+    }
 }
