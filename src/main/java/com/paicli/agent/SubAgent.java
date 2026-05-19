@@ -247,7 +247,7 @@ public class SubAgent {
 
     public ForkContext createForkContext() {
         List<LlmClient.Message> sharedPrefix = List.of(LlmClient.Message.system(getSystemPrompt()));
-        List<LlmClient.Tool> toolDefinitions = shouldUseTools() ? toolRegistry.getToolDefinitions() : null;
+        List<LlmClient.Tool> toolDefinitions = shouldUseTools() ? toolDefinitionsForRole() : null;
         String skillBodySnapshot = skillContextBuffer == null ? "" : skillContextBuffer.snapshot();
         String modelName = llmClient == null ? "" : llmClient.getModelName();
         String providerName = llmClient == null ? "" : llmClient.getProviderName();
@@ -447,11 +447,8 @@ public class SubAgent {
         }
     }
 
-    /**
-     * 只有执行者需要工具；规划者和检查者都只输出分析结果。
-     */
     private boolean shouldUseTools() {
-        return role == AgentRole.WORKER;
+        return role == AgentRole.WORKER || role == AgentRole.REVIEWER;
     }
 
     private List<LlmClient.Tool> toolDefinitionsFor(ForkContext forkContext) {
@@ -461,7 +458,19 @@ public class SubAgent {
         if (forkContext != null) {
             return forkContext.toolDefinitions() == null ? null : forkContext.toolDefinitions();
         }
-        return toolRegistry.getToolDefinitions();
+        return toolDefinitionsForRole();
+    }
+
+    private List<LlmClient.Tool> toolDefinitionsForRole() {
+        List<LlmClient.Tool> tools = toolRegistry.getToolDefinitions();
+        if (role != AgentRole.REVIEWER) {
+            return tools;
+        }
+        return tools.stream()
+                .filter(tool -> tool.name().equals("read_file")
+                        || tool.name().equals("list_dir")
+                        || tool.name().equals("execute_command"))
+                .toList();
     }
 
     private void logPromptCacheDiagnostics(ForkContext forkContext,
@@ -748,12 +757,11 @@ public class SubAgent {
         }
 
         private String contentLabel() {
-            // 故意区分：PLANNER/REVIEWER 不调用工具，content 一定是最终输出，用"结果"；
-            // WORKER 可能在 tool_calls 前先 narrate，用"输出"避免"结果"暗示已经完成。
+            // WORKER/REVIEWER 可能在 tool_calls 前先 narrate，用"输出"避免"结果"暗示已经完成。
             return switch (role) {
                 case PLANNER -> "规划结果";
                 case WORKER -> "执行输出";
-                case REVIEWER -> "审查结果";
+                case REVIEWER -> "审查输出";
             };
         }
 

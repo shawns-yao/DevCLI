@@ -215,6 +215,36 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    void shouldRunFinalIntegrationAfterFailedLeafSteps() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        List<AgentOrchestrator.ExecutionStep> steps = new ArrayList<>(List.of(
+                AgentOrchestrator.ExecutionStep.pending("step_1", "模型", "FILE_WRITE", List.of()).withResult("ok"),
+                AgentOrchestrator.ExecutionStep.pending("step_2", "服务", "FILE_WRITE", List.of("step_1")).withFailed("review failed"),
+                AgentOrchestrator.ExecutionStep.pending("step_3", "最终集成验收", "INTEGRATION", List.of("step_2"))
+        ));
+
+        List<AgentOrchestrator.ExecutionStep> executable = orchestrator.getExecutableSteps(steps);
+
+        assertEquals(1, executable.size());
+        assertEquals("step_3", executable.get(0).id());
+    }
+
+    @Test
+    void shouldRunFinalIntegrationWhenFailureLeavesBlockedPendingSteps() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        List<AgentOrchestrator.ExecutionStep> steps = new ArrayList<>(List.of(
+                AgentOrchestrator.ExecutionStep.pending("step_1", "模型", "FILE_WRITE", List.of()).withFailed("review failed"),
+                AgentOrchestrator.ExecutionStep.pending("step_2", "服务", "FILE_WRITE", List.of("step_1")),
+                AgentOrchestrator.ExecutionStep.pending("step_3", "最终集成验收", "INTEGRATION", List.of("step_2"))
+        ));
+
+        List<AgentOrchestrator.ExecutionStep> executable = orchestrator.getExecutableSteps(steps);
+
+        assertEquals(1, executable.size());
+        assertEquals("step_3", executable.get(0).id());
+    }
+
+    @Test
     void shouldPropagateOriginalUserTaskToWorkerAndReviewer(@TempDir Path tempDir) {
         String fullRequirement = "完整需求：必须生成 public final class，private constructor，public static 方法";
         List<String> workerInputs = new CopyOnWriteArrayList<>();
@@ -535,13 +565,73 @@ class AgentOrchestratorTest {
                     "second worker should see the same fork skill snapshot");
             assertEquals(1, skillBuffer.size(), "fork skill snapshot should not drain the shared skill buffer");
 
-            List<List<LlmClient.Tool>> workerTools = llmClient.toolsByCall.stream()
-                    .filter(tools -> tools != null && !tools.isEmpty())
-                    .toList();
+            List<List<LlmClient.Tool>> workerTools = new ArrayList<>();
+            for (int i = 0; i < llmClient.calls.size(); i++) {
+                String lastUser = DispatchingStubGLMClient.findLastUser(llmClient.calls.get(i));
+                if (lastUser.contains("当前任务：任务A") || lastUser.contains("当前任务：任务B")) {
+                    List<LlmClient.Tool> tools = llmClient.toolsByCall.get(i);
+                    if (tools != null && !tools.isEmpty()) {
+                        workerTools.add(tools);
+                    }
+                }
+            }
             assertTrue(workerTools.size() >= 2, "worker calls should receive exact tool snapshots");
             assertSame(workerTools.get(0), workerTools.get(1),
                     "parallel forked workers should reuse the same tool definitions snapshot");
         }
+    }
+
+    @Test
+    void reviewerShouldReceiveVerificationToolsAndRequirement(@TempDir Path tempDir) {
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                return response("""
+                        {
+                          "summary": "实现入口",
+                          "steps": [
+                            {"id": "a", "description": "实现 Java CLI 入口 LogCli", "type": "FILE_WRITE", "dependencies": []}
+                          ]
+                        }
+                        """);
+            }
+            if (body.contains("原始任务")) {
+                return response("""
+                        {"approved": true, "summary": "通过", "issues": []}
+                        """);
+            }
+            if (body.contains("LogCli")) {
+                return response("已写入 LogCli.java");
+            }
+            return response("fallback");
+        };
+
+        RecordingDispatchingStubGLMClient llmClient = new RecordingDispatchingStubGLMClient(dispatcher);
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    llmClient,
+                    new ToolRegistry(),
+                    mm
+            );
+
+            orchestrator.run("实现 Java CLI 入口 LogCli");
+        }
+
+        List<Integer> reviewerCallIndexes = new ArrayList<>();
+        for (int i = 0; i < llmClient.calls.size(); i++) {
+            String lastUser = DispatchingStubGLMClient.findLastUser(llmClient.calls.get(i));
+            if (lastUser.contains("审查要求：必须调用工具检查真实产物")) {
+                reviewerCallIndexes.add(i);
+            }
+        }
+
+        assertFalse(reviewerCallIndexes.isEmpty(), "reviewer prompt should require concrete verification");
+        List<LlmClient.Tool> reviewerTools = llmClient.toolsByCall.get(reviewerCallIndexes.get(0));
+        assertNotNull(reviewerTools, "reviewer should receive verification tools");
+        List<String> toolNames = reviewerTools.stream().map(LlmClient.Tool::name).toList();
+        assertTrue(toolNames.contains("list_dir"), "reviewer should be able to inspect files");
+        assertTrue(toolNames.contains("read_file"), "reviewer should be able to inspect file content");
+        assertTrue(toolNames.contains("execute_command"), "reviewer should be able to run minimal verification");
+        assertFalse(toolNames.contains("write_file"), "reviewer should not mutate files");
     }
 
     private static LlmClient.ChatResponse awaitBarrierThenReturn(CountDownLatch latch,
