@@ -608,9 +608,3 @@ src/main/java/com/paicli/
 ├── tool/        ToolRegistry
 └── web/         SearchProvider, WebFetcher, HtmlExtractor
 ```
-
-## Notes
-
-- 不要提交 `.env`、真实 API Key、`target/` 产物。
-- MCP OAuth、sampling 和 server 自动重启仍是后续增强方向。
-- Runtime API 默认只建议监听本机地址，并强制配置本地 API Key。
