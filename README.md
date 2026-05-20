@@ -149,6 +149,11 @@ Tips for getting started:
 1. Type / for commands and Tab completion
 2. Ask coding questions, edit code or run commands
 3. Attach context with @path or @image:
+
+* 你好
+
+> 你好
+DevCLI: 你好，我在。可以直接描述要阅读、修改或运行的任务。
 ```
 
 ## Configuration
