@@ -28,12 +28,12 @@ class ToolCallRendererTest {
     @Test
     void singleWebSearchCollapsedHeaderShowsQuery() {
         var grouped = ToolCallRenderer.group(List.of(
-                tc("web_search", "{\"query\":\"沉默王二 程序员 博主\"}")));
+                tc("web_search", "{\"query\":\" 程序员 博主\"}")));
 
         String header = ToolCallRenderer.collapsedHeader(grouped);
 
         assertTrue(header.contains("WebSearch"), header);
-        assertTrue(header.contains("沉默王二 程序员 博主"), header);
+        assertTrue(header.contains("程序员 博主"), header);
     }
 
     @Test
