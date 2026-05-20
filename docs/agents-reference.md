@@ -206,6 +206,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - DurableTaskManager(SQLite) / CLI: /task, /task list, /task add, /task cancel, /task log
 - Runtime API: `serve --http --port 8080`，仅 127.0.0.1，需 API Key
 - 端点：POST /v1/threads / POST /v1/threads/{id}/turns / GET /v1/threads/{id}/events
+- Runtime API 请求线程与 Agent 执行线程隔离；执行池默认 2 线程 / 64 队列，过载返回 429 `runtime_busy`
 
 ### Image Input (Phase 21)
 

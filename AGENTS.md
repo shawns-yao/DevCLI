@@ -99,6 +99,8 @@ src/main/java/com/paicli/
 └── render/      Renderer, InlineRenderer, PlainRenderer, RendererFactory
 ```
 
+Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔离；turn 执行池默认 2 线程 / 64 队列，过载返回 `429 runtime_busy`。
+
 启动与 inline 渲染当前约定：
 
 - 开屏 Banner 使用无右边框的简洁布局，避免 CJK/ANSI 字宽导致右侧竖线错位；Phase 22 后默认是 π 主题彩色 logo + Qoder 风格首屏，只展示模型、MCP、Skill、ReAct 状态和三条 getting-started tips，不再把 MCP server 明细刷成启动日志。

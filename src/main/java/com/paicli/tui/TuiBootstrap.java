@@ -10,6 +10,8 @@ import com.paicli.util.AnsiStyle;
 import org.jline.terminal.Size;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.Objects;
@@ -31,6 +33,7 @@ import java.util.Objects;
  * - 终端尺寸 &lt; 80×24
  */
 public final class TuiBootstrap {
+    private static final Logger log = LoggerFactory.getLogger(TuiBootstrap.class);
 
     private static final String TUI_ENV = "PAICLI_TUI";
     private static final String TUI_PROPERTY = "paicli.tui";
@@ -162,8 +165,8 @@ public final class TuiBootstrap {
             window.start();  // 阻塞直到用户退出
             System.out.println("\n👋 再见!");
         } catch (Exception e) {
+            log.warn("TUI startup failed; falling back to CLI", e);
             System.err.println("❌ TUI 启动失败，降级到 CLI 模式: " + e.getMessage());
-            e.printStackTrace();
             throw new IOException("TUI 启动失败", e);
         }
     }

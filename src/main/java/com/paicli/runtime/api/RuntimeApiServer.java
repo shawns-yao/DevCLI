@@ -11,20 +11,27 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class RuntimeApiServer implements AutoCloseable {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final int DEFAULT_HTTP_THREADS = 16;
+    private static final int DEFAULT_TURN_THREADS = 2;
+    private static final int DEFAULT_TURN_QUEUE_SIZE = 64;
+
     private final RuntimeThreadStore store;
     private final TaskRunner runner;
     private final String apiKey;
     private final HttpServer server;
-    private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
-        Thread thread = new Thread(r, "paicli-runtime-api");
-        thread.setDaemon(true);
-        return thread;
-    });
+    private final ExecutorService httpExecutor;
+    private final ThreadPoolExecutor turnExecutor;
 
     public RuntimeApiServer(RuntimeThreadStore store, TaskRunner runner, int port, String apiKey) throws IOException {
         if (apiKey == null || apiKey.isBlank()) {
@@ -34,8 +41,19 @@ public class RuntimeApiServer implements AutoCloseable {
         this.runner = runner;
         this.apiKey = apiKey;
         this.server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
+        this.httpExecutor = Executors.newFixedThreadPool(configuredPositiveInt(
+                "paicli.runtime.api.http.threads", DEFAULT_HTTP_THREADS), daemonThreadFactory("paicli-runtime-api-http"));
+        this.turnExecutor = new ThreadPoolExecutor(
+                configuredPositiveInt("paicli.runtime.api.turn.threads", DEFAULT_TURN_THREADS),
+                configuredPositiveInt("paicli.runtime.api.turn.threads", DEFAULT_TURN_THREADS),
+                0L,
+                TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(configuredPositiveInt(
+                        "paicli.runtime.api.turn.queue", DEFAULT_TURN_QUEUE_SIZE)),
+                daemonThreadFactory("paicli-runtime-api-turn"),
+                new ThreadPoolExecutor.AbortPolicy());
         this.server.createContext("/v1/threads", this::handleThreads);
-        this.server.setExecutor(executor);
+        this.server.setExecutor(httpExecutor);
     }
 
     public static String configuredApiKey() {
@@ -93,14 +111,21 @@ public class RuntimeApiServer implements AutoCloseable {
             return;
         }
         String turnId = "turn_" + Long.toHexString(System.nanoTime());
-        store.appendEvent(threadId, "turn.started",
-                "{\"turn_id\":\"" + turnId + "\",\"input\":\"" + escape(input) + "\"}");
-        executor.submit(() -> runTurn(threadId, turnId, input));
+        try {
+            turnExecutor.submit(() -> runTurn(threadId, turnId, input));
+        } catch (RejectedExecutionException e) {
+            store.appendEvent(threadId, "turn.rejected",
+                    "{\"turn_id\":\"" + turnId + "\",\"error\":\"runtime_busy\"}");
+            writeJson(exchange, 429, "{\"error\":\"runtime_busy\"}");
+            return;
+        }
         writeJson(exchange, 202, "{\"id\":\"" + turnId + "\",\"object\":\"turn\",\"status\":\"running\"}");
     }
 
     private void runTurn(String threadId, String turnId, String input) {
         try {
+            store.appendEvent(threadId, "turn.started",
+                    "{\"turn_id\":\"" + turnId + "\",\"input\":\"" + escape(input) + "\"}");
             String result = runner.run(input);
             store.appendEvent(threadId, "message.delta",
                     "{\"turn_id\":\"" + turnId + "\",\"content\":\"" + escape(result) + "\"}");
@@ -183,9 +208,32 @@ public class RuntimeApiServer implements AutoCloseable {
                 .replace("\n", "\\n");
     }
 
+    private static int configuredPositiveInt(String propertyName, int defaultValue) {
+        String raw = System.getProperty(propertyName);
+        if (raw == null || raw.isBlank()) {
+            return defaultValue;
+        }
+        try {
+            int value = Integer.parseInt(raw.trim());
+            return value > 0 ? value : defaultValue;
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
+
+    private static ThreadFactory daemonThreadFactory(String prefix) {
+        AtomicInteger threadId = new AtomicInteger();
+        return r -> {
+            Thread thread = new Thread(r, prefix + "-" + threadId.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        };
+    }
+
     @Override
     public void close() {
         server.stop(0);
-        executor.shutdownNow();
+        turnExecutor.shutdownNow();
+        httpExecutor.shutdownNow();
     }
 }
