@@ -63,20 +63,16 @@ base
 personality
 mode
 approval
-sticky_memory
 project_context
 skills
-working_memory
 context_mgmt
 handoff
 ```
 
-其中运行期动态段包括：
+其中 `project_context` 和 `skills` 是运行期动态段：
 
 - `memoryContext`
 - `externalContext`（例如 MCP resource index）
-- `stickyMemory`
-- `workingMemory`
 - `skillIndex`
 
 ## 覆盖规则
