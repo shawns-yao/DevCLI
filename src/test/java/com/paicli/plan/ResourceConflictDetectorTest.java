@@ -51,6 +51,33 @@ class ResourceConflictDetectorTest {
         assertEquals(List.of("c"), ids(waves.get(2)));
     }
 
+    @Test
+    void allowsWritesToDifferentFilesInSameWave() {
+        List<Item> items = List.of(
+                new Item("a", "修改 src/main/java/A.java", "FILE_WRITE"),
+                new Item("b", "修改 src/main/java/B.java", "FILE_WRITE")
+        );
+
+        List<List<Item>> waves = split(items);
+
+        assertEquals(1, waves.size());
+        assertEquals(List.of("a", "b"), ids(waves.get(0)));
+    }
+
+    @Test
+    void normalizesPathAndBasenameForSameJavaFileConflict() {
+        List<Item> items = List.of(
+                new Item("a", "修改 src/main/java/com/acme/LogCli.java", "FILE_WRITE"),
+                new Item("b", "读取 LogCli.java", "FILE_READ")
+        );
+
+        List<List<Item>> waves = split(items);
+
+        assertEquals(2, waves.size());
+        assertEquals(List.of("a"), ids(waves.get(0)));
+        assertEquals(List.of("b"), ids(waves.get(1)));
+    }
+
     private static List<List<Item>> split(List<Item> items) {
         return ResourceConflictDetector.splitConflictFree(items, Item::id, Item::description, Item::type);
     }

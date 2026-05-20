@@ -150,6 +150,10 @@ public class PlanExecuteAgent {
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
         this.toolRegistry.setContextProfile(this.memoryManager.getContextProfile());
         this.toolRegistry.setMemorySaver(this.memoryManager::storeFact);
+        this.toolRegistry.setMemorySaveHandler(fact -> {
+            MemoryManager.StoreResult result = this.memoryManager.storeFactWithPolicy(fact, true);
+            return new ToolRegistry.MemorySaveResult(result.stored(), result.message());
+        });
     }
 
     private static PrintStream deferredSystemOut() {

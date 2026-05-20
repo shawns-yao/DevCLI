@@ -7,6 +7,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -23,7 +24,9 @@ class ToolRegistryTest {
 
         String result = registry.executeTool("execute_command", "{\"command\":\"pwd\"}");
 
-        assertTrue(result.contains(tempDir.toString()));
+        String normalizedResult = result.replace('/', '\\').toLowerCase(Locale.ROOT);
+        String normalizedPath = tempDir.getFileName().toString().toLowerCase(Locale.ROOT);
+        assertTrue(normalizedResult.contains(normalizedPath), result);
     }
 
     @Test
@@ -140,5 +143,46 @@ class ToolRegistryTest {
 
         assertEquals(List.of("访问 yuque.com 时复用登录态"), saved);
         assertTrue(result.contains("已保存到长期记忆"));
+    }
+
+    @Test
+    void saveMemoryToolReportsPolicyRejection() {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setMemorySaveHandler(fact -> new ToolRegistry.MemorySaveResult(false,
+                "长期记忆策略跳过: 一次性临时信息"));
+
+        String result = registry.executeTool("save_memory", "{\"fact\":\"今天地铁好挤\"}");
+
+        assertTrue(result.contains("长期记忆策略跳过"), result);
+    }
+
+    @Test
+    void shouldRejectMalformedToolArgumentsBeforeExecution() {
+        ToolRegistry registry = new ToolRegistry();
+
+        String result = registry.executeTool("read_file", "{not-json");
+
+        assertTrue(result.contains("工具参数校验失败"));
+        assertTrue(result.contains("不是合法 JSON"));
+    }
+
+    @Test
+    void shouldRejectBuiltinToolTypeMismatchBeforeExecution() {
+        ToolRegistry registry = new ToolRegistry();
+
+        String result = registry.executeTool("search_code", "{\"query\":\"agent\",\"top_k\":\"5\"}");
+
+        assertTrue(result.contains("工具参数校验失败"));
+        assertTrue(result.contains("$.top_k must be integer"));
+    }
+
+    @Test
+    void shouldRejectBuiltinToolEnumMismatchBeforeExecution() {
+        ToolRegistry registry = new ToolRegistry();
+
+        String result = registry.executeTool("create_project", "{\"name\":\"demo\",\"type\":\"go\"}");
+
+        assertTrue(result.contains("工具参数校验失败"));
+        assertTrue(result.contains("$.type must be one of [java, python, node]"));
     }
 }

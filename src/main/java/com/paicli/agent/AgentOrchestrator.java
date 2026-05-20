@@ -14,8 +14,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.PrintStream;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
@@ -47,6 +51,11 @@ public class AgentOrchestrator {
     private static final Logger log = LoggerFactory.getLogger(AgentOrchestrator.class);
     private static final ObjectMapper mapper = new ObjectMapper();
     private static final int MAX_RETRIES_PER_STEP = 2;
+    private static final double MIN_REVIEW_SCORE = 0.6;
+    private static final double REQUIRED_FUNCTIONAL_SCORE = 1.0;
+    private static final double FINAL_INTEGRATION_FAILURE_RATIO_LIMIT = 0.5;
+    private static final int PRE_REVIEW_TIMEOUT_SECONDS = 60;
+    private static final int MAX_PLANNER_STEPS = 5;
 
     private final LlmClient llmClient;
     private final SubAgent planner;
@@ -61,6 +70,7 @@ public class AgentOrchestrator {
     private com.paicli.skill.SkillRegistry skillRegistry;
     private com.paicli.skill.SkillContextBuffer skillContextBuffer;
     private final TraceRecorder traceRecorder = new TraceRecorder();
+    private List<AcceptanceCriterion> currentAcceptanceCriteria = List.of();
 
     // 执行步骤的数据结构（package-private 供测试访问）
     record ExecutionStep(String id, String description, String type,
@@ -87,6 +97,35 @@ public class AgentOrchestrator {
         PENDING, RUNNING, COMPLETED, FAILED
     }
 
+    record PreReviewResult(boolean passed, String feedback) {
+        static PreReviewResult ok() {
+            return new PreReviewResult(true, "");
+        }
+
+        static PreReviewResult failed(String feedback) {
+            return new PreReviewResult(false, feedback == null ? "Pre-review hard check failed" : feedback);
+        }
+    }
+
+    record AcceptanceCriterion(String id, String category, String description, String testSignal) {
+        boolean isValid() {
+            return !id.isBlank() && !description.isBlank();
+        }
+
+        String formatForPrompt() {
+            StringBuilder sb = new StringBuilder();
+            sb.append("- ").append(id);
+            if (!category.isBlank()) {
+                sb.append(" [").append(category).append("]");
+            }
+            sb.append(": ").append(description);
+            if (!testSignal.isBlank()) {
+                sb.append("；test_signal: ").append(testSignal);
+            }
+            return sb.toString();
+        }
+    }
+
     public AgentOrchestrator(LlmClient llmClient) {
         this(llmClient, new ToolRegistry(), new MemoryManager(llmClient));
     }
@@ -106,6 +145,10 @@ public class AgentOrchestrator {
         this.toolRegistry = toolRegistry;
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
         this.toolRegistry.setMemorySaver(memoryManager::storeFact);
+        this.toolRegistry.setMemorySaveHandler(fact -> {
+            MemoryManager.StoreResult result = memoryManager.storeFactWithPolicy(fact, true);
+            return new ToolRegistry.MemorySaveResult(result.stored(), result.message());
+        });
         this.planner = new SubAgent("planner", AgentRole.PLANNER, llmClient, toolRegistry);
         this.workers = List.of(
                 new SubAgent("worker-1", AgentRole.WORKER, llmClient, toolRegistry),
@@ -113,6 +156,9 @@ public class AgentOrchestrator {
         );
         this.reviewer = new SubAgent("reviewer", AgentRole.REVIEWER, llmClient, toolRegistry);
         this.memoryManager = memoryManager;
+        configureSubAgent(planner);
+        workers.forEach(this::configureSubAgent);
+        configureSubAgent(reviewer);
     }
 
     public void setExternalContextSupplier(Supplier<String> externalContextSupplier) {
@@ -153,7 +199,8 @@ public class AgentOrchestrator {
         agent.setMemoryContextSupplier(() -> memoryManager.buildContextForQuery(
                 "multi-agent " + agent.getRole().name().toLowerCase(Locale.ROOT),
                 memoryManager.getContextProfile().memoryContextTokens()));
-        agent.setWorkingMemorySupplier(memoryManager::buildWorkingMemorySection);
+        agent.setWorkingMemorySupplier(() -> memoryManager.buildWorkingMemorySectionForAgent(
+                agent.getRole().name().toLowerCase(Locale.ROOT)));
         agent.setToolResultConsumer(memoryManager::addToolResult);
         agent.setSkillRegistry(skillRegistry);
         agent.setSkillContextBuffer(skillContextBuffer == null ? null : skillContextBuffer.copy());
@@ -171,6 +218,7 @@ public class AgentOrchestrator {
         ));
         memoryManager.addUserMessage(userInput);
         currentUserTask = userInput == null ? "" : userInput;
+        currentAcceptanceCriteria = List.of();
         if (CancellationContext.isCancelled()) {
             return "⏹️ 已取消当前多 Agent 任务。";
         }
@@ -199,6 +247,7 @@ public class AgentOrchestrator {
         if (steps.isEmpty()) {
             return "❌ 规划失败：无法解析执行计划\n原始输出:\n" + planResult.content();
         }
+        steps = coarsenPlanIfNeeded(steps);
         steps = appendFinalIntegrationStep(steps);
 
         out.println(AnsiStyle.heading("📋 执行计划"));
@@ -217,6 +266,14 @@ public class AgentOrchestrator {
             List<ExecutionStep> executable = getExecutableSteps(steps);
             if (executable.isEmpty()) {
                 break;
+            }
+            if (executable.size() == 1 && isFinalIntegrationStep(executable.get(0))
+                    && shouldFuseFinalIntegration(steps)) {
+                ExecutionStep finalStep = executable.get(0);
+                String reason = "Final integration 熔断：失败步骤比例过高，停止让最终集成阶段强行修补。";
+                updateStep(steps, finalStep.id(), finalStep.withFailed(reason));
+                out.println("⛔ 步骤 [" + finalStep.id() + "] " + reason + "\n");
+                continue;
             }
             batchIndex++;
 
@@ -269,6 +326,8 @@ public class AgentOrchestrator {
                     .trim();
 
             JsonNode root = mapper.readTree(cleaned);
+            currentAcceptanceCriteria = parseAcceptanceCriteria(firstPresent(root,
+                    "acceptance_criteria", "acceptanceCriteria", "acceptancecriteria"));
             JsonNode stepsNode = root.path("steps");
 
             if (!stepsNode.isArray() || stepsNode.isEmpty()) {
@@ -317,11 +376,98 @@ public class AgentOrchestrator {
                 }
             }
 
-            return steps;
+            return coarsenPlanIfNeeded(steps);
         } catch (Exception e) {
             log.error("Failed to parse plan JSON", e);
+            currentAcceptanceCriteria = List.of();
             return List.of();
         }
+    }
+
+    List<AcceptanceCriterion> parseAcceptanceCriteria(JsonNode criteriaNode) {
+        if (criteriaNode == null || !criteriaNode.isArray() || criteriaNode.isEmpty()) {
+            return List.of();
+        }
+        List<AcceptanceCriterion> criteria = new ArrayList<>();
+        int index = 1;
+        for (JsonNode node : criteriaNode) {
+            if (!node.isObject()) {
+                continue;
+            }
+            String id = node.path("id").asText("AC-" + String.format(Locale.ROOT, "%02d", index));
+            String category = node.path("category").asText("");
+            String description = node.path("description").asText("");
+            String testSignal = firstPresent(node, "test_signal", "testSignal", "testsignal").asText("");
+            AcceptanceCriterion criterion = new AcceptanceCriterion(id, category, description, testSignal);
+            if (criterion.isValid()) {
+                criteria.add(criterion);
+                index++;
+            }
+        }
+        return List.copyOf(criteria);
+    }
+
+    private JsonNode firstPresent(JsonNode node, String... fieldNames) {
+        if (node == null || fieldNames == null) {
+            return mapper.missingNode();
+        }
+        for (String fieldName : fieldNames) {
+            JsonNode value = node.path(fieldName);
+            if (!value.isMissingNode() && !value.isNull()) {
+                return value;
+            }
+        }
+        return mapper.missingNode();
+    }
+
+    List<ExecutionStep> coarsenPlanIfNeeded(List<ExecutionStep> steps) {
+        if (steps == null || steps.size() <= MAX_PLANNER_STEPS) {
+            return steps;
+        }
+        List<ExecutionStep> analysisSteps = new ArrayList<>();
+        List<ExecutionStep> verificationSteps = new ArrayList<>();
+        List<ExecutionStep> implementationSteps = new ArrayList<>();
+        for (ExecutionStep step : steps) {
+            String type = step.type() == null ? "" : step.type().toUpperCase(Locale.ROOT);
+            String text = ((step.type() == null ? "" : step.type()) + " " + step.description()).toLowerCase(Locale.ROOT);
+            if (type.contains("VERIFICATION") || text.contains("验证") || text.contains("test")) {
+                verificationSteps.add(step);
+            } else if (type.contains("ANALYSIS") || type.contains("FILE_READ") || text.contains("分析") || text.contains("读取")) {
+                analysisSteps.add(step);
+            } else {
+                implementationSteps.add(step);
+            }
+        }
+
+        List<ExecutionStep> coarse = new ArrayList<>();
+        if (!analysisSteps.isEmpty()) {
+            coarse.add(ExecutionStep.pending("step_1", mergeStepDescriptions("分析与准备", analysisSteps),
+                    "ANALYSIS", List.of()));
+        }
+        if (!implementationSteps.isEmpty()) {
+            List<String> deps = coarse.isEmpty() ? List.of() : List.of(coarse.get(coarse.size() - 1).id());
+            coarse.add(ExecutionStep.pending("step_" + (coarse.size() + 1),
+                    mergeStepDescriptions("核心实现", implementationSteps), "FILE_WRITE", deps));
+        }
+        if (!verificationSteps.isEmpty()) {
+            List<String> deps = coarse.isEmpty() ? List.of() : List.of(coarse.get(coarse.size() - 1).id());
+            coarse.add(ExecutionStep.pending("step_" + (coarse.size() + 1),
+                    mergeStepDescriptions("验证与修正", verificationSteps), "VERIFICATION", deps));
+        }
+        if (coarse.isEmpty()) {
+            coarse.add(ExecutionStep.pending("step_1", mergeStepDescriptions("完成任务", steps),
+                    "FILE_WRITE", List.of()));
+        }
+        return coarse;
+    }
+
+    private String mergeStepDescriptions(String title, List<ExecutionStep> steps) {
+        StringBuilder description = new StringBuilder(title).append("：");
+        for (ExecutionStep step : steps) {
+            description.append("\n- ").append(step.description());
+        }
+        description.append("\n按原始需求交付完整可用结果，不要只完成局部文件或口头说明。");
+        return description.toString();
     }
 
     /**
@@ -355,6 +501,20 @@ public class AgentOrchestrator {
                 .toList();
     }
 
+    boolean shouldFuseFinalIntegration(List<ExecutionStep> steps) {
+        List<ExecutionStep> normalSteps = steps.stream()
+                .filter(step -> !isFinalIntegrationStep(step))
+                .toList();
+        if (normalSteps.isEmpty()) {
+            return false;
+        }
+        long failed = normalSteps.stream()
+                .filter(step -> step.status() == StepStatus.FAILED)
+                .count();
+        double failureRatio = (double) failed / normalSteps.size();
+        return failureRatio >= FINAL_INTEGRATION_FAILURE_RATIO_LIMIT;
+    }
+
     List<ExecutionStep> appendFinalIntegrationStep(List<ExecutionStep> steps) {
         if (steps == null || steps.isEmpty()) {
             return steps;
@@ -376,8 +536,9 @@ public class AgentOrchestrator {
         String finalId = "step_" + (steps.size() + 1);
         String description = """
                 最终集成验收：基于原始用户任务检查并补齐整体功能入口、跨模块联动、默认参数、错误处理和端到端可运行性。
-                如果任务要求 CLI/API 入口，必须确保入口存在且可调用；如果前面步骤遗漏模块，直接补齐缺失实现。
-                完成后运行最小编译或自检命令，修复发现的问题。
+                你只负责胶水代码、入口 main、对外 API 导出、默认参数注入和跨模块联动。
+                不要重写或大改已 COMPLETED 的底层模块；如果核心依赖失败或缺失，直接说明风险，不要强行擦屁股。
+                完成后运行最小编译或自检命令，修复集成层问题。
                 """;
         List<ExecutionStep> withFinal = new ArrayList<>(steps);
         withFinal.add(ExecutionStep.pending(finalId, description, "INTEGRATION", leafStepIds));
@@ -411,7 +572,36 @@ public class AgentOrchestrator {
                 log.warn("Reviewer JSON missing 'approved' field, defaulting to rejected");
                 return false;
             }
-            return approvedNode.asBoolean(false);
+            boolean approved = approvedNode.asBoolean(false);
+            if (!approved) {
+                return false;
+            }
+            if (hasFailedBlockingCriteria(root.path("criteria_results"))) {
+                log.warn("Reviewer approved despite failed blocking acceptance criteria, defaulting to rejected");
+                return false;
+            }
+            if (hasMissingAcceptanceCriteriaCoverage(root.path("criteria_results"))) {
+                log.warn("Reviewer JSON missing acceptance criteria coverage, defaulting to rejected");
+                return false;
+            }
+            JsonNode scoresNode = root.path("scores");
+            if (scoresNode.isMissingNode() || scoresNode.isNull() || !scoresNode.isObject()) {
+                log.warn("Reviewer JSON missing structured scores, defaulting to rejected");
+                return false;
+            }
+            double functional = scoresNode.path("functional_correctness").asDouble(-1.0);
+            double integration = scoresNode.path("integration_completeness").asDouble(-1.0);
+            double quality = scoresNode.path("code_quality").asDouble(-1.0);
+            if (functional < REQUIRED_FUNCTIONAL_SCORE) {
+                log.warn("Reviewer functional_correctness score {} below required {}", functional, REQUIRED_FUNCTIONAL_SCORE);
+                return false;
+            }
+            if (integration < MIN_REVIEW_SCORE || quality < MIN_REVIEW_SCORE) {
+                log.warn("Reviewer scores below threshold: integration={}, quality={}, threshold={}",
+                        integration, quality, MIN_REVIEW_SCORE);
+                return false;
+            }
+            return true;
         } catch (Exception e) {
             // 无法解析 JSON：必须同时不含否定关键词且含有肯定关键词，才视为通过
             String lower = reviewContent.toLowerCase();
@@ -431,6 +621,42 @@ public class AgentOrchestrator {
         }
     }
 
+    private boolean hasFailedBlockingCriteria(JsonNode criteriaResultsNode) {
+        if (criteriaResultsNode == null || !criteriaResultsNode.isArray()) {
+            return false;
+        }
+        for (JsonNode result : criteriaResultsNode) {
+            boolean passed = result.path("passed").asBoolean(false);
+            String severity = result.path("severity").asText("").toLowerCase(Locale.ROOT);
+            if (!passed && (severity.equals("critical") || severity.equals("high"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasMissingAcceptanceCriteriaCoverage(JsonNode criteriaResultsNode) {
+        if (currentAcceptanceCriteria == null || currentAcceptanceCriteria.isEmpty()) {
+            return false;
+        }
+        if (criteriaResultsNode == null || !criteriaResultsNode.isArray() || criteriaResultsNode.isEmpty()) {
+            return true;
+        }
+        Set<String> coveredIds = new HashSet<>();
+        for (JsonNode result : criteriaResultsNode) {
+            String id = result.path("id").asText("");
+            if (!id.isBlank()) {
+                coveredIds.add(id);
+            }
+        }
+        for (AcceptanceCriterion criterion : currentAcceptanceCriteria) {
+            if (!coveredIds.contains(criterion.id())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
      * 解析检查者反馈的问题
      */
@@ -443,12 +669,16 @@ public class AgentOrchestrator {
                     .replaceAll("```\\s*", "")
                     .trim();
             JsonNode root = mapper.readTree(cleaned);
+            String criteriaIssues = formatFailedCriteriaResults(root.path("criteria_results"));
 
             JsonNode issuesNode = root.path("issues");
             if (issuesNode.isArray() && !issuesNode.isEmpty()) {
                 StringBuilder sb = new StringBuilder();
                 for (JsonNode issue : issuesNode) {
-                    sb.append("- ").append(issue.asText()).append("\n");
+                    sb.append("- ").append(formatReviewIssue(issue)).append("\n");
+                }
+                if (!criteriaIssues.isBlank()) {
+                    sb.append(criteriaIssues).append("\n");
                 }
                 return sb.toString().trim();
             }
@@ -457,9 +687,16 @@ public class AgentOrchestrator {
             if (suggestionsNode.isArray() && !suggestionsNode.isEmpty()) {
                 StringBuilder sb = new StringBuilder();
                 for (JsonNode suggestion : suggestionsNode) {
-                    sb.append("- ").append(suggestion.asText()).append("\n");
+                    sb.append("- ").append(formatReviewIssue(suggestion)).append("\n");
+                }
+                if (!criteriaIssues.isBlank()) {
+                    sb.append(criteriaIssues).append("\n");
                 }
                 return sb.toString().trim();
+            }
+
+            if (!criteriaIssues.isBlank()) {
+                return criteriaIssues;
             }
 
             // 返回 summary 作为备选
@@ -470,6 +707,59 @@ public class AgentOrchestrator {
         } catch (Exception ignored) {
         }
         return "审查未通过，请改进执行结果";
+    }
+
+    private String formatFailedCriteriaResults(JsonNode criteriaResultsNode) {
+        if (criteriaResultsNode == null || !criteriaResultsNode.isArray() || criteriaResultsNode.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (JsonNode result : criteriaResultsNode) {
+            if (result.path("passed").asBoolean(false)) {
+                continue;
+            }
+            String id = result.path("id").asText("");
+            String severity = result.path("severity").asText("");
+            String evidence = result.path("evidence").asText("");
+            sb.append("- 验收失败");
+            if (!id.isBlank()) {
+                sb.append(" ").append(id);
+            }
+            if (!severity.isBlank()) {
+                sb.append(" severity=").append(severity);
+            }
+            if (!evidence.isBlank()) {
+                sb.append(": ").append(evidence);
+            }
+            sb.append("\n");
+        }
+        return sb.toString().trim();
+    }
+
+    private String formatReviewIssue(JsonNode issue) {
+        if (issue == null || issue.isNull()) {
+            return "";
+        }
+        if (!issue.isObject()) {
+            return issue.asText();
+        }
+        List<String> parts = new ArrayList<>();
+        String type = issue.path("type").asText("");
+        String severity = issue.path("severity").asText("");
+        String description = issue.path("description").asText("");
+        if (!type.isBlank()) {
+            parts.add("type=" + type);
+        }
+        if (!severity.isBlank()) {
+            parts.add("severity=" + severity);
+        }
+        if (!description.isBlank()) {
+            parts.add(description);
+        }
+        if (parts.isEmpty()) {
+            return issue.toString();
+        }
+        return String.join(", ", parts);
     }
 
     /**
@@ -619,21 +909,8 @@ public class AgentOrchestrator {
             return;
         }
 
-        out.println("🔍 " + reviewer.getName() + " 正在审查步骤 [" + step.id() + "] 的结果...");
-        String reviewTask = buildReviewTask(step);
-        AgentMessage reviewResult = reviewerForkContext == null
-                ? reviewer.review(reviewTask, result.content(), out)
-                : reviewer.reviewForked(reviewTask, result.content(), reviewerForkContext, out);
-        reviewer.clearHistory();
-
-        if (reviewResult.type() == AgentMessage.Type.ERROR) {
-            log.warn("Reviewer failed for step {}: {}", step.id(), reviewResult.content());
-            out.println("❌ 步骤 [" + step.id() + "] 审查阶段 LLM 调用失败，阻止下游步骤继续执行\n");
-            updateStep(steps, step.id(), step.withFailed("审查 LLM 故障：" + reviewResult.content()));
-            return;
-        }
-
-        boolean approved = parseReviewApproval(reviewResult.content());
+        ReviewDecision reviewDecision = reviewWorkerResult(step, reviewer, result.content(), out, reviewerForkContext);
+        boolean approved = reviewDecision.approved();
         String acceptedResult = result.content();
 
         if (approved) {
@@ -643,7 +920,11 @@ public class AgentOrchestrator {
         }
 
         int retries = retryCount.getOrDefault(step.id(), 0);
-        String issues = parseReviewIssues(reviewResult.content());
+        String issues = reviewDecision.issues();
+        if (reviewDecision.reviewerError()) {
+            updateStep(steps, step.id(), step.withFailed(issues));
+            return;
+        }
         log.info("Step {} rejected (retry {}/{}): {}", step.id(), retries, MAX_RETRIES_PER_STEP, issues);
 
         while (!approved && retries < MAX_RETRIES_PER_STEP) {
@@ -671,23 +952,13 @@ public class AgentOrchestrator {
             }
 
             acceptedResult = retryResult.content();
-            AgentMessage retryReview = reviewerForkContext == null
-                    ? reviewer.review(buildReviewTask(step), acceptedResult, out)
-                    : reviewer.reviewForked(buildReviewTask(step), acceptedResult, reviewerForkContext, out);
-            reviewer.clearHistory();
-
-            if (retryReview.type() == AgentMessage.Type.ERROR) {
-                // 与首次审查失败保持一致：reviewer LLM 故障不应被误判为通过。
-                // 退出重试循环，由下方的 updateStep 保留当前结果，但 approved 维持 false，
-                // 让用户从日志看到"reviewer 故障"并自行决定是否信任产出。
-                log.warn("Reviewer failed for step {} retry {}: {}", step.id(), retries, retryReview.content());
-                out.println("⚠️ 步骤 [" + step.id() + "] 审查阶段 LLM 调用失败，保留当前执行结果\n");
-                issues = "审查 LLM 故障：" + retryReview.content();
+            ReviewDecision retryReview = reviewWorkerResult(step, reviewer, acceptedResult, out, reviewerForkContext);
+            if (retryReview.reviewerError()) {
+                issues = retryReview.issues();
                 break;
             }
-
-            approved = parseReviewApproval(retryReview.content());
-            issues = parseReviewIssues(retryReview.content());
+            approved = retryReview.approved();
+            issues = retryReview.issues();
         }
 
         if (approved) {
@@ -699,12 +970,178 @@ public class AgentOrchestrator {
         }
     }
 
+    private ReviewDecision reviewWorkerResult(ExecutionStep step, SubAgent reviewer, String workerResult,
+                                              PrintStream out, SubAgent.ForkContext reviewerForkContext) {
+        PreReviewResult preReview = runPreReviewHook(step);
+        if (!preReview.passed()) {
+            out.println("⛔ 步骤 [" + step.id() + "] Pre-Review Hook 未通过，跳过 Reviewer LLM");
+            out.println("   反馈: " + preReview.feedback() + "\n");
+            return new ReviewDecision(false, preReview.feedback(), false);
+        }
+
+        out.println("🔍 " + reviewer.getName() + " 正在审查步骤 [" + step.id() + "] 的结果...");
+        String reviewTask = buildReviewTask(step);
+        List<String> reviewToolCalls = Collections.synchronizedList(new ArrayList<>());
+        reviewer.setToolResultConsumer((name, args, result) -> {
+            memoryManager.addToolResult(name, args, result);
+            reviewToolCalls.add(name);
+        });
+        AgentMessage reviewResult = reviewerForkContext == null
+                ? reviewer.review(reviewTask, workerResult, out)
+                : reviewer.reviewForked(reviewTask, workerResult, reviewerForkContext, out);
+        reviewer.clearHistory();
+
+        if (reviewResult.type() == AgentMessage.Type.ERROR) {
+            log.warn("Reviewer failed for step {}: {}", step.id(), reviewResult.content());
+            out.println("❌ 步骤 [" + step.id() + "] 审查阶段 LLM 调用失败，阻止下游步骤继续执行\n");
+            return new ReviewDecision(false, "审查 LLM 故障：" + reviewResult.content(), true);
+        }
+        if (requiresConcreteVerification(step) && reviewToolCalls.isEmpty()) {
+            return new ReviewDecision(false,
+                    "Reviewer 未调用工具验证真实产物；文件/代码/命令类任务不能只根据 Worker 文字说明批准。", false);
+        }
+
+        return new ReviewDecision(parseReviewApproval(reviewResult.content()),
+                parseReviewIssues(reviewResult.content()), false);
+    }
+
+    record ReviewDecision(boolean approved, String issues, boolean reviewerError) {
+    }
+
+    PreReviewResult runPreReviewHook(ExecutionStep step) {
+        if (!requiresConcreteVerification(step) || !requiresJavaHardCheck(step)) {
+            return PreReviewResult.ok();
+        }
+        Path projectRoot = Path.of(toolRegistry.getProjectPath()).toAbsolutePath().normalize();
+        Path javaRoot = projectRoot.resolve("src/main/java");
+        if (!Files.isDirectory(javaRoot)) {
+            return PreReviewResult.ok();
+        }
+
+        if (Files.isRegularFile(projectRoot.resolve("pom.xml"))) {
+            return runPreReviewCommand(projectRoot,
+                    mavenTestCompileCommand(),
+                    "mvn -q -DskipTests test-compile");
+        }
+
+        List<Path> javaFiles;
+        try (var stream = Files.walk(javaRoot)) {
+            javaFiles = stream
+                    .filter(Files::isRegularFile)
+                    .filter(path -> path.toString().endsWith(".java"))
+                    .toList();
+        } catch (IOException e) {
+            return PreReviewResult.failed("Pre-review hard check failed: 无法扫描 Java 文件：" + e.getMessage());
+        }
+        if (javaFiles.isEmpty()) {
+            return PreReviewResult.ok();
+        }
+
+        Path outputDir = projectRoot.resolve("target/paicli-pre-review-classes/" + step.id());
+        try {
+            Files.createDirectories(outputDir);
+        } catch (IOException e) {
+            return PreReviewResult.failed("Pre-review hard check failed: 无法创建编译目录：" + e.getMessage());
+        }
+
+        List<String> command = new ArrayList<>();
+        command.add("javac");
+        command.add("-encoding");
+        command.add("UTF-8");
+        command.add("-d");
+        command.add(outputDir.toString());
+        for (Path file : javaFiles) {
+            command.add(file.toString());
+        }
+        return runPreReviewCommand(projectRoot, command, "javac -encoding UTF-8");
+    }
+
+    private boolean requiresJavaHardCheck(ExecutionStep step) {
+        String text = (step.type() + " " + step.description()).toLowerCase(Locale.ROOT);
+        return text.contains("java")
+                || text.contains(".java")
+                || text.contains("cli")
+                || text.contains("api")
+                || text.contains("代码")
+                || text.contains("编译")
+                || text.contains("入口")
+                || isFinalIntegrationStep(step);
+    }
+
+    private List<String> mavenTestCompileCommand() {
+        if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")) {
+            return List.of("cmd.exe", "/c", "mvn", "-q", "-DskipTests", "test-compile");
+        }
+        return List.of("mvn", "-q", "-DskipTests", "test-compile");
+    }
+
+    private PreReviewResult runPreReviewCommand(Path projectRoot, List<String> command, String displayCommand) {
+        ProcessBuilder processBuilder = new ProcessBuilder(command);
+        processBuilder.directory(projectRoot.toFile());
+        processBuilder.redirectErrorStream(true);
+        try {
+            Process process = processBuilder.start();
+            boolean finished = process.waitFor(PRE_REVIEW_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                return PreReviewResult.failed("Pre-review hard check failed: " + displayCommand
+                        + " 超过 " + PRE_REVIEW_TIMEOUT_SECONDS + "s");
+            }
+            String output = decodeProcessOutput(process.getInputStream().readAllBytes());
+            if (process.exitValue() == 0) {
+                return PreReviewResult.ok();
+            }
+            return PreReviewResult.failed("Pre-review hard check failed: " + displayCommand
+                    + "\n" + abbreviate(output, 4000));
+        } catch (IOException e) {
+            return PreReviewResult.failed("Pre-review hard check failed: 无法执行 " + displayCommand
+                    + "：" + e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return PreReviewResult.failed("Pre-review hard check failed: " + displayCommand + " 被中断");
+        }
+    }
+
+    private String abbreviate(String text, int maxLength) {
+        if (text == null || text.length() <= maxLength) {
+            return text == null ? "" : text;
+        }
+        return text.substring(0, maxLength) + "\n...<truncated>";
+    }
+
+    private String decodeProcessOutput(byte[] bytes) {
+        String utf8 = new String(bytes, StandardCharsets.UTF_8);
+        if (!looksMojibake(utf8)) {
+            return utf8;
+        }
+        String platform = new String(bytes, Charset.defaultCharset());
+        if (!looksMojibake(platform)) {
+            return platform;
+        }
+        try {
+            String gbk = new String(bytes, Charset.forName("GBK"));
+            if (!looksMojibake(gbk)) {
+                return gbk;
+            }
+        } catch (Exception ignored) {
+        }
+        return utf8;
+    }
+
+    private boolean looksMojibake(String text) {
+        if (text == null || text.isEmpty()) {
+            return false;
+        }
+        return text.indexOf('\uFFFD') >= 0 || text.contains("????");
+    }
+
     private String buildStepContext(List<ExecutionStep> steps, ExecutionStep currentStep) {
         StringBuilder context = new StringBuilder();
         context.append("总任务上下文：\n");
         if (currentUserTask != null && !currentUserTask.isBlank()) {
             context.append("原始用户任务：\n").append(currentUserTask).append("\n\n");
         }
+        appendAcceptanceCriteriaSection(context, "本步骤必须满足以下验收点");
         context.append("当前步骤：").append(currentStep.description()).append("\n\n");
         if (isFinalIntegrationStep(currentStep)) {
             context.append("所有步骤状态：\n");
@@ -745,6 +1182,7 @@ public class AgentOrchestrator {
         if (currentUserTask != null && !currentUserTask.isBlank()) {
             task.append("原始用户任务：\n").append(currentUserTask).append("\n\n");
         }
+        appendAcceptanceCriteriaSection(task, "逐条验证以下验收点");
         task.append("当前步骤：").append(step.description());
         if (requiresConcreteVerification(step)) {
             task.append("\n\n审查要求：必须调用工具检查真实产物。")
@@ -752,6 +1190,17 @@ public class AgentOrchestrator {
                     .append("仅凭执行者文字说明不得批准。");
         }
         return task.toString();
+    }
+
+    private void appendAcceptanceCriteriaSection(StringBuilder sb, String title) {
+        if (currentAcceptanceCriteria == null || currentAcceptanceCriteria.isEmpty()) {
+            return;
+        }
+        sb.append("⚠️ ").append(title).append("：\n");
+        for (AcceptanceCriterion criterion : currentAcceptanceCriteria) {
+            sb.append(criterion.formatForPrompt()).append("\n");
+        }
+        sb.append("\n");
     }
 
     private boolean requiresConcreteVerification(ExecutionStep step) {

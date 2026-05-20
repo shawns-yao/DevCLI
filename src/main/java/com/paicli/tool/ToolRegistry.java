@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.paicli.browser.BrowserAuditMetadata;
 import com.paicli.browser.BrowserCheckResult;
 import com.paicli.browser.BrowserConnector;
@@ -74,6 +75,7 @@ public class ToolRegistry {
     private BrowserGuard browserGuard;
     private BrowserConnector browserConnector;
     private java.util.function.Consumer<String> memorySaver;
+    private MemorySaver memorySaveHandler;
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private final ThreadLocal<SkillContextBuffer> skillContextBufferOverride = new ThreadLocal<>();
@@ -151,6 +153,10 @@ public class ToolRegistry {
 
     public void setMemorySaver(java.util.function.Consumer<String> memorySaver) {
         this.memorySaver = memorySaver;
+    }
+
+    public void setMemorySaveHandler(MemorySaver memorySaveHandler) {
+        this.memorySaveHandler = memorySaveHandler;
     }
 
     public void setSkillRegistry(SkillRegistry skillRegistry) {
@@ -340,7 +346,7 @@ public class ToolRegistry {
                 "创建新项目结构",
                 createParameters(
                         new Param("name", "string", "项目名称", true),
-                        new Param("type", "string", "项目类型 (java/python/node)", true)
+                        new Param("type", "string", "项目类型", true, "java", "python", "node")
                 ),
                 args -> {
                     String name = args.get("name");
@@ -536,10 +542,22 @@ public class ToolRegistry {
                     if (fact == null || fact.isBlank()) {
                         return "保存长期记忆失败: fact 不能为空";
                     }
+                    String normalized = fact.trim();
+                    if (memorySaveHandler != null) {
+                        MemorySaveResult saveResult = memorySaveHandler.save(normalized);
+                        if (saveResult == null) {
+                            return "保存长期记忆失败: 记忆保存器未返回结果";
+                        }
+                        if (!saveResult.stored()) {
+                            return saveResult.message() == null || saveResult.message().isBlank()
+                                    ? "长期记忆策略拒绝保存"
+                                    : saveResult.message();
+                        }
+                        return "💾 已保存到长期记忆: " + normalized;
+                    }
                     if (memorySaver == null) {
                         return "保存长期记忆失败: 记忆保存器未初始化";
                     }
-                    String normalized = fact.trim();
                     memorySaver.accept(normalized);
                     return "💾 已保存到长期记忆: " + normalized;
                 }
@@ -709,6 +727,7 @@ public class ToolRegistry {
     private JsonNode createParameters(Param... params) {
         ObjectNode parameters = mapper.createObjectNode();
         parameters.put("type", "object");
+        parameters.put("additionalProperties", false);
         ObjectNode properties = parameters.putObject("properties");
         ArrayNode required = parameters.putArray("required");
 
@@ -716,6 +735,15 @@ public class ToolRegistry {
             ObjectNode prop = properties.putObject(param.name());
             prop.put("type", param.type());
             prop.put("description", param.description());
+            if ("string".equals(param.type()) && param.required()) {
+                prop.put("minLength", 1);
+            }
+            if (param.enumValues() != null && !param.enumValues().isEmpty()) {
+                ArrayNode enumNode = prop.putArray("enum");
+                for (String enumValue : param.enumValues()) {
+                    enumNode.add(enumValue);
+                }
+            }
             if (param.required()) {
                 required.add(param.name());
             }
@@ -825,14 +853,14 @@ public class ToolRegistry {
         BrowserAuditMetadata auditMetadata = null;
 
         try {
+            ToolOutput validationError = validateToolArguments(name, argumentsJson);
+            if (validationError != null) {
+                return validationError;
+            }
+            JsonNode parsedArgs = parseArguments(argumentsJson);
+
             McpRegisteredTool mcpTool = mcpTools.get(name);
             if (mcpTool != null) {
-                JsonNode mcpArgs = mapper.readTree(argumentsJson);
-                McpSchemaValidator.ValidationResult validation =
-                        McpSchemaValidator.validate(mcpTool.descriptor().inputSchema(), mcpArgs);
-                if (!validation.valid()) {
-                    return ToolOutput.text("MCP 参数校验失败: " + validation.message());
-                }
                 BrowserCheckResult browserCheck = checkBrowserTool(name, argumentsJson, false);
                 auditMetadata = browserCheck.metadata();
                 if (browserCheck.blocked()) {
@@ -851,9 +879,8 @@ public class ToolRegistry {
                 return output;
             }
 
-            JsonNode args = mapper.readTree(argumentsJson);
             Map<String, String> argMap = new HashMap<>();
-            args.fields().forEachRemaining(entry ->
+            parsedArgs.fields().forEachRemaining(entry ->
                     argMap.put(entry.getKey(), entry.getValue().asText()));
             String result = tool.executor().execute(argMap);
             if (shouldAudit) {
@@ -873,6 +900,41 @@ public class ToolRegistry {
             }
             return ToolOutput.text("工具执行失败: " + e.getMessage());
         }
+    }
+
+    protected ToolOutput validateToolArguments(String name, String argumentsJson) {
+        Tool tool = tools.get(name);
+        if (tool == null) {
+            return null;
+        }
+        JsonNode parsedArgs;
+        try {
+            parsedArgs = parseArguments(argumentsJson);
+        } catch (JsonProcessingException e) {
+            return validationFailed("不是合法 JSON: " + e.getOriginalMessage());
+        }
+        JsonNode schema = tool.parameters();
+        McpRegisteredTool mcpTool = mcpTools.get(name);
+        if (mcpTool != null) {
+            schema = mcpTool.descriptor().inputSchema();
+        }
+        McpSchemaValidator.ValidationResult validation = McpSchemaValidator.validate(schema, parsedArgs);
+        if (!validation.valid()) {
+            return validationFailed(validation.message());
+        }
+        return null;
+    }
+
+    private JsonNode parseArguments(String argumentsJson) throws JsonProcessingException {
+        if (argumentsJson == null || argumentsJson.isBlank()) {
+            return mapper.createObjectNode();
+        }
+        return mapper.readTree(argumentsJson);
+    }
+
+    private ToolOutput validationFailed(String message) {
+        return ToolOutput.text("工具参数校验失败: " + (message == null || message.isBlank() ? "参数不符合工具 schema" : message)
+                + "。请根据工具 JSON Schema 修正参数后重试。");
     }
 
     private boolean isLegacyExecuteToolOverride() {
@@ -1016,7 +1078,7 @@ public class ToolRegistry {
 
         Process process = null;
         try {
-            ProcessBuilder pb = new ProcessBuilder("bash", "-c", normalized);
+            ProcessBuilder pb = new ProcessBuilder(shellCommand(normalized));
             pb.directory(new File(projectPath));
             pb.redirectErrorStream(true);
             process = pb.start();
@@ -1051,9 +1113,26 @@ public class ToolRegistry {
         }
     }
 
+    private List<String> shellCommand(String command) {
+        if (isWindows()) {
+            String utf8Command = "[Console]::InputEncoding = [Text.UTF8Encoding]::new($false); "
+                    + "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); "
+                    + command;
+            return List.of("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                    "-Command", utf8Command);
+        }
+        return List.of("bash", "-c", command);
+    }
+
+    private static boolean isWindows() {
+        String os = System.getProperty("os.name", "");
+        return os.toLowerCase(Locale.ROOT).contains("win");
+    }
+
     private String readProcessOutput(Process process) throws Exception {
         StringBuilder output = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (output.length() < MAX_COMMAND_OUTPUT_CHARS) {
@@ -1083,11 +1162,27 @@ public class ToolRegistry {
     }
 
     // 记录定义
-    private record Param(String name, String type, String description, boolean required) {}
+    private record Param(String name, String type, String description, boolean required, List<String> enumValues) {
+        private Param(String name, String type, String description, boolean required) {
+            this(name, type, description, required, List.of());
+        }
+
+        private Param(String name, String type, String description, boolean required, String... enumValues) {
+            this(name, type, description, required,
+                    enumValues == null || enumValues.length == 0 ? List.of() : List.of(enumValues));
+        }
+    }
 
     public record Tool(String name, String description, JsonNode parameters, ToolExecutor executor) {}
 
     private record McpRegisteredTool(McpToolDescriptor descriptor, Function<String, ToolOutput> invoker) {}
+
+    public record MemorySaveResult(boolean stored, String message) {}
+
+    @FunctionalInterface
+    public interface MemorySaver {
+        MemorySaveResult save(String fact);
+    }
 
     public record ToolInvocation(String id, String name, String argumentsJson) {}
 

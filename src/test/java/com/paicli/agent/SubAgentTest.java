@@ -24,12 +24,12 @@ import static org.junit.jupiter.api.Assertions.*;
 class SubAgentTest {
 
     @Test
-    void shouldOnlyEnableToolsForWorker() throws Exception {
+    void shouldEnableToolsForWorkerAndReviewer() throws Exception {
         assertFalse(invokeShouldUseTools(new SubAgent("planner", AgentRole.PLANNER,
                 new GLMClient("test-key"), new ToolRegistry())));
         assertTrue(invokeShouldUseTools(new SubAgent("worker", AgentRole.WORKER,
                 new GLMClient("test-key"), new ToolRegistry())));
-        assertFalse(invokeShouldUseTools(new SubAgent("reviewer", AgentRole.REVIEWER,
+        assertTrue(invokeShouldUseTools(new SubAgent("reviewer", AgentRole.REVIEWER,
                 new GLMClient("test-key"), new ToolRegistry())));
     }
 

@@ -463,8 +463,13 @@ public class Main {
                         if (fact == null || fact.isEmpty()) {
                             ui.println("❌ 请提供要保存的内容，例如 /save 这个项目使用Java 17\n");
                         } else {
-                            reactAgent.getMemoryManager().storeFact(fact);
-                            ui.println("💾 已保存到长期记忆（Retrievable）: " + fact + "\n");
+                            com.paicli.memory.MemoryManager.StoreResult result =
+                                    reactAgent.getMemoryManager().storeFactWithPolicy(fact, true);
+                            if (result.stored()) {
+                                ui.println("💾 已保存到长期记忆（Retrievable）: " + fact + "\n");
+                            } else {
+                                ui.println("⚠️ " + result.message() + "\n");
+                            }
                         }
                         continue;
                     }

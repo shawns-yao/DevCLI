@@ -29,6 +29,13 @@
             <version>2.16.0</version>
         </dependency>
 
+        <!-- JSON Schema 校验（工具调用参数执行前强校验，Jackson 2 兼容线） -->
+        <dependency>
+            <groupId>com.networknt</groupId>
+            <artifactId>json-schema-validator</artifactId>
+            <version>1.5.9</version>
+        </dependency>
+
         <!-- HTTP客户端 -->
         <dependency>
             <groupId>com.squareup.okhttp3</groupId>

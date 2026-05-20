@@ -89,7 +89,8 @@ class LoadSkillToolTest {
         tools.setSkillContextBuffer(new SkillContextBuffer());
 
         String result = tools.executeTool("load_skill", "{}");
-        assertTrue(result.contains("name 不能为空"), result);
+        assertTrue(result.contains("工具参数校验失败"), result);
+        assertTrue(result.contains("$.name is required"), result);
     }
 
     private static SkillRegistry registryWith(Path tempDir, String name, String desc, String body) throws IOException {

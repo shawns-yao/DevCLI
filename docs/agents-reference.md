@@ -96,14 +96,24 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `WorkingMemory` 只保存当前会话工具证据 / 任务状态 / 临时事实，作为 system prompt 派生视图注入，不参与压缩
 - 长期记忆只通过 `/save` 或用户明确要求保存
 - 长期记忆只保存跨会话稳定事实，不保存临时指令
+- `LongTermMemoryPolicy` 在写入前计算显式程度、稳定性、未来收益、重复出现、可执行性、置信度和敏感惩罚；`SAVE` 才落库，`CONFIRM` / `SKIP` 作为 `save_memory` 工具结果回传给 LLM
+- 高敏信息(API key/token/密码/身份证等)永不自动保存；收货地址、手机号、健康/财务等敏感个人信息即使显式也要求确认
 
 ### Multi-Agent
 
-- 三角色：Planner / Worker(默认 2 个) / Reviewer
-- 流程：规划 → 按依赖分配 Worker → Reviewer 审查 → 未通过重试(最多 2 次)
+- 三角色：Planner 拆 DAG，Worker 做实现，Reviewer 做硬检查后的质量审查
+- 流程：规划 → 按依赖分配 Worker → Pre-Review Hook → Reviewer 审查 → 未通过重试(最多 2 次)
 - SubAgent IOException 返回 ERROR 类型
 - 所有子代理共享 ToolRegistry 和 MemoryManager
+- Planner JSON 支持 `acceptance_criteria`，用于保存默认参数、可选参数、错误处理、输出格式、副作用等验收点
+- Orchestrator 将验收点前置注入 Worker 上下文，并在 Reviewer 任务中要求逐条验证
+- Reviewer JSON 支持 `criteria_results` / `must_fix`；critical/high 验收点失败，或已有验收点但缺少覆盖，Orchestrator 覆写为不通过
+- WorkingMemory 注入使用 role-scoped view：Planner = taskState + volatileFacts；Worker = taskState + volatileFacts + toolEvidence；Reviewer = taskState + toolEvidence
 - 并行批次通过 `SubAgent.ForkContext` 创建 cache-safe fork：冻结 system prompt 前缀、exact tool definitions 快照、skill body 快照、provider/model 和 fork fingerprint；同批 Worker / Reviewer 从同一 prefix fork，本步骤上下文只进入末尾 user message，提升稳定前缀的 prompt cache 命中概率
+- Reviewer 前置硬约束：Java 项目优先跑 `mvn -q -DskipTests test-compile`；无 `pom.xml` 且存在 `src/main/java` 时跑 `javac -encoding UTF-8`。失败直接生成系统级 `approved=false` 反馈，不调用 Reviewer LLM
+- Reviewer JSON 必须输出 `scores.functional_correctness` / `scores.integration_completeness` / `scores.code_quality`；任一分数低于 `0.6`，或 `functional_correctness < 1.0`，Orchestrator 覆写为不通过
+- Final integration 只做入口、API 导出、默认参数和跨模块联动胶水；普通步骤失败比例达到 `50%` 时熔断
+- 并行资源冲突按具体文件路径/文件名归一化拆 wave；同文件写读/写写串行，不同文件写入可并行，命令任务仍独占
 
 ### HITL System
 
@@ -232,6 +242,14 @@ DAG 拓扑排序 / 可执行任务判定 / 进度可视化
 
 ### ToolRegistry.java
 9 个内置工具 + MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult
+
+- 工具参数先过 JSON 解析和 JSON Schema 校验，再进入真实执行
+- 内置工具和 MCP 工具共用 `McpSchemaValidator`，先走 `json-schema-validator` 标准库，再走本地兜底校验
+- 当前覆盖 required / type / enum / minLength / additionalProperties=false / pattern / minimum 等 JSON Schema 约束
+- 校验失败返回 `工具参数校验失败: ...`，作为 tool result 回灌给 LLM，用于下一轮纠偏
+- 内置工具 schema 默认禁止未知字段；必填 string 默认 `minLength=1`
+- `create_project.type` 使用 enum 限制为 `java` / `python` / `node`
+- Windows 下 `execute_command` 使用 PowerShell 非交互执行并固定 UTF-8 输出；非 Windows 保持 `bash -c`
 
 ### MCP Package
 McpServerManager / McpClient / JsonRpcClient / StdioTransport / StreamableHttpTransport / McpSchemaSanitizer / resources/ / mention/ / notifications/
