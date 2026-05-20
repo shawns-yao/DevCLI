@@ -54,6 +54,7 @@ java -jar target/paicli-1.0-SNAPSHOT.jar serve --http --port 8080
 - `message.delta`
 - `turn.completed`
 - `turn.failed`
+- `turn.rejected`
 
 ## 当前边界
 
@@ -61,6 +62,8 @@ java -jar target/paicli-1.0-SNAPSHOT.jar serve --http --port 8080
 - 后台任务 runner 使用 headless ReAct Agent，不复用交互式 TUI 的 HITL 输入
 - 后台任务取消通过线程中断 + 状态标记实现；正在进行的远端 LLM HTTP 调用能否立即停止取决于底层 client 边界
 - Runtime API 当前不模拟完整 OpenAI Assistants API schema，只保留兼容方向的 threads / turns / events 主路径
+- HTTP 请求线程和 Agent turn 执行线程分离；turn 执行池默认 `2` 线程、队列 `64`，通过 `paicli.runtime.api.turn.threads` / `paicli.runtime.api.turn.queue` 调整
+- turn 队列满时 `POST /v1/threads/{id}/turns` 返回 `429 {"error":"runtime_busy"}`，并写入 `turn.rejected` 事件
 
 ## 验证
 

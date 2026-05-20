@@ -58,6 +58,8 @@ import org.jline.reader.Reference;
 import org.jline.utils.NonBlockingReader;
 import org.jline.utils.AttributedString;
 import org.jline.widget.AutosuggestionWidgets;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.jline.widget.AutopairWidgets;
 import org.jline.console.CmdDesc;
 import org.jline.keymap.KeyMap;
@@ -98,6 +100,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * HITL 增强：路径围栏（PathGuard）、命令快速拒绝（CommandGuard）、操作审计链（AuditLog）—— 见 com.paicli.policy
  */
 public class Main {
+    private static final Logger log = LoggerFactory.getLogger(Main.class);
     private static final String VERSION = "16.1.0";
     private static final String ENV_FILE = ".env";
     private static final String LOG_DIR_PROPERTY = "paicli.log.dir";
@@ -357,8 +360,8 @@ public class Main {
                     return;  // TUI 启动成功，不进入 CLI 循环
                 } catch (Exception e) {
                     hitlHandler.setDelegate(terminalHitlHandler);
+                    log.warn("TUI startup failed; falling back to CLI", e);
                     System.err.println("❌ TUI 启动失败，降级到 CLI: " + e.getMessage());
-                    e.printStackTrace();
                     // 降级到 CLI 继续执行
                 }
             }

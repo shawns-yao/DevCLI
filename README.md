@@ -230,6 +230,9 @@ java -jar target/paicli-1.0-SNAPSHOT.jar serve --http --port 8080
 Authorization: Bearer your_local_api_key
 ```
 
+Runtime API 默认仅绑定 `127.0.0.1`。HTTP 请求线程和 Agent 执行线程隔离；Agent 执行池默认 `2` 个线程、队列 `64`，可通过
+`-Dpaicli.runtime.api.turn.threads` / `-Dpaicli.runtime.api.turn.queue` 调整。队列满时返回 `429 {"error":"runtime_busy"}`。
+
 ## Usage
 
 启动后直接输入自然语言任务：
