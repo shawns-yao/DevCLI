@@ -79,6 +79,8 @@ public class ToolRegistry {
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private final ThreadLocal<SkillContextBuffer> skillContextBufferOverride = new ThreadLocal<>();
+    private final ResourceLeaseManager resourceLeaseManager = new ResourceLeaseManager();
+    private final ThreadLocal<String> resourceLeaseStep = new ThreadLocal<>();
     private java.util.function.BiConsumer<String, String[]> writeFileObserver = (p, ba) -> {};
     private LspManager lspManager = new LspManager(projectPath);
     private SnapshotService snapshotService = SnapshotService.forProject(Path.of(projectPath));
@@ -208,6 +210,35 @@ public class ToolRegistry {
         return override == null ? skillContextBuffer : override;
     }
 
+    public <T> T runWithResourceLease(String stepId, java.util.function.Supplier<T> action) {
+        if (action == null) {
+            return null;
+        }
+        String previous = resourceLeaseStep.get();
+        if (stepId == null || stepId.isBlank()) {
+            resourceLeaseStep.remove();
+        } else {
+            resourceLeaseStep.set(stepId);
+        }
+        try {
+            return action.get();
+        } finally {
+            if (previous == null) {
+                resourceLeaseStep.remove();
+            } else {
+                resourceLeaseStep.set(previous);
+            }
+        }
+    }
+
+    public void releaseResourceLeases(String stepId) {
+        resourceLeaseManager.releaseStep(stepId);
+    }
+
+    public void clearResourceLeases() {
+        resourceLeaseManager.clear();
+    }
+
     /**
      * 注册 write_file 写入观察者：参数 (path, [before, after])，
      * before == null 表示新建文件或读不出原文。
@@ -272,6 +303,10 @@ public class ToolRegistry {
                                 + (MAX_WRITE_FILE_BYTES / 1024 / 1024) + "MB 上限");
                     }
                     Path safe = pathGuard.resolveSafe(path);
+                    String activeStep = resourceLeaseStep.get();
+                    if (activeStep != null && !activeStep.isBlank()) {
+                        resourceLeaseManager.acquireWrite(activeStep, safe);
+                    }
                     String before = null;
                     try {
                         if (Files.exists(safe) && Files.isRegularFile(safe)) {

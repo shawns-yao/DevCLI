@@ -109,6 +109,34 @@ class ToolRegistryTest {
     }
 
     @Test
+    void shouldRejectRuntimeWriteConflictBetweenParallelSteps(@TempDir Path tempDir) {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        String first = registry.runWithResourceLease("step_a", () ->
+                registry.executeTool("write_file", "{\"path\":\"src/main/User.java\",\"content\":\"class A {}\"}"));
+        String second = registry.runWithResourceLease("step_b", () ->
+                registry.executeTool("write_file", "{\"path\":\"src/main/User.java\",\"content\":\"class B {}\"}"));
+
+        assertTrue(first.contains("文件已写入"), first);
+        assertTrue(second.contains("策略拒绝"), second);
+        assertTrue(second.contains("资源写入冲突"), second);
+    }
+
+    @Test
+    void shouldAllowSameStepToWriteSameFileAgain(@TempDir Path tempDir) {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        String result = registry.runWithResourceLease("step_a", () -> {
+            registry.executeTool("write_file", "{\"path\":\"src/main/User.java\",\"content\":\"class A {}\"}");
+            return registry.executeTool("write_file", "{\"path\":\"src/main/User.java\",\"content\":\"class A2 {}\"}");
+        });
+
+        assertTrue(result.contains("文件已写入"), result);
+    }
+
+    @Test
     void browserConnectToolUsesInjectedConnector() {
         ToolRegistry registry = new ToolRegistry();
         registry.setBrowserConnector(new BrowserConnector() {

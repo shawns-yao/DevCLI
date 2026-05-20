@@ -60,6 +60,7 @@ Main
 - `WorkingMemory（工作记忆）` 只保存当前会话派生状态，不承担压缩职责。
 - `LongTermMemory（长期记忆）` 只保存跨会话稳定事实，默认不把临时任务请求写入长期层。
 - `PathGuard（路径围栏）` 负责限制文件访问不逃逸项目根。
+- `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 和 `/team` 并行执行时拦截 `write_file`，同一文件只能被一个运行中 task / step 写入，避免运行时新增文件写入目标导致互相覆盖。
 - `CommandGuard（命令防线）` 是危险命令快速拒绝层，不替代 HITL 和路径策略。
 - `HitlToolRegistry（审批工具注册表）` 位于真实工具执行前，保证危险操作先经过审批和策略判定。
 
