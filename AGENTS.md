@@ -53,11 +53,25 @@ mvn test -DskipTests=false                  # 全量回归
 | Plan-and-Execute | `PlanExecuteAgent.java` | `/plan` |
 | Multi-Agent | `AgentOrchestrator.java` | `/team` |
 
+Multi-Agent 中 Planner 负责拆解 DAG，Worker 负责实现子任务，Reviewer 负责硬检查通过后的质量审查。
+
+Planner 必须输出 `acceptance_criteria`；Orchestrator 会把验收点前置注入 Worker，并要求 Reviewer 用 `criteria_results` 逐条验证。critical/high 验收点失败或缺少覆盖时强制不通过。
+
+Multi-Agent 的 WorkingMemory 按角色注入隔离视图：Planner 只看任务状态 + 会话关键事件，不看工具原文证据；Worker 看完整任务状态 + 关键事件 + 工具证据；Reviewer 只看任务状态 + 工具证据，避免把会话事件误当验收依据。
+
 Multi-Agent 并行批次使用 `SubAgent.ForkContext` 共享冻结 system prompt 前缀、exact tool definitions 快照、skill body 快照和 fork fingerprint；每个子任务只追加自己的 user 后缀，避免并行 Worker / Reviewer 因历史或动态工具差异破坏 prompt cache 命中。
+
+Reviewer 前置硬约束：Worker 产物进入 Reviewer LLM 前，`AgentOrchestrator` 会先跑 Pre-Review Hook；Java 项目优先 `mvn -q -DskipTests test-compile`，无 Maven 时用 `javac -encoding UTF-8` 编译 `src/main/java`。失败时直接生成 `approved=false` 反馈打回 Worker，不唤醒 Reviewer LLM。
+
+Reviewer 输出必须包含三层评分：`functional_correctness`、`integration_completeness`、`code_quality`。任一分数低于 `0.6`，或 `functional_correctness < 1.0`，Orchestrator 强制判不通过。
+
+Final integration 只做入口/API/默认参数/跨模块联动胶水；普通步骤失败比例达到 `50%` 时熔断，不让最终步骤强行修补。
 
 内置工具 9 个：`read_file` / `write_file` / `list_dir` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `revert_turn`
 
 MCP 动态工具：`mcp__{server}__{tool}`（+ resources 虚拟工具）
+
+工具调用可靠性链路：LLM 先按 reasoning 说明目标、工具选择和参数来源；工具定义使用 JSON Schema 强约束类型、必填项、枚举值和未知字段；`ToolRegistry` 执行前通过 `json-schema-validator` + 本地兜底校验内置工具和 MCP 工具参数，失败以 `工具参数校验失败` 回传模型修正；危险工具继续走 HITL / Policy / AuditLog；工具结果进入 WorkingMemory，最终回答必须用工具证据闭环。
 
 ## 仓库结构
 
@@ -129,6 +143,7 @@ src/main/java/com/paicli/
 
 - 三条路径都走 `executeTools()`，不手写 for-loop
 - 默认最多 4 个并发，结果保持原始顺序
+- 参数非法时不进入真实执行，返回可读校验错误给 LLM 纠偏
 
 ### Web + Browser
 

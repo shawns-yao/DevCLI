@@ -197,6 +197,20 @@ class HitlToolRegistryTest {
         assertEquals(0, stub.requestCount());
     }
 
+    @Test
+    void invalidDangerousToolArgumentsAreRejectedBeforeApproval() {
+        StubHandler stub = new StubHandler(req -> {
+            throw new AssertionError("参数非法时不应打扰 HITL 审批");
+        });
+        HitlToolRegistry registry = new HitlToolRegistry(stub);
+
+        String result = registry.executeTool("write_file", "{\"path\":\"a.txt\",\"content\":123}");
+
+        assertTrue(result.contains("工具参数校验失败"));
+        assertTrue(result.contains("$.content must be string"));
+        assertEquals(0, stub.requestCount());
+    }
+
     /** 可预设决策结果的 HitlHandler stub。 */
     private static final class StubHandler implements HitlHandler {
         private final Function<ApprovalRequest, ApprovalResult> decision;

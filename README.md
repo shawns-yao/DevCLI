@@ -269,6 +269,8 @@ Authorization: Bearer your_local_api_key
 /team 检查认证模块的安全问题，修复高风险项并补充测试
 ```
 
+Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 做实现，Reviewer 做硬检查后的质量审查。验收点会前置注入 Worker，并由 Reviewer 用 `criteria_results` 逐条验证；critical/high 失败或缺少覆盖强制不通过。三角色注入 role-scoped WorkingMemory：Planner 看任务状态 + 关键事件，Worker 看完整上下文，Reviewer 看任务状态 + 工具证据。Reviewer 前会自动执行 Java 编译硬检查，失败直接打回；Reviewer JSON 采用 `functional_correctness` / `integration_completeness` / `code_quality` 三层评分，未达阈值强制不通过。
+
 ## Commands
 
 常用命令：
@@ -318,13 +320,15 @@ Authorization: Bearer your_local_api_key
 
 同一轮模型返回多个工具调用时，DevCLI 会并行执行可并行的工具，并按原始顺序把结果回灌给模型。
 
+工具调用可靠性：工具定义以 JSON Schema 约束参数类型、必填项、枚举值和未知字段；`ToolRegistry` 在真实执行前通过 `json-schema-validator` + 本地兜底校验内置工具与 MCP 工具参数，非法 JSON、类型错误、空必填、非法枚举、pattern/minimum 等 schema 约束失败会以 `工具参数校验失败` 回传给模型修正。危险工具仍走 HITL 审批、策略拦截和 AuditLog；工具错误会回灌给模型继续纠偏，最终答复必须基于工具证据。
+
 ## Memory
 
 DevCLI 的上下文分为四层：
 
 - `ConversationHistory（对话历史）`：真实 LLM messages，由压缩器治理窗口。
 - `WorkingMemory（工作记忆）`：当前会话工具证据、任务状态和临时事实，不跨会话持久化。
-- `LongTermMemory（长期记忆）`：用户明确保存的跨会话稳定事实，SQLite 持久化，支持检索注入。
+- `LongTermMemory（长期记忆）`：跨会话稳定事实，SQLite 持久化，支持检索注入；写入前经过 `LongTermMemoryPolicy` 打分，显式低敏偏好/项目事实可自动保存，敏感或中等置信信息要求确认，临时闲聊和低复用信息跳过。
 - `StickyMemory（强约束记忆）`：通过 `/save --pin` 保存，每轮全量注入 system prompt。
 
 保存长期事实：

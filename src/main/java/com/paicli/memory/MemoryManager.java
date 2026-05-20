@@ -132,15 +132,44 @@ public class MemoryManager implements AutoCloseable {
      * 存储关键事实到长期记忆
      */
     public void storeFact(String fact) {
+        storeFact(fact, Map.of("source", "fact"));
+    }
+
+    /**
+     * 带长期记忆策略的写入入口。低价值信息不会落库，敏感/中等置信信息返回确认结果。
+     */
+    public StoreResult storeFactWithPolicy(String fact) {
+        return storeFactWithPolicy(fact, false);
+    }
+
+    /**
+     * @param explicitRequest true 表示用户已经通过 /save 或 save_memory 明确请求长期保存
+     */
+    public StoreResult storeFactWithPolicy(String fact, boolean explicitRequest) {
+        LongTermMemoryPolicy.Decision decision = LongTermMemoryPolicy.evaluate(fact, 0, explicitRequest);
+        if (decision.action() != LongTermMemoryPolicy.Action.SAVE) {
+            return new StoreResult(false, decision, "长期记忆策略" + switch (decision.action()) {
+                case CONFIRM -> "需要确认: " + decision.reason();
+                case SKIP -> "跳过: " + decision.reason();
+                case SAVE -> "允许保存";
+            });
+        }
+        storeFact(fact, decision.metadata());
+        return new StoreResult(true, decision, "已保存到长期记忆");
+    }
+
+    private void storeFact(String fact, Map<String, String> metadata) {
         MemoryEntry entry = new MemoryEntry(
                 "fact-" + UUID.randomUUID().toString().substring(0, 8),
                 fact,
                 MemoryEntry.MemoryType.FACT,
-                Map.of("source", "fact"),
+                metadata == null || metadata.isEmpty() ? Map.of("source", "fact") : metadata,
                 MemoryEntry.estimateTokens(fact)
         );
         longTermMemory.store(entry);
     }
+
+    public record StoreResult(boolean stored, LongTermMemoryPolicy.Decision decision, String message) {}
 
     // ─────────────────────────────────────────────────────────
     // 读取（注入到 system prompt）
@@ -167,6 +196,34 @@ public class MemoryManager implements AutoCloseable {
      */
     public String buildWorkingMemorySection() {
         return workingMemory.renderForPrompt();
+    }
+
+    /**
+     * 为 Multi-Agent 角色构建隔离后的工作记忆视图。
+     *
+     * Planner 只需要任务状态和关键事件，避免被 Worker 的工具原文证据污染；
+     * Worker 需要完整执行上下文；
+     * Reviewer 聚焦任务状态和工具证据，避免把会话事件当成验收证据。
+     */
+    public String buildWorkingMemorySectionForAgent(String agentType) {
+        return workingMemory.renderForPrompt(viewForAgent(agentType));
+    }
+
+    private static WorkingMemory.View viewForAgent(String agentType) {
+        if (agentType == null || agentType.isBlank()) {
+            return WorkingMemory.View.FULL;
+        }
+        String normalized = agentType.toLowerCase(java.util.Locale.ROOT);
+        if (normalized.contains("planner")) {
+            return WorkingMemory.View.PLANNER;
+        }
+        if (normalized.contains("reviewer")) {
+            return WorkingMemory.View.REVIEWER;
+        }
+        if (normalized.contains("worker")) {
+            return WorkingMemory.View.WORKER;
+        }
+        return WorkingMemory.View.FULL;
     }
 
     // ─────────────────────────────────────────────────────────

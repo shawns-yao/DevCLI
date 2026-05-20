@@ -66,6 +66,13 @@ public class WorkingMemory {
     private final LinkedList<String> volatileFacts = new LinkedList<>();
     private final LinkedHashMap<String, String> taskState = new LinkedHashMap<>();
 
+    public enum View {
+        FULL,
+        PLANNER,
+        WORKER,
+        REVIEWER
+    }
+
     public WorkingMemory() {
         this(DEFAULT_MAX_TOOL_RESULTS, DEFAULT_MAX_VOLATILE_FACTS);
     }
@@ -170,6 +177,14 @@ public class WorkingMemory {
      * 渲染为 system prompt 一段 Markdown。空内容返回空串（PromptAssembler 会跳过空段）。
      */
     public synchronized String renderForPrompt() {
+        return renderForPrompt(View.FULL);
+    }
+
+    /**
+     * 按 Agent 角色渲染工作记忆派生视图，避免 Multi-Agent 三角色共享同一份运行态证据。
+     */
+    public synchronized String renderForPrompt(View view) {
+        View effectiveView = view == null ? View.FULL : view;
         StringBuilder sb = new StringBuilder();
         if (!taskState.isEmpty()) {
             sb.append("### 当前任务状态\n\n");
@@ -178,7 +193,7 @@ public class WorkingMemory {
             }
             sb.append('\n');
         }
-        if (!volatileFacts.isEmpty()) {
+        if (shouldRenderVolatileFacts(effectiveView) && !volatileFacts.isEmpty()) {
             sb.append("### 本会话已发生的关键事件（避免重复执行）\n\n");
             // 倒序，最新事件在前
             List<String> reversed = new ArrayList<>(volatileFacts);
@@ -188,7 +203,7 @@ public class WorkingMemory {
             }
             sb.append('\n');
         }
-        if (!recentToolResults.isEmpty()) {
+        if (shouldRenderToolEvidence(effectiveView) && !recentToolResults.isEmpty()) {
             sb.append("### 最近工具调用证据（精确实体来源）\n\n");
             // 倒序，最新调用在前
             List<ToolEvidence> reversed = new ArrayList<>(recentToolResults);
@@ -204,6 +219,14 @@ public class WorkingMemory {
             }
         }
         return sb.toString().trim();
+    }
+
+    private static boolean shouldRenderVolatileFacts(View view) {
+        return view == View.FULL || view == View.PLANNER || view == View.WORKER;
+    }
+
+    private static boolean shouldRenderToolEvidence(View view) {
+        return view == View.FULL || view == View.WORKER || view == View.REVIEWER;
     }
 
     /** 状态摘要给 /memory 命令显示。 */

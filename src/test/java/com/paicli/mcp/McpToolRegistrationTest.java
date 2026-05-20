@@ -89,7 +89,7 @@ class McpToolRegistrationTest {
 
             String result = registry.executeTool("mcp__demo__required_echo", "{}");
 
-            assertTrue(result.contains("MCP 参数校验失败"));
+            assertTrue(result.contains("工具参数校验失败"));
             assertTrue(result.contains("$.text is required"));
         });
     }

@@ -136,8 +136,9 @@ public final class TuiSessionController implements AutoCloseable {
             if (fact.isEmpty()) {
                 appendSystem("请提供要保存的内容，例如 /save 这个项目使用 Java 17");
             } else {
-                reactAgent.getMemoryManager().storeFact(fact);
-                appendSystem("已保存到长期记忆: " + fact);
+                com.paicli.memory.MemoryManager.StoreResult result =
+                        reactAgent.getMemoryManager().storeFactWithPolicy(fact, true);
+                appendSystem(result.stored() ? "已保存到长期记忆: " + fact : result.message());
             }
             return true;
         }

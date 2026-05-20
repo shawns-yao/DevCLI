@@ -71,6 +71,10 @@ public class Agent implements AutoCloseable {
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
         this.toolRegistry.setMemorySaver(memoryManager::storeFact);
+        this.toolRegistry.setMemorySaveHandler(fact -> {
+            MemoryManager.StoreResult result = memoryManager.storeFactWithPolicy(fact, true);
+            return new ToolRegistry.MemorySaveResult(result.stored(), result.message());
+        });
         conversationHistory.add(LlmClient.Message.system(buildSystemPrompt("")));
     }
 
@@ -426,7 +430,7 @@ public class Agent implements AutoCloseable {
                 .toList();
         String fact = ExplicitMemoryHints.browserLoginFact(userInput, recentTexts);
         if (fact != null && !fact.isBlank()) {
-            memoryManager.storeFact(fact);
+            memoryManager.storeFactWithPolicy(fact, true);
         }
     }
 

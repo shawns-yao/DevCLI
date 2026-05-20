@@ -38,6 +38,10 @@ public class HitlToolRegistry extends ToolRegistry {
         if (!hitlHandler.isEnabled() || !ApprovalPolicy.requiresApproval(name)) {
             return super.doExecuteTool(name, argumentsJson);
         }
+        ToolOutput validationError = validateToolArguments(name, argumentsJson);
+        if (validationError != null) {
+            return validationError;
+        }
         BrowserCheckResult browserCheck = checkBrowserTool(name, argumentsJson, true);
         if (browserCheck.blocked()) {
             return super.doExecuteTool(name, argumentsJson);

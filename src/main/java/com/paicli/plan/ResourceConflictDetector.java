@@ -85,12 +85,35 @@ public final class ResourceConflictDetector {
             }
             String[] tokens = text.split("[\\s,，;；:：()（）\\[\\]{}<>\"']+");
             for (String token : tokens) {
-                String cleaned = token.trim().replace("\\", "/");
+                String cleaned = normalizeResourceToken(token);
+                if (cleaned.isEmpty()) {
+                    continue;
+                }
                 if (cleaned.contains("/") || cleaned.matches(".*\\.[A-Za-z0-9]{1,8}$")) {
                     resources.add(cleaned);
+                    int slash = cleaned.lastIndexOf('/');
+                    if (slash >= 0 && slash < cleaned.length() - 1) {
+                        resources.add(cleaned.substring(slash + 1));
+                    }
+                } else if (cleaned.matches("[A-Z][A-Za-z0-9_]*(Cli|CLI|Controller|Service|Repository|Util|Utils|Manager|Parser|Command|Handler|Application|Config)")) {
+                    resources.add(cleaned + ".java");
                 }
             }
             return resources;
+        }
+
+        private static String normalizeResourceToken(String token) {
+            if (token == null) {
+                return "";
+            }
+            String cleaned = token.trim()
+                    .replace("\\", "/")
+                    .replaceAll("^[`./]+", "")
+                    .replaceAll("[`。.!！?？]+$", "");
+            while (cleaned.contains("//")) {
+                cleaned = cleaned.replace("//", "/");
+            }
+            return cleaned;
         }
     }
 }

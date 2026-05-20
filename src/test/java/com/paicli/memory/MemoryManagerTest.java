@@ -101,6 +101,50 @@ class MemoryManagerTest {
     }
 
     @Test
+    void storeFactWithPolicyShouldSkipLowValueTemporaryFacts() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+
+            MemoryManager.StoreResult result = memoryManager.storeFactWithPolicy("今天地铁好挤，天气也不错");
+
+            assertFalse(result.stored());
+            assertEquals(LongTermMemoryPolicy.Action.SKIP, result.decision().action());
+            assertEquals(0, longTermMemory.size());
+        }
+    }
+
+    @Test
+    void storeFactWithPolicyShouldPersistExplicitLowRiskPreferenceWithMetadata() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+
+            MemoryManager.StoreResult result = memoryManager.storeFactWithPolicy("记住：我默认使用 Java 17 开发");
+
+            assertTrue(result.stored(), result.message());
+            assertEquals(1, longTermMemory.size());
+            MemoryEntry entry = longTermMemory.getAll().get(0);
+            assertEquals("preference", entry.getMetadata().get("memory_type"));
+            assertEquals("explicit", entry.getMetadata().get("source"));
+            assertTrue(entry.getMetadata().containsKey("score"));
+        }
+    }
+
+    @Test
+    void storeFactWithPolicyShouldTreatSaveMemoryToolCallAsExplicitRequest() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+
+            MemoryManager.StoreResult result = memoryManager.storeFactWithPolicy("用户默认使用简体中文短句回答", true);
+
+            assertTrue(result.stored(), result.message());
+            assertEquals("explicit", longTermMemory.getAll().get(0).getMetadata().get("source"));
+        }
+    }
+
+    @Test
     void compressionTriggerRatioAppliesToAllModelsUniformly() {
         // 验证：长 window 模型也使用统一的 90% 压缩触发阈值，没有"长模式不压缩"的二元开关
         MemoryManager memoryManager = new MemoryManager(new GLMClient("test-key"));
@@ -129,6 +173,32 @@ class MemoryManagerTest {
         try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
              MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {
             assertTrue(memoryManager.buildWorkingMemorySection().isBlank());
+        }
+    }
+
+    @Test
+    void buildWorkingMemorySectionForAgentShouldIsolateRoleSpecificViews() {
+        try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {
+            memoryManager.setTaskState("plan_task", "step_1");
+            memoryManager.addVolatileFact("用户最新输入: 修复 agent 记忆隔离");
+            memoryManager.addToolResult("read_file", "{\"path\":\"Secret.java\"}", "secret tool evidence");
+
+            String planner = memoryManager.buildWorkingMemorySectionForAgent("planner");
+            assertTrue(planner.contains("plan_task"));
+            assertTrue(planner.contains("用户最新输入"));
+            assertFalse(planner.contains("secret tool evidence"), planner);
+            assertFalse(planner.contains("最近工具调用证据"), planner);
+
+            String worker = memoryManager.buildWorkingMemorySectionForAgent("worker");
+            assertTrue(worker.contains("plan_task"));
+            assertTrue(worker.contains("用户最新输入"));
+            assertTrue(worker.contains("secret tool evidence"));
+
+            String reviewer = memoryManager.buildWorkingMemorySectionForAgent("reviewer");
+            assertTrue(reviewer.contains("plan_task"));
+            assertTrue(reviewer.contains("secret tool evidence"));
+            assertFalse(reviewer.contains("用户最新输入"), reviewer);
         }
     }
 
