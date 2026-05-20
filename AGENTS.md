@@ -61,6 +61,8 @@ Multi-Agent 的 WorkingMemory 按角色注入隔离视图：Planner 只看任务
 
 Multi-Agent 并行批次使用 `SubAgent.ForkContext` 共享冻结 system prompt 前缀、exact tool definitions 快照、skill body 快照和 fork fingerprint；每个子任务只追加自己的 user 后缀，避免并行 Worker / Reviewer 因历史或动态工具差异破坏 prompt cache 命中。
 
+并行 Worker 写文件时，`ToolRegistry.write_file` 会进入运行时资源租约检查：每个 `/plan` task 或 `/team` step 以自己的 id 持有写租约，同一文件只能被一个运行中步骤写入；冲突返回策略拒绝，不做 last-writer-wins 覆盖或 LLM 自动合并。设计说明见 `docs/runtime-resource-lease-design.md`。
+
 Reviewer 前置硬约束：Worker 产物进入 Reviewer LLM 前，`AgentOrchestrator` 会先跑 Pre-Review Hook；Java 项目优先 `mvn -q -DskipTests test-compile`，无 Maven 时用 `javac -encoding UTF-8` 编译 `src/main/java`。失败时直接生成 `approved=false` 反馈打回 Worker，不唤醒 Reviewer LLM。
 
 Reviewer 输出必须包含三层评分：`functional_correctness`、`integration_completeness`、`code_quality`。任一分数低于 `0.6`，或 `functional_correctness < 1.0`，Orchestrator 强制判不通过。

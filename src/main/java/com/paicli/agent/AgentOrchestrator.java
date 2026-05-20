@@ -820,8 +820,12 @@ public class AgentOrchestrator {
                 configureSubAgent(localReviewer);
                 try {
                     worker = workerPool.take();
-                    runStep(step, steps, retryCount, worker, localReviewer, context, stepOut,
-                            workerForkContext, reviewerForkContext);
+                    SubAgent leasedWorker = worker;
+                    toolRegistry.runWithResourceLease(step.id(), () -> {
+                        runStep(step, steps, retryCount, leasedWorker, localReviewer, context, stepOut,
+                                workerForkContext, reviewerForkContext);
+                        return null;
+                    });
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     updateStep(steps, step.id(), step.withFailed("并行执行被中断"));
@@ -835,6 +839,7 @@ public class AgentOrchestrator {
                         worker.clearHistory();
                         workerPool.offer(worker);
                     }
+                    toolRegistry.releaseResourceLeases(step.id());
                     stepOut.flush();
                 }
                 return null;
@@ -881,6 +886,20 @@ public class AgentOrchestrator {
                          PrintStream out,
                          SubAgent.ForkContext workerForkContext,
                          SubAgent.ForkContext reviewerForkContext) {
+        try {
+            runStepWithLease(step, steps, retryCount, worker, reviewer, context, out,
+                    workerForkContext, reviewerForkContext);
+        } finally {
+            toolRegistry.releaseResourceLeases(step.id());
+        }
+    }
+
+    private void runStepWithLease(ExecutionStep step, List<ExecutionStep> steps,
+                                  Map<String, Integer> retryCount,
+                                  SubAgent worker, SubAgent reviewer, String context,
+                                  PrintStream out,
+                                  SubAgent.ForkContext workerForkContext,
+                                  SubAgent.ForkContext reviewerForkContext) {
         out.println("🛠️ " + worker.getName() + " 执行步骤 [" + step.id() + "]: " + step.description());
         if (CancellationContext.isCancelled()) {
             updateStep(steps, step.id(), step.withFailed("用户取消"));
@@ -889,9 +908,9 @@ public class AgentOrchestrator {
         }
 
         AgentMessage taskMsg = AgentMessage.task("orchestrator", step.description());
-        AgentMessage result = workerForkContext == null
+        AgentMessage result = toolRegistry.runWithResourceLease(step.id(), () -> workerForkContext == null
                 ? worker.executeWithContext(taskMsg, context, out)
-                : worker.executeForkedWithContext(taskMsg, context, workerForkContext, out);
+                : worker.executeForkedWithContext(taskMsg, context, workerForkContext, out));
         if (CancellationContext.isCancelled()) {
             updateStep(steps, step.id(), step.withFailed("用户取消"));
             out.println("⏹️ 步骤 [" + step.id() + "] 已取消\n");
@@ -934,9 +953,9 @@ public class AgentOrchestrator {
             out.println("   反馈: " + issues + "\n");
 
             String feedbackContext = context + "\n\n之前的执行结果被审查拒绝，原因：\n" + issues;
-            AgentMessage retryResult = workerForkContext == null
+            AgentMessage retryResult = toolRegistry.runWithResourceLease(step.id(), () -> workerForkContext == null
                     ? worker.executeWithContext(taskMsg, feedbackContext, out)
-                    : worker.executeForkedWithContext(taskMsg, feedbackContext, workerForkContext, out);
+                    : worker.executeForkedWithContext(taskMsg, feedbackContext, workerForkContext, out));
             if (retryResult.type() == AgentMessage.Type.ERROR) {
                 log.warn("Step {} retry {} failed at LLM layer: {}", step.id(), retries, retryResult.content());
                 issues = "重试时 LLM 调用失败：" + retryResult.content();

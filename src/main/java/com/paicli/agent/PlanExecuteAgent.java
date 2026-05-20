@@ -30,6 +30,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.*;
@@ -393,9 +394,12 @@ public class PlanExecuteAgent {
             task.markStarted();
 
             try {
-                return List.of(TaskExecutionResult.success(task, executeTask(plan.getGoal(), plan, task, streamState, out)));
+                return List.of(TaskExecutionResult.success(task, toolRegistry.runWithResourceLease(task.getId(),
+                        () -> executeTaskUnchecked(plan.getGoal(), plan, task, streamState, out))));
             } catch (Exception e) {
                 return List.of(TaskExecutionResult.failure(task, e));
+            } finally {
+                toolRegistry.releaseResourceLeases(task.getId());
             }
         }
 
@@ -421,9 +425,12 @@ public class PlanExecuteAgent {
                 PrintStream taskOut = new PrintStream(baos, true, StandardCharsets.UTF_8);
                 futures.add(executor.submit(() -> {
                     try {
-                        return TaskExecutionResult.success(task, executeTask(plan.getGoal(), plan, task, streamState, taskOut));
+                        return TaskExecutionResult.success(task, toolRegistry.runWithResourceLease(task.getId(),
+                                () -> executeTaskUnchecked(plan.getGoal(), plan, task, streamState, taskOut)));
                     } catch (Exception e) {
                         return TaskExecutionResult.failure(task, e);
+                    } finally {
+                        toolRegistry.releaseResourceLeases(task.getId());
                     }
                 }));
             }
@@ -464,6 +471,15 @@ public class PlanExecuteAgent {
     /**
      * 执行单个任务（支持多轮工具调用）
      */
+    private TaskRunResult executeTaskUnchecked(String goal, ExecutionPlan plan, Task task,
+                                               StreamState streamState, PrintStream out) {
+        try {
+            return executeTask(goal, plan, task, streamState, out);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
     private TaskRunResult executeTask(String goal, ExecutionPlan plan, Task task,
                                       StreamState streamState, PrintStream out) throws IOException {
         // 注入长期记忆上下文
