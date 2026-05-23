@@ -185,6 +185,39 @@ class ToolRegistryTest {
     }
 
     @Test
+    void listMemoryToolUsesInjectedMemoryLister() {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setMemoryListHandler(limit -> "memories limit=" + limit);
+
+        String result = registry.executeTool("list_memory", "{\"limit\":2}");
+
+        assertEquals("memories limit=2", result);
+    }
+
+    @Test
+    void listMemoryToolReportsMissingLister() {
+        ToolRegistry registry = new ToolRegistry();
+
+        String result = registry.executeTool("list_memory", "{}");
+
+        assertTrue(result.contains("记忆查询器未初始化"), result);
+    }
+
+    @Test
+    void listMemoryToolDefinitionGuidesMemoryQueriesWithoutKeywordRouting() {
+        ToolRegistry registry = new ToolRegistry();
+
+        var tool = registry.getToolDefinitions().stream()
+                .filter(definition -> "list_memory".equals(definition.name()))
+                .findFirst()
+                .orElseThrow();
+
+        assertTrue(tool.description().contains("长期记忆"));
+        assertTrue(tool.description().contains("只读"));
+        assertTrue(tool.description().contains("search_code"));
+    }
+
+    @Test
     void shouldRejectMalformedToolArgumentsBeforeExecution() {
         ToolRegistry registry = new ToolRegistry();
 

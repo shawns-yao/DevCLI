@@ -411,6 +411,8 @@ Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 做实现
 | `search_code` | 检索代码库 |
 | `web_search` | 搜索互联网 |
 | `web_fetch` | 抓取已知 URL 并提取正文 |
+| `save_memory` | 保存长期记忆 |
+| `list_memory` | 只读列出长期记忆 |
 | `revert_turn` | 回滚最近 turn 的改动 |
 | `mcp__{server}__{tool}` | MCP server 动态工具 |
 | `mcp__{server}__read_resource` | 读取 MCP resource |

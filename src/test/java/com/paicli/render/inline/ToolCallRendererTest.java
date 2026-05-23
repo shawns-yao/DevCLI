@@ -96,6 +96,7 @@ class ToolCallRendererTest {
         assertEquals("📖 读取 1 个文件", ToolCallRenderer.toolLabel("read_file", 1));
         assertEquals("✏️ 写入 2 个文件", ToolCallRenderer.toolLabel("write_file", 2));
         assertEquals("⚡ 执行 1 条命令", ToolCallRenderer.toolLabel("execute_command", 1));
+        assertEquals("🧠 查看长期记忆 1 次", ToolCallRenderer.toolLabel("list_memory", 1));
     }
 
     @Test
@@ -113,6 +114,7 @@ class ToolCallRendererTest {
     @Test
     void extractKeyParamReturnsEmptyForNullArgs() {
         assertEquals("", ToolCallRenderer.extractKeyParam("read_file", null));
+        assertEquals("20", ToolCallRenderer.extractKeyParam("list_memory", "{\"limit\":20}"));
     }
 
     private static LlmClient.ToolCall tc(String name, String args) {

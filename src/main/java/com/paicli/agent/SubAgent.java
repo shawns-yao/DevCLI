@@ -576,6 +576,7 @@ public class SubAgent {
             case "web_search" -> "🌐 联网搜索 " + count + " 次";
             case "web_fetch" -> "📰 抓取 " + count + " 个网页";
             case "save_memory" -> "💾 保存长期记忆 " + count + " 条";
+            case "list_memory" -> "🧠 查看长期记忆 " + count + " 次";
             default -> toolName != null && toolName.startsWith("mcp__")
                     ? formatMcpLabel(toolName, count)
                     : "🔧 " + toolName + " × " + count;
@@ -600,6 +601,7 @@ public class SubAgent {
                 case "search_code", "web_search" -> "query";
                 case "web_fetch" -> "url";
                 case "save_memory" -> "fact";
+                case "list_memory" -> "limit";
                 default -> null;
             };
             if (key == null) {

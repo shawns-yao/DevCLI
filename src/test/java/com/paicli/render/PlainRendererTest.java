@@ -45,6 +45,22 @@ class PlainRendererTest {
     }
 
     @Test
+    void appendToolCallsRendersListMemoryLabel() {
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+        PlainRenderer renderer = new PlainRenderer(
+                new PrintStream(sink, true, StandardCharsets.UTF_8),
+                new BufferedReader(new StringReader("")));
+
+        var call = new LlmClient.ToolCall(
+                "tc-memory",
+                new LlmClient.ToolCall.Function("list_memory", "{\"limit\":20}"));
+        renderer.appendToolCalls(List.of(call));
+        String text = sink.toString(StandardCharsets.UTF_8);
+        assertTrue(text.contains("🧠 查看长期记忆 1 次"), text);
+        assertTrue(text.contains("20"), text);
+    }
+
+    @Test
     void appendToolCallsHandlesUnknownToolName() {
         ByteArrayOutputStream sink = new ByteArrayOutputStream();
         PlainRenderer renderer = new PlainRenderer(

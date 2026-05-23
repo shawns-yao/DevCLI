@@ -76,6 +76,7 @@ public class ToolRegistry {
     private BrowserConnector browserConnector;
     private java.util.function.Consumer<String> memorySaver;
     private MemorySaver memorySaveHandler;
+    private MemoryListHandler memoryListHandler;
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private final ThreadLocal<SkillContextBuffer> skillContextBufferOverride = new ThreadLocal<>();
@@ -159,6 +160,10 @@ public class ToolRegistry {
 
     public void setMemorySaveHandler(MemorySaver memorySaveHandler) {
         this.memorySaveHandler = memorySaveHandler;
+    }
+
+    public void setMemoryListHandler(MemoryListHandler memoryListHandler) {
+        this.memoryListHandler = memoryListHandler;
     }
 
     public void setSkillRegistry(SkillRegistry skillRegistry) {
@@ -595,6 +600,18 @@ public class ToolRegistry {
                     }
                     memorySaver.accept(normalized);
                     return "💾 已保存到长期记忆: " + normalized;
+                }
+        ));
+        tools.put("list_memory", new Tool(
+                "list_memory",
+                "只读查询当前已持久化的长期记忆条目；当用户想查看、核对或审计系统记住了什么时使用。不要用它检索项目代码，代码问题仍使用 search_code。",
+                createParameters(new Param("limit", "integer", "最多返回多少条长期记忆，默认 20", false)),
+                args -> {
+                    if (memoryListHandler == null) {
+                        return "查询长期记忆失败: 记忆查询器未初始化";
+                    }
+                    int limit = parseInt(args.get("limit"), 20);
+                    return memoryListHandler.list(Math.max(1, limit));
                 }
         ));
     }
@@ -1213,6 +1230,11 @@ public class ToolRegistry {
     private record McpRegisteredTool(McpToolDescriptor descriptor, Function<String, ToolOutput> invoker) {}
 
     public record MemorySaveResult(boolean stored, String message) {}
+
+    @FunctionalInterface
+    public interface MemoryListHandler {
+        String list(int limit);
+    }
 
     @FunctionalInterface
     public interface MemorySaver {
