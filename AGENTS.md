@@ -20,7 +20,7 @@
 
 ## 项目快照
 
-- 项目名：`PaiCLI`
+- 项目名：`DecCLL`
 - 定位：面向商业使用的 Java Agent CLI 产品，对标 Claude Code
 - 已交付 21 期（ReAct → Plan+DAG → Memory → RAG → Multi-Agent → HITL → 并行工具 → 多模型 → 联网 → MCP 核心 → MCP 高级 → 长上下文 → Chrome DevTools → CDP 会话复用 → Skill → TUI → LSP 诊断 → Side-Git 快照 → Prompt 分层 → Runtime API → 图片输入）
 - 下一步：OAuth / sampling / recovery 作为后续 MCP 增强

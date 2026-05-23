@@ -57,7 +57,7 @@ public final class LanternaWindow {
 
         // 创建根面板（三栏布局）
         this.rootPane = new RootPane(config, llmClient);
-        this.mainWindow = new BasicWindow("DevCLI");
+        this.mainWindow = new BasicWindow("DecCLL");
         mainWindow.setComponent(rootPane);
         gui.addWindow(mainWindow);
 
