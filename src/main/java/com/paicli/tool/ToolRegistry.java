@@ -1140,8 +1140,7 @@ public class ToolRegistry {
 
             boolean finished = process.waitFor(commandTimeoutSeconds, TimeUnit.SECONDS);
             if (!finished) {
-                process.destroyForcibly();
-                process.waitFor(2, TimeUnit.SECONDS);
+                terminateProcessTree(process);
                 outputFuture.cancel(true);
                 return "命令执行超时（" + commandTimeoutSeconds + "秒），已强制终止";
             }
@@ -1152,16 +1151,55 @@ public class ToolRegistry {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             if (process != null) {
-                process.destroyForcibly();
+                terminateProcessTree(process);
             }
             return "用户取消了此次工具调用";
         } catch (Exception e) {
             if (process != null) {
-                process.destroyForcibly();
+                terminateProcessTree(process);
             }
             return "执行命令失败: " + e.getMessage();
         } finally {
             outputReaderExecutor.shutdownNow();
+        }
+    }
+
+    private void terminateProcessTree(Process process) {
+        if (process == null) {
+            return;
+        }
+        List<ProcessHandle> descendants = process.toHandle().descendants().toList();
+        for (int i = descendants.size() - 1; i >= 0; i--) {
+            descendants.get(i).destroyForcibly();
+        }
+        process.destroyForcibly();
+        for (ProcessHandle descendant : descendants) {
+            waitForProcessExit(descendant);
+        }
+        waitForProcessExit(process.toHandle());
+        closeProcessStreams(process);
+    }
+
+    private void waitForProcessExit(ProcessHandle handle) {
+        try {
+            handle.onExit().get(3, TimeUnit.SECONDS);
+        } catch (Exception ignored) {
+            // Best-effort cleanup: timeout paths must return even if the OS delays process reaping.
+        }
+    }
+
+    private void closeProcessStreams(Process process) {
+        try {
+            process.getInputStream().close();
+        } catch (Exception ignored) {
+        }
+        try {
+            process.getOutputStream().close();
+        } catch (Exception ignored) {
+        }
+        try {
+            process.getErrorStream().close();
+        } catch (Exception ignored) {
         }
     }
 
