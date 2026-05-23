@@ -1,14 +1,16 @@
-# DevCLI
+![PaiCLI startup demo](images/Snipaste_2026-05-20_16-57-44.png)
 
-DevCLI 是一个面向 Java 后端开发者的终端 Agent CLI。它可以在命令行中通过自然语言驱动代码阅读、生成、调试、重构、命令执行和仓库检索。
+# PaiCLI
+
+PaiCLI 是一个面向 Java 后端开发者的终端 Agent CLI。它可以在命令行中通过自然语言驱动代码阅读、生成、调试、重构、命令执行和仓库检索。
 
 核心能力：
 
 - ReAct（推理-行动）主循环：支持多轮工具调用、结果回灌和流式输出。
 - Plan-and-Execute（规划执行）：通过 `/plan` 生成任务计划并按依赖执行。
 - Multi-Agent（多智能体）：通过 `/team` 使用 Planner / Worker / Reviewer 协作执行复杂任务。
-- RAG（检索增强生成）：基于 JavaParser、SQLite 向量存储、关键词召回和代码关系图谱检索仓库实现。
-- Memory（记忆）：支持当前会话工作记忆、长期记忆和强约束记忆。
+- RAG（检索增强生成）：基于 JavaParser、SQLite 向量存储、关键词召回、代码关系图谱、RRF（倒数排名融合）和 CrossEncoderReranker（交叉编码器重排）检索仓库实现。
+- Memory（记忆）：支持当前会话工作记忆、长期记忆、强约束记忆，以及绑定 SymbolVersion（符号版本）的 RAG 证据记忆。
 - MCP（Model Context Protocol）：可接入外部 MCP server，动态注册工具和 resources。
 - HITL（Human-in-the-Loop）：危险操作可开启人工审批、路径限制和审计日志。
 - Browser / Web：支持 web_search、web_fetch，以及 Chrome DevTools MCP 浏览器操作。
@@ -16,23 +18,23 @@ DevCLI 是一个面向 Java 后端开发者的终端 Agent CLI。它可以在命
 
 ## Feature Overview
 
-DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、代码仓库、记忆、审批、终端交互”串成一个本地开发工作流。核心执行路径分三类：
+PaiCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、代码仓库、记忆、审批、终端交互”串成一个本地开发工作流。核心执行路径分三类：
 
 - `ReAct`：默认模式。模型边思考边选择工具，工具结果会回灌到下一轮推理，适合阅读代码、定位问题、执行命令、做小范围修改。
 - `Plan-and-Execute`：通过 `/plan` 进入。Planner 先拆任务和依赖，再按 DAG（有向无环图）执行，适合多步骤改造、跨文件修复、需要先审计划的任务。
 - `Multi-Agent`：通过 `/team` 进入。Planner 负责拆解和验收标准，Worker 执行具体子任务，Reviewer 在硬检查通过后做质量审查，适合复杂任务和需要并行推进的工作。
 
-围绕这三条路径，DevCLI 提供以下能力：
+围绕这三条路径，PaiCLI 提供以下能力：
 
 - `ToolRegistry（工具注册表）`：统一管理内置工具、MCP 动态工具和 resource 读取工具；所有工具调用都走 JSON Schema 参数校验、HITL、策略层和审计链。
-- `RAG（检索增强生成）`：用 JavaParser 切分 Java 代码，结合 SQLite 向量存储、关键词召回、代码关系图谱和 rerank，把相关类、方法、调用链注入模型上下文。
-- `Memory（记忆）`：区分对话历史、工作记忆、长期记忆和强约束记忆。长期记忆写入前经过策略打分，避免把临时闲聊、敏感信息或低复用事实写入持久层。
+- `RAG（检索增强生成）`：用 JavaParser 切分 Java 代码，结合 SQLite 向量存储、关键词召回、代码关系图谱、RRF（倒数排名融合）、symbol-aware boost（符号感知加权）和 CrossEncoderReranker（交叉编码器重排），把相关类、方法、调用链注入模型上下文。
+- `Memory（记忆）`：区分对话历史、工作记忆、长期记忆和强约束记忆。长期记忆写入前经过规则化写入策略，避免把临时闲聊、敏感信息或低复用事实写入持久层。
 - `Prompt（提示词分层）`：base、personality、mode、approval、project_context、skills、context_mgmt、handoff 分层组装，支持 jar 内置、用户级和项目级覆盖。
 - `MCP（Model Context Protocol）`：支持 stdio / streamable HTTP MCP server，动态加载工具和 resources，并把 MCP server 状态、日志、重启能力暴露给 CLI。
 - `HITL（Human-in-the-Loop）`：危险工具和敏感页面操作进入人工审批；审批前先过策略层，策略拒绝的操作不能靠用户批准绕过。
 - `Snapshot（快照）`：通过 Side-Git 在 turn 前后保存快照，支持回滚最近一轮变更，降低 Agent 自动改文件的风险。
 - `Renderer（渲染器）`：默认 inline 模式提供底部状态栏、行内 thinking、工具块和 diff；也保留 plain 和 Lanterna TUI 模式。
-- `Runtime API`：本地 HTTP API 暴露 threads / turns / events，便于外部进程把 DevCLI 当作本地 Agent runtime 调用。
+- `Runtime API`：本地 HTTP API 暴露 threads / turns / events，便于外部进程把 PaiCLI 当作本地 Agent runtime 调用。
 - `Image Input`：支持 `@image:` 本地路径、file URL 和剪贴板图片，图片会做尺寸、格式和大小处理后进入模型输入。
 
 ## Architecture
@@ -57,8 +59,8 @@ Main
 关键边界：
 
 - `ConversationHistoryCompactor（对话历史压缩器）` 是治理 LLM messages 窗口的唯一压缩点。
-- `WorkingMemory（工作记忆）` 只保存当前会话派生状态，不承担压缩职责。
-- `LongTermMemory（长期记忆）` 只保存跨会话稳定事实，默认不把临时任务请求写入长期层。
+- `WorkingMemory（工作记忆）` 只保存当前会话派生状态，不承担压缩职责。`RagEvidenceMemory（RAG 证据记忆）` 会记录检索证据的 `IndexEpoch（索引版本）`、`SymbolVersion（符号版本）` 和 `ClasspathEpoch（类路径版本）`。
+- `LongTermMemory（长期记忆）` 只保存跨会话稳定事实，默认不把临时任务请求写入长期层。`SymbolInvalidation（符号失效）` 会在索引替换时记录旧/新符号版本差异，并通过 `NegativeFact（负向事实）` 告诉模型哪些旧事实不可用。
 - `PathGuard（路径围栏）` 负责限制文件访问不逃逸项目根。
 - `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 和 `/team` 并行执行时拦截 `write_file`，同一文件只能被一个运行中 task / step 写入，避免运行时新增文件写入目标导致互相覆盖。
 - `CommandGuard（命令防线）` 是危险命令快速拒绝层，不替代 HITL 和路径策略。
@@ -82,13 +84,17 @@ Embedding（向量检索）默认使用 Ollama：
 
 如果不使用本地 Ollama，可以在 `.env` 中配置远程 embedding provider。
 
+RAG 检索默认使用 keyword + semantic + bounded graph 的 RRF（倒数排名融合），再叠加 symbol-aware boost（符号感知加权），最后调用
+Cross-Encoder（交叉编码器）做二阶段 rerank。默认 rerank endpoint 是本地 Docker
+暴露的 `http://localhost:8000/v1/rerank`；不可用时会自动降级回 RRF 结果。
+
 ## Install
 
 克隆仓库：
 
 ```bash
-git clone https://github.com/shawns-yao/DevCLI.git
-cd DevCLI
+git clone https://gitcode.com/javabetter/paicli.git
+cd paicli
 ```
 
 复制配置文件：
@@ -136,12 +142,12 @@ mvn clean compile exec:java -Dexec.mainClass="com.paicli.cli.Main"
 
 ## Startup
 
-启动后会进入交互式终端。README 中展示的品牌输出使用 DevCLI：
+启动后会进入交互式终端。README 中展示的品牌输出使用 PaiCLI：
 
 ```text
 ██████╗  ███████╗██╗   ██╗
 ██╔══██╗ ██╔════╝██║   ██║
-██║  ██║ █████╗  ██║   ██║    DevCLI
+██║  ██║ █████╗  ██║   ██║    PaiCLI
 ██║  ██║ ██╔══╝  ╚██╗ ██╔╝    ReAct · Plan · Team · MCP · RAG
 ██████╔╝ ███████╗ ╚████╔╝
 ╚═════╝  ╚══════╝  ╚═══╝
@@ -154,14 +160,14 @@ Tips for getting started:
 * 你好
 
 > 你好
-DevCLI: 你好，我在。可以直接描述要阅读、修改或运行的任务。
+PaiCLI: 你好，我在。可以直接描述要阅读、修改或运行的任务。
 ```
 
 ## Configuration
 
 ### LLM
 
-DevCLI 会从 `.env` 或系统环境变量读取模型配置。
+PaiCLI 会从 `.env` 或系统环境变量读取模型配置。
 
 常用配置：
 
@@ -200,6 +206,19 @@ EMBEDDING_BASE_URL=https://api.openai.com/v1
 EMBEDDING_API_KEY=your_api_key_here
 ```
 
+### Rerank
+
+默认：
+
+```bash
+RERANK_ENABLED=true
+RERANK_PROVIDER=openai
+RERANK_MODEL=BAAI/bge-reranker-v2-m3
+RERANK_BASE_URL=http://localhost:8000/v1
+```
+
+如果本地 Docker rerank 服务不可用，检索会降级到 RRF 结果，不中断 Agent。
+
 ### Web Search
 
 支持 `zhipu`、`serpapi`、`searxng`：
@@ -222,7 +241,7 @@ MCP 配置文件：
 - 用户级：`~/.paicli/mcp.json`
 - 项目级：`.paicli/mcp.json`
 
-DevCLI 在默认配置缺失时会创建 Chrome DevTools MCP 示例配置：
+PaiCLI 在默认配置缺失时会创建 Chrome DevTools MCP 示例配置：
 
 ```json
 {
@@ -272,7 +291,7 @@ PAICLI_NO_STATUSBAR=true
 
 ### Runtime API
 
-DevCLI 可以以本地 Runtime API 方式启动：
+PaiCLI 可以以本地 Runtime API 方式启动：
 
 ```bash
 PAICLI_RUNTIME_API_KEY=your_local_api_key \
@@ -396,7 +415,7 @@ Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 做实现
 | `mcp__{server}__{tool}` | MCP server 动态工具 |
 | `mcp__{server}__read_resource` | 读取 MCP resource |
 
-同一轮模型返回多个工具调用时，DevCLI 会并行执行可并行的工具，并按原始顺序把结果回灌给模型。
+同一轮模型返回多个工具调用时，PaiCLI 会并行执行可并行的工具，并按原始顺序把结果回灌给模型。
 
 工具调用可靠性：工具定义以 JSON Schema 约束参数类型、必填项、枚举值和未知字段；`ToolRegistry` 在真实执行前通过 `json-schema-validator` + 本地兜底校验内置工具与 MCP 工具参数，非法 JSON、类型错误、空必填、非法枚举、pattern/minimum 等 schema 约束失败会以 `工具参数校验失败` 回传给模型修正。危险工具仍走 HITL 审批、策略拦截和 AuditLog；工具错误会回灌给模型继续纠偏，最终答复必须基于工具证据。
 
@@ -410,11 +429,11 @@ Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 做实现
 
 ## Memory
 
-DevCLI 的上下文分为四层：
+PaiCLI 的上下文分为四层：
 
 - `ConversationHistory（对话历史）`：真实 LLM messages，由压缩器治理窗口。
 - `WorkingMemory（工作记忆）`：当前会话工具证据、任务状态和临时事实，不跨会话持久化。
-- `LongTermMemory（长期记忆）`：跨会话稳定事实，SQLite 持久化，支持检索注入；写入前经过 `LongTermMemoryPolicy` 打分，显式低敏偏好/项目事实可自动保存，敏感或中等置信信息要求确认，临时闲聊和低复用信息跳过。
+- `LongTermMemory（长期记忆）`：跨会话稳定事实，SQLite 持久化，支持检索注入；写入前经过 `LongTermMemoryPolicy` 规则化分流，显式低敏偏好/项目事实、稳定个人属性和多次重复出现的稳定事实可保存，敏感或模糊新事实要求确认，临时闲聊和低复用信息跳过。
 - `StickyMemory（强约束记忆）`：通过 `/save --pin` 保存，每轮全量注入 system prompt。
 
 保存长期事实：
@@ -431,8 +450,9 @@ DevCLI 的上下文分为四层：
 
 长期记忆写入策略：
 
-- 用户明确说“记住”“保存”“以后记得”时，稳定事实优先保存。
-- 个人偏好、项目约定、常用路径、长期身份信息会获得更高分。
+- 用户明确说“记住”“保存”“以后记得”时，低敏稳定事实优先保存。
+- 个人偏好、项目约定、常用路径、长期身份属性通过 `reason_code` 记录可解释写入原因，不再依赖未校准的小数打分。
+- 个人属性类键值事实（如“我是医生”）可自动进入长期记忆；模糊的新个人状态事实（如“我刚刚搬到北京”）需要确认。
 - 当信息涉及 token、密码、手机号、地址等敏感内容时，默认要求确认或跳过。
 - “今天临时这样做”“这次先用某个文件名”等低复用信息只留在 WorkingMemory。
 - 多次在短期上下文重复出现的稳定事实，会提高进入长期记忆的优先级。
@@ -473,7 +493,7 @@ RAG 索引内容：
 - Java 类、方法、字段、注解、import 和包名。
 - 方法体文本和关键上下文片段。
 - 调用关系、实现关系、继承关系和依赖关系。
-- 文件路径、起止行号、chunk 名称和语义向量。
+- 文件路径、起止行号、chunk 名称、语义向量、`IndexEpoch（索引版本）`、`SymbolVersion（符号版本）` 和 `ClasspathEpoch（类路径版本）`。
 
 RAG 检索流程：
 
@@ -481,9 +501,10 @@ RAG 检索流程：
 2. 语义向量召回候选代码块。
 3. 关键词和路径信号补充召回。
 4. 需要调用链时扩展代码关系图谱。
-5. 合并、去重、排序后返回给模型。
+5. 使用 RRF（倒数排名融合）合并多路结果，并叠加 symbol-aware boost（符号感知加权）。
+6. 默认调用 CrossEncoderReranker（交叉编码器重排）做二阶段排序；服务不可用时保留 RRF 结果。
 
-如果 embedding 服务不可用，DevCLI 会降级到关键词和结构化检索路径。
+如果 embedding 服务不可用，PaiCLI 会降级到关键词和结构化检索路径。
 
 ## MCP
 
@@ -503,7 +524,7 @@ MCP 安全边界：
 
 ## Runtime API
 
-Runtime API 适合把 DevCLI 接入本地脚本、编辑器插件或自动化系统。当前提供三个端点：
+Runtime API 适合把 PaiCLI 接入本地脚本、编辑器插件或自动化系统。当前提供三个端点：
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -523,7 +544,7 @@ Runtime API 适合把 DevCLI 接入本地脚本、编辑器插件或自动化系
 
 ## Safety
 
-DevCLI 是本地 Agent CLI，不提供容器或虚拟机级沙箱。安全机制包括：
+PaiCLI 是本地 Agent CLI，不提供容器或虚拟机级沙箱。安全机制包括：
 
 - HITL（人工审批）
 - PathGuard（路径围栏）
