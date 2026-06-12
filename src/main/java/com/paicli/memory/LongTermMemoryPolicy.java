@@ -8,13 +8,11 @@ import java.util.regex.Pattern;
 /**
  * 长期记忆写入决策器。
  *
- * <p>目标是高精度拦截：显式、稳定、低敏的信息才自动保存；敏感或中等置信信息交给上层确认；
- * 低价值临时信息只留在 WorkingMemory。
+ * <p>目标是高精度拦截：显式、稳定、低敏的信息才自动保存；敏感或模糊的新事实交给上层确认；
+ * 低价值临时信息只留在 WorkingMemory。这里故意不用未校准的加权分数，所有决策都落到可解释的
+ * reason_code，方便测试、审计和后续接入 LLM Judge。
  */
 public final class LongTermMemoryPolicy {
-    private static final double AUTO_SAVE_THRESHOLD = 0.85;
-    private static final double CONFIRM_THRESHOLD = 0.65;
-
     private static final Pattern ID_CARD = Pattern.compile("\\b\\d{17}[0-9Xx]\\b");
     private static final Pattern BANK_CARD = Pattern.compile("\\b\\d{13,19}\\b");
     private static final Pattern TOKEN = Pattern.compile("(?i)(api[_-]?key|token|secret|password|bearer)\\s*[:=]");
@@ -29,54 +27,58 @@ public final class LongTermMemoryPolicy {
     public static Decision evaluate(String fact, int recurrenceCount, boolean explicitOverride) {
         String text = normalize(fact);
         if (text.isBlank()) {
-            return Decision.skip(0.0, "空事实不保存");
+            return Decision.skip("空事实不保存", "EMPTY_FACT", "fact", "low", "LOW");
         }
 
         boolean explicit = explicitOverride || hasExplicitRememberIntent(text);
         String sensitivity = sensitivity(text);
         String memoryType = memoryType(text);
 
-        double explicitness = explicit ? 1.0 : 0.0;
-        double stability = stability(text, memoryType);
-        double futureUtility = futureUtility(text, memoryType);
-        double recurrence = Math.min(1.0, Math.max(0, recurrenceCount) / 3.0);
-        double specificity = specificity(text);
-        double confidence = explicit ? 0.95 : (recurrence >= 1.0 ? 0.75 : 0.45);
-        double sensitivityPenalty = switch (sensitivity) {
-            case "high" -> 0.55;
-            case "medium" -> 0.25;
-            default -> 0.0;
-        };
-
-        double score = clamp(
-                0.30 * explicitness
-                        + 0.20 * futureUtility
-                        + 0.15 * stability
-                        + 0.15 * recurrence
-                        + 0.10 * specificity
-                        + 0.10 * confidence
-                        - sensitivityPenalty
-        );
-        if (explicit && ("preference".equals(memoryType) || "project".equals(memoryType))) {
-            score = clamp(score + 0.10);
-        }
-        if (!explicit && recurrenceCount >= 3 && ("preference".equals(memoryType) || "project".equals(memoryType))) {
-            score = clamp(score + 0.25);
-        }
-
         if ("high".equals(sensitivity)) {
-            return Decision.confirm(score, "包含高敏感信息，必须用户确认", source(explicit, recurrenceCount), memoryType, sensitivity);
+            return Decision.confirm("包含高敏感信息，必须用户确认",
+                    source(explicit, recurrenceCount), memoryType, sensitivity,
+                    "SENSITIVE_REQUIRES_CONFIRMATION", "HIGH");
         }
-        if ("medium".equals(sensitivity) && explicit) {
-            return Decision.confirm(score, "包含敏感个人信息，必须用户确认", source(true, recurrenceCount), memoryType, sensitivity);
+        if ("medium".equals(sensitivity)) {
+            return Decision.confirm("包含敏感个人信息，必须用户确认",
+                    source(explicit, recurrenceCount), memoryType, sensitivity,
+                    "SENSITIVE_REQUIRES_CONFIRMATION", "HIGH");
         }
-        if (score >= AUTO_SAVE_THRESHOLD && ("low".equals(sensitivity))) {
-            return Decision.save(score, source(explicit, recurrenceCount), memoryType, sensitivity);
+
+        if (explicit) {
+            return Decision.save("explicit", memoryType, sensitivity,
+                    "EXPLICIT_STABLE_MEMORY", "HIGH");
         }
-        if (score >= CONFIRM_THRESHOLD) {
-            return Decision.confirm(score, "记忆价值中等，需要用户确认", source(explicit, recurrenceCount), memoryType, sensitivity);
+        if (isLowReuseThirdPartyFact(text)) {
+            return Decision.skip("第三方一次性事件不进入长期记忆",
+                    "LOW_REUSE_VALUE", memoryType, sensitivity, "LOW");
         }
-        return Decision.skip(score, "临时、低复用或低置信信息不进入长期记忆");
+        if (isPersonalAttribute(text)) {
+            return Decision.save("heuristic", "profile", sensitivity,
+                    "PROFILE_ATTRIBUTE", "HIGH");
+        }
+        if (isNovelProfileFact(text)) {
+            return Decision.confirm("新的个人状态事实需要用户确认",
+                    source(explicit, recurrenceCount), "profile", sensitivity,
+                    "NOVEL_PROFILE_FACT_REQUIRES_CONFIRMATION", "MEDIUM");
+        }
+        if (isTemporary(text)) {
+            return Decision.skip("临时、低复用或低置信信息不进入长期记忆",
+                    "TEMPORARY_LOW_VALUE", memoryType, sensitivity, "LOW");
+        }
+
+        if (recurrenceCount >= 3 && isCoreMemoryType(memoryType)) {
+            return Decision.save("recurrence", memoryType, sensitivity,
+                    "REPEATED_STABLE_MEMORY", "HIGH");
+        }
+        if (isCoreMemoryType(memoryType) && isSpecific(text)) {
+            return Decision.confirm("项目或偏好事实较具体，但缺少显式保存意图",
+                    source(false, recurrenceCount), memoryType, sensitivity,
+                    "AMBIGUOUS_STABLE_FACT_REQUIRES_CONFIRMATION", "MEDIUM");
+        }
+
+        return Decision.skip("低复用信息不进入长期记忆",
+                "LOW_REUSE_VALUE", memoryType, sensitivity, "LOW");
     }
 
     public static Decision evaluate(String fact) {
@@ -134,43 +136,38 @@ public final class LongTermMemoryPolicy {
                 || text.contains("优先")) {
             return "preference";
         }
-        if (text.contains("我是") || text.contains("我在") || text.contains("我的")) {
+        if (isPersonalAttribute(text) || isNovelProfileFact(text)
+                || (text.contains("我是") || text.contains("我在") || text.contains("我的"))
+                && !isLowReuseThirdPartyFact(text)) {
             return "profile";
         }
         return "fact";
     }
 
-    private static double stability(String text, String memoryType) {
-        if (containsAny(text, "今天", "刚刚", "这次", "临时", "暂时", "现在先")) {
-            return 0.15;
-        }
-        return switch (memoryType) {
-            case "preference", "project", "profile" -> 0.9;
-            default -> 0.55;
-        };
+    private static boolean isTemporary(String text) {
+        return containsAny(text, "今天", "刚才", "刚刚", "这次", "临时", "暂时", "现在先", "先不用管");
     }
 
-    private static double futureUtility(String text, String memoryType) {
-        if (containsAny(text, "天气", "地铁", "吃了", "高考", "朋友")) {
-            return 0.15;
-        }
-        if ("preference".equals(memoryType) || "project".equals(memoryType)) {
-            return 0.9;
-        }
-        if ("profile".equals(memoryType)) {
-            return 0.7;
-        }
-        return 0.45;
+    private static boolean isPersonalAttribute(String text) {
+        return text.matches(".*(我是|我是一名|我的职业是|我从事|我在做|我负责).{0,24}(医生|老师|教师|律师|学生|工程师|程序员|开发|产品经理|设计师|运维|测试|研究员).*");
     }
 
-    private static double specificity(String text) {
-        if (text.length() < 6) {
-            return 0.2;
-        }
-        if (containsAny(text, "默认", "使用", "命令", "路径", "偏好", "语言", "测试", "优先")) {
-            return 0.9;
-        }
-        return 0.55;
+    private static boolean isNovelProfileFact(String text) {
+        return containsAny(text, "搬到", "迁到", "入职", "离职", "转行", "换工作", "换城市", "定居")
+                && containsAny(text, "我", "我的");
+    }
+
+    private static boolean isLowReuseThirdPartyFact(String text) {
+        return containsAny(text, "朋友", "同学", "同事", "孩子", "高考");
+    }
+
+    private static boolean isCoreMemoryType(String memoryType) {
+        return "preference".equals(memoryType) || "project".equals(memoryType);
+    }
+
+    private static boolean isSpecific(String text) {
+        return text.length() >= 6
+                && containsAny(text, "默认", "使用", "命令", "路径", "偏好", "语言", "测试", "优先", "版本");
     }
 
     private static boolean containsAny(String text, String... needles) {
@@ -189,37 +186,39 @@ public final class LongTermMemoryPolicy {
         return text.replace("\r\n", "\n").replace('\r', '\n').trim().replaceAll("\\s+", " ");
     }
 
-    private static double clamp(double value) {
-        return Math.max(0.0, Math.min(1.0, value));
-    }
-
     public enum Action {
         SAVE,
         CONFIRM,
         SKIP
     }
 
-    public record Decision(Action action, double score, String reason, Map<String, String> metadata) {
-        public static Decision save(double score, String source, String memoryType, String sensitivity) {
-            return new Decision(Action.SAVE, score, "满足长期记忆自动保存阈值",
-                    metadata(score, source, memoryType, sensitivity));
+    public record Decision(Action action, String reason, Map<String, String> metadata) {
+        public static Decision save(String source, String memoryType, String sensitivity,
+                                    String reasonCode, String confidence) {
+            return new Decision(Action.SAVE, "满足长期记忆保存规则",
+                    metadata(source, memoryType, sensitivity, reasonCode, confidence));
         }
 
-        public static Decision confirm(double score, String reason, String source, String memoryType, String sensitivity) {
-            return new Decision(Action.CONFIRM, score, reason, metadata(score, source, memoryType, sensitivity));
+        public static Decision confirm(String reason, String source, String memoryType, String sensitivity,
+                                       String reasonCode, String confidence) {
+            return new Decision(Action.CONFIRM, reason,
+                    metadata(source, memoryType, sensitivity, reasonCode, confidence));
         }
 
-        public static Decision skip(double score, String reason) {
-            return new Decision(Action.SKIP, score, reason,
-                    metadata(score, "policy", "fact", "low"));
+        public static Decision skip(String reason, String reasonCode, String memoryType,
+                                    String sensitivity, String confidence) {
+            return new Decision(Action.SKIP, reason,
+                    metadata("policy", memoryType, sensitivity, reasonCode, confidence));
         }
 
-        private static Map<String, String> metadata(double score, String source, String memoryType, String sensitivity) {
+        private static Map<String, String> metadata(String source, String memoryType, String sensitivity,
+                                                    String reasonCode, String confidence) {
             Map<String, String> metadata = new LinkedHashMap<>();
             metadata.put("source", source);
             metadata.put("memory_type", memoryType);
             metadata.put("sensitivity", sensitivity);
-            metadata.put("score", String.format(Locale.ROOT, "%.3f", score));
+            metadata.put("reason_code", reasonCode);
+            metadata.put("confidence", confidence);
             return Map.copyOf(metadata);
         }
     }

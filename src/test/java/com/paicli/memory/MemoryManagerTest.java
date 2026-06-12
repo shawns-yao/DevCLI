@@ -99,6 +99,81 @@ class MemoryManagerTest {
             assertEquals(0, longTermMemory.size());
         }
     }
+    @Test
+    void listLongTermMemoryShouldReturnReadOnlyPersistentSnapshot() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+
+            memoryManager.storeFact("用户称号是派大星");
+            memoryManager.storeFact("项目名是 DecCLL");
+
+            String snapshot = memoryManager.listLongTermMemory(1);
+
+            assertTrue(snapshot.contains("长期记忆（LongTermMemory）"));
+            assertTrue(snapshot.contains("content:"));
+            assertTrue(snapshot.contains("项目名是 DecCLL") || snapshot.contains("用户称号是派大星"));
+            assertFalse(snapshot.contains("长期记忆为空"));
+        }
+    }
+
+    @Test
+    void listLongTermMemoryShouldReportEmptyStore() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+
+            assertEquals("长期记忆为空。", memoryManager.listLongTermMemory(20));
+        }
+    }
+
+
+    @Test
+    void buildContextForQueryShouldIncludeInventorySnapshotWhenQueryDoesNotMatchMemory() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+
+            memoryManager.storeFact("用户的名称叫做派大星");
+
+            String context = memoryManager.buildContextForQuery("你现在有什么长期记忆", 512);
+
+            assertTrue(context.contains("长期记忆索引快照"));
+            assertTrue(context.contains("total: 1"));
+            assertTrue(context.contains("派大星"));
+        }
+    }
+
+
+    @Test
+    void searchCodeToolResultShouldRecordRagEvidenceWithSymbolVersion() {
+
+        try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {
+            String result = """
+                    检索摘要:
+                    搜索摘要:
+                    - 最相关的入口是 [method:CodeRetriever.search]，位于 rag/CodeRetriever.java。
+
+                    检索结果:
+                    1. [method:CodeRetriever.search(String,int,String,int)] (相似度: 0.910) src/main/java/com/paicli/rag/CodeRetriever.java
+                       evidence: symbolVersion=sv_test123, indexEpoch=idx-1, classpathEpoch=cp-1
+                       negativeFact: Do not rely on CodeRetriever.search from symbolVersion sv_old.
+                       public List<SearchResult> search(...) { return List.of(); }
+                    """;
+
+            memoryManager.addToolResult("search_code", "{\"query\":\"CodeRetriever search\"}", result);
+
+            String section = memoryManager.buildWorkingMemorySection();
+            assertEquals(1, memoryManager.getWorkingMemory().getRagEvidenceMemory().size());
+            assertTrue(section.contains("RAG 证据记忆"));
+            assertTrue(section.contains("symbolVersion=sv_test123"));
+            assertTrue(section.contains("indexEpoch=idx-1"));
+            assertTrue(section.contains("classpathEpoch=cp-1"));
+            assertTrue(section.contains("NegativeFact（负向事实）"));
+            assertTrue(section.contains("query=CodeRetriever search"));
+        }
+    }
 
     @Test
     void storeFactWithPolicyShouldSkipLowValueTemporaryFacts() {
@@ -127,7 +202,9 @@ class MemoryManagerTest {
             MemoryEntry entry = longTermMemory.getAll().get(0);
             assertEquals("preference", entry.getMetadata().get("memory_type"));
             assertEquals("explicit", entry.getMetadata().get("source"));
-            assertTrue(entry.getMetadata().containsKey("score"));
+            assertEquals("EXPLICIT_STABLE_MEMORY", entry.getMetadata().get("reason_code"));
+            assertEquals("HIGH", entry.getMetadata().get("confidence"));
+            assertFalse(entry.getMetadata().containsKey("score"));
         }
     }
 
@@ -141,6 +218,50 @@ class MemoryManagerTest {
 
             assertTrue(result.stored(), result.message());
             assertEquals("explicit", longTermMemory.getAll().get(0).getMetadata().get("source"));
+        }
+    }
+
+    @Test
+    void addUserMessageShouldAutoPersistStableProfileAttribute() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+
+            memoryManager.addUserMessage("我是医生");
+
+            assertEquals(1, longTermMemory.size());
+            MemoryEntry entry = longTermMemory.getAll().get(0);
+            assertEquals("我是医生", entry.getContent());
+            assertEquals("PROFILE_ATTRIBUTE", entry.getMetadata().get("reason_code"));
+        }
+    }
+
+    @Test
+    void addUserMessageShouldPromoteRepeatedStableProjectFact() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+
+            memoryManager.addUserMessage("项目默认测试命令是 mvn test -Pquick");
+            memoryManager.addUserMessage("项目默认测试命令是 mvn test -Pquick");
+            memoryManager.addUserMessage("项目默认测试命令是 mvn test -Pquick");
+
+            assertEquals(1, longTermMemory.size());
+            MemoryEntry entry = longTermMemory.getAll().get(0);
+            assertEquals("recurrence", entry.getMetadata().get("source"));
+            assertEquals("REPEATED_STABLE_MEMORY", entry.getMetadata().get("reason_code"));
+        }
+    }
+
+    @Test
+    void addUserMessageShouldNotPersistUnrelatedThirdPartyEvent() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+
+            memoryManager.addUserMessage("我朋友的孩子今天高考");
+
+            assertEquals(0, longTermMemory.size());
         }
     }
 

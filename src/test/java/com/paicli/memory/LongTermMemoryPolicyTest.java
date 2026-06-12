@@ -3,19 +3,31 @@ package com.paicli.memory;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class LongTermMemoryPolicyTest {
 
     @Test
-    void explicitPreferenceShouldBeSavedAutomatically() {
+    void explicitLowRiskRememberInstructionShouldBeSavedAutomatically() {
         LongTermMemoryPolicy.Decision decision =
                 LongTermMemoryPolicy.evaluate("请记住：我默认使用简体中文和短句回答", 0);
 
         assertEquals(LongTermMemoryPolicy.Action.SAVE, decision.action());
-        assertTrue(decision.score() >= 0.85, "显式低敏偏好应达到自动保存阈值: " + decision);
         assertEquals("preference", decision.metadata().get("memory_type"));
         assertEquals("explicit", decision.metadata().get("source"));
+        assertEquals("EXPLICIT_STABLE_MEMORY", decision.metadata().get("reason_code"));
+        assertEquals("HIGH", decision.metadata().get("confidence"));
+        assertFalse(decision.metadata().containsKey("score"));
+    }
+
+    @Test
+    void explicitLowRiskRememberInstructionShouldWinOverLowReuseHeuristics() {
+        LongTermMemoryPolicy.Decision decision =
+                LongTermMemoryPolicy.evaluate("请记住：我朋友的孩子今天高考", 0);
+
+        assertEquals(LongTermMemoryPolicy.Action.SAVE, decision.action());
+        assertEquals("explicit", decision.metadata().get("source"));
+        assertEquals("EXPLICIT_STABLE_MEMORY", decision.metadata().get("reason_code"));
     }
 
     @Test
@@ -24,7 +36,7 @@ class LongTermMemoryPolicyTest {
                 LongTermMemoryPolicy.evaluate("今天地铁好挤，天气也不错", 0);
 
         assertEquals(LongTermMemoryPolicy.Action.SKIP, decision.action());
-        assertTrue(decision.score() < 0.65, "一次性闲聊不应进入长期记忆: " + decision);
+        assertEquals("TEMPORARY_LOW_VALUE", decision.metadata().get("reason_code"));
     }
 
     @Test
@@ -34,7 +46,7 @@ class LongTermMemoryPolicyTest {
 
         assertEquals(LongTermMemoryPolicy.Action.CONFIRM, decision.action());
         assertEquals("high", decision.metadata().get("sensitivity"));
-        assertTrue(decision.reason().contains("敏感"));
+        assertEquals("SENSITIVE_REQUIRES_CONFIRMATION", decision.metadata().get("reason_code"));
     }
 
     @Test
@@ -45,5 +57,35 @@ class LongTermMemoryPolicyTest {
         assertEquals(LongTermMemoryPolicy.Action.SAVE, decision.action());
         assertEquals("project", decision.metadata().get("memory_type"));
         assertEquals("recurrence", decision.metadata().get("source"));
+        assertEquals("REPEATED_STABLE_MEMORY", decision.metadata().get("reason_code"));
+    }
+
+    @Test
+    void personalProfileAttributeShouldBeSavedAsNewStableFact() {
+        LongTermMemoryPolicy.Decision decision =
+                LongTermMemoryPolicy.evaluate("我是医生", 0);
+
+        assertEquals(LongTermMemoryPolicy.Action.SAVE, decision.action());
+        assertEquals("profile", decision.metadata().get("memory_type"));
+        assertEquals("PROFILE_ATTRIBUTE", decision.metadata().get("reason_code"));
+    }
+
+    @Test
+    void novelPersonalLifeEventShouldRequireConfirmationInsteadOfAutomaticSave() {
+        LongTermMemoryPolicy.Decision decision =
+                LongTermMemoryPolicy.evaluate("我刚刚搬到北京", 0);
+
+        assertEquals(LongTermMemoryPolicy.Action.CONFIRM, decision.action());
+        assertEquals("profile", decision.metadata().get("memory_type"));
+        assertEquals("NOVEL_PROFILE_FACT_REQUIRES_CONFIRMATION", decision.metadata().get("reason_code"));
+    }
+
+    @Test
+    void unrelatedFriendLifeEventShouldBeSkipped() {
+        LongTermMemoryPolicy.Decision decision =
+                LongTermMemoryPolicy.evaluate("我朋友的孩子今天高考", 0);
+
+        assertEquals(LongTermMemoryPolicy.Action.SKIP, decision.action());
+        assertEquals("LOW_REUSE_VALUE", decision.metadata().get("reason_code"));
     }
 }
