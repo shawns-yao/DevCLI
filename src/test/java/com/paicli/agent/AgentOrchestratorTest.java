@@ -1,5 +1,7 @@
 package com.paicli.agent;
 
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -28,6 +30,18 @@ import java.util.function.Function;
 import static org.junit.jupiter.api.Assertions.*;
 
 class AgentOrchestratorTest {
+
+    @BeforeAll
+    static void redirectCheckpointDir() throws IOException {
+        // run() 会写 orchestration checkpoint；测试重定向到临时目录，避免污染用户主目录
+        System.setProperty("paicli.checkpoint.dir",
+                Files.createTempDirectory("paicli-test-checkpoints").toString());
+    }
+
+    @AfterAll
+    static void clearCheckpointDirProperty() {
+        System.clearProperty("paicli.checkpoint.dir");
+    }
 
     @Test
     void shouldParseSimplePlan() {
@@ -272,6 +286,64 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    void finalIntegrationShouldBeExecutableWhenDependenciesSuperseded() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        List<AgentOrchestrator.ExecutionStep> steps = new ArrayList<>(List.of(
+                AgentOrchestrator.ExecutionStep.pending("step_1", "模型", "FILE_WRITE", List.of())
+                        .withFailed("review failed").withSuperseded(),
+                AgentOrchestrator.ExecutionStep.pending("r1_step_1", "恢复实现", "FILE_WRITE", List.of())
+                        .withResult("恢复完成"),
+                AgentOrchestrator.ExecutionStep.pending("step_2", "最终集成验收", "INTEGRATION", List.of("step_1"))
+        ));
+
+        List<AgentOrchestrator.ExecutionStep> executable = orchestrator.getExecutableSteps(steps);
+
+        assertEquals(1, executable.size());
+        assertEquals("step_2", executable.get(0).id());
+    }
+
+    @Test
+    void shouldFuseFinalIntegrationIgnoresSupersededSteps() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+
+        // 失败步骤未被接管：失败比例 1/2 达到熔断阈值
+        List<AgentOrchestrator.ExecutionStep> beforeReplan = List.of(
+                AgentOrchestrator.ExecutionStep.pending("step_1", "实现", "FILE_WRITE", List.of()).withFailed("编译失败"),
+                AgentOrchestrator.ExecutionStep.pending("step_2", "导出", "FILE_WRITE", List.of()).withResult("ok"),
+                AgentOrchestrator.ExecutionStep.pending("step_3", "最终集成验收", "INTEGRATION", List.of("step_1", "step_2"))
+        );
+        assertTrue(orchestrator.shouldFuseFinalIntegration(beforeReplan));
+
+        // 失败步骤被恢复计划接管（SUPERSEDED）且恢复步骤完成：不再计入熔断比例
+        List<AgentOrchestrator.ExecutionStep> afterReplan = List.of(
+                AgentOrchestrator.ExecutionStep.pending("step_1", "实现", "FILE_WRITE", List.of())
+                        .withFailed("编译失败").withSuperseded(),
+                AgentOrchestrator.ExecutionStep.pending("step_2", "导出", "FILE_WRITE", List.of()).withResult("ok"),
+                AgentOrchestrator.ExecutionStep.pending("r1_step_1", "恢复实现", "FILE_WRITE", List.of()).withResult("ok"),
+                AgentOrchestrator.ExecutionStep.pending("step_3", "最终集成验收", "INTEGRATION", List.of("step_1", "step_2"))
+        );
+        assertFalse(orchestrator.shouldFuseFinalIntegration(afterReplan));
+    }
+
+    @Test
+    void remapRecoveryStepIdsShouldPrefixIdsAndRemapDependencies() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        List<AgentOrchestrator.ExecutionStep> parsed = List.of(
+                AgentOrchestrator.ExecutionStep.pending("step_1", "重写实现", "FILE_WRITE", List.of()),
+                AgentOrchestrator.ExecutionStep.pending("step_2", "验证", "VERIFICATION",
+                        List.of("step_1", "old_plan_step_9"))
+        );
+
+        List<AgentOrchestrator.ExecutionStep> remapped = orchestrator.remapRecoveryStepIds(parsed, 1);
+
+        assertEquals(2, remapped.size());
+        assertEquals("r1_step_1", remapped.get(0).id());
+        assertEquals("r1_step_2", remapped.get(1).id());
+        // 内部依赖重映射，未知的旧计划 id 被丢弃
+        assertEquals(List.of("r1_step_1"), remapped.get(1).dependencies());
+    }
+
+    @Test
     void shouldPropagateOriginalUserTaskToWorkerAndReviewer(@TempDir Path tempDir) {
         String fullRequirement = "完整需求：必须生成 public final class，private constructor，public static 方法";
         List<String> workerInputs = new CopyOnWriteArrayList<>();
@@ -410,6 +482,11 @@ class AgentOrchestratorTest {
         // 含否定关键词的纯文本
         assertFalse(orchestrator.parseReviewApproval("执行结果未通过审查"));
         assertFalse(orchestrator.parseReviewApproval("代码质量不合格"));
+
+        // 否定语义变体：含"通过"二字但语义是失败，不能误判为批准
+        assertFalse(orchestrator.parseReviewApproval("测试未全部通过，存在 2 个失败用例"));
+        assertFalse(orchestrator.parseReviewApproval("集成验证没有通过"));
+        assertFalse(orchestrator.parseReviewApproval("编译检查未能通过"));
 
         // 含肯定关键词的非 JSON 文本
         assertTrue(orchestrator.parseReviewApproval("审查通过，代码质量良好"));

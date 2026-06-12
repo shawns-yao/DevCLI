@@ -880,7 +880,10 @@ public class Main {
 
     private static AgentOrchestrator createTeamAgent(LlmClient llmClient, Agent reactAgent, PrintStream out) {
         out.println("👥 使用 Multi-Agent 协作模式\n");
-        return new AgentOrchestrator(llmClient, reactAgent.getToolRegistry(), reactAgent.getMemoryManager(), out);
+        AgentOrchestrator orchestrator = new AgentOrchestrator(
+                llmClient, reactAgent.getToolRegistry(), reactAgent.getMemoryManager(), out);
+        orchestrator.setReplanEnabled(true);
+        return orchestrator;
     }
 
     private static String runWithCancelSupport(Terminal terminal, PrintStream out, Callable<String> task) {

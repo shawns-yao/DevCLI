@@ -56,6 +56,15 @@ public class AgentOrchestrator {
     private static final double FINAL_INTEGRATION_FAILURE_RATIO_LIMIT = 0.5;
     private static final int PRE_REVIEW_TIMEOUT_SECONDS = 60;
     private static final int MAX_PLANNER_STEPS = 5;
+    /** 失败步骤触发重规划的最大轮数。仅做一轮有界恢复，避免规划-失败死循环。 */
+    private static final int MAX_REPLAN_ROUNDS = 1;
+    /**
+     * Reviewer 输出 JSON 解析失败时的否定语义识别。
+     * 覆盖"未通过/不通过/未全部通过/没有通过/未能通过"等变体，
+     * 避免"测试未全部通过"因含"通过"二字被误判为批准。
+     */
+    private static final java.util.regex.Pattern NEGATIVE_REVIEW_PATTERN =
+            java.util.regex.Pattern.compile("[未没不][^。\\n]{0,6}通过");
 
     private final LlmClient llmClient;
     private final SubAgent planner;
@@ -71,6 +80,13 @@ public class AgentOrchestrator {
     private com.paicli.skill.SkillContextBuffer skillContextBuffer;
     private final TraceRecorder traceRecorder = new TraceRecorder();
     private List<AcceptanceCriterion> currentAcceptanceCriteria = List.of();
+    /** 当前 run 的进度 checkpoint：步骤完成/失败即落盘，全部成功后删除。崩溃后可凭文件做事后排查。 */
+    private AgentCheckpoint checkpoint;
+    /**
+     * 失败步骤重规划开关。默认关闭以保持既有调用方行为可预期；
+     * 生产装配点（Main / TuiSessionController）显式开启。
+     */
+    private boolean replanEnabled = false;
 
     // 执行步骤的数据结构（package-private 供测试访问）
     record ExecutionStep(String id, String description, String type,
@@ -91,10 +107,17 @@ public class AgentOrchestrator {
         ExecutionStep started() {
             return new ExecutionStep(id, description, type, dependencies, result, StepStatus.RUNNING);
         }
+
+        /** 标记本步骤已由重规划生成的恢复步骤接管（保留原 result 作为失败原因记录）。 */
+        ExecutionStep withSuperseded() {
+            return new ExecutionStep(id, description, type, dependencies, result, StepStatus.SUPERSEDED);
+        }
     }
 
     enum StepStatus {
-        PENDING, RUNNING, COMPLETED, FAILED
+        PENDING, RUNNING, COMPLETED, FAILED,
+        /** 失败或被失败阻塞后，已由重规划的恢复步骤接管，不再参与调度与熔断统计。 */
+        SUPERSEDED
     }
 
     record PreReviewResult(boolean passed, String feedback) {
@@ -173,6 +196,11 @@ public class AgentOrchestrator {
      * 注入 Sticky Memory（PR-B）：把 supplier 同时下发到 planner / workers / reviewer，
      * 让团队三角色都看到统一的稳定事实层。
      */
+    /** 开启失败步骤的有界重规划（最多 {@link #MAX_REPLAN_ROUNDS} 轮）。 */
+    public void setReplanEnabled(boolean replanEnabled) {
+        this.replanEnabled = replanEnabled;
+    }
+
     public void setStickyMemorySupplier(Supplier<String> stickyMemorySupplier) {
         this.stickyMemorySupplier = stickyMemorySupplier == null ? () -> "" : stickyMemorySupplier;
         planner.setStickyMemorySupplier(this.stickyMemorySupplier);
@@ -243,13 +271,16 @@ public class AgentOrchestrator {
             return "❌ 规划失败：规划者未能生成有效计划";
         }
 
-        // 2. 解析计划
+        // 2. 解析计划（parsePlan 内部已做超步数粗化）
         List<ExecutionStep> steps = parsePlan(planResult.content());
         if (steps.isEmpty()) {
             return "❌ 规划失败：无法解析执行计划\n原始输出:\n" + planResult.content();
         }
-        steps = coarsenPlanIfNeeded(steps);
         steps = appendFinalIntegrationStep(steps);
+        checkpoint = new AgentCheckpoint(
+                "orch-" + UUID.randomUUID().toString().substring(0, 8),
+                abbreviate(currentUserTask, 200));
+        checkpoint.save();
 
         out.println(AnsiStyle.heading("📋 执行计划"));
         out.println(summarizeSteps(steps) + "\n");
@@ -259,12 +290,34 @@ public class AgentOrchestrator {
         Map<String, Integer> retryCount = new ConcurrentHashMap<>();
         int singleStepCursor = 0;
         int batchIndex = 0;
+        int replanRounds = 0;
 
         while (true) {
             if (CancellationContext.isCancelled()) {
                 return "⏹️ 已取消当前多 Agent 任务。";
             }
             List<ExecutionStep> executable = getExecutableSteps(steps);
+            // 失败步骤的有界重规划：当正常步骤全部走完（只剩最终集成或无可执行步骤）
+            // 且存在失败步骤时，让 Planner 基于执行反馈生成一次恢复计划
+            boolean onlyFinalLeft = !executable.isEmpty()
+                    && executable.stream().allMatch(this::isFinalIntegrationStep);
+            if (replanEnabled
+                    && (executable.isEmpty() || onlyFinalLeft)
+                    && replanRounds < MAX_REPLAN_ROUNDS
+                    && hasFailedNormalSteps(steps)) {
+                replanRounds++;
+                out.println(AnsiStyle.heading("🔁 检测到失败步骤，尝试重规划（第 " + replanRounds + " 轮）"));
+                List<ExecutionStep> recoverySteps = replanFailedSteps(steps, replanRounds);
+                if (recoverySteps.isEmpty()) {
+                    out.println("⚠️ 重规划未产出有效恢复计划，按原失败状态继续收尾\n");
+                } else {
+                    supersedeFailedAndBlockedSteps(steps);
+                    insertRecoverySteps(steps, recoverySteps);
+                    out.println("📋 恢复计划：\n" + summarizeSteps(recoverySteps));
+                    continue;
+                }
+                executable = getExecutableSteps(steps);
+            }
             if (executable.isEmpty()) {
                 break;
             }
@@ -313,6 +366,17 @@ public class AgentOrchestrator {
         // 6. 汇总结果
         String finalResult = buildFinalResult(steps);
         memoryManager.addAssistantMessage("[多Agent结果] " + finalResult);
+
+        if (checkpoint != null) {
+            boolean allCompleted = steps.stream().allMatch(step ->
+                    step.status() == StepStatus.COMPLETED || step.status() == StepStatus.SUPERSEDED);
+            if (allCompleted) {
+                checkpoint.delete();
+            } else {
+                checkpoint.save();
+                log.info("orchestration checkpoint retained for post-mortem: {}", checkpoint.getOrchestrationId());
+            }
+        }
 
         return finalResult;
     }
@@ -502,14 +566,17 @@ public class AgentOrchestrator {
                 .filter(step -> step.dependencies().stream()
                         .allMatch(dep -> {
                             StepStatus status = statusMap.get(dep);
-                            return status == StepStatus.COMPLETED || status == StepStatus.FAILED;
+                            return status == StepStatus.COMPLETED || status == StepStatus.FAILED
+                                    || status == StepStatus.SUPERSEDED;
                         }))
                 .toList();
     }
 
     boolean shouldFuseFinalIntegration(List<ExecutionStep> steps) {
+        // SUPERSEDED 步骤已由恢复计划接管，不参与失败比例统计
         List<ExecutionStep> normalSteps = steps.stream()
                 .filter(step -> !isFinalIntegrationStep(step))
+                .filter(step -> step.status() != StepStatus.SUPERSEDED)
                 .toList();
         if (normalSteps.isEmpty()) {
             return false;
@@ -560,6 +627,118 @@ public class AgentOrchestrator {
                 || description.contains("最终集成")
                 || type.equals("integration")
                 || type.equals("final_integration");
+    }
+
+    private boolean hasFailedNormalSteps(List<ExecutionStep> steps) {
+        return steps.stream()
+                .filter(step -> !isFinalIntegrationStep(step))
+                .anyMatch(step -> step.status() == StepStatus.FAILED);
+    }
+
+    /**
+     * 失败步骤的有界重规划：把执行反馈（已完成成果 + 失败原因 + 被阻塞步骤）交回 Planner，
+     * 生成只覆盖剩余工作的恢复计划。恢复步骤 id 加 r{round}_ 前缀避免与原步骤冲突。
+     * Planner 调用失败或计划不可解析时返回空列表，调用方按原失败状态收尾（保守降级）。
+     */
+    List<ExecutionStep> replanFailedSteps(List<ExecutionStep> steps, int round) {
+        List<AcceptanceCriterion> criteriaSnapshot = currentAcceptanceCriteria;
+        try {
+            AgentMessage replanMessage = AgentMessage.task("orchestrator", buildReplanTask(steps));
+            AgentMessage replanResult = planner.execute(replanMessage, out);
+            planner.clearHistory();
+            if (replanResult.type() == AgentMessage.Type.ERROR
+                    || replanResult.content() == null || replanResult.content().isBlank()) {
+                log.warn("Replan round {} failed at planner layer: {}", round,
+                        replanResult.content() == null ? "empty" : replanResult.content());
+                return List.of();
+            }
+            List<ExecutionStep> parsed = parsePlan(replanResult.content());
+            return remapRecoveryStepIds(parsed, round);
+        } finally {
+            // parsePlan 会用恢复计划覆盖验收点；恢复计划只描述剩余工作，必须还原原始验收点
+            currentAcceptanceCriteria = criteriaSnapshot;
+        }
+    }
+
+    /** 恢复步骤 id 统一改写为 r{round}_step_N，内部依赖同步重映射；引用未知 id 的依赖直接丢弃。 */
+    List<ExecutionStep> remapRecoveryStepIds(List<ExecutionStep> parsed, int round) {
+        if (parsed == null || parsed.isEmpty()) {
+            return List.of();
+        }
+        Map<String, String> idMapping = new HashMap<>();
+        for (int i = 0; i < parsed.size(); i++) {
+            idMapping.put(parsed.get(i).id(), "r" + round + "_step_" + (i + 1));
+        }
+        List<ExecutionStep> remapped = new ArrayList<>();
+        for (ExecutionStep step : parsed) {
+            List<String> deps = step.dependencies().stream()
+                    .map(idMapping::get)
+                    .filter(Objects::nonNull)
+                    .toList();
+            remapped.add(ExecutionStep.pending(
+                    idMapping.get(step.id()), step.description(), step.type(), deps));
+        }
+        return remapped;
+    }
+
+    /**
+     * 重规划接管后，把失败步骤和被失败阻塞的待执行步骤标记为 SUPERSEDED：
+     * 不再参与调度，不计入最终集成熔断比例，原失败原因保留在 result 字段供追溯。
+     */
+    private void supersedeFailedAndBlockedSteps(List<ExecutionStep> steps) {
+        for (int i = 0; i < steps.size(); i++) {
+            ExecutionStep step = steps.get(i);
+            if (isFinalIntegrationStep(step)) {
+                continue;
+            }
+            if (step.status() == StepStatus.FAILED || step.status() == StepStatus.PENDING) {
+                steps.set(i, step.withSuperseded());
+            }
+        }
+    }
+
+    /** 恢复步骤插入到最终集成步骤之前，保证汇总输出顺序与执行顺序一致。 */
+    private void insertRecoverySteps(List<ExecutionStep> steps, List<ExecutionStep> recoverySteps) {
+        int insertAt = steps.size();
+        for (int i = 0; i < steps.size(); i++) {
+            if (isFinalIntegrationStep(steps.get(i))) {
+                insertAt = i;
+                break;
+            }
+        }
+        steps.addAll(insertAt, recoverySteps);
+    }
+
+    private String buildReplanTask(List<ExecutionStep> steps) {
+        StringBuilder task = new StringBuilder();
+        task.append("之前的执行计划部分失败，请基于执行反馈生成一份恢复计划。\n\n");
+        if (currentUserTask != null && !currentUserTask.isBlank()) {
+            task.append("原始用户任务：\n").append(currentUserTask).append("\n\n");
+        }
+        task.append("执行情况：\n");
+        for (ExecutionStep step : steps) {
+            if (isFinalIntegrationStep(step)) {
+                continue;
+            }
+            switch (step.status()) {
+                case COMPLETED -> task.append("- [已完成] ").append(step.description())
+                        .append("\n  结果：").append(abbreviate(step.result(), 300)).append('\n');
+                case FAILED -> task.append("- [失败] ").append(step.description())
+                        .append("\n  失败原因：").append(abbreviate(step.result(), 300)).append('\n');
+                case PENDING -> task.append("- [未执行，被失败步骤阻塞] ").append(step.description()).append('\n');
+                default -> { }
+            }
+        }
+        task.append("""
+
+                要求：
+                1. 只为失败和未执行的工作生成恢复步骤；已完成的成果直接复用，不要重做
+                2. 针对失败原因换思路，不要原样重复已失败的做法
+                3. 输出 JSON：{"steps": [{"id": "...", "description": "...", "type": "...", "dependencies": [...]}]}
+                4. dependencies 只能引用本恢复计划内的步骤 id，不要引用旧计划的 id
+                5. 步骤描述必须自包含（写清楚文件、入口、验收方式），不依赖旧计划上下文
+                """);
+        return task.toString();
     }
 
     /**
@@ -613,9 +792,9 @@ public class AgentOrchestrator {
             }
             return true;
         } catch (Exception e) {
-            // 无法解析 JSON：必须同时不含否定关键词且含有肯定关键词，才视为通过
+            // 无法解析 JSON：必须同时不含否定语义且含有肯定关键词，才视为通过
             String lower = reviewContent.toLowerCase();
-            boolean hasNegativeKeyword = lower.contains("未通过") || lower.contains("不通过")
+            boolean hasNegativeKeyword = NEGATIVE_REVIEW_PATTERN.matcher(lower).find()
                     || lower.contains("不合格") || lower.contains("有问题")
                     || lower.contains("\"approved\": false") || lower.contains("\"approved\":false");
             boolean hasPositiveKeyword = lower.contains("通过") || lower.contains("合格")
@@ -790,8 +969,23 @@ public class AgentOrchestrator {
         for (int i = 0; i < steps.size(); i++) {
             if (steps.get(i).id().equals(stepId)) {
                 steps.set(i, updated);
+                recordStepToCheckpoint(stepId, updated);
                 return;
             }
+        }
+    }
+
+    /** 步骤终态写入 checkpoint（updateStep 已同步，无并发问题）。 */
+    private void recordStepToCheckpoint(String stepId, ExecutionStep updated) {
+        if (checkpoint == null) {
+            return;
+        }
+        if (updated.status() == StepStatus.COMPLETED) {
+            checkpoint.addCompletedStep(stepId, List.of(), abbreviate(updated.result(), 300));
+            checkpoint.save();
+        } else if (updated.status() == StepStatus.FAILED) {
+            checkpoint.recordFailure(stepId + ": " + abbreviate(updated.result(), 300));
+            checkpoint.save();
         }
     }
 
@@ -1310,16 +1504,29 @@ public class AgentOrchestrator {
                 context.append("已完成的依赖步骤 [").append(step.id()).append("]: ")
                         .append(step.description()).append("\n");
                 if (step.result() != null && !step.result().isBlank()) {
-                    String preview = step.result().length() > 500
-                            ? step.result().substring(0, 500) + "..."
-                            : step.result();
-                    context.append("结果：").append(preview).append("\n");
+                    context.append("结果：").append(previewDependencyResult(step.result())).append("\n");
                 }
                 context.append("\n");
             }
         }
 
         return context.toString();
+    }
+
+    /**
+     * 依赖步骤结果预览：保留头部 + 尾部，避免精确实体（入口签名、路径、验收结论）
+     * 被单一截断点切掉——结论与验证输出通常在结果末尾。
+     */
+    private static String previewDependencyResult(String result) {
+        final int maxChars = 2_000;
+        final int headChars = 1_500;
+        final int tailChars = 400;
+        if (result.length() <= maxChars) {
+            return result;
+        }
+        return result.substring(0, headChars)
+                + "\n...<中间内容已截断>...\n"
+                + result.substring(result.length() - tailChars);
     }
 
     private boolean isVerificationStepWithPreReview(ExecutionStep step) {
@@ -1397,7 +1604,9 @@ public class AgentOrchestrator {
      */
     private String buildFinalResult(List<ExecutionStep> steps) {
         StringBuilder result = new StringBuilder();
-        boolean allCompleted = steps.stream().allMatch(step -> step.status() == StepStatus.COMPLETED);
+        // SUPERSEDED 步骤已由恢复步骤接管，恢复步骤本身的状态已计入统计
+        boolean allCompleted = steps.stream().allMatch(step ->
+                step.status() == StepStatus.COMPLETED || step.status() == StepStatus.SUPERSEDED);
         boolean hasFailedSteps = steps.stream().anyMatch(step -> step.status() == StepStatus.FAILED);
 
         if (allCompleted) {
@@ -1415,6 +1624,8 @@ public class AgentOrchestrator {
                 result.append("✅ ");
             } else if (step.status() == StepStatus.FAILED) {
                 result.append("❌ ");
+            } else if (step.status() == StepStatus.SUPERSEDED) {
+                result.append("🔁 (已由恢复计划接管) ");
             } else {
                 result.append("⏳ ");
             }

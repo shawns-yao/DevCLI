@@ -236,11 +236,7 @@ public final class TuiSessionController implements AutoCloseable {
                             reactAgent.getMemoryManager(),
                             (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute()
                     ).run(input);
-                    case TEAM -> new AgentOrchestrator(
-                            llmClient,
-                            reactAgent.getToolRegistry(),
-                            reactAgent.getMemoryManager()
-                    ).run(input);
+                    case TEAM -> createTeamOrchestrator().run(input);
                 }));
         } catch (Exception e) {
             output = "执行失败: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
@@ -253,6 +249,16 @@ public final class TuiSessionController implements AutoCloseable {
             });
         }
         appendAssistant(cleanOutput(output));
+    }
+
+    private AgentOrchestrator createTeamOrchestrator() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(
+                llmClient,
+                reactAgent.getToolRegistry(),
+                reactAgent.getMemoryManager()
+        );
+        orchestrator.setReplanEnabled(true);
+        return orchestrator;
     }
 
     private String formatSnapshots() {
