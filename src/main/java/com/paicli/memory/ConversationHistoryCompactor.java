@@ -748,7 +748,19 @@ public class ConversationHistoryCompactor {
 
         // 至少保留 system + 3 条消息（降级标记 + assistant + 1条用户消息）
         int minKeep = 3;
+        int originalToRemove = toRemove;
         toRemove = Math.min(toRemove, history.size() - systemEnd - minKeep);
+
+        // Bug #4 残留修复：如果 minKeep cap 改变了 toRemove，回退到最近的 user 边界
+        if (toRemove < originalToRemove) {
+            int cappedEnd = systemEnd + toRemove;
+            for (int i = cappedEnd; i > systemEnd; i--) {
+                if ("user".equals(history.get(i).role())) {
+                    toRemove = i - systemEnd;
+                    break;
+                }
+            }
+        }
 
         if (toRemove <= 0) {
             // 无法删除足够的消息达到目标，说明最近几条消息就很大

@@ -335,8 +335,12 @@ public class VectorStore implements AutoCloseable {
                     index_epoch, symbol_version, classpath_epoch)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
+        // Bug #1 残留修复：检测是否在外层事务中，避免嵌套事务提前 commit
         boolean autoCommit = connection.getAutoCommit();
-        connection.setAutoCommit(false);
+        boolean manageTransaction = autoCommit; // 只有 autoCommit=true 时才自己管理事务
+        if (manageTransaction) {
+            connection.setAutoCommit(false);
+        }
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             for (CodeChunkEntry entry : entries) {
                 SymbolSnapshot snapshot = SymbolSnapshot.from(
@@ -358,12 +362,18 @@ public class VectorStore implements AutoCloseable {
                 ps.addBatch();
             }
             ps.executeBatch();
-            connection.commit();
+            if (manageTransaction) {
+                connection.commit();
+            }
         } catch (SQLException e) {
-            connection.rollback();
+            if (manageTransaction) {
+                connection.rollback();
+            }
             throw e;
         } finally {
-            connection.setAutoCommit(autoCommit);
+            if (manageTransaction) {
+                connection.setAutoCommit(autoCommit);
+            }
         }
     }
 
@@ -376,8 +386,12 @@ public class VectorStore implements AutoCloseable {
                     resolution_source, confidence, classpath_epoch)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
+        // Bug #1 残留修复：检测是否在外层事务中，避免嵌套事务提前 commit
         boolean autoCommit = connection.getAutoCommit();
-        connection.setAutoCommit(false);
+        boolean manageTransaction = autoCommit;
+        if (manageTransaction) {
+            connection.setAutoCommit(false);
+        }
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             for (CodeRelation rel : relations) {
                 ps.setString(1, projectPath);
@@ -392,12 +406,18 @@ public class VectorStore implements AutoCloseable {
                 ps.addBatch();
             }
             ps.executeBatch();
-            connection.commit();
+            if (manageTransaction) {
+                connection.commit();
+            }
         } catch (SQLException e) {
-            connection.rollback();
+            if (manageTransaction) {
+                connection.rollback();
+            }
             throw e;
         } finally {
-            connection.setAutoCommit(autoCommit);
+            if (manageTransaction) {
+                connection.setAutoCommit(autoCommit);
+            }
         }
     }
 

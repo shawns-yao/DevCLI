@@ -62,9 +62,10 @@ public class WorkingMemory {
     /** 单条 tool 结果在注入时截断到此字符数。完整原文仍保留在 recentToolResults，仅渲染时截断。 */
     public static final int TOOL_RESULT_RENDER_CHARS = 1_500;
     public static final int DEFAULT_MAX_RAG_EVIDENCE = 8;
-    // Bug #9 修复：使用 [^\]]+ 捕获文件路径，支持 Windows 路径 (C:\Users\...)
+    // Bug #9 修复：第一个捕获组改为 \w+，只匹配 chunkType (method/class/file)
+    // 避免在 Windows 路径 C:\Users\... 时被盘符冒号截断
     private static final Pattern SEARCH_RESULT_HEADER = Pattern.compile(
-            "^\\s*\\d+\\. \\[([^:]+):([^\\]]+)] \\(相似度: ([^)]+)\\) (.+)$");
+            "^\\s*\\d+\\. \\[(\\w+):([^\\]]+)] \\(相似度: ([^)]+)\\) (.+)$");
     private static final Pattern SEARCH_RESULT_EVIDENCE = Pattern.compile(
             "^\\s*evidence: symbolVersion=([^,]+), (?:indexEpoch=([^,]+), )?classpathEpoch=(.+)$");
     private static final Pattern SEARCH_RESULT_NEGATIVE_FACT = Pattern.compile("^\\s*negativeFact: (.+)$");
