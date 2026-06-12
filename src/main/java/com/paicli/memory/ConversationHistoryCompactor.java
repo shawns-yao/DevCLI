@@ -56,6 +56,13 @@ public class ConversationHistoryCompactor {
     static final String SUMMARY_MARKER = "[已压缩的历史对话摘要]\n";
 
     /**
+     * 滚动摘要的字符上限。增量摘要"只追加不删除"会让摘要单调膨胀，
+     * 超过此上限时触发一次"摘要的摘要"再压缩（保留精确实体与最终决策）。
+     * 再压缩失败时保留原摘要并打日志，不阻断压缩主流程。
+     */
+    static final int MAX_SUMMARY_CHARS = 16_000;
+
+    /**
      * 连续压缩失败上限。达到后本会话停止再次尝试压缩，避免在不可恢复的窗口溢出
      * 场景下反复打爆 LLM API（参考 Claude Code 的 autocompact circuit breaker）。
      */
@@ -92,7 +99,6 @@ public class ConversationHistoryCompactor {
             "exceeds maximum",
             "exceeds the maximum",
             "maximum context",
-            "max_tokens",
             "input is too long",
             "request too large",
             "tokens exceeds",
@@ -164,6 +170,18 @@ public class ConversationHistoryCompactor {
             === 新增对话（结束） ===
             """;
 
+    private static final String RECOMPRESS_PROMPT = """
+            下面这份滚动摘要已经过长。请把它压缩到大约 %d 字以内，规则：
+            1. 保留所有仍然有效的最终决策、约束和用户偏好
+            2. 精确实体（文件名、路径、数字常量、错误码、配置值）必须保留原文
+            3. 合并重复信息，删除已被覆盖的中间状态，只保留"最终值"
+            4. 输出压缩后的完整摘要，不加任何前缀或元描述
+
+            === 待再压缩的摘要 ===
+            %s
+            === 待再压缩的摘要（结束） ===
+            """;
+
     private LlmClient llmClient;
     private final int retainRecentTokens;
 
@@ -218,7 +236,16 @@ public class ConversationHistoryCompactor {
         // 检查是否在降级冷却期内
         long now = System.currentTimeMillis();
         if (lastFallbackTimestamp > 0 && (now - lastFallbackTimestamp) < FALLBACK_COOLDOWN_MS) {
-            // 冷却期内不执行任何压缩操作，避免降级循环
+            // 冷却期内不再尝试 LLM 摘要压缩，避免降级循环；
+            // 但 token 再次越过阈值说明有真实新增内容，允许结构性截断兜底，
+            // 否则冷却期内会裸奔撞窗口。
+            if (TokenBudget.estimateMessagesTokens(history) >= triggerTokens) {
+                boolean truncated = fallbackTruncate(history, triggerTokens);
+                if (truncated) {
+                    lastFallbackTimestamp = now;
+                }
+                return truncated;
+            }
             return false;
         }
 
@@ -261,6 +288,7 @@ public class ConversationHistoryCompactor {
             return false;
         }
         String summary = attempt.summary();
+        summary = capSummarySize(summary);
 
         // 5) 重建：[system] + [user(摘要)] + [assistant("好的")] + 保留尾部
         List<LlmClient.Message> rebuilt = new ArrayList<>();
@@ -664,6 +692,34 @@ public class ConversationHistoryCompactor {
         }
         String prompt = String.format(REDUCE_PROMPT, joined);
         return chatOnce("你是一个摘要合并助手，必须保留所有片段里出现过的精确实体原文。", prompt);
+    }
+
+    /**
+     * 滚动摘要超过 {@link #MAX_SUMMARY_CHARS} 时做一次"摘要的摘要"。
+     * 再压缩失败或结果无效时保留原摘要（显式降级，打日志），不阻断压缩主流程。
+     */
+    private String capSummarySize(String summary) {
+        if (summary == null || summary.length() <= MAX_SUMMARY_CHARS) {
+            return summary;
+        }
+        int targetChars = MAX_SUMMARY_CHARS / 2;
+        try {
+            String recompressed = chatOnce(
+                    "你是一个摘要再压缩助手，必须保留所有精确实体原文和最终决策。",
+                    String.format(RECOMPRESS_PROMPT, targetChars, summary));
+            if (recompressed != null && !recompressed.isBlank()
+                    && recompressed.trim().length() < summary.length()) {
+                log.info("rolling summary recompressed: {} -> {} chars",
+                        summary.length(), recompressed.trim().length());
+                return recompressed.trim();
+            }
+            log.warn("summary recompress returned invalid result; keep oversized summary ({} chars)",
+                    summary.length());
+        } catch (IOException e) {
+            // fallback：保留超长原摘要，宁可贵也不丢事实
+            log.warn("summary recompress failed; keep oversized summary ({} chars)", summary.length(), e);
+        }
+        return summary;
     }
 
     private String chatOnce(String systemPrompt, String userPrompt) throws IOException {

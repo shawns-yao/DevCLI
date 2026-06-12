@@ -573,6 +573,9 @@ class ConversationHistoryCompactorTest {
                 new IOException("connection refused")));
         assertFalse(ConversationHistoryCompactor.isPromptTooLongError(
                 new IOException("401 unauthorized")));
+        // max_tokens 是输出参数配置错误，不是 prompt 超长，不应触发丢历史重试
+        assertFalse(ConversationHistoryCompactor.isPromptTooLongError(
+                new IOException("max_tokens must be greater than thinking.budget_tokens")));
     }
 
     /** 构造一段足够大、可以 split 的 history。 */
