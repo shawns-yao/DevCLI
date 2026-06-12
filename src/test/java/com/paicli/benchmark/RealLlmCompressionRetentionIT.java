@@ -200,13 +200,13 @@ class RealLlmCompressionRetentionIT {
                 "本次会话最初要解决什么问题？",
                 List.of("RAG", "检索", "调用链")));
         facts.add(new FactCase(Tier.EASY,
-                "确定的实现边界是不引入 Java SymbolSolver，避免重型依赖",
-                "对依赖范围有什么明确禁止的事？",
-                List.of("SymbolSolver", "不引入", "禁止")));
+                "当前实现已经把 JavaParser SymbolSolver 接入 CodeAnalyzer，作为符号解析第一阶段",
+                "JavaParser 符号解析现在做到哪一步了？",
+                List.of("SymbolSolver", "CodeAnalyzer")));
         facts.add(new FactCase(Tier.EASY,
-                "排序方案最终选择确定性分层排序",
+                "排序方案最终选择 RetrievalFusion 加 RRF，再叠加符号级 boost",
                 "排序方案是怎么选的？",
-                List.of("分层排序", "确定性")));
+                List.of("RetrievalFusion", "RRF")));
         facts.add(new FactCase(Tier.EASY,
                 "代码图谱保留 calls / implements / extends / contains 四种关系",
                 "图谱里抽了哪几种边？",
@@ -230,9 +230,9 @@ class RealLlmCompressionRetentionIT {
                 "调试过程中最严重的错是什么？",
                 List.of("MCP", "schema", "required")));
         facts.add(new FactCase(Tier.MEDIUM,
-                "下一步要补一组 ConversationHistoryCompactor 协议契约测试",
-                "接下来要写哪类测试？",
-                List.of("ConversationHistoryCompactor", "契约", "协议")));
+                "下一步要补一组 SymbolVersionDiff 到 InvalidationMemory 的上下文失效契约测试",
+                "接下来要写哪类上下文治理测试？",
+                List.of("SymbolVersionDiff", "InvalidationMemory", "失效")));
         facts.add(new FactCase(Tier.MEDIUM,
                 "压缩保留率回归命令使用 mvn test -Dtest=RealLlmCompressionRetentionIT",
                 "怎么跑真实压缩保留率回归？",
@@ -268,9 +268,9 @@ class RealLlmCompressionRetentionIT {
                 "search_code 的 top_k 现在用的是几？",
                 List.of("10")));
         facts.add(new FactCase(Tier.HARD_OVERRIDE,
-                "OVERRIDE: 摘要器先尝试 LLM rerank，后改成确定性排序，最后回到混合（向量+确定性）",
+                "OVERRIDE: 摘要器先尝试 LLM rerank，后改成确定性排序，最后回到 RRF 混合（向量+关键词+图谱）",
                 "排序最终用的是哪个版本？",
-                List.of("混合", "向量")));
+                List.of("RRF", "混合")));
         facts.add(new FactCase(Tier.HARD_OVERRIDE,
                 "OVERRIDE: chunk_size 从 256 改到 512，最终定 384 平衡速度和召回",
                 "chunk_size 最后定多少？",
@@ -432,8 +432,8 @@ class RealLlmCompressionRetentionIT {
 
         // EASY-1 / EASY-2 第二次复述
         turn++;
-        injectUser(history, turn, "总目标还是 RAG 检索优化对吧？SymbolSolver 不引入。");
-        injectAssistant(history, turn, "对，目标和边界都没变。");
+        injectUser(history, turn, "总目标还是 RAG 检索优化对吧？SymbolSolver 已经接到 CodeAnalyzer。");
+        injectAssistant(history, turn, "对，目标和当前符号解析状态都没变。");
 
         // 灌大段纯对话直到达到 targetTokens（不用大代码块，避免撑爆保留尾部）
         while (TokenBudget.estimateMessagesTokens(history) < targetTokens) {
@@ -479,7 +479,7 @@ class RealLlmCompressionRetentionIT {
         for (int i = 0; i < 30; i++) {
             if (isUser) {
                 sb.append("讨论点 ").append(seed).append("-").append(i)
-                        .append("：保持当前架构思路，先不引入新的依赖；")
+                        .append("：保持当前架构思路，先不扩大依赖范围；")
                         .append("回顾一下之前的讨论结论，确认大家理解一致；")
                         .append("注意保持代码风格的一致性；");
             } else {

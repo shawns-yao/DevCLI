@@ -258,7 +258,7 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    void shouldRunFinalIntegrationWhenFailureLeavesBlockedPendingSteps() {
+    void shouldNotRunFinalIntegrationWhenFailureLeavesBlockedPendingSteps() {
         AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
         List<AgentOrchestrator.ExecutionStep> steps = new ArrayList<>(List.of(
                 AgentOrchestrator.ExecutionStep.pending("step_1", "模型", "FILE_WRITE", List.of()).withFailed("review failed"),
@@ -268,8 +268,7 @@ class AgentOrchestratorTest {
 
         List<AgentOrchestrator.ExecutionStep> executable = orchestrator.getExecutableSteps(steps);
 
-        assertEquals(1, executable.size());
-        assertEquals("step_3", executable.get(0).id());
+        assertTrue(executable.isEmpty());
     }
 
     @Test
@@ -546,6 +545,63 @@ class AgentOrchestratorTest {
         assertTrue(orchestrator.shouldFuseFinalIntegration(steps));
     }
 
+    @Test
+    void finalIntegrationShouldPassWhenPreReviewPassesAndReviewerHasTransientFailure(@TempDir Path tempDir) throws Exception {
+        Path javaRoot = tempDir.resolve("src/main/java/bench/logops");
+        Files.createDirectories(javaRoot);
+        Files.writeString(javaRoot.resolve("LogOpsCli.java"), """
+                package bench.logops;
+                public class LogOpsCli {
+                    public static String run(String[] args, String terminalInput,
+                                             java.nio.file.Path dataDir, java.nio.file.Path exportDir) {
+                        return "ok";
+                    }
+                }
+                """, StandardCharsets.UTF_8);
+        LlmClient llmClient = new GLMClient("test-key") {
+            private final Queue<ChatResponse> responses = new ArrayDeque<>(List.of(
+                    response("""
+                            {
+                              "summary": "最终集成",
+                              "steps": [
+                                {"id":"s1","description":"最终集成验收 Java CLI","type":"INTEGRATION","dependencies":[]}
+                              ]
+                            }
+                            """),
+                    response("已完成最终集成检查")
+            ));
+
+            @Override
+            public ChatResponse chat(List<Message> messages, List<Tool> tools) throws IOException {
+                return chat(messages, tools, StreamListener.NO_OP);
+            }
+
+            @Override
+            public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {
+                ChatResponse response = responses.poll();
+                if (response == null) {
+                    throw new IOException("LLM 调用失败: API请求失败: 500 - transient");
+                }
+                if (response.content() != null && !response.content().isEmpty()) {
+                    listener.onContentDelta(response.content());
+                }
+                return response;
+            }
+        };
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    llmClient,
+                    isolatedToolRegistry(tempDir),
+                    mm
+            );
+
+            String finalResult = orchestrator.run("验证最终集成 reviewer 瞬时失败降级");
+
+            assertTrue(finalResult.contains("多 Agent 协作任务完成"), finalResult);
+            assertTrue(finalResult.contains("Pre-Review"), finalResult);
+        }
+    }
     @Test
     void shouldFallbackToSummaryForIssues() {
         AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));

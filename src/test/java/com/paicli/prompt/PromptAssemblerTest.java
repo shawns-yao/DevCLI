@@ -32,6 +32,16 @@ class PromptAssemblerTest {
     }
 
     @Test
+    void builtinPromptRequiresEvidenceBeforeClaimingLongTermMemoryIsEmpty() {
+        PromptAssembler assembler = PromptAssembler.createDefault();
+
+        String prompt = assembler.assemble(PromptMode.AGENT, PromptContext.empty());
+
+        assertTrue(prompt.contains("list_memory"));
+        assertTrue(prompt.contains("长期记忆索引快照"));
+        assertTrue(prompt.contains("不要在缺少"));
+    }
+    @Test
     void projectOverrideReplacesBuiltinModePrompt() throws Exception {
         Path projectPrompts = tempDir.resolve("project");
         Files.createDirectories(projectPrompts.resolve("modes"));

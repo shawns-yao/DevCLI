@@ -510,22 +510,40 @@ public class SubAgent {
     }
 
     private List<ToolExecutionResult> executeToolCalls(List<LlmClient.ToolCall> toolCalls) {
+        List<ToolExecutionResult> results = new ArrayList<>();
         List<ToolInvocation> invocations = new ArrayList<>();
+        List<String> allowedToolNames = allowedToolNamesForRole();
         for (LlmClient.ToolCall toolCall : toolCalls) {
             String toolName = toolCall.function().name();
             String toolArgs = toolCall.function().arguments();
             log.info("[{}] scheduling tool: {}", name, toolName);
             log.debug("[{}] tool args [{}]: {}", name, toolName, toolArgs);
-            invocations.add(new ToolInvocation(toolCall.id(), toolName, toolArgs));
+            ToolInvocation invocation = new ToolInvocation(toolCall.id(), toolName, toolArgs);
+            if (allowedToolNames != null && !allowedToolNames.contains(toolName)) {
+                results.add(ToolExecutionResult.failed(invocation,
+                        role.name() + " 不允许调用工具 " + toolName));
+                continue;
+            }
+            invocations.add(invocation);
         }
 
         if (invocations.size() > 1) {
             log.info("[{}] executing {} tool calls in parallel", name, invocations.size());
         }
-        AtomicReference<List<ToolExecutionResult>> results = new AtomicReference<>(List.of());
-        toolRegistry.runWithSkillContextBuffer(skillContextBuffer,
-                () -> results.set(toolRegistry.executeTools(invocations)));
-        return results.get();
+        if (!invocations.isEmpty()) {
+            AtomicReference<List<ToolExecutionResult>> executed = new AtomicReference<>(List.of());
+            toolRegistry.runWithSkillContextBuffer(skillContextBuffer,
+                    () -> executed.set(toolRegistry.executeTools(invocations)));
+            results.addAll(executed.get());
+        }
+        return results;
+    }
+
+    private List<String> allowedToolNamesForRole() {
+        if (role != AgentRole.REVIEWER) {
+            return null;
+        }
+        return List.of("read_file", "list_dir", "execute_command");
     }
 
     private void appendImageToolMessages(List<ToolExecutionResult> toolResults) {

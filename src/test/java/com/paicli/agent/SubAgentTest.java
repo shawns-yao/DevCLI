@@ -144,6 +144,44 @@ class SubAgentTest {
     }
 
     @Test
+    void reviewerShouldRejectWriteFileToolCallAtExecutionLayer(@TempDir Path tempDir) throws Exception {
+        ToolRegistry tools = new ToolRegistry();
+        tools.setProjectPath(tempDir.toString());
+        Path target = tempDir.resolve("src/main/java/bench/logops/LogOpsCli.java");
+        MultiCallStreamClient llm = new MultiCallStreamClient(List.of(
+                new CallScript(
+                        listener -> {},
+                        new LlmClient.ChatResponse(
+                                "assistant",
+                                "尝试写文件",
+                                null,
+                                List.of(new LlmClient.ToolCall(
+                                        "call_write",
+                                        new LlmClient.ToolCall.Function("write_file",
+                                                "{\"path\":\"src/main/java/bench/logops/LogOpsCli.java\",\"content\":\"class Bad {}\"}")
+                                )),
+                                10, 5
+                        )
+                ),
+                new CallScript(
+                        listener -> {},
+                        new LlmClient.ChatResponse("assistant", "{\"approved\":false}", null, 8, 3)
+                )
+        ));
+        SubAgent reviewer = new SubAgent("reviewer", AgentRole.REVIEWER, llm, tools);
+
+        reviewer.review("检查实现", "worker result",
+                new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+
+        assertFalse(Files.exists(target), "Reviewer must not be able to mutate files even if it returns write_file");
+        String toolResult = llm.messagesByCall.get(1).stream()
+                .filter(message -> "tool".equals(message.role()))
+                .map(LlmClient.Message::content)
+                .findFirst()
+                .orElse("");
+        assertTrue(toolResult.contains("不允许调用工具 write_file"), toolResult);
+    }
+    @Test
     void shouldWriteLoadedSkillIntoSubAgentBufferForNextUserMessage(@TempDir Path tempDir) throws Exception {
         Path skillRoot = tempDir.resolve("skills");
         writeSkill(skillRoot, "parallel-skill", "desc", "loaded body for worker");

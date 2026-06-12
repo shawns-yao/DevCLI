@@ -15,6 +15,7 @@ import com.paicli.tool.ToolRegistry;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import javax.tools.Diagnostic;
 import javax.tools.DiagnosticCollector;
@@ -23,6 +24,7 @@ import javax.tools.JavaFileObject;
 import javax.tools.StandardJavaFileManager;
 import javax.tools.ToolProvider;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.PrintStream;
 import java.lang.reflect.Method;
 import java.net.URL;
@@ -40,6 +42,7 @@ import java.util.Set;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class AgentCollaborationBenchmarkIT {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -79,24 +82,28 @@ class AgentCollaborationBenchmarkIT {
     }
 
     @Test
-    @DisplayName("re-evaluate an existing benchmark run without calling LLM")
-    void reevaluateExistingRun() throws Exception {
-        String runDir = System.getProperty("paicli.benchmark.reevaluate");
-        Assumptions.assumeTrue(runDir != null && !runDir.isBlank(),
-                "set -Dpaicli.benchmark.reevaluate=<run-dir> to re-score an existing run");
-        Path root = Path.of(runDir).toAbsolutePath().normalize();
-        ObjectNode previous = (ObjectNode) JSON.readTree(root.resolve("agent-collaboration-benchmark.json").toFile());
-        RunResult single = scoredExistingRun("single-agent", root.resolve("single"),
-                previous.path("single_agent").path("elapsed_ms").asLong(),
-                previous.path("single_agent").path("llm_run_completed").asBoolean(false));
-        RunResult team = scoredExistingRun("planner-worker-reviewer", root.resolve("team"),
-                previous.path("planner_worker_reviewer").path("elapsed_ms").asLong(),
-                previous.path("planner_worker_reviewer").path("llm_run_completed").asBoolean(false));
-        Path report = writeReport(root, previous.path("provider").asText("unknown"),
-                previous.path("model").asText("unknown"), single, team,
-                "corrected re-evaluation of existing generated files; no LLM calls were made");
-        System.out.println("Corrected benchmark report: " + report);
-        System.out.println(Files.readString(report));
+    void hiddenValidationShouldRejectArbitraryEntrypointClass(@TempDir Path workspace) throws Exception {
+        Path sourceDir = workspace.resolve("src/main/java/bench/logops");
+        Files.createDirectories(sourceDir);
+        Files.writeString(sourceDir.resolve("WrongCli.java"), """
+                package bench.logops;
+
+                public class WrongCli {
+                    public static String run(String[] args, String terminalInput,
+                                             java.nio.file.Path dataDir, java.nio.file.Path exportDir) {
+                        return "| ok |";
+                    }
+                }
+                """, StandardCharsets.UTF_8);
+        CompiledWorkspace compiled = compileWorkspace(workspace);
+        assertTrue(compiled.failures().isEmpty(), String.join("\n", compiled.failures()));
+
+        try (URLClassLoader loader = new URLClassLoader(new URL[]{compiled.classes().toUri().toURL()})) {
+            IllegalStateException error = assertThrows(IllegalStateException.class,
+                    () -> requiredEntrypoint(compiled.classes(), loader, "bench.logops.LogOpsCli"));
+            assertTrue(error.getMessage().contains("bench.logops.LogOpsCli"), error.getMessage());
+            assertTrue(error.getMessage().contains("run"), error.getMessage());
+        }
     }
 
     private static RunResult runSingleWithRetries(LlmClient llm, BenchmarkTask task, Path workspace) throws Exception {
@@ -159,12 +166,23 @@ class AgentCollaborationBenchmarkIT {
                     buffer.toString(StandardCharsets.UTF_8) + "\nLLM run failed: " + e.getMessage());
         }
         String combined = buffer.toString(StandardCharsets.UTF_8) + "\n" + output;
-        return result("planner-worker-reviewer", task, workspace, started, !isLlmFailure(combined), combined);
+        return result("planner-worker-reviewer", task, workspace, started, !isLlmFailure(output), combined);
     }
 
     private static RunResult result(String mode, BenchmarkTask task, Path workspace,
                                     long started, boolean completed, String output) {
+        writeRunOutput(workspace, mode, output);
         return new RunResult(mode, workspace, elapsedMs(started), completed, 1, output, evaluate(workspace, task));
+    }
+
+    private static void writeRunOutput(Path workspace, String mode, String output) {
+        try {
+            Files.createDirectories(workspace);
+            Files.writeString(workspace.resolve("benchmark-output-" + mode + ".txt"),
+                    output == null ? "" : output, StandardCharsets.UTF_8);
+        } catch (IOException ignored) {
+            // Benchmark diagnostics must not change scoring.
+        }
     }
 
     private static LimitedToolRegistry registryFor(Path workspace) {
@@ -208,9 +226,14 @@ class AgentCollaborationBenchmarkIT {
                   * log clean shard --before <yyyy-MM-dd>
 
                 Testable behavior:
-                - expose a public static Java method returning String and accepting
-                  (String[] args, String terminalInput, java.nio.file.Path dataDir,
-                  java.nio.file.Path exportDir). Class name and method name are not fixed.
+                - create class bench.logops.LogOpsCli.
+                - expose exactly this entrypoint:
+                  public static String run(String[] args, String terminalInput,
+                  java.nio.file.Path dataDir, java.nio.file.Path exportDir).
+                - keep production code self-contained under src/main/java/bench/logops/.
+                - do not invent a different public entrypoint; benchmark validation expects bench.logops.LogOpsCli.run.
+                - prefer simple imperative Java loops and mutable local variables; avoid lambdas/streams when a later mutation is needed.
+                - before final answer, run a local compile check such as javac -encoding UTF-8 -d classes <all generated java files>.
 
                 Log format:
                 yyyy-MM-dd'T'HH:mm:ss LEVEL service message
@@ -226,6 +249,9 @@ class AgentCollaborationBenchmarkIT {
                 - stat error aggregates ERROR count by service.
                 - clean shard deletes only files named shard-<yyyy-MM-dd>.log older than --before.
                 - invalid command or argument returns a clear error string, not an exception.
+
+                Required self-check before final answer: compile; default level; interactive level; ERROR export;
+                clean default and explicit before; invalid root command message contains log.
 
                 Suggested concerns: parsing, storage, query, statistics, cleanup, table formatting, export, CLI dispatch.
 
@@ -251,9 +277,14 @@ class AgentCollaborationBenchmarkIT {
                   * sales clean export --before <yyyy-MM-dd>
 
                 Testable behavior:
-                - expose a public static Java method returning String and accepting
-                  (String[] args, String terminalInput, java.nio.file.Path dataDir,
-                  java.nio.file.Path exportDir). Class name and method name are not fixed.
+                - create class bench.salesops.SalesOpsCli.
+                - expose exactly this entrypoint:
+                  public static String run(String[] args, String terminalInput,
+                  java.nio.file.Path dataDir, java.nio.file.Path exportDir).
+                - keep production code self-contained under src/main/java/bench/salesops/.
+                - do not invent a different public entrypoint; benchmark validation expects bench.salesops.SalesOpsCli.run.
+                - prefer simple imperative Java loops and mutable local variables; avoid lambdas/streams when a later mutation is needed.
+                - before final answer, run a local compile check such as javac -encoding UTF-8 -d classes <all generated java files>.
 
                 Order format:
                 yyyy-MM-dd,status,region,amount,orderId
@@ -269,6 +300,9 @@ class AgentCollaborationBenchmarkIT {
                 - revenue region aggregates PAID amount by region.
                 - clean export deletes only files named export-<yyyy-MM-dd>.csv older than --before.
                 - invalid command or argument returns a clear error string, not an exception.
+
+                Required self-check before final answer: compile; default status/date/before; interactive status;
+                orders.csv export; revenue region aggregation; invalid root command message contains sales.
 
                 Suggested concerns: parsing, CSV loading, filtering, aggregation, cleanup, table formatting, export, CLI dispatch.
 
@@ -294,9 +328,14 @@ class AgentCollaborationBenchmarkIT {
                   * incident archive resolved --before <yyyy-MM-dd>
 
                 Testable behavior:
-                - expose a public static Java method returning String and accepting
-                  (String[] args, String terminalInput, java.nio.file.Path dataDir,
-                  java.nio.file.Path exportDir). Class name and method name are not fixed.
+                - create class bench.incidentops.IncidentOpsCli.
+                - expose exactly this entrypoint:
+                  public static String run(String[] args, String terminalInput,
+                  java.nio.file.Path dataDir, java.nio.file.Path exportDir).
+                - keep production code self-contained under src/main/java/bench/incidentops/.
+                - do not invent a different public entrypoint; benchmark validation expects bench.incidentops.IncidentOpsCli.run.
+                - prefer simple imperative Java loops and mutable local variables; avoid lambdas/streams when a later mutation is needed.
+                - before final answer, run a local compile check such as javac -encoding UTF-8 -d classes <all generated java files>.
 
                 Incident format:
                 yyyy-MM-dd'T'HH:mm:ss severity service status message
@@ -312,6 +351,11 @@ class AgentCollaborationBenchmarkIT {
                 - stat severity aggregates incident count by severity.
                 - archive resolved deletes only files named incident-<yyyy-MM-dd>.log older than --before.
                 - invalid command or argument returns a clear error string, not an exception.
+                - query, service and stat commands must read incident records from dataDir files; do not return hard-coded sample rows.
+                - archive resolved must parse the yyyy-MM-dd date in incident-<date>.log and delete only files older than --before; keep newer files.
+
+                Required self-check before final answer: compile; default severity/before; interactive severity;
+                p1-incidents.log export contains real P1 rows; severity aggregation reads dataDir; newer archive files are kept; invalid root command message contains incident.
 
                 Suggested concerns: parsing, storage, query, statistics, archive cleanup, table formatting, export, CLI dispatch.
 
@@ -378,7 +422,7 @@ class AgentCollaborationBenchmarkIT {
 
         List<String> failures = new ArrayList<>();
         try (URLClassLoader loader = new URLClassLoader(new URL[]{classes.toUri().toURL()})) {
-            CliEntrypoint run = discoverEntrypoint(classes, loader, "log query level --level ERROR", "", logDir, exportDir);
+            CliEntrypoint run = requiredEntrypoint(classes, loader, "bench.logops.LogOpsCli");
             hiddenCheck(failures, "time query", () -> {
                 String out = run.invoke("log query time --from 2026-05-19T00:00:00 --to 2026-05-19T23:59:59", "", logDir, exportDir);
                 checkContains(failures, out, "|", "time query table");
@@ -455,8 +499,7 @@ class AgentCollaborationBenchmarkIT {
 
         List<String> failures = new ArrayList<>();
         try (URLClassLoader loader = new URLClassLoader(new URL[]{compiled.classes().toUri().toURL()})) {
-            CliEntrypoint run = discoverEntrypoint(compiled.classes(), loader,
-                    "sales order query --status PAID", "", dataDir, exportDir);
+            CliEntrypoint run = requiredEntrypoint(compiled.classes(), loader, "bench.salesops.SalesOpsCli");
             hiddenCheck(failures, "sales status default", () -> {
                 String out = run.invoke("sales order query", "", dataDir, exportDir);
                 checkContains(failures, out, "PAID", "default status is PAID");
@@ -532,8 +575,7 @@ class AgentCollaborationBenchmarkIT {
 
         List<String> failures = new ArrayList<>();
         try (URLClassLoader loader = new URLClassLoader(new URL[]{compiled.classes().toUri().toURL()})) {
-            CliEntrypoint run = discoverEntrypoint(compiled.classes(), loader,
-                    "incident ticket query --severity P1", "", dataDir, exportDir);
+            CliEntrypoint run = requiredEntrypoint(compiled.classes(), loader, "bench.incidentops.IncidentOpsCli");
             hiddenCheck(failures, "incident severity default", () -> {
                 String out = run.invoke("incident ticket query", "", dataDir, exportDir);
                 checkContains(failures, out, "P1", "default severity is P1");
@@ -640,32 +682,24 @@ class AgentCollaborationBenchmarkIT {
         return value == null ? "" : value.toString();
     }
 
-    private static CliEntrypoint discoverEntrypoint(Path classes, URLClassLoader loader, String probeCommand,
-                                                   String input, Path dataDir, Path exportDir) throws Exception {
-        List<Method> candidates = new ArrayList<>();
-        for (String className : compiledClassNames(classes)) {
-            Class<?> type = Class.forName(className, true, loader);
-            for (Method method : type.getMethods()) {
-                if (isCliEntrypoint(method)) {
-                    candidates.add(method);
-                }
-            }
+    private static CliEntrypoint requiredEntrypoint(Path classes, URLClassLoader loader, String className) throws Exception {
+        if (!compiledClassNames(classes).contains(className)) {
+            throw new IllegalStateException("required CLI class not found: " + className
+                    + ". Expected public static String run(String[], String, Path, Path)");
         }
-        if (candidates.isEmpty()) {
-            throw new IllegalStateException("no public static String CLI entrypoint accepting String[], String, Path, Path");
+        Class<?> type = Class.forName(className, true, loader);
+        Method method;
+        try {
+            method = type.getMethod("run", String[].class, String.class, Path.class, Path.class);
+        } catch (NoSuchMethodException e) {
+            throw new IllegalStateException("required run entrypoint not found on " + className
+                    + ". Expected public static String run(String[], String, Path, Path)", e);
         }
-        for (Method method : candidates) {
-            CliEntrypoint entrypoint = new CliEntrypoint(method);
-            try {
-                String out = entrypoint.invoke(probeCommand, input, dataDir, exportDir);
-                if (out != null && !out.isBlank()) {
-                    return entrypoint;
-                }
-            } catch (Exception ignored) {
-                // Try the next candidate; hidden checks validate behavior after discovery.
-            }
+        if (!isCliEntrypoint(method)) {
+            throw new IllegalStateException("invalid run entrypoint on " + className
+                    + ". Expected public static String run(String[], String, Path, Path)");
         }
-        return new CliEntrypoint(candidates.get(0));
+        return new CliEntrypoint(method);
     }
 
     private static List<String> compiledClassNames(Path classes) throws Exception {
@@ -758,11 +792,6 @@ class AgentCollaborationBenchmarkIT {
         return sb.toString();
     }
 
-    private static RunResult scoredExistingRun(String mode, Path workspace, long elapsedMs, boolean llmRunCompleted) {
-        return new RunResult(mode, workspace, elapsedMs, llmRunCompleted, 1,
-                "re-evaluated existing generated files", evaluate(workspace, logOpsTask()));
-    }
-
     private static Path writeSuiteReport(Path root, LlmClient llm, List<TaskComparison> comparisons) throws Exception {
         ObjectNode report = JSON.createObjectNode();
         report.put("created_at", Instant.now().toString());
@@ -795,35 +824,6 @@ class AgentCollaborationBenchmarkIT {
         aggregate.set("completed_pairs_comparison", aggregateComparisonJson(completedPairs));
 
         Path file = root.resolve("agent-collaboration-benchmark.json");
-        Files.writeString(file, JSON.writerWithDefaultPrettyPrinter().writeValueAsString(report), StandardCharsets.UTF_8);
-        return file;
-    }
-
-    private static Path writeReport(Path root, LlmClient llm, RunResult single, RunResult team) throws Exception {
-        return writeReport(root, llm.getProviderName(), llm.getModelName(), single, team,
-                "single task run once per mode; treat as a sample comparison, not a statistically significant benchmark");
-    }
-
-    private static Path writeReport(Path root, String provider, String model, RunResult single, RunResult team,
-                                    String note) throws Exception {
-        ObjectNode report = JSON.createObjectNode();
-        report.put("created_at", Instant.now().toString());
-        report.put("provider", provider);
-        report.put("model", model);
-        report.put("sample_size_per_mode", 1);
-        report.put("benchmark_task", "implement nested log operations CLI");
-        report.put("completion_metric", "hidden behavior checks passed / hidden behavior checks total");
-        report.put("hidden_failure_metric", "hidden validation failures / hidden validation checks total");
-        report.put("unique_bug_metric", "deduplicated functional failure categories / hidden validation checks total");
-        report.set("single_agent", toJson(single));
-        report.set("planner_worker_reviewer", toJson(team));
-
-        ObjectNode comparison = comparisonJson(single, team);
-        comparison.put("note", note);
-        report.set("comparison", comparison);
-
-        Path file = root.resolve(note.startsWith("corrected") ? "agent-collaboration-benchmark.corrected.json"
-                : "agent-collaboration-benchmark.json");
         Files.writeString(file, JSON.writerWithDefaultPrettyPrinter().writeValueAsString(report), StandardCharsets.UTF_8);
         return file;
     }
