@@ -273,4 +273,135 @@ class CodeRetrieverTest {
             assertEquals("PromptAssembler", results.get(0).name());
         }
     }
+
+    @Test
+    void rrfFusionPrefersResultsConfirmedByKeywordAndSemanticChannels() throws Exception {
+        CodeChunk noisySemantic = CodeChunk.classChunk(
+                "src/main/java/com/example/DeleteHelper.java",
+                "DeleteHelper",
+                "public class DeleteHelper { void deleteEverything() {} }",
+                1, 10
+        );
+        CodeChunk userService = CodeChunk.classChunk(
+                "src/main/java/com/example/UserService.java",
+                "UserService",
+                "public interface UserService { UserVO detail(Long id); }",
+                1, 3
+        );
+        store.insertChunks(List.of(
+                new VectorStore.CodeChunkEntry(noisySemantic, new float[]{1.0f, 0.0f}),
+                new VectorStore.CodeChunkEntry(userService, new float[]{0.98f, 0.02f})
+        ));
+
+        EmbeddingClient stubClient = new EmbeddingClient("ollama", "stub", "http://localhost", "") {
+            @Override
+            public float[] embed(String text) {
+                return new float[]{1.0f, 0.0f};
+            }
+        };
+
+        try (CodeRetriever retriever = new CodeRetriever(testProject, stubClient)) {
+            List<VectorStore.SearchResult> results = retriever.search("UserService 在哪里定义", 2,
+                    "definition", null);
+
+            assertFalse(results.isEmpty());
+            assertEquals("UserService", results.get(0).name());
+        }
+    }
+
+    @Test
+    void searchAppliesRerankerAfterRrfFusion() throws Exception {
+        CodeChunk noise = CodeChunk.methodChunk(
+                "src/main/java/com/example/NoiseService.java",
+                "NoiseService.handle()",
+                "public void handle() {}",
+                1, 3
+        );
+        CodeChunk target = CodeChunk.methodChunk(
+                "src/main/java/com/example/UserService.java",
+                "UserService.detail(Long id)",
+                "public UserVO detail(Long id) { return userMapper.selectById(id); }",
+                5, 8
+        );
+        store.insertChunks(List.of(
+                new VectorStore.CodeChunkEntry(noise, new float[]{1.0f, 0.0f}),
+                new VectorStore.CodeChunkEntry(target, new float[]{0.9f, 0.1f})
+        ));
+
+        EmbeddingClient stubClient = new EmbeddingClient("ollama", "stub", "http://localhost", "") {
+            @Override
+            public float[] embed(String text) {
+                return new float[]{1.0f, 0.0f};
+            }
+        };
+        CodeReranker reranker = new CodeReranker() {
+            @Override
+            public List<VectorStore.SearchResult> rerank(String query, List<VectorStore.SearchResult> candidates, int limit) {
+                return candidates.stream()
+                        .sorted((left, right) -> Boolean.compare(
+                                right.name().contains("UserService"),
+                                left.name().contains("UserService")))
+                        .limit(limit)
+                        .toList();
+            }
+
+            @Override
+            public boolean enabled() {
+                return true;
+            }
+
+            @Override
+            public String description() {
+                return "stub-cross-encoder";
+            }
+        };
+
+        try (CodeRetriever retriever = new CodeRetriever(testProject, stubClient, reranker)) {
+            List<VectorStore.SearchResult> results = retriever.search("用户详情实现在哪里", 1, "general", null);
+
+            assertEquals("UserService.detail(Long id)", results.get(0).name());
+            assertEquals("cross_encoder:stub-cross-encoder", retriever.rerankStrategy());
+        }
+    }
+
+    @Test
+    void searchFallsBackToRrfWhenRerankerFails() throws Exception {
+        CodeChunk target = CodeChunk.methodChunk(
+                "src/main/java/com/example/UserService.java",
+                "UserService.detail(Long id)",
+                "public UserVO detail(Long id) { return userMapper.selectById(id); }",
+                5, 8
+        );
+        store.insertChunks(List.of(new VectorStore.CodeChunkEntry(target, new float[]{1.0f, 0.0f})));
+
+        EmbeddingClient stubClient = new EmbeddingClient("ollama", "stub", "http://localhost", "") {
+            @Override
+            public float[] embed(String text) {
+                return new float[]{1.0f, 0.0f};
+            }
+        };
+        CodeReranker failingReranker = new CodeReranker() {
+            @Override
+            public List<VectorStore.SearchResult> rerank(String query, List<VectorStore.SearchResult> candidates, int limit) {
+                throw new IllegalStateException("rerank unavailable");
+            }
+
+            @Override
+            public boolean enabled() {
+                return true;
+            }
+
+            @Override
+            public String description() {
+                return "failing-cross-encoder";
+            }
+        };
+
+        try (CodeRetriever retriever = new CodeRetriever(testProject, stubClient, failingReranker)) {
+            List<VectorStore.SearchResult> results = retriever.search("UserService detail", 1, "general", null);
+
+            assertFalse(results.isEmpty());
+            assertEquals("UserService.detail(Long id)", results.get(0).name());
+        }
+    }
 }

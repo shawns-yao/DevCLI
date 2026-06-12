@@ -36,28 +36,35 @@ class RagRetrievalBenchmarkIT {
         Path ragDir = tempDir.resolve("rag-db");
         System.setProperty("paicli.rag.dir", ragDir.toString());
         try {
-            Path project = tempDir.resolve("sample-project");
-            writeSampleProject(project);
-
             EmbeddingClient embeddingClient = new EmbeddingClient();
-            CodeIndex.IndexResult indexResult = new CodeIndex(embeddingClient).index(project.toString());
-            assertTrue(indexResult.chunkCount() > 0, "index should create chunks");
-            assertTrue(indexResult.relationCount() > 0, "index should create relations");
-
-            List<QueryCase> cases = queryCases();
-            List<QueryScore> scores = new ArrayList<>();
-            try (CodeRetriever retriever = new CodeRetriever(project.toString(), embeddingClient)) {
-                for (QueryCase queryCase : cases) {
-                    List<VectorStore.SearchResult> baseline = retriever.semanticSearch(queryCase.query(), TOP_K);
-                    List<VectorStore.SearchResult> improved = retriever.search(queryCase.query(), TOP_K, "call_chain", 3);
-                    scores.add(new QueryScore(queryCase, baseline, improved));
-                }
+            List<BenchmarkDataset> datasets = new ArrayList<>();
+            datasets.add(sampleProjectDataset(tempDir));
+            if (Boolean.getBoolean("paicli.benchmark.rag.currentSource")) {
+                datasets.add(paiCliSourceDataset());
             }
+            for (BenchmarkDataset dataset : datasets) {
+                CodeIndex.IndexResult indexResult = new CodeIndex(embeddingClient).index(dataset.projectRoot().toString());
+                assertTrue(indexResult.chunkCount() > 0, "index should create chunks for " + dataset.name());
+                assertTrue(indexResult.relationCount() > 0, "index should create relations for " + dataset.name());
 
-            Path report = writeReport(tempDir.resolve("rag-benchmark"), embeddingClient, indexResult, scores);
-            System.out.println("RAG retrieval benchmark report: " + report);
-            System.out.println(Files.readString(report));
-            assertTrue(Files.exists(report), "benchmark report should be written");
+                List<QueryScore> scores = new ArrayList<>();
+                String rerankStrategy;
+                try (CodeRetriever retriever = new CodeRetriever(dataset.projectRoot().toString(), embeddingClient)) {
+                    rerankStrategy = retriever.rerankStrategy();
+                    for (QueryCase queryCase : dataset.queryCases()) {
+                        List<VectorStore.SearchResult> baseline = retriever.semanticSearch(queryCase.query(), TOP_K);
+                        List<VectorStore.SearchResult> improved = retriever.search(queryCase.query(), TOP_K,
+                                queryCase.mode(), queryCase.graphDepth());
+                        scores.add(new QueryScore(queryCase, baseline, improved));
+                    }
+                }
+
+                Path report = writeReport(tempDir.resolve("rag-benchmark").resolve(dataset.name()),
+                        embeddingClient, dataset, rerankStrategy, indexResult, scores);
+                System.out.println("RAG retrieval benchmark report: " + report);
+                System.out.println(Files.readString(report));
+                assertTrue(Files.exists(report), "benchmark report should be written for " + dataset.name());
+            }
         } finally {
             if (previousRagDir == null) {
                 System.clearProperty("paicli.rag.dir");
@@ -65,6 +72,39 @@ class RagRetrievalBenchmarkIT {
                 System.setProperty("paicli.rag.dir", previousRagDir);
             }
         }
+    }
+
+    private static BenchmarkDataset sampleProjectDataset(Path tempDir) throws Exception {
+        Path project = tempDir.resolve("sample-project");
+        writeSampleProject(project);
+        return new BenchmarkDataset("synthetic-java-call-chain", "synthetic_sample_project", project, List.of(
+                new QueryCase("UserController detail 调用链", "call_chain", 3,
+                        List.of("UserController.detail", "UserService.detail", "UserServiceImpl.detail", "UserMapper.selectById")),
+                new QueryCase("用户详情审计链路", "call_chain", 3,
+                        List.of("UserController.detail", "UserServiceImpl.detail", "AuditLogger.recordView")),
+                new QueryCase("下单 checkout 支付库存调用链", "call_chain", 3,
+                        List.of("OrderController.checkout", "OrderService.checkout", "PaymentGateway.charge", "InventoryService.reserve")),
+                new QueryCase("PromptAssembler 如何组装 PromptContext", "call_chain", 3,
+                        List.of("PromptAssembler.assemble", "PromptRepository.systemPrompt", "PromptContext")),
+                new QueryCase("OrderService checkout 依赖哪些下游服务", "call_chain", 3,
+                        List.of("OrderService.checkout", "PaymentGateway.charge", "InventoryService.reserve"))
+        ));
+    }
+
+    private static BenchmarkDataset paiCliSourceDataset() {
+        Path project = Path.of("").toAbsolutePath().normalize();
+        return new BenchmarkDataset("paicli-current-source-symbol-rag", "current_paicli_source", project, List.of(
+                new QueryCase("CodeRetriever 如何融合 keyword semantic graph RRF", "call_chain", 3,
+                        List.of("CodeRetriever.search", "RetrievalFusion.addChannel", "RetrievalFusion.rank")),
+                new QueryCase("ResourceLeaseManager 文件资源租约如何拒绝并发写冲突", "definition", 0,
+                        List.of("ResourceLeaseManager", "ResourceLeaseManager.acquire")),
+                new QueryCase("SymbolVersionDiff 如何生成 NegativeFact 失效记忆", "definition", 0,
+                        List.of("SymbolVersion", "SymbolInvalidation.from", "SymbolSnapshot")),
+                new QueryCase("JavaParser SymbolSolver 解析方法调用关系并写入 classpathEpoch", "call_chain", 3,
+                        List.of("CodeAnalyzer", "CodeAnalyzer.resolveCallee", "ClasspathEpoch")),
+                new QueryCase("MemoryManager 如何把 RAG evidence symbolVersion negativeFact 写入记忆", "call_chain", 2,
+                        List.of("MemoryManager", "MemoryManager.storeFactWithPolicy", "LongTermMemoryPolicy"))
+        ));
     }
 
     private static void writeSampleProject(Path root) throws Exception {
@@ -217,31 +257,22 @@ class RagRetrievalBenchmarkIT {
                 """, StandardCharsets.UTF_8);
     }
 
-    private static List<QueryCase> queryCases() {
-        return List.of(
-                new QueryCase("UserController detail 调用链",
-                        List.of("UserController.detail", "UserService.detail", "UserServiceImpl.detail", "UserMapper.selectById")),
-                new QueryCase("用户详情审计链路",
-                        List.of("UserController.detail", "UserServiceImpl.detail", "AuditLogger.recordView")),
-                new QueryCase("下单 checkout 支付库存调用链",
-                        List.of("OrderController.checkout", "OrderService.checkout", "PaymentGateway.charge", "InventoryService.reserve")),
-                new QueryCase("PromptAssembler 如何组装 PromptContext",
-                        List.of("PromptAssembler.assemble", "PromptRepository.systemPrompt", "PromptContext")),
-                new QueryCase("OrderService checkout 依赖哪些下游服务",
-                        List.of("OrderService.checkout", "PaymentGateway.charge", "InventoryService.reserve"))
-        );
-    }
-
     private static Path writeReport(Path reportDir, EmbeddingClient embeddingClient,
+                                    BenchmarkDataset dataset,
+                                    String rerankStrategy,
                                     CodeIndex.IndexResult indexResult,
                                     List<QueryScore> scores) throws Exception {
         Files.createDirectories(reportDir);
         ObjectNode root = JSON.createObjectNode();
         root.put("created_at", Instant.now().toString());
+        root.put("dataset_name", dataset.name());
+        root.put("dataset_type", dataset.type());
+        root.put("project_root", dataset.projectRoot().toString());
         root.put("embedding_provider", embeddingClient.getProvider());
         root.put("embedding_model", embeddingClient.getModel());
         root.put("top_k", TOP_K);
-        root.put("ranking_strategy", "current implementation: semantic + keyword + bounded graph + score boost rerank; not RRF");
+        root.put("ranking_strategy", "semantic baseline vs keyword + semantic + bounded graph + RRF + symbol-aware boost + optional cross-encoder rerank");
+        root.put("rerank_strategy", rerankStrategy);
         root.put("chunk_count", indexResult.chunkCount());
         root.put("relation_count", indexResult.relationCount());
 
@@ -249,6 +280,8 @@ class RagRetrievalBenchmarkIT {
         for (QueryScore score : scores) {
             ObjectNode node = queries.addObject();
             node.put("query", score.queryCase().query());
+            node.put("mode", score.queryCase().mode());
+            node.put("graph_depth", score.queryCase().graphDepth());
             node.putPOJO("gold_chain", score.queryCase().goldNames());
             node.put("baseline_recall_at_5", recall(score.baseline(), score.queryCase().goldNames()));
             node.put("improved_recall_at_5", recall(score.improved(), score.queryCase().goldNames()));
@@ -334,7 +367,10 @@ class RagRetrievalBenchmarkIT {
         return Math.round(value * 10_000.0) / 10_000.0;
     }
 
-    private record QueryCase(String query, List<String> goldNames) {
+    private record BenchmarkDataset(String name, String type, Path projectRoot, List<QueryCase> queryCases) {
+    }
+
+    private record QueryCase(String query, String mode, Integer graphDepth, List<String> goldNames) {
     }
 
     private record QueryScore(QueryCase queryCase,

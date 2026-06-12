@@ -31,6 +31,10 @@ public final class SearchResultFormatter {
                     result.name(),
                     result.similarity(),
                     result.filePath()));
+            sb.append("   evidence: symbolVersion=").append(result.symbolVersion())
+                    .append(", indexEpoch=").append(result.indexEpoch())
+                    .append(", classpathEpoch=").append(result.classpathEpoch()).append('\n');
+            appendInvalidations(sb, result);
             sb.append("   ").append(buildSnippet(result.content(), 120).replace("\n", "\n   "));
             sb.append("\n\n");
         }
@@ -52,6 +56,10 @@ public final class SearchResultFormatter {
                     result.name(),
                     result.similarity(),
                     result.filePath()));
+            sb.append("   evidence: symbolVersion=").append(result.symbolVersion())
+                    .append(", indexEpoch=").append(result.indexEpoch())
+                    .append(", classpathEpoch=").append(result.classpathEpoch()).append('\n');
+            appendInvalidations(sb, result);
             sb.append("   ").append(buildSnippet(result.content(), 180).replace("\n", "\n   ")).append("\n\n");
         }
 
@@ -102,6 +110,17 @@ public final class SearchResultFormatter {
             return normalized;
         }
         return normalized.substring(0, maxChars) + "...";
+    }
+
+    private static void appendInvalidations(StringBuilder sb, VectorStore.SearchResult result) {
+        for (SymbolInvalidation invalidation : result.invalidations()) {
+            sb.append("   negativeFact: ").append(invalidation.negativeFact())
+                    .append(" oldSymbolVersion=").append(invalidation.oldSymbolVersion())
+                    .append(", newSymbolVersion=").append(invalidation.newSymbolVersion())
+                    .append(", oldIndexEpoch=").append(invalidation.oldIndexEpoch())
+                    .append(", newIndexEpoch=").append(invalidation.newIndexEpoch())
+                    .append('\n');
+        }
     }
 
     private static String shortenPath(String filePath) {

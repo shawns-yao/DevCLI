@@ -51,6 +51,9 @@ class VectorStoreTest {
         assertEquals(2, results.size());
         assertEquals("TestClass", results.get(0).name());
         assertTrue(results.get(0).similarity() > 0.99);
+        assertTrue(results.get(0).symbolVersion().startsWith("sv_"));
+        assertEquals("none", results.get(0).classpathEpoch());
+        assertEquals("none", results.get(0).indexEpoch());
     }
 
     @Test
@@ -62,16 +65,50 @@ class VectorStoreTest {
         List<VectorStore.SearchResult> results = store.searchByKeyword("FooService");
         assertEquals(1, results.size());
         assertEquals("FooService", results.get(0).name());
+        assertTrue(results.get(0).symbolVersion().startsWith("sv_"));
+    }
+
+    @Test
+    void replaceProjectIndexRecordsSymbolInvalidationWhenVersionChanges() throws Exception {
+        CodeChunk oldChunk = CodeChunk.methodChunk("UserService.java", "UserService.findUser",
+                "public User findUser(Long id) { return null; }", 1, 3);
+        CodeChunk newChunk = CodeChunk.methodChunk("UserService.java", "UserService.findUser",
+                "public User findUser(String username) { return null; }", 1, 3);
+
+        store.replaceProjectIndex(
+                List.of(new VectorStore.CodeChunkEntry(oldChunk, new float[]{1.0f, 0.0f})),
+                List.of(),
+                "idx-old");
+        store.replaceProjectIndex(
+                List.of(new VectorStore.CodeChunkEntry(newChunk, new float[]{1.0f, 0.0f})),
+                List.of(),
+                "idx-new");
+
+        List<SymbolInvalidation> invalidations = store.getRecentInvalidations(10);
+        assertEquals(1, invalidations.size());
+        assertEquals("idx-old", invalidations.get(0).oldIndexEpoch());
+        assertEquals("idx-new", invalidations.get(0).newIndexEpoch());
+        assertNotEquals(invalidations.get(0).oldSymbolVersion(), invalidations.get(0).newSymbolVersion());
+        assertTrue(invalidations.get(0).negativeFact().contains("Do not rely on UserService.findUser"));
+
+        List<VectorStore.SearchResult> results = store.searchByKeyword("findUser");
+        assertEquals("idx-new", results.get(0).indexEpoch());
+        assertEquals(1, results.get(0).invalidations().size());
+        assertEquals("sv_", results.get(0).symbolVersion().substring(0, 3));
     }
 
     @Test
     void testRelationStorage() throws Exception {
-        CodeRelation rel = new CodeRelation("A.java", "A", "B.java", "B", "extends");
+        CodeRelation rel = new CodeRelation("A.java", "A", "B.java", "B", "extends",
+                CodeRelation.SOURCE_RESOLVED, 0.8, "epoch-1");
         store.insertRelations(List.of(rel));
 
         List<CodeRelation> results = store.getRelations("A");
         assertEquals(1, results.size());
         assertEquals("extends", results.get(0).relationType());
+        assertEquals(CodeRelation.SOURCE_RESOLVED, results.get(0).resolutionSource());
+        assertEquals(0.8, results.get(0).confidence());
+        assertEquals("epoch-1", results.get(0).classpathEpoch());
     }
 
     @Test

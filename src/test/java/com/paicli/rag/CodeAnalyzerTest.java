@@ -58,4 +58,32 @@ class CodeAnalyzerTest {
                         && r.fromName().equals("UserController.detail")
                         && r.toName().equals("UserService.detail")));
     }
+
+    @Test
+    void callRelationsCarryResolutionMetadata(@org.junit.jupiter.api.io.TempDir Path tempDir) throws Exception {
+        Path file = tempDir.resolve("UserController.java");
+        Files.writeString(file, """
+                class UserController {
+                    private UserService userService;
+                    public void detail() {
+                        userService.detail();
+                    }
+                }
+                interface UserService {
+                    void detail();
+                }
+                """);
+
+        CodeAnalyzer projectAnalyzer = new CodeAnalyzer(tempDir);
+        List<CodeRelation> relations = projectAnalyzer.analyzeFile(file);
+
+        CodeRelation call = relations.stream()
+                .filter(r -> r.relationType().equals("calls"))
+                .filter(r -> r.fromName().equals("UserController.detail"))
+                .findFirst()
+                .orElseThrow();
+        assertTrue(call.confidence() >= 0.75);
+        assertTrue(call.resolutionSource().equals(CodeRelation.SYMBOL_SOLVER)
+                || call.resolutionSource().equals(CodeRelation.SOURCE_RESOLVED));
+    }
 }
