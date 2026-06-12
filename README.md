@@ -1,6 +1,8 @@
-![DecCLL startup demo](images/Snipaste_2026-05-20_16-57-44.png)
-
 # DecCLL
+
+[![CI](https://github.com/YOUR_USERNAME/PaiCLI/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_USERNAME/PaiCLI/actions/workflows/ci.yml)
+
+![DecCLL startup demo](images/Snipaste_2026-05-20_16-57-44.png)
 
 DecCLL 是一个面向 Java 后端开发者的终端 Agent CLI。它可以在命令行中通过自然语言驱动代码阅读、生成、调试、重构、命令执行和仓库检索。
 

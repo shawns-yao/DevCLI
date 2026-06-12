@@ -17,8 +17,8 @@
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <!-- 日常打包优先给手工验收产物；回归测试用 mvn test -Pquick / -Pphase16-smoke / -DskipTests=false 显式触发。 -->
-        <skipTests>true</skipTests>
+        <!-- CI 和本地开发默认跑测试；可用 -DskipTests=true 快速打包 -->
+        <skipTests>false</skipTests>
     </properties>
 
     <dependencies>
@@ -83,6 +83,12 @@
         <dependency>
             <groupId>com.github.javaparser</groupId>
             <artifactId>javaparser-core</artifactId>
+            <version>3.28.0</version>
+        </dependency>
+
+        <dependency>
+            <groupId>com.github.javaparser</groupId>
+            <artifactId>javaparser-symbol-solver-core</artifactId>
             <version>3.28.0</version>
         </dependency>
 
