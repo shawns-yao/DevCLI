@@ -106,11 +106,12 @@ public class AgentBudget {
      * 记录本轮工具调用签名并判断是否进入停滞。
      *
      * 停滞条件：最近 stagnationWindow 轮的"工具名 + 参数"完全相同；
-     * 一旦判定为停滞，状态会保持，后续 {@link #check()} 会返回 STAGNATION_DETECTED。
+     * Bug #3 修复：如果后续工具签名变化，应该重置 stagnant 标志，允许 LLM 自我纠正。
      */
     public void recordToolCalls(List<LlmClient.ToolCall> toolCalls) {
         if (toolCalls == null || toolCalls.isEmpty()) {
             recentToolSignatures.clear();
+            stagnant = false;  // 重置停滞标志
             return;
         }
         String signature = signatureOf(toolCalls);
@@ -121,6 +122,9 @@ public class AgentBudget {
         if (recentToolSignatures.size() == stagnationWindow) {
             String first = recentToolSignatures.peekFirst();
             stagnant = recentToolSignatures.stream().allMatch(sig -> sig.equals(first));
+        } else {
+            // 窗口未满时，不能判定为停滞
+            stagnant = false;
         }
     }
 
@@ -128,6 +132,8 @@ public class AgentBudget {
         String category = ToolErrorClassifier.classify(result);
         if (category.isBlank()) {
             recentToolErrorSignatures.clear();
+            repeatedToolError = false;  // Bug #3 修复：重置重复错误标志
+            repeatedToolErrorSignature = "";
             return;
         }
         String signature = (toolName == null ? "" : toolName) + "|" + category;
@@ -141,6 +147,10 @@ public class AgentBudget {
             if (repeatedToolError) {
                 repeatedToolErrorSignature = first;
             }
+        } else {
+            // Bug #3 修复：窗口未满时，重置标志
+            repeatedToolError = false;
+            repeatedToolErrorSignature = "";
         }
     }
 

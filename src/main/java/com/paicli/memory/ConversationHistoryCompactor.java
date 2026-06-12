@@ -724,14 +724,27 @@ public class ConversationHistoryCompactor {
             return false;
         }
 
-        // 从头开始删除消息，直到 token 降到目标以下
-        int toRemove = 0;
+        // Bug #4 修复：按 user 边界对齐删除，确保 tool_call/tool_result 不分离
+        // 策略：从头开始找 user 消息边界，删除到该边界之前的所有消息
+        int deleteUpTo = systemEnd;  // 默认从 system 后开始
         int accumulatedTokens = currentTokens;
-        for (int i = systemEnd; i < history.size() && accumulatedTokens > targetTokens; i++) {
-            int msgTokens = TokenBudget.estimateMessagesTokens(List.of(history.get(i)));
-            accumulatedTokens -= msgTokens;
-            toRemove++;
+
+        for (int i = systemEnd; i < history.size(); i++) {
+            if ("user".equals(history.get(i).role())) {
+                // 计算删除到这个 user 之前的 token 减少量
+                int tokensToRemove = 0;
+                for (int j = systemEnd; j < i; j++) {
+                    tokensToRemove += TokenBudget.estimateMessagesTokens(List.of(history.get(j)));
+                }
+                if (accumulatedTokens - tokensToRemove <= targetTokens) {
+                    // 删除到这个 user 之前可以达到目标
+                    deleteUpTo = i;
+                    break;
+                }
+            }
         }
+
+        int toRemove = deleteUpTo - systemEnd;
 
         // 至少保留 system + 3 条消息（降级标记 + assistant + 1条用户消息）
         int minKeep = 3;

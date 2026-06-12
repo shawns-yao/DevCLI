@@ -12,6 +12,11 @@ import com.github.javaparser.ast.body.MethodDeclaration;
 import com.github.javaparser.ast.body.VariableDeclarator;
 import com.github.javaparser.ast.expr.Expression;
 import com.github.javaparser.ast.expr.MethodCallExpr;
+import com.github.javaparser.resolution.declarations.ResolvedMethodDeclaration;
+import com.github.javaparser.symbolsolver.JavaSymbolSolver;
+import com.github.javaparser.symbolsolver.resolution.typesolvers.CombinedTypeSolver;
+import com.github.javaparser.symbolsolver.resolution.typesolvers.JavaParserTypeSolver;
+import com.github.javaparser.symbolsolver.resolution.typesolvers.ReflectionTypeSolver;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -33,8 +38,24 @@ import java.util.Optional;
  * - contains：类包含方法
  */
 public class CodeAnalyzer {
-    private final JavaParser parser = new JavaParser(
-            new ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17));
+    private final JavaParser parser;
+    private final ClasspathEpoch classpathEpoch;
+
+    public CodeAnalyzer() {
+        this(null);
+    }
+
+    public CodeAnalyzer(Path projectRoot) {
+        this.classpathEpoch = ClasspathEpoch.detect(projectRoot);
+        ParserConfiguration configuration = new ParserConfiguration()
+                .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17);
+        CombinedTypeSolver typeSolver = new CombinedTypeSolver(new ReflectionTypeSolver());
+        if (projectRoot != null && Files.isDirectory(projectRoot)) {
+            typeSolver.add(new JavaParserTypeSolver(projectRoot));
+        }
+        configuration.setSymbolResolver(new JavaSymbolSolver(typeSolver));
+        this.parser = new JavaParser(configuration);
+    }
 
     /**
      * 分析单个 Java 文件，提取所有代码关系
@@ -67,7 +88,8 @@ public class CodeAnalyzer {
             // 只记录非 JDK 导入（作为项目内依赖的近似判断）
             if (!importName.startsWith("java.") && !importName.startsWith("javax.")) {
                 relations.add(new CodeRelation(
-                        filePath, "file", null, simpleName, "imports"));
+                        filePath, "file", null, simpleName, "imports",
+                        CodeRelation.AST_INFERRED, 0.50, classpathEpoch.value()));
             }
         }
     }
@@ -79,39 +101,45 @@ public class CodeAnalyzer {
             // extends 关系
             clazz.getExtendedTypes().forEach(ext -> {
                 relations.add(new CodeRelation(
-                        filePath, className, null, ext.getNameAsString(), "extends"));
+                        filePath, className, null, ext.getNameAsString(), "extends",
+                        CodeRelation.AST_INFERRED, 0.65, classpathEpoch.value()));
             });
 
             // implements 关系
             clazz.getImplementedTypes().forEach(impl -> {
                 relations.add(new CodeRelation(
-                        filePath, className, null, impl.getNameAsString(), "implements"));
+                        filePath, className, null, impl.getNameAsString(), "implements",
+                        CodeRelation.AST_INFERRED, 0.65, classpathEpoch.value()));
             });
 
             // contains 关系：类包含方法
             clazz.getMethods().forEach(method -> {
                 String methodName = method.getNameAsString();
                 relations.add(new CodeRelation(
-                        filePath, className, filePath, className + "." + methodName, "contains"));
+                        filePath, className, filePath, className + "." + methodName, "contains",
+                        CodeRelation.SOURCE_RESOLVED, 0.90, classpathEpoch.value()));
                 clazz.getImplementedTypes().forEach(impl -> relations.add(new CodeRelation(
                         filePath, className + "." + methodName, null,
-                        impl.getNameAsString() + "." + methodName, "implements")));
+                        impl.getNameAsString() + "." + methodName, "implements",
+                        CodeRelation.AST_INFERRED, 0.65, classpathEpoch.value())));
                 clazz.getExtendedTypes().forEach(ext -> relations.add(new CodeRelation(
                         filePath, className + "." + methodName, null,
-                        ext.getNameAsString() + "." + methodName, "extends")));
+                        ext.getNameAsString() + "." + methodName, "extends",
+                        CodeRelation.AST_INFERRED, 0.65, classpathEpoch.value())));
             });
 
             Map<String, String> receiverTypes = collectReceiverTypes(clazz);
 
             // calls 关系：优先把 userService.login() 解析为 UserService.login，失败再退回方法名。
             clazz.findAll(MethodCallExpr.class).forEach(call -> {
-                String callee = resolveCallee(call, receiverTypes);
+                ResolvedCallee callee = resolveCallee(call, receiverTypes);
                 // 尝试获取调用者方法
                 Optional<MethodDeclaration> parentMethod = findParentMethod(call);
                 if (parentMethod.isPresent()) {
                     String caller = className + "." + parentMethod.get().getNameAsString();
                     relations.add(new CodeRelation(
-                            filePath, caller, null, callee, "calls"));
+                            filePath, caller, null, callee.name(), "calls",
+                            callee.source(), callee.confidence(), classpathEpoch.value()));
                 }
             });
         });
@@ -119,29 +147,48 @@ public class CodeAnalyzer {
 
     private Map<String, String> collectReceiverTypes(ClassOrInterfaceDeclaration clazz) {
         Map<String, String> receiverTypes = new HashMap<>();
+
+        // 收集字段（实例变量）
         clazz.findAll(FieldDeclaration.class).forEach(field -> {
             String type = field.getElementType().asString();
             for (VariableDeclarator variable : field.getVariables()) {
                 receiverTypes.put(variable.getNameAsString(), type);
             }
         });
+
+        // 收集局部变量
         clazz.findAll(VariableDeclarator.class).forEach(variable ->
                 receiverTypes.putIfAbsent(variable.getNameAsString(), variable.getType().asString()));
+
+        // 收集方法参数（Bug #2 修复：方法参数在 AST 中是独立的 Parameter 节点）
+        clazz.findAll(MethodDeclaration.class).forEach(method -> {
+            for (com.github.javaparser.ast.body.Parameter param : method.getParameters()) {
+                receiverTypes.putIfAbsent(param.getNameAsString(), param.getType().asString());
+            }
+        });
+
         return receiverTypes;
     }
 
-    private String resolveCallee(MethodCallExpr call, Map<String, String> receiverTypes) {
+    private ResolvedCallee resolveCallee(MethodCallExpr call, Map<String, String> receiverTypes) {
+        try {
+            ResolvedMethodDeclaration resolved = call.resolve();
+            return new ResolvedCallee(resolved.declaringType().getClassName() + "." + resolved.getName(),
+                    CodeRelation.SYMBOL_SOLVER, 0.92);
+        } catch (RuntimeException ignored) {
+            // Fall back to source-local receiver inference.
+        }
         String methodName = call.getNameAsString();
         Optional<Expression> scope = call.getScope();
         if (scope.isEmpty()) {
-            return methodName;
+            return new ResolvedCallee(methodName, CodeRelation.AST_INFERRED, 0.35);
         }
         String receiver = scope.get().toString();
         String type = receiverTypes.get(receiver);
         if (type == null || type.isBlank()) {
-            return methodName;
+            return new ResolvedCallee(methodName, CodeRelation.AST_INFERRED, 0.35);
         }
-        return type + "." + methodName;
+        return new ResolvedCallee(type + "." + methodName, CodeRelation.SOURCE_RESOLVED, 0.75);
     }
 
     private Optional<MethodDeclaration> findParentMethod(Node node) {
@@ -153,5 +200,8 @@ public class CodeAnalyzer {
             current = current.getParentNode().orElse(null);
         }
         return Optional.empty();
+    }
+
+    private record ResolvedCallee(String name, String source, double confidence) {
     }
 }
