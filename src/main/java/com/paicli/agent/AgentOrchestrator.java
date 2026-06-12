@@ -143,19 +143,20 @@ public class AgentOrchestrator {
         this.llmClient = llmClient;
         this.out = out == null ? System.out : out;
         this.toolRegistry = toolRegistry;
-        this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
-        this.toolRegistry.setMemorySaver(memoryManager::storeFact);
+        this.memoryManager = memoryManager;
+        this.toolRegistry.setContextProfile(this.memoryManager.getContextProfile());
+        this.toolRegistry.setMemorySaver(this.memoryManager::storeFact);
         this.toolRegistry.setMemorySaveHandler(fact -> {
-            MemoryManager.StoreResult result = memoryManager.storeFactWithPolicy(fact, true);
+            MemoryManager.StoreResult result = this.memoryManager.storeFactWithPolicy(fact, true);
             return new ToolRegistry.MemorySaveResult(result.stored(), result.message());
         });
+        this.toolRegistry.setMemoryListHandler(this.memoryManager::listLongTermMemory);
         this.planner = new SubAgent("planner", AgentRole.PLANNER, llmClient, toolRegistry);
         this.workers = List.of(
                 new SubAgent("worker-1", AgentRole.WORKER, llmClient, toolRegistry),
                 new SubAgent("worker-2", AgentRole.WORKER, llmClient, toolRegistry)
         );
         this.reviewer = new SubAgent("reviewer", AgentRole.REVIEWER, llmClient, toolRegistry);
-        this.memoryManager = memoryManager;
         configureSubAgent(planner);
         workers.forEach(this::configureSubAgent);
         configureSubAgent(reviewer);
@@ -498,6 +499,11 @@ public class AgentOrchestrator {
         return steps.stream()
                 .filter(step -> step.status() == StepStatus.PENDING)
                 .filter(this::isFinalIntegrationStep)
+                .filter(step -> step.dependencies().stream()
+                        .allMatch(dep -> {
+                            StepStatus status = statusMap.get(dep);
+                            return status == StepStatus.COMPLETED || status == StepStatus.FAILED;
+                        }))
                 .toList();
     }
 
@@ -536,6 +542,7 @@ public class AgentOrchestrator {
         String finalId = "step_" + (steps.size() + 1);
         String description = """
                 最终集成验收：基于原始用户任务检查并补齐整体功能入口、跨模块联动、默认参数、错误处理和端到端可运行性。
+                先读取现有生产文件，确认已存在的 class / method / signature，不要创建第二套入口。
                 你只负责胶水代码、入口 main、对外 API 导出、默认参数注入和跨模块联动。
                 不要重写或大改已 COMPLETED 的底层模块；如果核心依赖失败或缺失，直接说明风险，不要强行擦屁股。
                 完成后运行最小编译或自检命令，修复集成层问题。
@@ -546,10 +553,13 @@ public class AgentOrchestrator {
     }
 
     private boolean isFinalIntegrationStep(ExecutionStep step) {
-        String text = (step.id() + " " + step.type() + " " + step.description()).toLowerCase(Locale.ROOT);
-        return text.contains("final_integration")
-                || text.contains("最终集成")
-                || text.contains("integration");
+        String id = step.id() == null ? "" : step.id().toLowerCase(Locale.ROOT);
+        String type = step.type() == null ? "" : step.type().toLowerCase(Locale.ROOT);
+        String description = step.description() == null ? "" : step.description().toLowerCase(Locale.ROOT);
+        return id.contains("final_integration")
+                || description.contains("最终集成")
+                || type.equals("integration")
+                || type.equals("final_integration");
     }
 
     /**
@@ -801,8 +811,12 @@ public class AgentOrchestrator {
         });
         BlockingQueue<SubAgent> workerPool = new LinkedBlockingQueue<>(workers);
         Map<String, ByteArrayOutputStream> buffers = new ConcurrentHashMap<>();
+        // Bug #8 修复：每个 Worker 独立存储 ForkContext，避免共用上下文
+        Map<SubAgent, SubAgent.ForkContext> workerContexts = new ConcurrentHashMap<>();
+        for (SubAgent worker : workers) {
+            workerContexts.put(worker, worker.createForkContext());
+        }
         List<Future<?>> futures = new ArrayList<>();
-        SubAgent.ForkContext workerForkContext = workers.get(0).createForkContext();
         SubAgent reviewerForkTemplate = new SubAgent("reviewer-fork-template", AgentRole.REVIEWER, llmClient, toolRegistry);
         configureSubAgent(reviewerForkTemplate);
         SubAgent.ForkContext reviewerForkContext = reviewerForkTemplate.createForkContext();
@@ -821,6 +835,7 @@ public class AgentOrchestrator {
                 try {
                     worker = workerPool.take();
                     SubAgent leasedWorker = worker;
+                    SubAgent.ForkContext workerForkContext = workerContexts.get(leasedWorker);
                     toolRegistry.runWithResourceLease(step.id(), () -> {
                         runStep(step, steps, retryCount, leasedWorker, localReviewer, context, stepOut,
                                 workerForkContext, reviewerForkContext);
@@ -908,9 +923,8 @@ public class AgentOrchestrator {
         }
 
         AgentMessage taskMsg = AgentMessage.task("orchestrator", step.description());
-        AgentMessage result = toolRegistry.runWithResourceLease(step.id(), () -> workerForkContext == null
-                ? worker.executeWithContext(taskMsg, context, out)
-                : worker.executeForkedWithContext(taskMsg, context, workerForkContext, out));
+        AgentMessage result = executeWorkerWithTransientRetry(step, worker, taskMsg, context, out,
+                workerForkContext, "");
         if (CancellationContext.isCancelled()) {
             updateStep(steps, step.id(), step.withFailed("用户取消"));
             out.println("⏹️ 步骤 [" + step.id() + "] 已取消\n");
@@ -941,6 +955,14 @@ public class AgentOrchestrator {
         int retries = retryCount.getOrDefault(step.id(), 0);
         String issues = reviewDecision.issues();
         if (reviewDecision.reviewerError()) {
+            if (shouldAcceptFinalIntegrationAfterTransientReviewerFailure(step, issues)) {
+                String degradedResult = acceptedResult
+                        + "\n\nFinal integration Reviewer 瞬时失败；Pre-Review 硬检查已通过，按降级策略接受。\n"
+                        + issues;
+                updateStep(steps, step.id(), step.withResult(degradedResult));
+                out.println("✅ 步骤 [" + step.id() + "] Pre-Review 已通过，Reviewer 瞬时失败降级接受\n");
+                return;
+            }
             updateStep(steps, step.id(), step.withFailed(issues));
             return;
         }
@@ -952,10 +974,9 @@ public class AgentOrchestrator {
             out.println("⚠️ 步骤 [" + step.id() + "] 审查未通过，正在重新执行...");
             out.println("   反馈: " + issues + "\n");
 
-            String feedbackContext = context + "\n\n之前的执行结果被审查拒绝，原因：\n" + issues;
-            AgentMessage retryResult = toolRegistry.runWithResourceLease(step.id(), () -> workerForkContext == null
-                    ? worker.executeWithContext(taskMsg, feedbackContext, out)
-                    : worker.executeForkedWithContext(taskMsg, feedbackContext, workerForkContext, out));
+            String feedbackContext = buildRetryContext(context, issues);
+            AgentMessage retryResult = executeWorkerWithTransientRetry(step, worker, taskMsg, feedbackContext, out,
+                    workerForkContext, "重试 ");
             if (retryResult.type() == AgentMessage.Type.ERROR) {
                 log.warn("Step {} retry {} failed at LLM layer: {}", step.id(), retries, retryResult.content());
                 issues = "重试时 LLM 调用失败：" + retryResult.content();
@@ -989,6 +1010,52 @@ public class AgentOrchestrator {
         }
     }
 
+    private AgentMessage executeWorkerWithTransientRetry(ExecutionStep step, SubAgent worker, AgentMessage taskMsg,
+                                                         String context, PrintStream out,
+                                                         SubAgent.ForkContext workerForkContext,
+                                                         String label) {
+        AgentMessage result = executeWorkerOnce(step, worker, taskMsg, context, out, workerForkContext);
+        int transientRetries = 0;
+        while (result.type() == AgentMessage.Type.ERROR
+                && isTransientLlmError(result.content())
+                && transientRetries < MAX_RETRIES_PER_STEP) {
+            transientRetries++;
+            out.println("⚠️ 步骤 [" + step.id() + "] " + label
+                    + "LLM 瞬时错误，正在重新调用 Worker (" + transientRetries
+                    + "/" + MAX_RETRIES_PER_STEP + ")...");
+            result = executeWorkerOnce(step, worker, taskMsg, context, out, workerForkContext);
+        }
+        return result;
+    }
+
+    private AgentMessage executeWorkerOnce(ExecutionStep step, SubAgent worker, AgentMessage taskMsg,
+                                           String context, PrintStream out,
+                                           SubAgent.ForkContext workerForkContext) {
+        return toolRegistry.runWithResourceLease(step.id(), () -> workerForkContext == null
+                ? worker.executeWithContext(taskMsg, context, out)
+                : worker.executeForkedWithContext(taskMsg, context, workerForkContext, out));
+    }
+
+    private boolean shouldAcceptFinalIntegrationAfterTransientReviewerFailure(ExecutionStep step, String issues) {
+        return isFinalIntegrationStep(step) && isTransientLlmError(issues);
+    }
+    private boolean isTransientLlmError(String content) {
+        if (content == null) {
+            return false;
+        }
+        String lower = content.toLowerCase(Locale.ROOT);
+        return lower.contains("api请求失败: 500")
+                || lower.contains("server_error")
+                || lower.contains("internal_server_error")
+                || lower.contains("oauth2.googleapis.com/token")
+                || lower.contains(" eof")
+                || lower.contains("timeout")
+                || lower.contains("temporarily")
+                || lower.contains("rate limit")
+                || lower.contains("429")
+                || lower.contains("503")
+                || lower.contains("502");
+    }
     private ReviewDecision reviewWorkerResult(ExecutionStep step, SubAgent reviewer, String workerResult,
                                               PrintStream out, SubAgent.ForkContext reviewerForkContext) {
         PreReviewResult preReview = runPreReviewHook(step);
@@ -1016,8 +1083,12 @@ public class AgentOrchestrator {
             return new ReviewDecision(false, "审查 LLM 故障：" + reviewResult.content(), true);
         }
         if (requiresConcreteVerification(step) && reviewToolCalls.isEmpty()) {
-            return new ReviewDecision(false,
-                    "Reviewer 未调用工具验证真实产物；文件/代码/命令类任务不能只根据 Worker 文字说明批准。", false);
+            if (isVerificationStepWithPreReview(step)) {
+                log.info("Reviewer did not call tools for verification step {}, accepting Pre-Review hard check as concrete verification", step.id());
+            } else {
+                return new ReviewDecision(false,
+                        "Reviewer 未调用工具验证真实产物；文件/代码/命令类任务不能只根据 Worker 文字说明批准。", false);
+            }
         }
 
         return new ReviewDecision(parseReviewApproval(reviewResult.content()),
@@ -1111,7 +1182,7 @@ public class AgentOrchestrator {
                 return PreReviewResult.ok();
             }
             return PreReviewResult.failed("Pre-review hard check failed: " + displayCommand
-                    + "\n" + abbreviate(output, 4000));
+                    + "\n" + summarizePreReviewFailure(output));
         } catch (IOException e) {
             return PreReviewResult.failed("Pre-review hard check failed: 无法执行 " + displayCommand
                     + "：" + e.getMessage());
@@ -1121,6 +1192,58 @@ public class AgentOrchestrator {
         }
     }
 
+    private String buildRetryContext(String context, String issues) {
+        StringBuilder retry = new StringBuilder(context == null ? "" : context);
+        retry.append("\n\n上一次执行被拒绝。只做根因修复，不要重写无关代码。\n");
+        retry.append("必须保留原始任务指定的 class / method / signature、已通过行为和已有生产文件结构。\n");
+        retry.append("如果反馈来自 Pre-Review 编译失败，先读取报错文件和行号，再最小补丁修复。\n");
+        retry.append("拒绝原因摘要：\n").append(summarizeRetryIssues(issues)).append("\n");
+        return retry.toString();
+    }
+
+    private String summarizeRetryIssues(String issues) {
+        if (issues == null || issues.isBlank()) {
+            return "未提供具体原因；请重新验证入口、编译和验收点。";
+        }
+        String[] lines = issues.replace("\r", "").split("\n");
+        StringBuilder summary = new StringBuilder();
+        int kept = 0;
+        for (String line : lines) {
+            String trimmed = line.trim();
+            if (trimmed.isBlank()) {
+                continue;
+            }
+            boolean important = kept < 8
+                    || trimmed.contains("error:")
+                    || trimmed.contains("错误")
+                    || trimmed.contains("failed")
+                    || trimmed.contains("missing")
+                    || trimmed.contains("expected=")
+                    || trimmed.contains("actual=")
+                    || trimmed.contains("Reviewer 未调用工具");
+            if (important) {
+                summary.append("- ").append(trimmed).append("\n");
+                kept++;
+            }
+            if (kept >= 14) {
+                break;
+            }
+        }
+        if (summary.isEmpty()) {
+            return abbreviate(issues, 1200);
+        }
+        if (lines.length > kept) {
+            summary.append("- ...<truncated>\n");
+        }
+        return summary.toString();
+    }
+
+    private String summarizePreReviewFailure(String output) {
+        if (output == null || output.isBlank()) {
+            return "无编译输出；请检查命令是否可执行。";
+        }
+        return summarizeRetryIssues(abbreviate(output, 3000));
+    }
     private String abbreviate(String text, int maxLength) {
         if (text == null || text.length() <= maxLength) {
             return text == null ? "" : text;
@@ -1162,6 +1285,9 @@ public class AgentOrchestrator {
         }
         appendAcceptanceCriteriaSection(context, "本步骤必须满足以下验收点");
         context.append("当前步骤：").append(currentStep.description()).append("\n\n");
+        if (requiresJavaHardCheck(currentStep)) {
+            context.append("Java 代码交付约束：严格保留原始任务指定的入口签名；优先使用简单命令式实现；完成前运行最小编译检查；重试时只做根因补丁。\n\n");
+        }
         if (isFinalIntegrationStep(currentStep)) {
             context.append("所有步骤状态：\n");
             for (ExecutionStep step : steps) {
@@ -1196,6 +1322,19 @@ public class AgentOrchestrator {
         return context.toString();
     }
 
+    private boolean isVerificationStepWithPreReview(ExecutionStep step) {
+        if (step == null || !requiresJavaHardCheck(step)) {
+            return false;
+        }
+        String text = ((step.type() == null ? "" : step.type()) + " "
+                + (step.description() == null ? "" : step.description())).toLowerCase(Locale.ROOT);
+        return text.contains("verification")
+                || text.contains("verify")
+                || text.contains("test")
+                || text.contains("compile")
+                || text.contains("验证")
+                || text.contains("编译");
+    }
     private String buildReviewTask(ExecutionStep step) {
         StringBuilder task = new StringBuilder();
         if (currentUserTask != null && !currentUserTask.isBlank()) {

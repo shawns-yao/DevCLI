@@ -19,11 +19,10 @@ public final class CommandGuard {
     private static final List<DenyRule> RULES = List.of(
             new DenyRule("禁止 sudo 提权",
                     Pattern.compile("(?i)\\bsudo\\b")),
-            // rm 路径黑名单：匹配开头即可拦截，不强求路径结束边界。
-            // /、~、/*、$HOME 是常见的"灾难性删除起点"，包括其作为前缀的所有子路径都拦掉，避免 LLM 误删根目录或用户目录。
-            new DenyRule("禁止 rm -rf 删除全盘或用户目录",
-                    Pattern.compile("(?i)\\brm\\s+-[a-z]*r[a-z]*f[a-z]*\\s+(/|~|\\$home)|" +
-                            "\\brm\\s+-[a-z]*f[a-z]*r[a-z]*\\s+(/|~|\\$home)")),
+            // Bug #10 修复：rm 递归删除全盘/用户目录，不要求同时有 -r 和 -f
+            // 匹配 rm -r、rm -rf、rm -fr、rm --recursive、rm -R 等变体
+            new DenyRule("禁止 rm 递归删除全盘或用户目录",
+                    Pattern.compile("(?i)\\brm\\s+(-[a-z]*r[a-z]*|--recursive|-R)\\s+(/|~|\\$home)")),
             new DenyRule("禁止 mkfs 格式化磁盘",
                     Pattern.compile("(?i)\\bmkfs(\\.|\\b)")),
             new DenyRule("禁止 dd 写入裸设备",

@@ -62,6 +62,7 @@ public class WorkingMemory {
     /** 单条 tool 结果在注入时截断到此字符数。完整原文仍保留在 recentToolResults，仅渲染时截断。 */
     public static final int TOOL_RESULT_RENDER_CHARS = 1_500;
     public static final int DEFAULT_MAX_RAG_EVIDENCE = 8;
+    // Bug #9 修复：使用 [^\]]+ 捕获文件路径，支持 Windows 路径 (C:\Users\...)
     private static final Pattern SEARCH_RESULT_HEADER = Pattern.compile(
             "^\\s*\\d+\\. \\[([^:]+):([^\\]]+)] \\(相似度: ([^)]+)\\) (.+)$");
     private static final Pattern SEARCH_RESULT_EVIDENCE = Pattern.compile(

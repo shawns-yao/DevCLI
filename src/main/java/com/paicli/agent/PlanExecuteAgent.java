@@ -342,9 +342,12 @@ public class PlanExecuteAgent {
             return "⚠️ 计划未能继续推进，存在未满足依赖的任务。";
         }
 
-        String planSummary = finalResult.isEmpty()
-                ? buildFinalResult(plan, streamedTaskOutputs)
-                : finalResult.toString();
+        // Bug #7 修复：始终调用 buildFinalResult 生成完整摘要（包含成功和失败）
+        // 如果有失败，在摘要前添加失败信息
+        String planSummary = buildFinalResult(plan, streamedTaskOutputs);
+        if (!finalResult.isEmpty()) {
+            planSummary = "⚠️ 部分任务失败:\n" + finalResult + "\n\n" + planSummary;
+        }
 
         if (plan.hasFailed()) {
             plan.markFailed();

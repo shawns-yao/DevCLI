@@ -22,15 +22,22 @@ public class CodeRetriever implements AutoCloseable {
     private static final int GRAPH_TOTAL_CHUNK_LIMIT = 12;
     private final EmbeddingClient embeddingClient;
     private final VectorStore vectorStore;
+    private final CodeReranker reranker;
 
     public CodeRetriever(String projectPath) throws SQLException {
         this.embeddingClient = new EmbeddingClient();
         this.vectorStore = new VectorStore(Paths.get(projectPath).toAbsolutePath().normalize().toString());
+        this.reranker = new CrossEncoderReranker();
     }
 
     public CodeRetriever(String projectPath, EmbeddingClient embeddingClient) throws SQLException {
+        this(projectPath, embeddingClient, new CrossEncoderReranker());
+    }
+
+    public CodeRetriever(String projectPath, EmbeddingClient embeddingClient, CodeReranker reranker) throws SQLException {
         this.embeddingClient = embeddingClient;
         this.vectorStore = new VectorStore(Paths.get(projectPath).toAbsolutePath().normalize().toString());
+        this.reranker = reranker == null ? new NoopCodeReranker() : reranker;
     }
 
     /**
@@ -60,215 +67,149 @@ public class CodeRetriever implements AutoCloseable {
     }
 
     public List<VectorStore.SearchResult> search(String query, int topK, CodeSearchOptions options) throws Exception {
-        Map<String, VectorStore.SearchResult> merged = new LinkedHashMap<>();
-        Set<String> dualMatchBonused = new HashSet<>();
+        RetrievalFusion fusion = new RetrievalFusion();
 
         switch (options.mode()) {
-            case DEFINITION, CONFIG -> searchPreciseFirst(query, topK, merged, dualMatchBonused);
-            case ERROR_TRACE -> searchErrorTrace(query, topK, options, merged, dualMatchBonused);
-            case CALL_CHAIN -> searchCallChain(query, topK, options, merged, dualMatchBonused);
-            case AUTO, GENERAL -> searchGeneral(query, topK, options, merged, dualMatchBonused);
+            case DEFINITION, CONFIG -> searchPreciseFirst(query, topK, fusion);
+            case ERROR_TRACE -> searchErrorTrace(query, topK, options, fusion);
+            case CALL_CHAIN -> searchCallChain(query, topK, options, fusion);
+            case AUTO, GENERAL -> searchGeneral(query, topK, options, fusion);
         }
 
-        return rankAndLimit(merged, query, topK);
+        List<VectorStore.SearchResult> fused = fusion.rank(query, Math.max(topK * 3, topK));
+        List<VectorStore.SearchResult> reranked = rerankOrFallback(query, fused, Math.max(topK * 3, topK));
+        return limitPerFile(reranked, topK, 2);
     }
 
-    private void searchGeneral(String query, int topK, CodeSearchOptions options,
-                               Map<String, VectorStore.SearchResult> merged,
-                               Set<String> dualMatchBonused) throws Exception {
-        addSemanticResults(query, topK, merged, dualMatchBonused);
-        addKeywordResults(query, merged, dualMatchBonused);
-        expandIfNeeded(merged, options.graphDepth(), dualMatchBonused);
+    public String rerankStrategy() {
+        return reranker.enabled() ? "cross_encoder:" + reranker.description() : "disabled";
     }
 
-    private void searchCallChain(String query, int topK, CodeSearchOptions options,
-                                 Map<String, VectorStore.SearchResult> merged,
-                                 Set<String> dualMatchBonused) throws Exception {
-        addSemanticResults(query, topK, merged, dualMatchBonused);
-        addKeywordResults(query, merged, dualMatchBonused);
-        expandIfNeeded(merged, options.graphDepth(), dualMatchBonused);
+    private void searchGeneral(String query, int topK, CodeSearchOptions options, RetrievalFusion fusion) throws Exception {
+        List<VectorStore.SearchResult> semantic = semanticResults(query, topK);
+        List<VectorStore.SearchResult> keyword = keywordResults(query);
+        fusion.addChannel("semantic", semantic, 1.0);
+        fusion.addChannel("keyword", keyword, 1.15);
+        addGraphResults(options.graphDepth(), fusion, semantic, keyword);
     }
 
-    private void searchErrorTrace(String query, int topK, CodeSearchOptions options,
-                                  Map<String, VectorStore.SearchResult> merged,
-                                  Set<String> dualMatchBonused) throws Exception {
-        addKeywordResults(query, merged, dualMatchBonused);
-        addSemanticResults(query, topK, merged, dualMatchBonused);
-        expandIfNeeded(merged, options.graphDepth(), dualMatchBonused);
+    private void searchCallChain(String query, int topK, CodeSearchOptions options, RetrievalFusion fusion) throws Exception {
+        List<VectorStore.SearchResult> semantic = semanticResults(query, topK);
+        List<VectorStore.SearchResult> keyword = keywordResults(query);
+        fusion.addChannel("semantic", semantic, 1.0);
+        fusion.addChannel("keyword", keyword, 1.20);
+        addGraphResults(options.graphDepth(), fusion, semantic, keyword);
     }
 
-    private void searchPreciseFirst(String query, int topK,
-                                    Map<String, VectorStore.SearchResult> merged,
-                                    Set<String> dualMatchBonused) throws Exception {
-        addKeywordResults(query, merged, dualMatchBonused);
-        if (merged.size() < Math.max(topK, 5)) {
-            addSemanticResults(query, topK, merged, dualMatchBonused);
+    private void searchErrorTrace(String query, int topK, CodeSearchOptions options, RetrievalFusion fusion) throws Exception {
+        List<VectorStore.SearchResult> keyword = keywordResults(query);
+        List<VectorStore.SearchResult> semantic = semanticResults(query, topK);
+        fusion.addChannel("keyword", keyword, 1.30);
+        fusion.addChannel("semantic", semantic, 0.90);
+        addGraphResults(options.graphDepth(), fusion, keyword, semantic);
+    }
+
+    private void searchPreciseFirst(String query, int topK, RetrievalFusion fusion) throws Exception {
+        List<VectorStore.SearchResult> keyword = keywordResults(query);
+        fusion.addChannel("keyword", keyword, 1.35);
+        if (keyword.size() < Math.max(topK, 5)) {
+            fusion.addChannel("semantic", semanticResults(query, topK), 0.75);
         }
     }
 
-    private void addSemanticResults(String query, int topK, Map<String, VectorStore.SearchResult> merged,
-                                    Set<String> dualMatchBonused) throws Exception {
+    private List<VectorStore.SearchResult> semanticResults(String query, int topK) throws Exception {
         int semanticLimit = Math.max(topK * 2, 10);
-        for (VectorStore.SearchResult result : semanticSearch(query, semanticLimit)) {
-            mergeResult(merged, result, dualMatchBonused);
+        return semanticSearch(query, semanticLimit);
+    }
+
+    private List<VectorStore.SearchResult> rerankOrFallback(String query,
+                                                            List<VectorStore.SearchResult> fused,
+                                                            int limit) {
+        if (!reranker.enabled()) {
+            return fused;
+        }
+        try {
+            return reranker.rerank(query, fused, limit);
+        } catch (Exception ignored) {
+            return fused;
         }
     }
 
-    private void addKeywordResults(String query, Map<String, VectorStore.SearchResult> merged,
-                                   Set<String> dualMatchBonused) throws SQLException {
+    private List<VectorStore.SearchResult> keywordResults(String query) throws SQLException {
+        Map<String, VectorStore.SearchResult> keywordResults = new LinkedHashMap<>();
         Set<String> keywords = RagQueryTokenizer.tokenize(query);
         for (String keyword : keywords) {
             for (VectorStore.SearchResult result : keywordSearch(keyword)) {
-                mergeResult(merged, boostKeywordMatch(result, keyword), dualMatchBonused);
+                mergeKeywordResult(keywordResults, boostKeywordMatch(result, keyword));
             }
         }
+        return keywordResults.values().stream()
+                .sorted(Comparator.comparingDouble(VectorStore.SearchResult::similarity).reversed())
+                .toList();
     }
 
-    private void expandIfNeeded(Map<String, VectorStore.SearchResult> merged, int graphDepth,
-                                Set<String> dualMatchBonused) throws SQLException {
+    private void addGraphResults(int graphDepth, RetrievalFusion fusion,
+                                 List<VectorStore.SearchResult> first,
+                                 List<VectorStore.SearchResult> second) throws SQLException {
         if (graphDepth > 0) {
-            expandGraphNeighbors(merged, graphDepth, dualMatchBonused);
+            List<VectorStore.SearchResult> graph = expandGraphNeighbors(seedResults(first, second), graphDepth);
+            fusion.addChannel("graph", graph, 0.85);
         }
     }
 
-    private List<VectorStore.SearchResult> rankAndLimit(Map<String, VectorStore.SearchResult> merged, String query, int topK) {
-        Set<String> queryTokens = RagQueryTokenizer.tokenize(query);
-        List<VectorStore.SearchResult> ranked = new ArrayList<>();
-        for (VectorStore.SearchResult r : merged.values()) {
-            double typeBoost = switch (r.chunkType()) {
-                case "method" -> 0.15;
-                case "class" -> 0.10;
-                default -> 0.0;
-            };
-            double rerankBoost = typeBoost + queryMatchBoost(r, queryTokens) - noisePenalty(r, queryTokens);
-            ranked.add(rerankBoost == 0.0 ? r : new VectorStore.SearchResult(
-                    r.filePath(), r.chunkType(), r.name(), r.content(), r.similarity() + rerankBoost));
+    private List<VectorStore.SearchResult> seedResults(List<VectorStore.SearchResult> first,
+                                                       List<VectorStore.SearchResult> second) {
+        Map<String, VectorStore.SearchResult> seeds = new LinkedHashMap<>();
+        for (VectorStore.SearchResult result : first) {
+            mergeKeywordResult(seeds, result);
         }
-
-        ranked.sort(Comparator.comparingDouble(VectorStore.SearchResult::similarity).reversed());
-        return limitPerFile(ranked, topK, 2);
+        for (VectorStore.SearchResult result : second) {
+            mergeKeywordResult(seeds, result);
+        }
+        return seeds.values().stream()
+                .sorted(Comparator.comparingDouble(VectorStore.SearchResult::similarity).reversed())
+                .toList();
     }
 
-    private double queryMatchBoost(VectorStore.SearchResult result, Set<String> queryTokens) {
-        if (queryTokens.isEmpty()) {
-            return 0.0;
-        }
-        String nameLower = result.name().toLowerCase();
-        String fileLower = result.filePath().replace('\\', '/').toLowerCase();
-        String contentLower = result.content().toLowerCase();
-        double boost = 0.0;
-        int covered = 0;
-        for (String token : queryTokens) {
-            String tokenLower = token.toLowerCase();
-            if (tokenLower.length() < 2) {
-                continue;
-            }
-            boolean matched = false;
-            if (nameLower.equals(tokenLower)) {
-                boost += 0.70;
-                matched = true;
-            } else if (nameLower.startsWith(tokenLower + ".")
-                    || nameLower.contains("." + tokenLower) || nameLower.contains(tokenLower + "(")) {
-                boost += 0.18;
-                matched = true;
-            } else if (nameLower.contains(tokenLower)) {
-                boost += 0.10;
-                matched = true;
-            }
-            if (fileLower.endsWith("/" + tokenLower + ".java") || fileLower.contains("/" + tokenLower + "/")) {
-                boost += 0.16;
-                matched = true;
-            } else if (fileLower.contains(tokenLower)) {
-                boost += 0.06;
-                matched = true;
-            }
-            if (!matched && contentLower.contains(tokenLower)) {
-                boost += 0.02;
-                matched = true;
-            }
-            if (matched) {
-                covered++;
-            }
-        }
-        if (covered >= 2) {
-            boost += Math.min(0.20, covered * 0.03);
-        }
-        return Math.min(boost, 1.20);
-    }
-
-    private double noisePenalty(VectorStore.SearchResult result, Set<String> queryTokens) {
-        String path = result.filePath().replace('\\', '/').toLowerCase();
-        String tokenText = String.join(" ", queryTokens).toLowerCase();
-        double penalty = 0.0;
-        if ((path.contains("/src/test/") || path.contains("/test/"))
-                && !containsAny(tokenText, "test", "测试", "单测")) {
-            penalty += 0.12;
-        }
-        if ((path.contains("/docs/") || path.endsWith(".md"))
-                && !containsAny(tokenText, "doc", "docs", "readme", "文档")) {
-            penalty += 0.08;
-        }
-        if ("file".equals(result.chunkType())) {
-            penalty += 0.08;
-        }
-        return penalty;
-    }
-
-    private boolean containsAny(String text, String... needles) {
-        for (String needle : needles) {
-            if (text.contains(needle)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private void mergeResult(Map<String, VectorStore.SearchResult> merged, VectorStore.SearchResult candidate,
-                             Set<String> dualMatchBonused) {
+    private void mergeKeywordResult(Map<String, VectorStore.SearchResult> merged, VectorStore.SearchResult candidate) {
         String key = candidate.filePath() + "#" + candidate.name();
         VectorStore.SearchResult existing = merged.get(key);
-        if (existing == null) {
+        if (existing == null || candidate.similarity() > existing.similarity()) {
             merged.put(key, candidate);
-        } else {
-            double best = Math.max(existing.similarity(), candidate.similarity());
-            // 双重命中奖励只给一次，不重复叠加
-            if (!dualMatchBonused.contains(key)) {
-                best += 0.1;
-                dualMatchBonused.add(key);
-            }
-            merged.put(key, new VectorStore.SearchResult(
-                    candidate.filePath(), candidate.chunkType(), candidate.name(),
-                    candidate.content(), best));
         }
     }
 
-    private void expandGraphNeighbors(Map<String, VectorStore.SearchResult> merged, int maxDepth,
-                                      Set<String> dualMatchBonused) throws SQLException {
-        List<VectorStore.SearchResult> seeds = merged.values().stream()
+    private List<VectorStore.SearchResult> expandGraphNeighbors(List<VectorStore.SearchResult> merged, int maxDepth) throws SQLException {
+        List<VectorStore.SearchResult> seeds = merged.stream()
                 .sorted(Comparator.comparingDouble(VectorStore.SearchResult::similarity).reversed())
                 .limit(GRAPH_SEED_LIMIT)
                 .toList();
+        Map<String, VectorStore.SearchResult> graphResults = new LinkedHashMap<>();
         Set<String> visitedNodes = new HashSet<>();
         int[] added = {0};
         for (VectorStore.SearchResult seed : seeds) {
-            expandFrom(seed.name(), seed.similarity(), 1, maxDepth, visitedNodes, merged, added, dualMatchBonused);
+            expandFrom(seed.name(), seed.similarity(), 1, maxDepth, visitedNodes, graphResults, added);
             if (added[0] >= GRAPH_TOTAL_CHUNK_LIMIT) {
                 break;
             }
         }
+        return graphResults.values().stream()
+                .sorted(Comparator.comparingDouble(VectorStore.SearchResult::similarity).reversed())
+                .toList();
     }
 
     private void expandFrom(String name, double parentScore, int depth, int maxDepth, Set<String> visitedNodes,
-                            Map<String, VectorStore.SearchResult> merged, int[] added,
-                            Set<String> dualMatchBonused) throws SQLException {
+                            Map<String, VectorStore.SearchResult> merged, int[] added) throws SQLException {
         if (name == null || name.isBlank() || depth > maxDepth || added[0] >= GRAPH_TOTAL_CHUNK_LIMIT) {
             return;
         }
-        String normalizedName = normalizeMethodName(name);
-        if (!visitedNodes.add(normalizedName)) {
+        // Bug #5 修复：visitedNodes 使用完整签名（含参数），避免重载方法互相覆盖
+        if (!visitedNodes.add(name)) {
             return;
         }
 
+        // 查询关系时标准化（去参数），因为存储的关系 key 是标准化后的
+        String normalizedName = normalizeMethodName(name);
         List<CodeRelation> relations = vectorStore.getRelations(normalizedName).stream()
                 .filter(this::isGraphExpansionRelation)
                 .limit(GRAPH_RELATIONS_PER_NODE)
@@ -278,27 +219,35 @@ public class CodeRetriever implements AutoCloseable {
             if (target == null || target.isBlank()) {
                 continue;
             }
-            double score = parentScore - (0.12 * depth) + relationBoost(relation.relationType());
+            double score = parentScore - (0.12 * depth) + relationBoost(relation);
             for (VectorStore.SearchResult chunk : vectorStore.findChunksByName(target, 3)) {
-                // 关键：传入主流程级别的 dualMatchBonused，避免 graph 扩展为已被双重命中的节点
-                // 重新加 +0.1 bonus 导致分数虚高、graph 结果挤掉真正语义相关的结果。
-                mergeResult(merged, new VectorStore.SearchResult(
-                        chunk.filePath(), chunk.chunkType(), chunk.name(), chunk.content(), score), dualMatchBonused);
+                mergeKeywordResult(merged, new VectorStore.SearchResult(
+                        chunk.filePath(),
+                        chunk.chunkType(),
+                        chunk.name(),
+                        chunk.content(),
+                        score,
+                        chunk.symbolVersion(),
+                        chunk.classpathEpoch(),
+                        chunk.indexEpoch(),
+                        chunk.invalidations()));
                 added[0]++;
                 if (added[0] >= GRAPH_TOTAL_CHUNK_LIMIT) {
                     return;
                 }
             }
-            expandFrom(target, score, depth + 1, maxDepth, visitedNodes, merged, added, dualMatchBonused);
+            expandFrom(target, score, depth + 1, maxDepth, visitedNodes, merged, added);
         }
     }
 
     private String relatedTarget(String current, CodeRelation relation) {
+        // 正向遍历：current 是 from，返回 to
         if (current.equals(relation.fromName())) {
             return relation.toName();
         }
-        if (current.equals(relation.toName())
-                && ("implements".equals(relation.relationType()) || "extends".equals(relation.relationType()))) {
+        // Bug #6 修复：反向遍历 calls/contains/implements/extends
+        // 搜索"谁调用了 X"时，从 X (toName) 找到 caller (fromName)
+        if (current.equals(relation.toName())) {
             return relation.fromName();
         }
         return null;
@@ -311,13 +260,14 @@ public class CodeRetriever implements AutoCloseable {
         };
     }
 
-    private double relationBoost(String relationType) {
-        return switch (relationType) {
+    private double relationBoost(CodeRelation relation) {
+        double base = switch (relation.relationType()) {
             case "calls" -> 0.12;
             case "implements", "extends" -> 0.08;
             case "contains" -> 0.04;
             default -> 0.0;
         };
+        return base + ((relation.confidence() - 0.5) * 0.06);
     }
 
     private String normalizeMethodName(String name) {
@@ -351,7 +301,11 @@ public class CodeRetriever implements AutoCloseable {
                 result.chunkType(),
                 result.name(),
                 result.content(),
-                result.similarity() + bonus
+                result.similarity() + bonus,
+                result.symbolVersion(),
+                result.classpathEpoch(),
+                result.indexEpoch(),
+                result.invalidations()
         );
     }
 
