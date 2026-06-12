@@ -5,6 +5,7 @@ import com.paicli.context.ContextProfile;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -37,6 +38,8 @@ public class MemoryManager implements AutoCloseable {
     private final WorkingMemory workingMemory;
     private final LongTermMemory longTermMemory;
     private final MemoryRetriever retriever;
+    // Bug #12 修复：使用 ConcurrentHashMap 支持 Multi-Agent 并发调用
+    private final Map<String, Integer> memoryCandidateOccurrences = new java.util.concurrent.ConcurrentHashMap<>();
     private TokenBudget tokenBudget;
     private ContextProfile contextProfile;
 
@@ -87,6 +90,7 @@ public class MemoryManager implements AutoCloseable {
         // 取首 60 字符做 fact，避免 prompt 膨胀
         String preview = content.length() > 60 ? content.substring(0, 60) + "..." : content;
         workingMemory.addVolatileFact("用户最新输入: " + preview);
+        maybePersistUserFact(content);
     }
 
     /**
@@ -158,6 +162,30 @@ public class MemoryManager implements AutoCloseable {
         return new StoreResult(true, decision, "已保存到长期记忆");
     }
 
+    private void maybePersistUserFact(String content) {
+        String candidate = normalizeMemoryCandidate(content);
+        if (candidate.isBlank()) {
+            return;
+        }
+        int recurrence = memoryCandidateOccurrences.merge(candidate, 1, Integer::sum);
+        LongTermMemoryPolicy.Decision decision = LongTermMemoryPolicy.evaluate(candidate, recurrence, false);
+        if (decision.action() == LongTermMemoryPolicy.Action.SAVE
+                && longTermMemory.search(candidate, 1).stream().noneMatch(e -> e.getContent().equals(candidate))) {
+            storeFact(candidate, decision.metadata());
+        }
+    }
+
+    private String normalizeMemoryCandidate(String content) {
+        if (content == null) {
+            return "";
+        }
+        String normalized = content.replace("\r\n", "\n").replace('\r', '\n').trim().replaceAll("\\s+", " ");
+        if (normalized.length() > 200) {
+            return "";
+        }
+        return normalized;
+    }
+
     private void storeFact(String fact, Map<String, String> metadata) {
         MemoryEntry entry = new MemoryEntry(
                 "fact-" + UUID.randomUUID().toString().substring(0, 8),
@@ -170,6 +198,31 @@ public class MemoryManager implements AutoCloseable {
     }
 
     public record StoreResult(boolean stored, LongTermMemoryPolicy.Decision decision, String message) {}
+
+    /**
+     * 返回当前持久化长期记忆的只读快照，供工具层审计和展示。
+     */
+    public String listLongTermMemory(int limit) {
+        List<MemoryEntry> entries = longTermMemory.getAll().stream()
+                .sorted(java.util.Comparator.comparing(MemoryEntry::getTimestamp).reversed())
+                .limit(Math.max(1, limit))
+                .toList();
+        if (entries.isEmpty()) {
+            return "长期记忆为空。";
+        }
+        StringBuilder sb = new StringBuilder("长期记忆（LongTermMemory）当前持久化条目：\n");
+        for (MemoryEntry entry : entries) {
+            sb.append("- id=").append(entry.getId())
+                    .append(", type=").append(entry.getType())
+                    .append(", created_at=").append(entry.getTimestamp())
+                    .append("\n  content: ").append(entry.getContent());
+            if (!entry.getMetadata().isEmpty()) {
+                sb.append("\n  metadata: ").append(entry.getMetadata());
+            }
+            sb.append("\n");
+        }
+        return sb.toString().trim();
+    }
 
     // ─────────────────────────────────────────────────────────
     // 读取（注入到 system prompt）
@@ -187,7 +240,51 @@ public class MemoryManager implements AutoCloseable {
      * 构建用于 LLM 的长期记忆上下文（按 query 检索 top-k）。
      */
     public String buildContextForQuery(String query, int maxTokens) {
-        return retriever.buildContextForQuery(query, maxTokens);
+        int safeBudget = Math.max(64, maxTokens);
+        String inventory = buildLongTermMemoryInventorySnapshot(5, Math.min(256, safeBudget));
+        int relevantBudget = Math.max(0, safeBudget - MemoryEntry.estimateTokens(inventory));
+        String relevant = relevantBudget == 0 ? "" : retriever.buildContextForQuery(query, relevantBudget);
+        if (relevant.isBlank()) {
+            return inventory;
+        }
+        return inventory + "\n\n" + relevant.trim();
+    }
+
+    private String buildLongTermMemoryInventorySnapshot(int limit, int maxTokens) {
+        int total = longTermMemory.size();
+        if (total == 0) {
+            return "## 长期记忆索引快照\n\n- total: 0\n- 当前持久化长期记忆为空。";
+        }
+        StringBuilder context = new StringBuilder("## 长期记忆索引快照\n\n");
+        context.append("- total: ").append(total).append('\n');
+        context.append("- 说明: 这是持久化长期记忆的轻量目录；用户要求完整查看或审计时调用 list_memory。\n");
+        List<MemoryEntry> entries = longTermMemory.getAll().stream()
+                .sorted(java.util.Comparator.comparing(MemoryEntry::getTimestamp).reversed())
+                .limit(Math.max(1, limit))
+                .toList();
+        int usedTokens = MemoryEntry.estimateTokens(context.toString());
+        for (MemoryEntry entry : entries) {
+            String line = "- [" + entry.getType() + "] " + truncateForPrompt(entry.getContent(), 120) + "\n";
+            int lineTokens = MemoryEntry.estimateTokens(line);
+            if (usedTokens + lineTokens > maxTokens && usedTokens > 0) {
+                context.append("- ...\n");
+                break;
+            }
+            context.append(line);
+            usedTokens += lineTokens;
+        }
+        return context.toString().trim();
+    }
+
+    private static String truncateForPrompt(String text, int maxChars) {
+        if (text == null) {
+            return "";
+        }
+        String normalized = text.replace("\r\n", "\n").replace('\r', '\n').trim().replaceAll("\\s+", " ");
+        if (normalized.length() <= maxChars) {
+            return normalized;
+        }
+        return normalized.substring(0, Math.max(0, maxChars - 3)) + "...";
     }
 
     /**

@@ -16,7 +16,6 @@ public class CodeIndex {
     private static final Logger log = LoggerFactory.getLogger(CodeIndex.class);
     private final EmbeddingClient embeddingClient;
     private final CodeChunker chunker;
-    private final CodeAnalyzer analyzer;
     private final ProgressListener progressListener;
 
     @FunctionalInterface
@@ -44,7 +43,6 @@ public class CodeIndex {
     public CodeIndex(EmbeddingClient embeddingClient, ProgressListener progressListener) {
         this.embeddingClient = embeddingClient;
         this.chunker = new CodeChunker();
-        this.analyzer = new CodeAnalyzer();
         this.progressListener = progressListener == null ? ProgressListener.noop() : progressListener;
     }
 
@@ -63,11 +61,14 @@ public class CodeIndex {
         }
 
         emit("🔍 开始索引: " + root);
+        IndexEpoch indexEpoch = IndexEpoch.next();
+        emit("🧭 IndexEpoch: " + indexEpoch.value());
 
         List<Path> filesToIndex = new ArrayList<>();
         collectFiles(root, filesToIndex);
         emit("📁 发现 " + filesToIndex.size() + " 个文件待索引");
 
+        CodeAnalyzer projectAnalyzer = new CodeAnalyzer(root);
         List<VectorStore.CodeChunkEntry> entries = new ArrayList<>();
         List<CodeRelation> allRelations = new ArrayList<>();
 
@@ -92,7 +93,7 @@ public class CodeIndex {
 
                 // 3. 分析关系（仅 Java 文件）
                 if (file.toString().endsWith(".java")) {
-                    allRelations.addAll(analyzer.analyzeFile(file));
+                    allRelations.addAll(projectAnalyzer.analyzeFile(file));
                 }
             } catch (Exception e) {
                 String message = "   ⚠️ 索引失败: " + file + " - " + e.getMessage();
@@ -103,12 +104,15 @@ public class CodeIndex {
 
         // 4. 持久化到 SQLite
         try (VectorStore store = new VectorStore(root.toString())) {
-            store.clearProject();
-            store.insertChunks(entries);
-            store.insertRelations(allRelations);
+            store.replaceProjectIndex(entries, allRelations, indexEpoch.value());
 
             VectorStore.IndexStats stats = store.getStats();
-            String msg = String.format("索引完成：%d 个代码块，%d 条关系", stats.chunkCount(), stats.relationCount());
+            int invalidationCount = store.getRecentInvalidations(1000).stream()
+                    .filter(invalidation -> indexEpoch.value().equals(invalidation.newIndexEpoch()))
+                    .toList()
+                    .size();
+            String msg = String.format("索引完成：%d 个代码块，%d 条关系，%d 条失效事件，indexEpoch=%s",
+                    stats.chunkCount(), stats.relationCount(), invalidationCount, indexEpoch.value());
             emit("✅ " + msg);
             return new IndexResult(stats.chunkCount(), stats.relationCount(), msg);
         } catch (Exception e) {
@@ -132,12 +136,15 @@ public class CodeIndex {
                 @Override
                 public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
                     String dirName = dir.getFileName().toString();
-                    // 跳过常见非代码目录
+                    // Bug #19 修复：保留重要配置目录 (.github, .cursor, .vscode/settings.json 等)
+                    // 只跳过明确的隐藏/缓存目录
                     if (dirName.equals("node_modules") || dirName.equals("target")
                             || dirName.equals("build") || dirName.equals(".git")
-                            || dirName.equals(".idea") || dirName.equals(".vscode")
-                            || dirName.equals("dist") || dirName.equals("out")
-                            || dirName.startsWith(".")) {
+                            || dirName.equals(".idea") || dirName.equals("dist")
+                            || dirName.equals("out") || dirName.equals(".next")
+                            || dirName.equals(".nuxt") || dirName.equals(".cache")
+                            || dirName.equals(".pytest_cache") || dirName.equals(".mypy_cache")
+                            || dirName.equals("__pycache__")) {
                         return FileVisitResult.SKIP_SUBTREE;
                     }
                     return FileVisitResult.CONTINUE;

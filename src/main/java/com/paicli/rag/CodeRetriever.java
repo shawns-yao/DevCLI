@@ -171,12 +171,15 @@ public class CodeRetriever implements AutoCloseable {
                 .toList();
     }
 
-    private void mergeKeywordResult(Map<String, VectorStore.SearchResult> merged, VectorStore.SearchResult candidate) {
+    // Bug #14 修复：返回 true 表示实际新增了条目
+    private boolean mergeKeywordResult(Map<String, VectorStore.SearchResult> merged, VectorStore.SearchResult candidate) {
         String key = candidate.filePath() + "#" + candidate.name();
         VectorStore.SearchResult existing = merged.get(key);
         if (existing == null || candidate.similarity() > existing.similarity()) {
             merged.put(key, candidate);
+            return existing == null; // 只有从无到有才算新增
         }
+        return false;
     }
 
     private List<VectorStore.SearchResult> expandGraphNeighbors(List<VectorStore.SearchResult> merged, int maxDepth) throws SQLException {
@@ -221,7 +224,8 @@ public class CodeRetriever implements AutoCloseable {
             }
             double score = parentScore - (0.12 * depth) + relationBoost(relation);
             for (VectorStore.SearchResult chunk : vectorStore.findChunksByName(target, 3)) {
-                mergeKeywordResult(merged, new VectorStore.SearchResult(
+                // Bug #14 修复：只有实际新增时才计数
+                boolean isNewEntry = mergeKeywordResult(merged, new VectorStore.SearchResult(
                         chunk.filePath(),
                         chunk.chunkType(),
                         chunk.name(),
@@ -231,7 +235,9 @@ public class CodeRetriever implements AutoCloseable {
                         chunk.classpathEpoch(),
                         chunk.indexEpoch(),
                         chunk.invalidations()));
-                added[0]++;
+                if (isNewEntry) {
+                    added[0]++;
+                }
                 if (added[0] >= GRAPH_TOTAL_CHUNK_LIMIT) {
                     return;
                 }

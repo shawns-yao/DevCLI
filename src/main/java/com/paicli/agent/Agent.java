@@ -75,6 +75,7 @@ public class Agent implements AutoCloseable {
             MemoryManager.StoreResult result = memoryManager.storeFactWithPolicy(fact, true);
             return new ToolRegistry.MemorySaveResult(result.stored(), result.message());
         });
+        this.toolRegistry.setMemoryListHandler(memoryManager::listLongTermMemory);
         conversationHistory.add(LlmClient.Message.system(buildSystemPrompt("")));
     }
 
@@ -958,6 +959,8 @@ public class Agent implements AutoCloseable {
             reasoningStarted = false;
             contentStarted = false;
             thinkingQuotePrinted = false;
+            // Bug #15 修复：重置标题打印标志，确保下一轮迭代能正常显示标题
+            reasoningHeadingPrinted = false;
             if (streamedOutput) {
                 out().println();
             }

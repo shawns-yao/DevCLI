@@ -83,7 +83,8 @@ public class LongTermMemory implements Memory, AutoCloseable {
     }
 
     @Override
-    public void store(MemoryEntry entry) {
+    public synchronized void store(MemoryEntry entry) {
+        // Bug #13 修复：整个方法加锁，确保去重检查和插入原子性
         if (entry == null) return;
         MemoryEntry previousById = entries.get(entry.getId());
         if (previousById == null && findDuplicateContent(entry) != null) {
@@ -140,19 +141,31 @@ public class LongTermMemory implements Memory, AutoCloseable {
 
     @Override
     public boolean delete(String id) {
-        MemoryEntry removed = entries.remove(id);
-        if (removed != null) {
-            tokenCounter.addAndGet(-removed.getTokenCount());
-            removeHashIfUnused(removed.getContent().hashCode());
-            store.delete(id);
-            try {
-                onDeleteHook.accept(id);
-            } catch (Exception e) {
-                log.warn("LongTermMemory onDeleteHook failed for {}: {}", id, e.getMessage());
-            }
-            return true;
+        MemoryEntry toRemove = entries.get(id);
+        if (toRemove == null) {
+            return false;
         }
-        return false;
+        // Bug #20 修复：先删 SQLite，成功后再删内存
+        // store.delete() 返回 void，如果抛异常则表示失败
+        try {
+            store.delete(id);
+        } catch (Exception e) {
+            if (persistentStore) {
+                log.warn("LongTermMemory delete failed in persistent store for {}: {}", id, e.getMessage());
+                return false;
+            }
+            // 非持久化模式，忽略 store 错误
+        }
+        // SQLite 删除成功或非持久化模式，删除内存
+        entries.remove(id);
+        tokenCounter.addAndGet(-toRemove.getTokenCount());
+        removeHashIfUnused(toRemove.getContent().hashCode());
+        try {
+            onDeleteHook.accept(id);
+        } catch (Exception e) {
+            log.warn("LongTermMemory onDeleteHook failed for {}: {}", id, e.getMessage());
+        }
+        return true;
     }
 
     private MemoryEntry findDuplicateContent(MemoryEntry entry) {

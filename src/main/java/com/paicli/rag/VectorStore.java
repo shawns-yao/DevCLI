@@ -444,11 +444,15 @@ public class VectorStore implements AutoCloseable {
      * 根据关键词检索代码块（不经过 Embedding，用于精确匹配类名/方法名）
      */
     public List<SearchResult> searchByKeyword(String keyword) throws SQLException {
+        // Bug #17 修复：添加 ORDER BY，优先返回名称匹配的结果
         String sql = """
                 SELECT file_path, chunk_type, name, content, index_epoch, symbol_version, classpath_epoch FROM code_chunks
                 WHERE project_path = ? AND (name LIKE ? ESCAPE '\\'
                     OR file_path LIKE ? ESCAPE '\\'
                     OR content LIKE ? ESCAPE '\\')
+                ORDER BY
+                    CASE WHEN name LIKE ? ESCAPE '\\' THEN 1 ELSE 2 END,
+                    name
                 """;
         List<SearchResult> results = new ArrayList<>();
         String escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
@@ -459,6 +463,7 @@ public class VectorStore implements AutoCloseable {
             ps.setString(2, pattern);
             ps.setString(3, pattern);
             ps.setString(4, pattern);
+            ps.setString(5, pattern); // ORDER BY 条件
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     results.add(searchResult(

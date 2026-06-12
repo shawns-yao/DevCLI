@@ -95,7 +95,10 @@ public class CodeAnalyzer {
     }
 
     private void extractClassRelations(String filePath, CompilationUnit cu, List<CodeRelation> relations) {
-        cu.findAll(ClassOrInterfaceDeclaration.class).forEach(clazz -> {
+        // Bug #18 修复：只处理顶级类，避免内部类/匿名类的方法调用被归属到外部类
+        cu.findAll(ClassOrInterfaceDeclaration.class).stream()
+                .filter(clazz -> !clazz.isNestedType()) // 过滤掉内部类
+                .forEach(clazz -> {
             String className = clazz.getNameAsString();
 
             // extends 关系
