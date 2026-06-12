@@ -40,6 +40,8 @@ public class MemoryManager implements AutoCloseable {
     private final MemoryRetriever retriever;
     // Bug #12 修复：使用 ConcurrentHashMap 支持 Multi-Agent 并发调用
     private final Map<String, Integer> memoryCandidateOccurrences = new java.util.concurrent.ConcurrentHashMap<>();
+    /** recurrence 候选计数器的容量上限，防止长会话下无界增长。 */
+    private static final int MAX_MEMORY_CANDIDATE_ENTRIES = 512;
     private TokenBudget tokenBudget;
     private ContextProfile contextProfile;
 
@@ -166,6 +168,13 @@ public class MemoryManager implements AutoCloseable {
         String candidate = normalizeMemoryCandidate(content);
         if (candidate.isBlank()) {
             return;
+        }
+        // 进程内计数器防泄漏：超过上限直接清空重新统计。
+        // recurrence 本就不跨会话持久化，清空只是重置单会话内的重复计数，影响可接受。
+        if (memoryCandidateOccurrences.size() > MAX_MEMORY_CANDIDATE_ENTRIES) {
+            memoryCandidateOccurrences.clear();
+            log.debug("memoryCandidateOccurrences exceeded {} entries; reset recurrence counters",
+                    MAX_MEMORY_CANDIDATE_ENTRIES);
         }
         int recurrence = memoryCandidateOccurrences.merge(candidate, 1, Integer::sum);
         LongTermMemoryPolicy.Decision decision = LongTermMemoryPolicy.evaluate(candidate, recurrence, false);

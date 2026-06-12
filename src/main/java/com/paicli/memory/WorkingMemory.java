@@ -69,6 +69,8 @@ public class WorkingMemory {
     private static final Pattern SEARCH_RESULT_EVIDENCE = Pattern.compile(
             "^\\s*evidence: symbolVersion=([^,]+), (?:indexEpoch=([^,]+), )?classpathEpoch=(.+)$");
     private static final Pattern SEARCH_RESULT_NEGATIVE_FACT = Pattern.compile("^\\s*negativeFact: (.+)$");
+    /** 从 negativeFact 行提取被失效的旧 symbolVersion，用于即时清理对应的过期 RAG 证据。 */
+    private static final Pattern NEGATIVE_FACT_OLD_SYMBOL_VERSION = Pattern.compile("oldSymbolVersion=([^,\\s]+)");
 
     private final int maxToolResults;
     private final int maxVolatileFacts;
@@ -359,8 +361,36 @@ public class WorkingMemory {
             }
             Matcher negativeFactMatcher = SEARCH_RESULT_NEGATIVE_FACT.matcher(line);
             if (negativeFactMatcher.matches()) {
-                addVolatileFact("NegativeFact（负向事实）: " + negativeFactMatcher.group(1).trim());
+                String negativeFact = negativeFactMatcher.group(1).trim();
+                addVolatileFact("NegativeFact（负向事实）: " + negativeFact);
+                pruneEvidenceForNegativeFact(negativeFact);
             }
+        }
+    }
+
+    /**
+     * negativeFact 表明某个旧 symbolVersion 已失效；立即清理引用该版本的 RAG 证据，
+     * 避免过期证据继续留在 system prompt 里误导模型（不再依赖外部维护服务触发）。
+     * 行内没有结构化 oldSymbolVersion= 字段时不做任何清理。
+     */
+    private void pruneEvidenceForNegativeFact(String negativeFact) {
+        if (negativeFact == null || negativeFact.isBlank()) {
+            return;
+        }
+        Matcher matcher = NEGATIVE_FACT_OLD_SYMBOL_VERSION.matcher(negativeFact);
+        if (!matcher.find()) {
+            return;
+        }
+        String oldSymbolVersion = matcher.group(1).trim();
+        if (oldSymbolVersion.isEmpty() || "none".equals(oldSymbolVersion)) {
+            return;
+        }
+        int sizeBefore = ragEvidenceMemory.size();
+        ragEvidenceMemory.removeIf(evidence -> oldSymbolVersion.equals(evidence.symbolVersion()));
+        int removed = sizeBefore - ragEvidenceMemory.size();
+        if (removed > 0) {
+            log.info("pruneEvidenceForNegativeFact: removed {} stale RAG evidence with symbolVersion={}",
+                    removed, oldSymbolVersion);
         }
     }
 

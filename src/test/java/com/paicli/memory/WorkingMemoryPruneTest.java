@@ -146,4 +146,50 @@ class WorkingMemoryPruneTest {
         assertEquals(0, removed, "null 输入应该返回 0");
         assertEquals(1, memory.getRagEvidenceCount(), "证据应该保留");
     }
+
+    @Test
+    void negativeFactWithOldSymbolVersion_shouldPruneStaleEvidenceImmediately() {
+        // Arrange: 先建立一条旧版本证据
+        WorkingMemory memory = new WorkingMemory();
+        String firstResult = """
+            1. [class:UserService] (相似度: 0.95) com/example/UserService.java
+               evidence: symbolVersion=sv_old, indexEpoch=epoch-001, classpathEpoch=cp-001
+            """;
+        memory.recordToolResult("search_code", "{}", firstResult);
+        assertEquals(1, memory.getRagEvidenceCount());
+
+        // Act: 新一轮检索结果携带结构化 negativeFact，声明 sv_old 已失效
+        String secondResult = """
+            1. [class:UserService] (相似度: 0.95) com/example/UserService.java
+               evidence: symbolVersion=sv_new, indexEpoch=epoch-002, classpathEpoch=cp-001
+               negativeFact: UserService 已变更 oldSymbolVersion=sv_old, newSymbolVersion=sv_new, oldIndexEpoch=epoch-001, newIndexEpoch=epoch-002
+            """;
+        memory.recordToolResult("search_code", "{}", secondResult);
+
+        // Assert: sv_old 证据被即时清理，只剩 sv_new
+        assertEquals(1, memory.getRagEvidenceCount(), "旧版本证据应被即时清理");
+        assertEquals("sv_new", memory.getRagEvidenceMemory().get(0).symbolVersion());
+    }
+
+    @Test
+    void negativeFactWithoutStructuredFields_shouldNotPruneAnything() {
+        // Arrange
+        WorkingMemory memory = new WorkingMemory();
+        String firstResult = """
+            1. [class:UserService] (相似度: 0.95) com/example/UserService.java
+               evidence: symbolVersion=sv_old, indexEpoch=epoch-001, classpathEpoch=cp-001
+            """;
+        memory.recordToolResult("search_code", "{}", firstResult);
+
+        // Act: 自由文本 negativeFact，没有 oldSymbolVersion= 结构化字段
+        String secondResult = """
+            1. [method:findById] (相似度: 0.88) com/example/UserService.java
+               evidence: symbolVersion=sv_other, indexEpoch=epoch-001, classpathEpoch=cp-001
+               negativeFact: Do not rely on stale data.
+            """;
+        memory.recordToolResult("search_code", "{}", secondResult);
+
+        // Assert: 无结构化字段时不做清理
+        assertEquals(2, memory.getRagEvidenceCount(), "自由文本 negativeFact 不应触发清理");
+    }
 }
