@@ -12,6 +12,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 当前会话工作记忆。
@@ -59,10 +61,18 @@ public class WorkingMemory {
     public static final int DEFAULT_MAX_VOLATILE_FACTS = 16;
     /** 单条 tool 结果在注入时截断到此字符数。完整原文仍保留在 recentToolResults，仅渲染时截断。 */
     public static final int TOOL_RESULT_RENDER_CHARS = 1_500;
+    public static final int DEFAULT_MAX_RAG_EVIDENCE = 8;
+    private static final Pattern SEARCH_RESULT_HEADER = Pattern.compile(
+            "^\\s*\\d+\\. \\[([^:]+):([^\\]]+)] \\(相似度: ([^)]+)\\) (.+)$");
+    private static final Pattern SEARCH_RESULT_EVIDENCE = Pattern.compile(
+            "^\\s*evidence: symbolVersion=([^,]+), (?:indexEpoch=([^,]+), )?classpathEpoch=(.+)$");
+    private static final Pattern SEARCH_RESULT_NEGATIVE_FACT = Pattern.compile("^\\s*negativeFact: (.+)$");
 
     private final int maxToolResults;
     private final int maxVolatileFacts;
+    private final int maxRagEvidence;
     private final LinkedList<ToolEvidence> recentToolResults = new LinkedList<>();
+    private final LinkedList<RagEvidence> ragEvidenceMemory = new LinkedList<>();
     private final LinkedList<String> volatileFacts = new LinkedList<>();
     private final LinkedHashMap<String, String> taskState = new LinkedHashMap<>();
 
@@ -74,12 +84,17 @@ public class WorkingMemory {
     }
 
     public WorkingMemory() {
-        this(DEFAULT_MAX_TOOL_RESULTS, DEFAULT_MAX_VOLATILE_FACTS);
+        this(DEFAULT_MAX_TOOL_RESULTS, DEFAULT_MAX_VOLATILE_FACTS, DEFAULT_MAX_RAG_EVIDENCE);
     }
 
     public WorkingMemory(int maxToolResults, int maxVolatileFacts) {
+        this(maxToolResults, maxVolatileFacts, DEFAULT_MAX_RAG_EVIDENCE);
+    }
+
+    public WorkingMemory(int maxToolResults, int maxVolatileFacts, int maxRagEvidence) {
         this.maxToolResults = Math.max(1, maxToolResults);
         this.maxVolatileFacts = Math.max(1, maxVolatileFacts);
+        this.maxRagEvidence = Math.max(1, maxRagEvidence);
     }
 
     // ─────────────────────────────────────────────────────────
@@ -108,10 +123,15 @@ public class WorkingMemory {
         while (recentToolResults.size() > maxToolResults) {
             recentToolResults.removeFirst();
         }
+        recordRagEvidenceIfPresent(toolName, argsJson, result);
     }
 
     public synchronized List<ToolEvidence> getRecentToolResults() {
         return Collections.unmodifiableList(new ArrayList<>(recentToolResults));
+    }
+
+    public synchronized List<RagEvidence> getRagEvidenceMemory() {
+        return Collections.unmodifiableList(new ArrayList<>(ragEvidenceMemory));
     }
 
     // ─────────────────────────────────────────────────────────
@@ -203,6 +223,23 @@ public class WorkingMemory {
             }
             sb.append('\n');
         }
+        if (shouldRenderToolEvidence(effectiveView) && !ragEvidenceMemory.isEmpty()) {
+            sb.append("### RAG 证据记忆（绑定 SymbolVersion）\n\n");
+            List<RagEvidence> reversed = new ArrayList<>(ragEvidenceMemory);
+            Collections.reverse(reversed);
+            for (RagEvidence evidence : reversed) {
+                sb.append("- [").append(evidence.chunkType()).append(':').append(evidence.symbolName()).append("] ")
+                        .append(evidence.filePath())
+                        .append(" | symbolVersion=").append(evidence.symbolVersion())
+                        .append(" | indexEpoch=").append(evidence.indexEpoch())
+                        .append(" | classpathEpoch=").append(evidence.classpathEpoch());
+                if (!evidence.query().isBlank()) {
+                    sb.append(" | query=").append(evidence.query());
+                }
+                sb.append('\n');
+            }
+            sb.append('\n');
+        }
         if (shouldRenderToolEvidence(effectiveView) && !recentToolResults.isEmpty()) {
             sb.append("### 最近工具调用证据（精确实体来源）\n\n");
             // 倒序，最新调用在前
@@ -232,15 +269,124 @@ public class WorkingMemory {
     /** 状态摘要给 /memory 命令显示。 */
     public synchronized String getStatusSummary() {
         return String.format(Locale.ROOT,
-                "工作记忆: %d 工具证据 / %d 任务状态 / %d 临时事实",
-                recentToolResults.size(), taskState.size(), volatileFacts.size());
+                "工作记忆: %d 工具证据 / %d RAG证据 / %d 任务状态 / %d 临时事实",
+                recentToolResults.size(), ragEvidenceMemory.size(), taskState.size(), volatileFacts.size());
+    }
+
+    /** 获取工具结果数量（供维护服务使用）。 */
+    public synchronized int getToolResultsCount() {
+        return recentToolResults.size();
+    }
+
+    /** 获取临时事实数量（供维护服务使用）。 */
+    public synchronized int getVolatileFactsCount() {
+        return volatileFacts.size();
+    }
+
+    /** 获取 RAG 证据数量（供维护服务使用）。 */
+    public synchronized int getRagEvidenceCount() {
+        return ragEvidenceMemory.size();
+    }
+
+    /**
+     * 清理失效的 RAG 证据（供维护服务调用）。
+     *
+     * @param symbolInvalidation 符号失效记录
+     * @return 清理的证据数量
+     */
+    public synchronized int pruneInvalidEvidence(com.paicli.rag.SymbolInvalidation symbolInvalidation) {
+        if (symbolInvalidation == null) {
+            return 0;
+        }
+        String oldEpoch = symbolInvalidation.oldIndexEpoch();
+        if (oldEpoch == null || oldEpoch.isBlank()) {
+            return 0;
+        }
+        int sizeBefore = ragEvidenceMemory.size();
+        ragEvidenceMemory.removeIf(evidence -> {
+            String evidenceEpoch = evidence.indexEpoch();
+            return evidenceEpoch != null && evidenceEpoch.equals(oldEpoch);
+        });
+        int removed = sizeBefore - ragEvidenceMemory.size();
+        if (removed > 0) {
+            log.info("pruneInvalidEvidence: removed {} stale RAG evidence from old index epoch {}",
+                removed, oldEpoch);
+        }
+        return removed;
     }
 
     /** 清空整个 working memory（用于 /clear 命令）。 */
     public synchronized void clear() {
         recentToolResults.clear();
+        ragEvidenceMemory.clear();
         volatileFacts.clear();
         taskState.clear();
+    }
+
+    private void recordRagEvidenceIfPresent(String toolName, String argsJson, String result) {
+        if (!"search_code".equals(toolName) || result == null || result.isBlank()) {
+            return;
+        }
+        String query = extractQuery(argsJson);
+        String[] lines = result.split("\\R");
+        PendingRagEvidence pending = null;
+        for (String line : lines) {
+            Matcher headerMatcher = SEARCH_RESULT_HEADER.matcher(line);
+            if (headerMatcher.matches()) {
+                pending = new PendingRagEvidence(
+                        headerMatcher.group(1).trim(),
+                        headerMatcher.group(2).trim(),
+                        safeParseDouble(headerMatcher.group(3).trim()),
+                        headerMatcher.group(4).trim());
+                continue;
+            }
+            Matcher evidenceMatcher = SEARCH_RESULT_EVIDENCE.matcher(line);
+            if (pending != null && evidenceMatcher.matches()) {
+                addRagEvidence(new RagEvidence(
+                        pending.filePath,
+                        pending.symbolName,
+                        pending.chunkType,
+                        evidenceMatcher.group(1).trim(),
+                        evidenceMatcher.group(3).trim(),
+                        evidenceMatcher.group(2) == null ? "none" : evidenceMatcher.group(2).trim(),
+                        query,
+                        pending.similarity,
+                        Instant.now()));
+                pending = null;
+                continue;
+            }
+            Matcher negativeFactMatcher = SEARCH_RESULT_NEGATIVE_FACT.matcher(line);
+            if (negativeFactMatcher.matches()) {
+                addVolatileFact("NegativeFact（负向事实）: " + negativeFactMatcher.group(1).trim());
+            }
+        }
+    }
+
+    private void addRagEvidence(RagEvidence evidence) {
+        ragEvidenceMemory.removeIf(existing ->
+                existing.filePath().equals(evidence.filePath())
+                        && existing.symbolName().equals(evidence.symbolName())
+                        && existing.symbolVersion().equals(evidence.symbolVersion()));
+        ragEvidenceMemory.addLast(evidence);
+        while (ragEvidenceMemory.size() > maxRagEvidence) {
+            ragEvidenceMemory.removeFirst();
+        }
+    }
+
+    private static String extractQuery(String argsJson) {
+        if (argsJson == null || argsJson.isBlank()) {
+            return "";
+        }
+        Matcher matcher = Pattern.compile("\"query\"\\s*:\\s*\"([^\"]+)\"").matcher(argsJson);
+        return matcher.find() ? matcher.group(1) : "";
+    }
+
+    private static double safeParseDouble(String value) {
+        try {
+            return Double.parseDouble(value);
+        } catch (NumberFormatException e) {
+            return 0.0;
+        }
     }
 
     private static String truncate(String s, int maxChars) {
@@ -262,4 +408,16 @@ public class WorkingMemory {
             this.capturedAt = capturedAt;
         }
     }
+
+    public record RagEvidence(String filePath,
+                              String symbolName,
+                              String chunkType,
+                              String symbolVersion,
+                              String classpathEpoch,
+                              String indexEpoch,
+                              String query,
+                              double similarity,
+                              Instant capturedAt) {}
+
+    private record PendingRagEvidence(String chunkType, String symbolName, double similarity, String filePath) {}
 }

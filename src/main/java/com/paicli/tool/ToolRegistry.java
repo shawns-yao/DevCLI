@@ -310,7 +310,13 @@ public class ToolRegistry {
                     Path safe = pathGuard.resolveSafe(path);
                     String activeStep = resourceLeaseStep.get();
                     if (activeStep != null && !activeStep.isBlank()) {
+                        // 获取租约
                         resourceLeaseManager.acquireWrite(activeStep, safe);
+                        // 二次校验：防止租约在获取后、写入前超时被回收
+                        if (!resourceLeaseManager.isLeaseValid(activeStep, safe)) {
+                            throw new PolicyException("写入冲突: 租约已失效，文件 " + path
+                                + " 可能正在被其他任务写入");
+                        }
                     }
                     String before = null;
                     try {
@@ -1320,7 +1326,7 @@ public class ToolRegistry {
             return completed(invocation, ToolOutput.text(result), elapsedMillis);
         }
 
-        private static ToolExecutionResult failed(ToolInvocation invocation, String message) {
+        public static ToolExecutionResult failed(ToolInvocation invocation, String message) {
             return completed(invocation, "工具执行失败: " + message, 0);
         }
 

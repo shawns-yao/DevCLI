@@ -62,6 +62,11 @@ public class ConversationHistoryCompactor {
     static final int MAX_CONSECUTIVE_FAILURES = 3;
 
     /**
+     * 降级截断后的冷却时间（毫秒）。在此时间内不再尝试任何压缩操作，避免降级循环。
+     */
+    private static final long FALLBACK_COOLDOWN_MS = 300_000L; // 5 分钟
+
+    /**
      * 摘要调用自身 prompt-too-long 时的最大重试次数。
      * 每次重试丢掉 oldMsgs 头部 20% 的 user 边界对齐 round，再试一次。
      * 超过仍然 PTL 才计入 {@link #consecutiveFailures}。
@@ -169,6 +174,11 @@ public class ConversationHistoryCompactor {
      */
     private int consecutiveFailures = 0;
 
+    /**
+     * 上次降级截断的时间戳（毫秒）。用于冷却期判断，避免降级循环。
+     */
+    private long lastFallbackTimestamp = 0;
+
     public ConversationHistoryCompactor(LlmClient llmClient) {
         this(llmClient, DEFAULT_RETAIN_RECENT_TOKENS, true);
     }
@@ -204,10 +214,23 @@ public class ConversationHistoryCompactor {
      */
     public boolean compactIfNeeded(List<LlmClient.Message> history, int triggerTokens) {
         if (history == null || history.isEmpty()) return false;
-        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-            // circuit breaker 已熔断：本会话不再尝试压缩，避免反复打爆 LLM。
-            // 调用方（Agent 主循环）应配合 budget 兜底，把超窗口请求引导到失败路径而非死循环重试。
+
+        // 检查是否在降级冷却期内
+        long now = System.currentTimeMillis();
+        if (lastFallbackTimestamp > 0 && (now - lastFallbackTimestamp) < FALLBACK_COOLDOWN_MS) {
+            // 冷却期内不执行任何压缩操作，避免降级循环
             return false;
+        }
+
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+            // circuit breaker 已熔断：启用降级截断策略
+            log.warn("压缩连续失败 {} 次，启用降级截断策略", MAX_CONSECUTIVE_FAILURES);
+            boolean truncated = fallbackTruncate(history, triggerTokens);
+            if (truncated) {
+                lastFallbackTimestamp = now;
+                consecutiveFailures = 0; // 重置计数器
+            }
+            return truncated;
         }
         int currentTokens = TokenBudget.estimateMessagesTokens(history);
         if (currentTokens < triggerTokens) return false;
@@ -673,6 +696,82 @@ public class ConversationHistoryCompactor {
             start = end;
         }
         return chunks;
+    }
+
+    /**
+     * 降级截断策略：压缩失败 3 次后的兜底方案。
+     * 根据目标 token 动态计算需要删除的消息数量，保留 system 和最近上下文。
+     *
+     * @param history       对话历史
+     * @param triggerTokens 触发压缩的 token 阈值
+     * @return 是否成功截断
+     */
+    private boolean fallbackTruncate(List<LlmClient.Message> history, int triggerTokens) {
+        if (history == null || history.isEmpty()) return false;
+
+        int systemEnd = "system".equals(history.get(0).role()) ? 1 : 0;
+        if (history.size() <= systemEnd + 1) {
+            // 只有 system 或 system + 1条消息，无法截断
+            return false;
+        }
+
+        // 目标：降到 trigger * 0.7（留 30% 安全余量）
+        int targetTokens = (int) (triggerTokens * 0.7);
+        int currentTokens = TokenBudget.estimateMessagesTokens(history);
+
+        if (currentTokens <= targetTokens) {
+            // 已经在安全范围内，无需截断
+            return false;
+        }
+
+        // 从头开始删除消息，直到 token 降到目标以下
+        int toRemove = 0;
+        int accumulatedTokens = currentTokens;
+        for (int i = systemEnd; i < history.size() && accumulatedTokens > targetTokens; i++) {
+            int msgTokens = TokenBudget.estimateMessagesTokens(List.of(history.get(i)));
+            accumulatedTokens -= msgTokens;
+            toRemove++;
+        }
+
+        // 至少保留 system + 3 条消息（降级标记 + assistant + 1条用户消息）
+        int minKeep = 3;
+        toRemove = Math.min(toRemove, history.size() - systemEnd - minKeep);
+
+        if (toRemove <= 0) {
+            // 无法删除足够的消息达到目标，说明最近几条消息就很大
+            log.warn("fallbackTruncate: 无法删除足够消息降到目标 token，当前 {} 目标 {}",
+                currentTokens, targetTokens);
+            return false;
+        }
+
+        List<LlmClient.Message> preserved = new ArrayList<>();
+
+        // 保留 system 消息
+        for (int i = 0; i < systemEnd; i++) {
+            preserved.add(history.get(i));
+        }
+
+        // 插入降级标记
+        int keptMessages = history.size() - systemEnd - toRemove;
+        preserved.add(LlmClient.Message.user(
+            "[上下文压缩降级] 由于压缩连续失败，早期对话已截断。"
+            + "当前保留最近 " + keptMessages + " 条消息。"
+        ));
+        preserved.add(LlmClient.Message.assistant(
+            "了解，早期上下文已截断。我会基于当前保留的上下文继续工作。"
+        ));
+
+        // 保留尾部消息
+        preserved.addAll(history.subList(systemEnd + toRemove, history.size()));
+
+        history.clear();
+        history.addAll(preserved);
+
+        int afterTokens = TokenBudget.estimateMessagesTokens(history);
+        log.warn("fallbackTruncate: removed {} early messages ({}->{} tokens), kept {} recent messages",
+            toRemove, currentTokens, afterTokens, keptMessages);
+
+        return true;
     }
 
     public int retainRecentTokens() {

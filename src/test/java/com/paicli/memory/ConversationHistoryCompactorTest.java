@@ -362,7 +362,7 @@ class ConversationHistoryCompactorTest {
 
     @Test
     void circuitBreakerTripsAfterMaxConsecutiveFailures() {
-        // 模拟连续 LLM 失败：第 1、2、3 次返回 IOException → 第 4 次起直接 short-circuit 不再调 LLM
+        // 模拟连续 LLM 失败：第 1、2、3 次返回 IOException → 第 4 次起触发降级截断
         AtomicInteger summarizeAttempts = new AtomicInteger();
         ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 2_000, true) {
             @Override
@@ -379,10 +379,12 @@ class ConversationHistoryCompactorTest {
         assertTrue(c.isCircuitOpen(), "达到上限应熔断");
         assertEquals(ConversationHistoryCompactor.MAX_CONSECUTIVE_FAILURES, summarizeAttempts.get());
 
-        // 熔断后再次调用：不再触达 summarize，直接返回 false
-        assertFalse(c.compactIfNeeded(history, 100));
+        // 熔断后再次调用：触发降级截断（返回 true），不再调用 summarize
+        int historyBeforeFallback = history.size();
+        assertTrue(c.compactIfNeeded(history, 100), "熔断后应执行降级截断");
+        assertTrue(history.size() < historyBeforeFallback, "降级截断应减少消息数量");
         assertEquals(ConversationHistoryCompactor.MAX_CONSECUTIVE_FAILURES, summarizeAttempts.get(),
-                "熔断后不应再调 LLM");
+                "降级截断不应调用 LLM");
     }
 
     @Test
