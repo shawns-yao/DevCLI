@@ -44,9 +44,14 @@ public class AgentCheckpoint {
     private List<PlanStep> planSteps;
     private List<CriterionRecord> acceptanceCriteria;
     private List<String> completedSteps;
-    /** 被重规划恢复步骤接管的步骤 id：resume 时标 SUPERSEDED，不再调度。 */
+    /** 遗留兼容字段：旧版"平行重规划"会写入被接管步骤 id。在位重做模型下不再写入，仅为反序列化旧 checkpoint 保留。 */
     private List<String> supersededSteps;
     private Map<String, StepArtifact> artifacts;
+    /**
+     * 失败步骤的产物账本：失败步骤可能已写入文件（副作用不可逆），记录其 modifiedFiles + 失败摘要。
+     * resume 后注入对应步骤上下文，让重做的 Worker 知道上次失败已留下哪些文件，不要假设它们不存在。
+     */
+    private Map<String, StepArtifact> failedArtifacts;
     private long timestamp;
     private int failedSteps;
     private String lastError;
@@ -62,6 +67,7 @@ public class AgentCheckpoint {
     public AgentCheckpoint() {
         this.completedSteps = new ArrayList<>();
         this.artifacts = new HashMap<>();
+        this.failedArtifacts = new HashMap<>();
         this.planSteps = new ArrayList<>();
         this.acceptanceCriteria = new ArrayList<>();
         this.supersededSteps = new ArrayList<>();
@@ -90,6 +96,8 @@ public class AgentCheckpoint {
                 : summary);
         artifacts.put(stepId, new StepArtifact(stepId,
                 modifiedFiles == null ? List.of() : List.copyOf(modifiedFiles), bounded));
+        // 重做成功：清理同 step 的旧失败 artifact，避免成功与失败记录并存导致状态不一致
+        failedArtifacts.remove(stepId);
         timestamp = System.currentTimeMillis();
     }
 
@@ -97,6 +105,22 @@ public class AgentCheckpoint {
         this.failedSteps++;
         this.lastError = error;
         this.timestamp = System.currentTimeMillis();
+    }
+
+    /**
+     * 记录失败步骤的产物：失败步骤可能已写入文件，保留其 modifiedFiles 供 resume 后对位。
+     * 内部已调用 {@link #recordFailure(String)}，调用方不应再单独调用，避免 failedSteps 重复计数。
+     */
+    public void addFailedStep(String stepId, List<String> modifiedFiles, String summary) {
+        if (stepId == null || stepId.isBlank()) {
+            return;
+        }
+        String bounded = summary == null ? "" : (summary.length() > MAX_SUMMARY_LENGTH
+                ? summary.substring(0, MAX_SUMMARY_LENGTH) + "...(截断)"
+                : summary);
+        failedArtifacts.put(stepId, new StepArtifact(stepId,
+                modifiedFiles == null ? List.of() : List.copyOf(modifiedFiles), bounded));
+        recordFailure(stepId + ": " + bounded);
     }
 
     public boolean isStepCompleted(String stepId) {
@@ -295,6 +319,14 @@ public class AgentCheckpoint {
 
     public void setArtifacts(Map<String, StepArtifact> artifacts) {
         this.artifacts = artifacts;
+    }
+
+    public Map<String, StepArtifact> getFailedArtifacts() {
+        return failedArtifacts;
+    }
+
+    public void setFailedArtifacts(Map<String, StepArtifact> failedArtifacts) {
+        this.failedArtifacts = failedArtifacts == null ? new HashMap<>() : failedArtifacts;
     }
 
     public long getTimestamp() {

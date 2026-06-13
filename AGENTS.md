@@ -68,9 +68,13 @@ Reviewer 前置硬约束：Worker 产物进入 Reviewer LLM 前，`AgentOrchestr
 
 Reviewer 输出必须包含三层评分：`functional_correctness`、`integration_completeness`、`code_quality`。任一分数低于 `0.6`，或 `functional_correctness < 1.0`，Orchestrator 强制判不通过。
 
-Final integration 只做入口/API/默认参数/跨模块联动胶水；普通步骤失败比例达到 `50%` 时熔断（`SUPERSEDED` 步骤不计入比例），不让最终步骤强行修补。
+Final integration 只做入口/API/默认参数/跨模块联动胶水；普通步骤失败比例达到 `50%` 时熔断，不让最终步骤强行修补。
 
-失败步骤支持一轮有界重规划（生产入口默认开启，`setReplanEnabled`）：正常步骤走完仍有失败时，Planner 基于执行反馈生成恢复计划；原失败与被阻塞步骤标记 `SUPERSEDED` 由 `r{round}_step_N` 恢复步骤接管，接管后的计划结构会同步回 checkpoint。Orchestration 的计划（步骤/依赖/验收点）与进度（完整 result + 修改文件清单）落盘到 `~/.devcli/checkpoints/`（原子写入；全部成功后删除）；中断后可用 `/team resume [id]` 断点续跑——已完成步骤直接带回 result，其余重置 PENDING 重新执行；resume 不恢复 WorkingMemory / 会话记忆。
+失败步骤支持有界在位重做（默认 1 次）：正常步骤走完仍有失败时，失败步骤保持原 id/依赖在 DAG 原位换思路重做（buildStepContext 注入上次失败反馈），而非生成平行恢复计划——恢复始终长在原 DAG 上、通过依赖关系看到已完成成果，从机制上消除"平行计划 vs 已落盘成果"冲突；redo 用尽仍失败则保持 FAILED 终态，由熔断与汇总处理。在位重做的状态与决策由 `StepRedoTracker` 承载（与调度循环解耦）。Orchestration 的计划（步骤/依赖/验收点）与进度（完整 result + 修改文件清单）落盘到 `~/.devcli/checkpoints/`（原子写入；全部成功后删除）；中断后可用 `/team resume [id]` 断点续跑——已完成步骤直接带回 result，其余重置 PENDING 重新执行；resume 不恢复 WorkingMemory / 会话记忆。
+
+副作用横向信息流：write_file/execute_command 等副作用工具的证据在 `WorkingMemory.recentToolResults` 中优先保留、不被只读操作（read_file/search）的 FIFO 淘汰挤出，使后续步骤/轮次持续看到"本会话改过哪些文件"。这是改进既有工具证据淘汰策略实现的，未新增重复的文件账本维度。
+
+职责边界：`WorkingMemory` 是**当前会话内**的副作用证据缓存（会淘汰、不跨进程）；**失败步骤的持久化副作用**由 checkpoint `failedArtifacts` 负责——失败步骤可能已写文件，其 modifiedFiles 进 checkpoint，`/team resume`（崩溃/跨进程恢复，此时 WorkingMemory 为空）后注入重做上下文，让 Worker 知道上次失败留下哪些文件、先读其当前内容再改。同进程靠 WorkingMemory，跨进程靠 checkpoint，二者互补。
 
 内置工具 11 个：`read_file` / `write_file` / `list_dir` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `save_memory` / `list_memory` / `revert_turn`
 

@@ -99,4 +99,41 @@ class AgentCheckpointTest {
     void loadLatestReturnsNullWhenEmpty() {
         assertNull(AgentCheckpoint.loadLatest());
     }
+
+    @Test
+    void addFailedStepPersistsModifiedFilesForResume() {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-failed", "目标");
+        checkpoint.setPlanSteps(List.of(
+                new AgentCheckpoint.PlanStep("step-1", "重构接口", "code", List.of())));
+        // 失败步骤已写入文件（副作用不可逆），其 modifiedFiles 应进 checkpoint
+        checkpoint.addFailedStep("step-1", List.of("src/UserService.java"), "编译失败：签名不匹配");
+        checkpoint.save();
+
+        AgentCheckpoint loaded = AgentCheckpoint.load("orch-failed");
+
+        assertNotNull(loaded);
+        assertEquals(1, loaded.getFailedArtifacts().size());
+        assertEquals(List.of("src/UserService.java"),
+                loaded.getFailedArtifacts().get("step-1").modifiedFiles());
+        assertTrue(loaded.getFailedArtifacts().get("step-1").summary().contains("签名不匹配"));
+        // 失败步骤未进 completed，resume 时会重置 PENDING 重做
+        assertFalse(loaded.isStepCompleted("step-1"));
+        // addFailedStep 内部调 recordFailure，failedSteps 计数 +1（不重复）
+        assertEquals(1, loaded.getFailedSteps());
+    }
+
+    @Test
+    void completingStepClearsItsStaleFailedArtifact() {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-redo", "目标");
+        checkpoint.setPlanSteps(List.of(
+                new AgentCheckpoint.PlanStep("step-1", "实现", "code", List.of())));
+        // 先失败（留下失败 artifact），重做成功后应清理旧失败 artifact，避免成功与失败记录并存
+        checkpoint.addFailedStep("step-1", List.of("src/A.java"), "第一次失败");
+        checkpoint.addCompletedStep("step-1", List.of("src/A.java"), "重做成功");
+
+        assertTrue(checkpoint.isStepCompleted("step-1"));
+        assertFalse(checkpoint.getFailedArtifacts().containsKey("step-1"),
+                "重做成功后同 step 的失败 artifact 应被清理");
+        assertEquals("重做成功", checkpoint.getArtifacts().get("step-1").summary());
+    }
 }

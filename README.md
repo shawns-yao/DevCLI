@@ -352,6 +352,8 @@ Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 做实现
 
 并行 Worker 数量默认 `2`，可通过 `DEVCLI_TEAM_WORKERS` 环境变量或 `-Ddevcli.team.workers` 系统属性调整（取值夹在 `[1, 8]`，非法值回退默认）。同一依赖批次内相互独立的步骤会按 Worker 池大小并行执行。
 
+失败恢复采用「在位重做」而非平行重规划：失败步骤保持原 id/依赖在 DAG 原位换思路重做（默认 1 次，带上次失败反馈），恢复始终长在原 DAG 上、通过依赖关系看到已完成成果，从机制上避免「新计划与已落盘成果冲突」；redo 用尽仍失败则保持失败终态。代码开发有副作用（write_file 已落盘），所以 write_file/execute_command 的工具证据在工作记忆中优先保留、不被只读操作挤出，使后续步骤持续看到本会话改过哪些文件，在真实现状上工作。
+
 常见任务写法：
 
 ```text

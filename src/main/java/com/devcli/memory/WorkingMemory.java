@@ -124,10 +124,43 @@ public class WorkingMemory {
                 argsJson == null ? "" : argsJson,
                 result,
                 Instant.now()));
-        while (recentToolResults.size() > maxToolResults) {
-            recentToolResults.removeFirst();
-        }
+        evictToolResultsIfNeeded();
         recordRagEvidenceIfPresent(toolName, argsJson, result);
+    }
+
+    /**
+     * 工具证据淘汰：副作用证据（改文件系统 / 项目状态，不可再生）优先保留，淘汰时先牺牲
+     * 只读证据（read_file / search 等可再生）。这样一串只读操作不会把关键的 write_file
+     * 副作用挤出工作记忆——后续步骤 / 轮次仍能看到"本会话改过哪些文件"。总量仍受
+     * {@link #maxToolResults} 约束；全是副作用且超限时才淘汰最旧副作用。
+     */
+    private void evictToolResultsIfNeeded() {
+        while (recentToolResults.size() > maxToolResults) {
+            int readOnlyIdx = -1;
+            for (int i = 0; i < recentToolResults.size(); i++) {
+                if (!isSideEffectTool(recentToolResults.get(i).toolName)) {
+                    readOnlyIdx = i;
+                    break;
+                }
+            }
+            if (readOnlyIdx >= 0) {
+                recentToolResults.remove(readOnlyIdx);
+            } else {
+                recentToolResults.removeFirst();
+            }
+        }
+    }
+
+    /**
+     * 是否为有副作用的工具——其证据不可再生、对"理解当前文件系统状态"至关重要，淘汰时优先保留。
+     * 只覆盖明确改文件系统 / 项目状态的内置工具；read_file / list_dir / search_code / web_* 等
+     * 只读工具的证据可再生，按普通 FIFO 淘汰。
+     */
+    private static boolean isSideEffectTool(String toolName) {
+        if (toolName == null) return false;
+        return toolName.equals("write_file")
+                || toolName.equals("execute_command")
+                || toolName.equals("create_project");
     }
 
     public synchronized List<ToolEvidence> getRecentToolResults() {

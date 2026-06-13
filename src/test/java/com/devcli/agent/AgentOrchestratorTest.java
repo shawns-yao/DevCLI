@@ -325,13 +325,12 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    void finalIntegrationShouldBeExecutableWhenDependenciesSuperseded() {
+    void finalIntegrationExecutableWhenDependencyFailed() {
+        // 在位重做模型下无 SUPERSEDED：依赖步骤 redo 用尽后保持 FAILED 终态时，最终集成仍可执行收尾
         AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
         List<AgentOrchestrator.ExecutionStep> steps = new ArrayList<>(List.of(
                 AgentOrchestrator.ExecutionStep.pending("step_1", "模型", "FILE_WRITE", List.of())
-                        .withFailed("review failed").withSuperseded(),
-                AgentOrchestrator.ExecutionStep.pending("r1_step_1", "恢复实现", "FILE_WRITE", List.of())
-                        .withResult("恢复完成"),
+                        .withFailed("review failed"),
                 AgentOrchestrator.ExecutionStep.pending("step_2", "最终集成验收", "INTEGRATION", List.of("step_1"))
         ));
 
@@ -342,44 +341,31 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    void shouldFuseFinalIntegrationIgnoresSupersededSteps() {
+    void shouldFuseFinalIntegrationWhenFailureRatioHigh() {
         AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
 
-        // 失败步骤未被接管：失败比例 1/2 达到熔断阈值
-        List<AgentOrchestrator.ExecutionStep> beforeReplan = List.of(
+        // 失败比例 1/2 达到熔断阈值：停止让最终集成强行修补
+        List<AgentOrchestrator.ExecutionStep> steps = List.of(
                 AgentOrchestrator.ExecutionStep.pending("step_1", "实现", "FILE_WRITE", List.of()).withFailed("编译失败"),
                 AgentOrchestrator.ExecutionStep.pending("step_2", "导出", "FILE_WRITE", List.of()).withResult("ok"),
                 AgentOrchestrator.ExecutionStep.pending("step_3", "最终集成验收", "INTEGRATION", List.of("step_1", "step_2"))
         );
-        assertTrue(orchestrator.shouldFuseFinalIntegration(beforeReplan));
-
-        // 失败步骤被恢复计划接管（SUPERSEDED）且恢复步骤完成：不再计入熔断比例
-        List<AgentOrchestrator.ExecutionStep> afterReplan = List.of(
-                AgentOrchestrator.ExecutionStep.pending("step_1", "实现", "FILE_WRITE", List.of())
-                        .withFailed("编译失败").withSuperseded(),
-                AgentOrchestrator.ExecutionStep.pending("step_2", "导出", "FILE_WRITE", List.of()).withResult("ok"),
-                AgentOrchestrator.ExecutionStep.pending("r1_step_1", "恢复实现", "FILE_WRITE", List.of()).withResult("ok"),
-                AgentOrchestrator.ExecutionStep.pending("step_3", "最终集成验收", "INTEGRATION", List.of("step_1", "step_2"))
-        );
-        assertFalse(orchestrator.shouldFuseFinalIntegration(afterReplan));
+        assertTrue(orchestrator.shouldFuseFinalIntegration(steps));
     }
 
     @Test
-    void remapRecoveryStepIdsShouldPrefixIdsAndRemapDependencies() {
+    void shouldNotFuseFinalIntegrationWhenFailureRatioLow() {
         AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
-        List<AgentOrchestrator.ExecutionStep> parsed = List.of(
-                AgentOrchestrator.ExecutionStep.pending("step_1", "重写实现", "FILE_WRITE", List.of()),
-                AgentOrchestrator.ExecutionStep.pending("step_2", "验证", "VERIFICATION",
-                        List.of("step_1", "old_plan_step_9"))
+
+        // 只有 1/3 失败，未达熔断阈值：最终集成正常执行
+        List<AgentOrchestrator.ExecutionStep> steps = List.of(
+                AgentOrchestrator.ExecutionStep.pending("step_1", "实现", "FILE_WRITE", List.of()).withFailed("编译失败"),
+                AgentOrchestrator.ExecutionStep.pending("step_2", "导出", "FILE_WRITE", List.of()).withResult("ok"),
+                AgentOrchestrator.ExecutionStep.pending("step_3", "文档", "FILE_WRITE", List.of()).withResult("ok"),
+                AgentOrchestrator.ExecutionStep.pending("step_4", "最终集成验收", "INTEGRATION",
+                        List.of("step_1", "step_2", "step_3"))
         );
-
-        List<AgentOrchestrator.ExecutionStep> remapped = orchestrator.remapRecoveryStepIds(parsed, 1);
-
-        assertEquals(2, remapped.size());
-        assertEquals("r1_step_1", remapped.get(0).id());
-        assertEquals("r1_step_2", remapped.get(1).id());
-        // 内部依赖重映射，未知的旧计划 id 被丢弃
-        assertEquals(List.of("r1_step_1"), remapped.get(1).dependencies());
+        assertFalse(orchestrator.shouldFuseFinalIntegration(steps));
     }
 
     @Test
@@ -1219,13 +1205,16 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    void resumeKeepsSupersededStepsOutOfScheduling(@TempDir File memoryDir) {
+    void resumeIgnoresLegacySupersededFieldAndCompletes(@TempDir File memoryDir) {
+        // 旧版 checkpoint 含遗留 supersededSteps 字段；在位重做模型下该字段被忽略，
+        // resume 不报错，已完成步骤（含曾被标记 superseded 的）按 COMPLETED 直接收尾
         AgentCheckpoint checkpoint = new AgentCheckpoint("orch-resume2", "目标");
         checkpoint.setPlanSteps(List.of(
-                new AgentCheckpoint.PlanStep("step-1", "原失败步骤", "code", List.of()),
-                new AgentCheckpoint.PlanStep("step-1-fix", "恢复步骤", "code", List.of())));
-        checkpoint.setSupersededSteps(List.of("step-1"));
-        checkpoint.addCompletedStep("step-1-fix", List.of(), "恢复完成");
+                new AgentCheckpoint.PlanStep("step-1", "原步骤", "code", List.of()),
+                new AgentCheckpoint.PlanStep("step-2", "后续步骤", "code", List.of("step-1"))));
+        checkpoint.setSupersededSteps(List.of("step-1")); // 遗留字段，应被忽略
+        checkpoint.addCompletedStep("step-1", List.of(), "完成1");
+        checkpoint.addCompletedStep("step-2", List.of(), "完成2");
         checkpoint.save();
 
         try (NoOpMemoryManager mm = new NoOpMemoryManager(memoryDir)) {
@@ -1234,7 +1223,6 @@ class AgentOrchestratorTest {
             String result = orchestrator.resume("orch-resume2");
 
             assertTrue(result.contains("多 Agent 协作任务完成"), result);
-            assertTrue(result.contains("已由恢复计划接管"), result);
             assertNull(AgentCheckpoint.load("orch-resume2"));
         }
     }

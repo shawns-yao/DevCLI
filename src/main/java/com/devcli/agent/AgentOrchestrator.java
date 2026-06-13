@@ -60,8 +60,11 @@ public class AgentOrchestrator {
     private static final double FINAL_INTEGRATION_FAILURE_RATIO_LIMIT = 0.5;
     private static final int PRE_REVIEW_TIMEOUT_SECONDS = 60;
     private static final int MAX_PLANNER_STEPS = 5;
-    /** 失败步骤触发重规划的最大轮数。仅做一轮有界恢复，避免规划-失败死循环。 */
-    private static final int MAX_REPLAN_ROUNDS = 1;
+    /**
+     * 失败步骤的在位重做上限。失败步骤保持原 id/依赖在 DAG 原位换思路重做，而非生成平行恢复计划——
+     * 恢复始终长在原 DAG 上、通过依赖关系看到已完成成果，从机制上消除"平行计划 vs 已落盘成果"冲突。
+     */
+    private static final int MAX_REDO_PER_STEP = 1;
     /**
      * Reviewer 输出 JSON 解析失败时的否定语义识别。
      * 覆盖"未通过/不通过/未全部通过/没有通过/未能通过"等变体，
@@ -86,11 +89,10 @@ public class AgentOrchestrator {
     private List<AcceptanceCriterion> currentAcceptanceCriteria = List.of();
     /** 当前 run 的进度 checkpoint：步骤完成/失败即落盘，全部成功后删除。崩溃后可凭文件做事后排查。 */
     private AgentCheckpoint checkpoint;
-    /**
-     * 失败步骤重规划开关。默认关闭以保持既有调用方行为可预期；
-     * 生产装配点（Main / TuiSessionController）显式开启。
-     */
-    private boolean replanEnabled = false;
+    /** 失败步骤在位重做的状态与决策（计数 + 上次失败原因），与调度循环解耦，见 {@link StepRedoTracker}。 */
+    private final StepRedoTracker redoTracker = new StepRedoTracker(MAX_REDO_PER_STEP);
+    /** resume 时从 checkpoint 载入的失败步骤产物（stepId → 已写文件 + 失败摘要），注入重做上下文；run() 新任务清空。 */
+    private Map<String, AgentCheckpoint.StepArtifact> restoredFailedArtifacts = new HashMap<>();
 
     // 执行步骤的数据结构（package-private 供测试访问）
     record ExecutionStep(String id, String description, String type,
@@ -112,16 +114,14 @@ public class AgentOrchestrator {
             return new ExecutionStep(id, description, type, dependencies, result, StepStatus.RUNNING);
         }
 
-        /** 标记本步骤已由重规划生成的恢复步骤接管（保留原 result 作为失败原因记录）。 */
-        ExecutionStep withSuperseded() {
-            return new ExecutionStep(id, description, type, dependencies, result, StepStatus.SUPERSEDED);
+        /** 失败步骤在位重做：重置为 PENDING，清空上轮 result（失败原因另存于 lastFailureForRedo）。 */
+        ExecutionStep withRedoPending() {
+            return new ExecutionStep(id, description, type, dependencies, null, StepStatus.PENDING);
         }
     }
 
     enum StepStatus {
-        PENDING, RUNNING, COMPLETED, FAILED,
-        /** 失败或被失败阻塞后，已由重规划的恢复步骤接管，不再参与调度与熔断统计。 */
-        SUPERSEDED
+        PENDING, RUNNING, COMPLETED, FAILED
     }
 
     record PreReviewResult(boolean passed, String feedback) {
@@ -230,11 +230,6 @@ public class AgentOrchestrator {
      * 注入 Sticky Memory（PR-B）：把 supplier 同时下发到 planner / workers / reviewer，
      * 让团队三角色都看到统一的稳定事实层。
      */
-    /** 开启失败步骤的有界重规划（最多 {@link #MAX_REPLAN_ROUNDS} 轮）。 */
-    public void setReplanEnabled(boolean replanEnabled) {
-        this.replanEnabled = replanEnabled;
-    }
-
     public void setStickyMemorySupplier(Supplier<String> stickyMemorySupplier) {
         this.stickyMemorySupplier = stickyMemorySupplier == null ? () -> "" : stickyMemorySupplier;
         planner.setStickyMemorySupplier(this.stickyMemorySupplier);
@@ -281,6 +276,7 @@ public class AgentOrchestrator {
         ));
         memoryManager.addUserMessage(userInput);
         currentUserTask = userInput == null ? "" : userInput;
+        restoredFailedArtifacts.clear();
         currentAcceptanceCriteria = List.of();
         // 回收上一轮崩溃残留的超时租约，避免历史租约阻塞本轮写入
         toolRegistry.pruneExpiredLeases();
@@ -330,7 +326,7 @@ public class AgentOrchestrator {
      * 从磁盘 checkpoint 恢复执行（/team resume 入口）。
      *
      * <p>恢复范围：计划（步骤/依赖/验收点）与进度（已完成步骤带回完整 result 与产物文件，
-     * 被重规划接管的步骤保持 SUPERSEDED，其余——包括上次失败的——重置为 PENDING 重新执行）。
+     * 其余——包括上次失败的、被阻塞的——重置为 PENDING 重新执行）。
      * <b>不恢复</b> WorkingMemory / 会话记忆：Worker 上下文完全来自 checkpoint 内的步骤 result。
      *
      * @param orchestrationIdOrNull 指定 checkpoint id；为空时取最近一次保存的 checkpoint
@@ -358,6 +354,8 @@ public class AgentOrchestrator {
         currentUserTask = loaded.getGoal() == null ? "" : loaded.getGoal();
         memoryManager.addUserMessage(currentUserTask);
         currentAcceptanceCriteria = fromCriterionRecords(loaded.getAcceptanceCriteria());
+        restoredFailedArtifacts = new HashMap<>(
+                loaded.getFailedArtifacts() == null ? Map.of() : loaded.getFailedArtifacts());
         toolRegistry.pruneExpiredLeases();
         if (CancellationContext.isCancelled()) {
             return "⏹️ 已取消当前多 Agent 任务。";
@@ -383,10 +381,9 @@ public class AgentOrchestrator {
                 String result = artifact == null || artifact.summary() == null ? "" : artifact.summary();
                 steps.add(new ExecutionStep(planStep.id(), planStep.description(), planStep.type(),
                         deps, result, StepStatus.COMPLETED));
-            } else if (loaded.isStepSuperseded(planStep.id())) {
-                steps.add(new ExecutionStep(planStep.id(), planStep.description(), planStep.type(),
-                        deps, "（上次运行中被重规划恢复步骤接管）", StepStatus.SUPERSEDED));
             } else {
+                // 未完成步骤（含上次失败的、被阻塞的、以及旧 checkpoint 里曾标记 superseded 的）
+                // 一律重置为 PENDING 重新执行——在位重做模型下不再有 SUPERSEDED 接管语义。
                 steps.add(ExecutionStep.pending(planStep.id(), planStep.description(),
                         planStep.type(), deps));
             }
@@ -449,37 +446,23 @@ public class AgentOrchestrator {
      */
     private String executeSteps(List<ExecutionStep> steps, TraceContext traceContext) {
         out.println(AnsiStyle.heading("⚡ 第二阶段：执行"));
+        redoTracker.reset();
         Map<String, Integer> retryCount = new ConcurrentHashMap<>();
         int singleStepCursor = 0;
         int batchIndex = 0;
-        int replanRounds = 0;
 
         while (true) {
             if (CancellationContext.isCancelled()) {
                 return "⏹️ 已取消当前多 Agent 任务。";
             }
             List<ExecutionStep> executable = getExecutableSteps(steps);
-            // 失败步骤的有界重规划：当正常步骤全部走完（只剩最终集成或无可执行步骤）
-            // 且存在失败步骤时，让 Planner 基于执行反馈生成一次恢复计划
+            // 失败步骤的在位重做：当正常步骤全部走完（只剩最终集成或无可执行步骤）且存在失败步骤时，
+            // 把可重做的失败步骤重置为 PENDING、保持原 id/依赖在 DAG 原位换思路重做，而非生成平行恢复计划。
+            // 这样恢复步骤天然通过依赖关系看到已完成成果，不会产生"平行计划 vs 已落盘成果"冲突。
             boolean onlyFinalLeft = !executable.isEmpty()
                     && executable.stream().allMatch(this::isFinalIntegrationStep);
-            if (replanEnabled
-                    && (executable.isEmpty() || onlyFinalLeft)
-                    && replanRounds < MAX_REPLAN_ROUNDS
-                    && hasFailedNormalSteps(steps)) {
-                replanRounds++;
-                out.println(AnsiStyle.heading("🔁 检测到失败步骤，尝试重规划（第 " + replanRounds + " 轮）"));
-                List<ExecutionStep> recoverySteps = replanFailedSteps(steps, replanRounds);
-                if (recoverySteps.isEmpty()) {
-                    out.println("⚠️ 重规划未产出有效恢复计划，按原失败状态继续收尾\n");
-                } else {
-                    supersedeFailedAndBlockedSteps(steps);
-                    insertRecoverySteps(steps, recoverySteps);
-                    syncPlanToCheckpoint(steps);
-                    out.println("📋 恢复计划：\n" + summarizeSteps(recoverySteps));
-                    continue;
-                }
-                executable = getExecutableSteps(steps);
+            if ((executable.isEmpty() || onlyFinalLeft) && resetFailedStepsForRedo(steps)) {
+                continue;
             }
             if (executable.isEmpty()) {
                 break;
@@ -532,7 +515,7 @@ public class AgentOrchestrator {
 
         if (checkpoint != null) {
             boolean allCompleted = steps.stream().allMatch(step ->
-                    step.status() == StepStatus.COMPLETED || step.status() == StepStatus.SUPERSEDED);
+                    step.status() == StepStatus.COMPLETED);
             if (allCompleted) {
                 checkpoint.delete();
             } else {
@@ -543,19 +526,6 @@ public class AgentOrchestrator {
         }
 
         return finalResult;
-    }
-
-    /** 重规划改变了步骤结构（接管 + 插入恢复步骤）后，把最新计划结构同步进 checkpoint。 */
-    private void syncPlanToCheckpoint(List<ExecutionStep> steps) {
-        if (checkpoint == null) {
-            return;
-        }
-        checkpoint.setPlanSteps(toPlanSteps(steps));
-        checkpoint.setSupersededSteps(steps.stream()
-                .filter(step -> step.status() == StepStatus.SUPERSEDED)
-                .map(ExecutionStep::id)
-                .toList());
-        checkpoint.save();
     }
 
     /**
@@ -743,17 +713,14 @@ public class AgentOrchestrator {
                 .filter(step -> step.dependencies().stream()
                         .allMatch(dep -> {
                             StepStatus status = statusMap.get(dep);
-                            return status == StepStatus.COMPLETED || status == StepStatus.FAILED
-                                    || status == StepStatus.SUPERSEDED;
+                            return status == StepStatus.COMPLETED || status == StepStatus.FAILED;
                         }))
                 .toList();
     }
 
     boolean shouldFuseFinalIntegration(List<ExecutionStep> steps) {
-        // SUPERSEDED 步骤已由恢复计划接管，不参与失败比例统计
         List<ExecutionStep> normalSteps = steps.stream()
                 .filter(step -> !isFinalIntegrationStep(step))
-                .filter(step -> step.status() != StepStatus.SUPERSEDED)
                 .toList();
         if (normalSteps.isEmpty()) {
             return false;
@@ -806,116 +773,31 @@ public class AgentOrchestrator {
                 || type.equals("final_integration");
     }
 
-    private boolean hasFailedNormalSteps(List<ExecutionStep> steps) {
-        return steps.stream()
-                .filter(step -> !isFinalIntegrationStep(step))
-                .anyMatch(step -> step.status() == StepStatus.FAILED);
-    }
-
     /**
-     * 失败步骤的有界重规划：把执行反馈（已完成成果 + 失败原因 + 被阻塞步骤）交回 Planner，
-     * 生成只覆盖剩余工作的恢复计划。恢复步骤 id 加 r{round}_ 前缀避免与原步骤冲突。
-     * Planner 调用失败或计划不可解析时返回空列表，调用方按原失败状态收尾（保守降级）。
+     * 失败步骤在位重做：把可重做的失败普通步骤重置为 PENDING（保持原 id/依赖），在 DAG 原位
+     * 换思路重做，而非生成平行恢复计划。返回是否有步骤被重置（有则调度循环 continue 重新调度）。
+     *
+     * <p>失败原因存入 {@link StepRedoTracker}，重做时由 {@link #buildStepContext} 注入"换思路"提示；
+     * redo 用尽的失败步骤保持 FAILED 终态，交由最终集成熔断与汇总处理。恢复始终长在原 DAG 上、
+     * 通过依赖关系看到已完成成果，不会产生"平行计划 vs 已落盘成果"冲突。
      */
-    List<ExecutionStep> replanFailedSteps(List<ExecutionStep> steps, int round) {
-        List<AcceptanceCriterion> criteriaSnapshot = currentAcceptanceCriteria;
-        try {
-            AgentMessage replanMessage = AgentMessage.task("orchestrator", buildReplanTask(steps));
-            AgentMessage replanResult = planner.execute(replanMessage, out);
-            planner.clearHistory();
-            if (replanResult.type() == AgentMessage.Type.ERROR
-                    || replanResult.content() == null || replanResult.content().isBlank()) {
-                log.warn("Replan round {} failed at planner layer: {}", round,
-                        replanResult.content() == null ? "empty" : replanResult.content());
-                return List.of();
-            }
-            List<ExecutionStep> parsed = parsePlan(replanResult.content());
-            return remapRecoveryStepIds(parsed, round);
-        } finally {
-            // parsePlan 会用恢复计划覆盖验收点；恢复计划只描述剩余工作，必须还原原始验收点
-            currentAcceptanceCriteria = criteriaSnapshot;
-        }
-    }
-
-    /** 恢复步骤 id 统一改写为 r{round}_step_N，内部依赖同步重映射；引用未知 id 的依赖直接丢弃。 */
-    List<ExecutionStep> remapRecoveryStepIds(List<ExecutionStep> parsed, int round) {
-        if (parsed == null || parsed.isEmpty()) {
-            return List.of();
-        }
-        Map<String, String> idMapping = new HashMap<>();
-        for (int i = 0; i < parsed.size(); i++) {
-            idMapping.put(parsed.get(i).id(), "r" + round + "_step_" + (i + 1));
-        }
-        List<ExecutionStep> remapped = new ArrayList<>();
-        for (ExecutionStep step : parsed) {
-            List<String> deps = step.dependencies().stream()
-                    .map(idMapping::get)
-                    .filter(Objects::nonNull)
-                    .toList();
-            remapped.add(ExecutionStep.pending(
-                    idMapping.get(step.id()), step.description(), step.type(), deps));
-        }
-        return remapped;
-    }
-
-    /**
-     * 重规划接管后，把失败步骤和被失败阻塞的待执行步骤标记为 SUPERSEDED：
-     * 不再参与调度，不计入最终集成熔断比例，原失败原因保留在 result 字段供追溯。
-     */
-    private void supersedeFailedAndBlockedSteps(List<ExecutionStep> steps) {
+    private boolean resetFailedStepsForRedo(List<ExecutionStep> steps) {
+        boolean anyReset = false;
         for (int i = 0; i < steps.size(); i++) {
             ExecutionStep step = steps.get(i);
-            if (isFinalIntegrationStep(step)) {
+            if (isFinalIntegrationStep(step) || step.status() != StepStatus.FAILED) {
                 continue;
             }
-            if (step.status() == StepStatus.FAILED || step.status() == StepStatus.PENDING) {
-                steps.set(i, step.withSuperseded());
-            }
-        }
-    }
-
-    /** 恢复步骤插入到最终集成步骤之前，保证汇总输出顺序与执行顺序一致。 */
-    private void insertRecoverySteps(List<ExecutionStep> steps, List<ExecutionStep> recoverySteps) {
-        int insertAt = steps.size();
-        for (int i = 0; i < steps.size(); i++) {
-            if (isFinalIntegrationStep(steps.get(i))) {
-                insertAt = i;
-                break;
-            }
-        }
-        steps.addAll(insertAt, recoverySteps);
-    }
-
-    private String buildReplanTask(List<ExecutionStep> steps) {
-        StringBuilder task = new StringBuilder();
-        task.append("之前的执行计划部分失败，请基于执行反馈生成一份恢复计划。\n\n");
-        if (currentUserTask != null && !currentUserTask.isBlank()) {
-            task.append("原始用户任务：\n").append(currentUserTask).append("\n\n");
-        }
-        task.append("执行情况：\n");
-        for (ExecutionStep step : steps) {
-            if (isFinalIntegrationStep(step)) {
+            if (!redoTracker.canRedo(step.id())) {
                 continue;
             }
-            switch (step.status()) {
-                case COMPLETED -> task.append("- [已完成] ").append(step.description())
-                        .append("\n  结果：").append(abbreviate(step.result(), 300)).append('\n');
-                case FAILED -> task.append("- [失败] ").append(step.description())
-                        .append("\n  失败原因：").append(abbreviate(step.result(), 300)).append('\n');
-                case PENDING -> task.append("- [未执行，被失败步骤阻塞] ").append(step.description()).append('\n');
-                default -> { }
-            }
+            int attempt = redoTracker.recordRedo(step.id(), step.result());
+            out.println(AnsiStyle.heading("🔁 步骤 [" + step.id() + "] 失败，在原位换思路重做（第 "
+                    + attempt + "/" + redoTracker.maxRedoPerStep() + " 次）"));
+            steps.set(i, step.withRedoPending());
+            anyReset = true;
         }
-        task.append("""
-
-                要求：
-                1. 只为失败和未执行的工作生成恢复步骤；已完成的成果直接复用，不要重做
-                2. 针对失败原因换思路，不要原样重复已失败的做法
-                3. 输出 JSON：{"steps": [{"id": "...", "description": "...", "type": "...", "dependencies": [...]}]}
-                4. dependencies 只能引用本恢复计划内的步骤 id，不要引用旧计划的 id
-                5. 步骤描述必须自包含（写清楚文件、入口、验收方式），不依赖旧计划上下文
-                """);
-        return task.toString();
+        return anyReset;
     }
 
     /**
@@ -1165,8 +1047,12 @@ public class AgentOrchestrator {
                     updated.result());
             checkpoint.save();
         } else if (updated.status() == StepStatus.FAILED) {
-            toolRegistry.consumeStepModifiedFiles(stepId); // 失败步骤的归集丢弃，避免跨步骤串档
-            checkpoint.recordFailure(stepId + ": " + abbreviate(updated.result(), 300));
+            // 失败步骤可能已写入文件（副作用不可逆）：保留 modifiedFiles 进 checkpoint，
+            // resume 后注入重做上下文，让 Worker 知道上次失败已留下哪些文件。
+            // addFailedStep 内部已调 recordFailure，此处不再单独调用以免 failedSteps 重复计数。
+            checkpoint.addFailedStep(stepId,
+                    toolRegistry.consumeStepModifiedFiles(stepId),
+                    updated.result());
             checkpoint.save();
         }
     }
@@ -1661,6 +1547,30 @@ public class AgentOrchestrator {
         }
         appendAcceptanceCriteriaSection(context, "本步骤必须满足以下验收点");
         context.append("当前步骤：").append(currentStep.description()).append("\n\n");
+        if (redoTracker.isRedo(currentStep.id())) {
+            context.append("⚠️ 本步骤上次执行失败，现在原位重做——请换一种思路实现，不要重复已失败的做法。\n");
+            String lastFailure = redoTracker.lastFailureReason(currentStep.id());
+            if (!lastFailure.isBlank()) {
+                context.append("上次失败原因：").append(abbreviate(lastFailure, 300)).append("\n");
+            }
+            context.append("\n");
+        }
+        // resume 跨进程恢复：WorkingMemory 已空、StepRedoTracker 无上次失败原因，失败步骤的副作用
+        // （已写文件 + 失败摘要）从 checkpoint 注入，让重做的 Worker 知道上次失败留下了什么。
+        AgentCheckpoint.StepArtifact failedArtifact = restoredFailedArtifacts.get(currentStep.id());
+        if (failedArtifact != null) {
+            if (!failedArtifact.modifiedFiles().isEmpty()) {
+                context.append("本步骤上次运行失败并已写入以下文件（副作用不可逆）：\n");
+                for (String file : failedArtifact.modifiedFiles()) {
+                    context.append("- ").append(file).append('\n');
+                }
+                context.append("重做前必须先读取这些文件的当前内容，在其真实状态上修改，不要假设它们不存在。\n");
+            }
+            if (failedArtifact.summary() != null && !failedArtifact.summary().isBlank()) {
+                context.append("上次失败摘要：").append(abbreviate(failedArtifact.summary(), 300)).append("\n");
+            }
+            context.append("\n");
+        }
         if (requiresJavaHardCheck(currentStep)) {
             context.append("Java 代码交付约束：严格保留原始任务指定的入口签名；优先使用简单命令式实现；完成前运行最小编译检查；重试时只做根因补丁。\n\n");
         }
@@ -1786,9 +1696,8 @@ public class AgentOrchestrator {
      */
     private String buildFinalResult(List<ExecutionStep> steps) {
         StringBuilder result = new StringBuilder();
-        // SUPERSEDED 步骤已由恢复步骤接管，恢复步骤本身的状态已计入统计
         boolean allCompleted = steps.stream().allMatch(step ->
-                step.status() == StepStatus.COMPLETED || step.status() == StepStatus.SUPERSEDED);
+                step.status() == StepStatus.COMPLETED);
         boolean hasFailedSteps = steps.stream().anyMatch(step -> step.status() == StepStatus.FAILED);
 
         if (allCompleted) {
@@ -1806,8 +1715,6 @@ public class AgentOrchestrator {
                 result.append("✅ ");
             } else if (step.status() == StepStatus.FAILED) {
                 result.append("❌ ");
-            } else if (step.status() == StepStatus.SUPERSEDED) {
-                result.append("🔁 (已由恢复计划接管) ");
             } else {
                 result.append("⏳ ");
             }

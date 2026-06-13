@@ -257,7 +257,6 @@ public final class TuiSessionController implements AutoCloseable {
                 reactAgent.getToolRegistry(),
                 reactAgent.getMemoryManager()
         );
-        orchestrator.setReplanEnabled(true);
         return orchestrator;
     }
 

@@ -913,7 +913,6 @@ public class Main {
         out.println("👥 使用 Multi-Agent 协作模式\n");
         AgentOrchestrator orchestrator = new AgentOrchestrator(
                 llmClient, reactAgent.getToolRegistry(), reactAgent.getMemoryManager(), out);
-        orchestrator.setReplanEnabled(true);
         return orchestrator;
     }
 
