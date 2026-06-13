@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PaiCLI · Terminal-First Agent IDE</title>
+  <title>DevCLI · Terminal-First Agent IDE</title>
   <meta name="description" content="一个面向商业使用的 Java Agent CLI 产品，对标 Claude Code。从 ReAct 循环持续演进到完整 Agent 产品形态。">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -19,7 +19,7 @@
     <div class="nav-inner">
       <a href="#" class="nav-logo">
         <span class="logo-bracket">{</span>
-        <span class="logo-text">PaiCLI</span>
+        <span class="logo-text">DevCLI</span>
         <span class="logo-bracket">}</span>
         <span class="logo-version">v16.1</span>
       </a>
@@ -49,7 +49,7 @@
           <span class="title-line title-accent">Java Agent IDE</span>
         </h1>
         <p class="hero-subtitle">
-          PaiCLI 是一款基于 Java 的开源命令行智能体，对标 Claude Code。
+          DevCLI 是一款基于 Java 的开源命令行智能体，对标 Claude Code。
           从 ReAct 循环出发，已完成 <strong>16.1 期迭代</strong>，演进为支持
           多模型、多 Agent 协作、MCP 协议、浏览器自动化的完整 Agent 产品。
         </p>
@@ -88,10 +88,10 @@
             <span class="terminal-dot dot-red"></span>
             <span class="terminal-dot dot-yellow"></span>
             <span class="terminal-dot dot-green"></span>
-            <span class="terminal-title">paiCLI — zsh</span>
+            <span class="terminal-title">DevCLI — zsh</span>
           </div>
           <div class="terminal-body">
-            <div class="terminal-line"><span class="t-prompt">$</span> java -jar paicli.jar</div>
+            <div class="terminal-line"><span class="t-prompt">$</span> java -jar devcli.jar</div>
             <div class="terminal-line t-dim">╔══════════════════════════════════╗</div>
             <div class="terminal-line t-dim">║   <span class="t-accent">██████╗  █████╗ ██╗ ██████╗██╗</span> ║</div>
             <div class="terminal-line t-dim">║   <span class="t-accent">██╔══██╗██╔══██╗██║██╔════╝██║</span> ║</div>
@@ -108,12 +108,12 @@
     </div>
   </section>
 
-  <!-- What is PaiCLI -->
+  <!-- What is DevCLI -->
   <section class="section section-about" id="about">
     <div class="container">
       <div class="section-header">
         <span class="section-label">// 关于</span>
-        <h2>什么是 PaiCLI？</h2>
+        <h2>什么是 DevCLI？</h2>
       </div>
       <div class="about-grid">
         <div class="about-card">
@@ -444,12 +444,12 @@
               <pre><code><span class="c-comment"># 编译打包</span>
 mvn clean package
 
-<span class="c-comment"># 启动 PaiCLI</span>
-java -jar target/paicli-1.0-SNAPSHOT.jar
+<span class="c-comment"># 启动 DevCLI</span>
+java -jar target/devcli-1.0-SNAPSHOT.jar
 
 <span class="c-comment"># 或直接运行（无需先 package）</span>
 mvn clean compile exec:java \
-  -Dexec.mainClass=<span class="c-string">"com.paicli.cli.Main"</span></code></pre>
+  -Dexec.mainClass=<span class="c-string">"com.devcli.cli.Main"</span></code></pre>
             </div>
           </div>
         </div>
@@ -458,9 +458,9 @@ mvn clean compile exec:java \
           <div class="step-content">
             <h4>开始使用</h4>
             <div class="code-block">
-              <div class="code-header"><span>paiCLI session</span></div>
+              <div class="code-header"><span>DevCLI session</span></div>
               <pre><code><span class="c-dim">╔══════════════════════════════════╗
-║   PaiCLI  v16.1.0              ║
+║   DevCLI  v16.1.0              ║
 ╚══════════════════════════════════╝</span>
 
 ✅ <span class="c-green">API Key 已加载</span>
@@ -478,7 +478,7 @@ mvn clean compile exec:java \
       <div class="install-extra">
         <p>可选：配置 MCP server（默认自动创建 chrome-devtools 配置）</p>
         <div class="code-block">
-          <div class="code-header"><span>~/.paicli/mcp.json</span></div>
+          <div class="code-header"><span>~/.devcli/mcp.json</span></div>
           <pre><code>{
   <span class="c-key">"mcpServers"</span>: {
     <span class="c-key">"chrome-devtools"</span>: {
@@ -617,10 +617,10 @@ mvn clean compile exec:java \
         <div class="footer-brand">
           <div class="footer-logo">
             <span class="logo-bracket">{</span>
-            <span>PaiCLI</span>
+            <span>DevCLI</span>
             <span class="logo-bracket">}</span>
           </div>
-          <p>Terminal-First Agent IDE<br>作者：PaiCLI Team</p>
+          <p>Terminal-First Agent IDE<br>作者：DevCLI Team</p>
         </div>
         <div class="footer-links">
           <h5>项目</h5>
@@ -645,7 +645,7 @@ mvn clean compile exec:java \
         </div>
       </div>
       <div class="footer-bottom">
-        <p>&copy; 2025 PaiCLI · MIT License · Built with ☕ in Java</p>
+        <p>&copy; 2025 DevCLI · MIT License · Built with ☕ in Java</p>
       </div>
     </div>
   </footer>

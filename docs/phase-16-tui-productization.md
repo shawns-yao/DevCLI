@@ -3,7 +3,7 @@
 > ⚠️ **形态修正提示（2026-05-08）**：本文的"Lanterna 三栏全屏"形态选型已被
 > [`docs/inline-tui-pivot.md`](inline-tui-pivot.md) 修正。
 > 默认渲染器切换为 **inline 流式 TUI**（Claude Code 风格）；
-> Lanterna 三栏 TUI 作为可切换形态保留，通过 `PAICLI_RENDERER=lanterna` 启用。
+> Lanterna 三栏 TUI 作为可切换形态保留，通过 `DEVCLI_RENDERER=lanterna` 启用。
 > phase-16 实现的 widget 代码（CenterPane / StatusPane / FileTreePane）继续可用，只是默认不再启动。
 
 
@@ -13,9 +13,9 @@
 > 1. 仓库根 `AGENTS.md`（仓库规则、文档联动硬规则）
 > 2. `docs/phase-15-skill-system.md`（第 15 期 Skill 系统，已完成，本期 TUI 需兼容 Skill 状态展示）
 > 3. `docs/phase-13-chrome-devtools-mcp.md`（第 13 期 Chrome DevTools MCP，已完成，TUI 需适配流式输出 + HITL 弹窗）
-> 4. `src/main/java/com/paicli/cli/Main.java`（当前 CLI 入口，TUI 将在此之上做可视化层）
-> 5. `src/main/java/com/paicli/util/TerminalMarkdownRenderer.java`（现有 Markdown 渲染器，TUI 需复用或增强）
-> 6. `src/main/java/com/paicli/agent/Agent.java`、`PlanExecuteAgent.java`、`SubAgent.java`（系统提示词构造路径）
+> 4. `src/main/java/com/devcli/cli/Main.java`（当前 CLI 入口，TUI 将在此之上做可视化层）
+> 5. `src/main/java/com/devcli/util/TerminalMarkdownRenderer.java`（现有 Markdown 渲染器，TUI 需复用或增强）
+> 6. `src/main/java/com/devcli/agent/Agent.java`、`PlanExecuteAgent.java`、`SubAgent.java`（系统提示词构造路径）
 >
 > **核心原则**：本期**不写新工具、不修改 Agent 核心逻辑**，只做**可视化层**。TUI 是 Main.java 的"皮肤"，ReAct / Plan / Team 三条执行路径完全不动，只是把原来 JLine 行编辑器的输入输出升级成 Lanterna 面板布局。页面布局、样式定制、键盘交互是本期重点，LLM 协议和工具层保持稳定。
 
@@ -23,13 +23,13 @@
 
 ## 1. 目标与产出物
 
-让 PaiCLI 从"纯 CLI"升级为"终端 GUI"（TUI），具备文件树浏览、代码高亮、对话历史可视化、配置管理等产品级体验，**不牺牲任何现有 Agent 能力**。
+让 DevCLI 从"纯 CLI"升级为"终端 GUI"（TUI），具备文件树浏览、代码高亮、对话历史可视化、配置管理等产品级体验，**不牺牲任何现有 Agent 能力**。
 
 **为什么做 TUI 而不是继续纯 CLI**：
 
-- PaiCLI 当前已内置 9 个工具 + MCP 60+ 个工具，用户记忆成本高
+- DevCLI 当前已内置 9 个工具 + MCP 60+ 个工具，用户记忆成本高
 - 文件树 / 代码高亮 / 对话历史回滚这些"展示型"需求，纯 CLI 手工渲染成本高且体验差
-- Claude Code、Cursor、Aider 等竞品都有 TUI，PaiCLI 需要产品化竞争力
+- Claude Code、Cursor、Aider 等竞品都有 TUI，DevCLI 需要产品化竞争力
 - Skill 系统（第 15 期）的 TUI 可视化是天然配套
 
 最终交付：
@@ -85,7 +85,7 @@
 
 ### 2.2 TUI 与现有 CLI 的兼容策略
 
-**不破坏现有命令行行为**：默认仍使用纯 CLI（JLine 行编辑器模式）。Lanterna 全屏 TUI 只在显式设置 `PAICLI_TUI=true` 或 `-Dpaicli.tui=true` 时启用；如果 `NO_TUI=true`、终端不可用或终端尺寸过小（`< 80×24`），仍降级为 CLI。
+**不破坏现有命令行行为**：默认仍使用纯 CLI（JLine 行编辑器模式）。Lanterna 全屏 TUI 只在显式设置 `DEVCLI_TUI=true` 或 `-Ddevcli.tui=true` 时启用；如果 `NO_TUI=true`、终端不可用或终端尺寸过小（`< 80×24`），仍降级为 CLI。
 
 实现：
 ```java
@@ -97,7 +97,7 @@ if (shouldUseTui()) {
 ```
 
 `shouldUseTui()` 判断：
-1. 未设置 `PAICLI_TUI=true` 且未设置 `-Dpaicli.tui=true` → 保持默认 CLI
+1. 未设置 `DEVCLI_TUI=true` 且未设置 `-Ddevcli.tui=true` → 保持默认 CLI
 2. `NO_TUI=true` → 降级
 3. 终端不可用、尺寸为 `0×0`、rows < 24 或 cols < 80 → 降级
 4. 显式启用且终端满足条件 → 启动 TUI
@@ -156,7 +156,7 @@ if (shouldUseTui()) {
 
 ### 2.5 代码高亮设计
 
-**高亮引擎**：**不使用第三方高亮库**（如 Pygments / highlight.js 的 Java 移植版），而是用 PaiCLI 自己第 4 期 `CodeChunker` 和 `CodeAnalyzer` 的能力做**轻量级语法着色**。
+**高亮引擎**：**不使用第三方高亮库**（如 Pygments / highlight.js 的 Java 移植版），而是用 DevCLI 自己第 4 期 `CodeChunker` 和 `CodeAnalyzer` 的能力做**轻量级语法着色**。
 
 实现路径：
 1. 从 `CodeChunker` 拿代码块的 `language` 字段
@@ -164,7 +164,7 @@ if (shouldUseTui()) {
 3. 输出 ANSI 256 色字符串，直接交给 Lanterna `TextArea` 渲染
 
 **为什么不用第三方库**：
-- PaiCLI 已有 AST 解析能力（第 4 期 JavaParser），Java 代码着色可以复用
+- DevCLI 已有 AST 解析能力（第 4 期 JavaParser），Java 代码着色可以复用
 - 其他语言用正则表达式着色足够（`CodeChunker` 已能识别语言）
 - 避免引入 highlight.js / Pygments 等 1MB+ 的依赖
 
@@ -233,8 +233,8 @@ public record ConversationSnapshot(
 - `Esc`：关闭配置面板
 
 **配置读写**：
-- 读：`PaiCliConfig.load()` 已有
-- 写：`PaiCliConfig.save(config)` 新增，写入 `~/.paicli/config.json`
+- 读：`DevCliConfig.load()` 已有
+- 写：`DevCliConfig.save(config)` 新增，写入 `~/.devcli/config.json`
 - 不修改 `.env`（`.env` 只读，配置持久化走 `config.json`）
 
 ### 2.8 主题系统
@@ -243,7 +243,7 @@ public record ConversationSnapshot(
 - **深色主题（默认）**：背景 `#1e1e2e`（Catppuccin Mocha 基调），文字 `#cdd6f4`，代码关键字 `#cba6f7`（紫），字符串 `#a6e3a1`（绿），注释 `#6c7086`（灰）
 - **浅色主题**：背景 `#eff1f5`（Catppuccin Latte），文字 `#4c4f69`，代码关键字 `#8839ef`，字符串 `#40a02b`，注释 `#9ca0b0`
 
-**主题持久化**：`~/.paicli/config.json` 的 `theme` 字段（`"dark"` / `"light"`）
+**主题持久化**：`~/.devcli/config.json` 的 `theme` 字段（`"dark"` / `"light"`）
 
 **Lanterna 颜色映射**：用 `TextColor.ANSI.foreground(颜色编号)` 或 `TextColor.fromRGB(r, g, b)`，深色主题用 256 色或 TrueColor，浅色主题同样适配。
 
@@ -274,7 +274,7 @@ public record ConversationSnapshot(
 
 ## 3. 配置文件改动
 
-### 3.1 `~/.paicli/config.json` 新增字段
+### 3.1 `~/.devcli/config.json` 新增字段
 
 ```json
 {
@@ -297,7 +297,7 @@ public record ConversationSnapshot(
 
 `tui` 字段是可选的，不存在时使用默认值。
 
-### 3.2 `~/.paicli/filetree-ignore.txt`（用户级忽略规则）
+### 3.2 `~/.devcli/filetree-ignore.txt`（用户级忽略规则）
 
 文件树忽略规则，每行一个 glob：
 
@@ -323,49 +323,49 @@ dist
 ```bash
 # ========== 第 16 期：TUI 产品化 ==========
 # TUI 开关
-# PAICLI_TUI=true       # 显式启用 Lanterna 全屏 TUI；默认保持 CLI
-# NO_TUI=true           # 强制 CLI，覆盖 PAICLI_TUI=true
-# PAICLI_THEME=dark     # TUI 主题: dark / light（默认 dark）
+# DEVCLI_TUI=true       # 显式启用 Lanterna 全屏 TUI；默认保持 CLI
+# NO_TUI=true           # 强制 CLI，覆盖 DEVCLI_TUI=true
+# DEVCLI_THEME=dark     # TUI 主题: dark / light（默认 dark）
 
 # TUI 窗口尺寸（Lanterna 自适应，无需手动设置）
-# PAICLI_TUI_FILE_TREE_WIDTH=25%  # 文件树宽度（百分比或绝对列数）
-# PAICLI_TUI_FONT_SIZE=1          # 字体缩放（0=小, 1=中, 2=大）
+# DEVCLI_TUI_FILE_TREE_WIDTH=25%  # 文件树宽度（百分比或绝对列数）
+# DEVCLI_TUI_FONT_SIZE=1          # 字体缩放（0=小, 1=中, 2=大）
 ```
 
 ---
 
 ## 4. 与现有架构的集成点（要修改 / 新增的文件）
 
-### 4.1 新增类（`com.paicli.tui` 包）
+### 4.1 新增类（`com.devcli.tui` 包）
 
 | 文件 | 职责 |
 |---|---|
-| `src/main/java/com/paicli/tui/TuiBootstrap.java` | TUI 入口，判断 `shouldUseTui()`，创建 `LanternaWindow` 和布局 |
-| `src/main/java/com/paicli/tui/LanternaWindow.java` | 封装 Lanterna `Window`，统一处理主题 / 大小变化 / 输入分发 |
-| `src/main/java/com/paicli/tui/pane/LeftPane.java` | 左侧文件树面板（`FileTreePane` 类，基于 Lanterna `TreeWidget` 或自定义 `ListWidget`） |
-| `src/main/java/com/paicli/tui/pane/CenterPane.java` | 中央对话流面板（`ChatPane`，基于 Lanterna `TextArea`，支持 Markdown 渲染 + 代码高亮 + 消息分色） |
-| `src/main/java/com/paicli/tui/pane/RightPane.java` | 右侧状态栏面板（`StatusPane`，显示模型 / Token / 耗时 / 命令提示） |
-| `src/main/java/com/paicli/tui/pane/InputBar.java` | 底部输入栏（`InputBar`，基于 Lanterna `TextField`，处理 Enter / Tab / ↑↓ / Ctrl 快捷键） |
-| `src/main/java/com/paicli/tui/highlight/CodeHighlighter.java` | 轻量级语法高亮器（基于 `CodeChunker` 语言识别 + 正则词法着色，输出 ANSI 256 色字符串） |
-| `src/main/java/com/paicli/tui/highlight/SyntaxTheme.java` | 主题定义（深色 / 浅色），映射语言关键字 / 字符串 / 注释到 Lanterna `TextColor` |
-| `src/main/java/com/paicli/tui/history/ConversationHistoryManager.java` | 对话历史管理（按 `ConversationSnapshot` 组织，支持保存 / 恢复 / 删除） |
-| `src/main/java/com/paicli/tui/history/ConversationStore.java` | 对话历史持久化（JSONL 格式，按天分文件 `~/.paicli/history/conversations-YYYY-MM-DD.jsonl`） |
-| `src/main/java/com/paicli/tui/config/ConfigEditor.java` | 配置管理面板（`/config` 命令触发，支持 API Key / 模型 / 上下文模式 / HITL / Skill 启用状态编辑） |
-| `src/main/java/com/paicli/tui/theme/ThemeManager.java` | 主题管理器（深色 / 浅色切换，持久化到 `config.json`） |
-| `src/main/java/com/paicli/tui/theme/ColorPalette.java` | Catppuccin Mocha / Latte 调色板（背景 / 前景 / 关键字 / 字符串 / 注释等） |
+| `src/main/java/com/devcli/tui/TuiBootstrap.java` | TUI 入口，判断 `shouldUseTui()`，创建 `LanternaWindow` 和布局 |
+| `src/main/java/com/devcli/tui/LanternaWindow.java` | 封装 Lanterna `Window`，统一处理主题 / 大小变化 / 输入分发 |
+| `src/main/java/com/devcli/tui/pane/LeftPane.java` | 左侧文件树面板（`FileTreePane` 类，基于 Lanterna `TreeWidget` 或自定义 `ListWidget`） |
+| `src/main/java/com/devcli/tui/pane/CenterPane.java` | 中央对话流面板（`ChatPane`，基于 Lanterna `TextArea`，支持 Markdown 渲染 + 代码高亮 + 消息分色） |
+| `src/main/java/com/devcli/tui/pane/RightPane.java` | 右侧状态栏面板（`StatusPane`，显示模型 / Token / 耗时 / 命令提示） |
+| `src/main/java/com/devcli/tui/pane/InputBar.java` | 底部输入栏（`InputBar`，基于 Lanterna `TextField`，处理 Enter / Tab / ↑↓ / Ctrl 快捷键） |
+| `src/main/java/com/devcli/tui/highlight/CodeHighlighter.java` | 轻量级语法高亮器（基于 `CodeChunker` 语言识别 + 正则词法着色，输出 ANSI 256 色字符串） |
+| `src/main/java/com/devcli/tui/highlight/SyntaxTheme.java` | 主题定义（深色 / 浅色），映射语言关键字 / 字符串 / 注释到 Lanterna `TextColor` |
+| `src/main/java/com/devcli/tui/history/ConversationHistoryManager.java` | 对话历史管理（按 `ConversationSnapshot` 组织，支持保存 / 恢复 / 删除） |
+| `src/main/java/com/devcli/tui/history/ConversationStore.java` | 对话历史持久化（JSONL 格式，按天分文件 `~/.devcli/history/conversations-YYYY-MM-DD.jsonl`） |
+| `src/main/java/com/devcli/tui/config/ConfigEditor.java` | 配置管理面板（`/config` 命令触发，支持 API Key / 模型 / 上下文模式 / HITL / Skill 启用状态编辑） |
+| `src/main/java/com/devcli/tui/theme/ThemeManager.java` | 主题管理器（深色 / 浅色切换，持久化到 `config.json`） |
+| `src/main/java/com/devcli/tui/theme/ColorPalette.java` | Catppuccin Mocha / Latte 调色板（背景 / 前景 / 关键字 / 字符串 / 注释等） |
 
 ### 4.2 修改类
 
 | 文件 | 改动 |
 |---|---|
-| `src/main/java/com/paicli/cli/Main.java` | TUI 入口判断（`shouldUseTui()`）；降级时保留现有 CLI；TUI 模式下用 `TuiBootstrap.launch()` 替换 JLine `LineReader` 主循环；Banner v16.0.0 |
-| `src/main/java/com/paicli/cli/CliCommandParser.java` | 新增 `CONFIG` 命令类型 + 子命令（`/config` 开配置面板）；TUI 模式下 `/clear` 清空对话流；`/exit` / `/quit` 关闭 TUI 窗口 |
-| `src/main/java/com/paicli/util/TerminalMarkdownRenderer.java` | 增强 Markdown 渲染器：支持代码块折叠 + 语法高亮输出（调用 `CodeHighlighter`）；保持 CLI 模式向后兼容 |
-| `src/main/java/com/paicli/config/PaiCliConfig.java` | 新增 `tui` 配置段（`fileTree` / `editor`）；新增 `ThemeManager` 读取 / 写入 `theme` 字段 |
-| `src/main/java/com/paicli/agent/Agent.java` | 流式输出时 TUI 模式改调用 `ChatPane.appendStreamingMessage()`（直接向面板写流式文本，不经过 `System.out`）；TUI 下的 HITL 弹窗调用 `TuiHitlDialog.show()` 替代 `TerminalHitlHandler` |
-| `src/main/java/com/paicli/hitl/TerminalHitlHandler.java` | 新增 `TuiHitlDialog` 内部类（Lanterna 模态框弹窗），保留 CLI 模式兼容；`requestApproval` 根据 `LanternaWindow.isTuiMode()` 分发到 TUI 或 CLI |
-| `src/main/java/com/paicli/agent/PlanExecuteAgent.java` | 同上：流式输出和 HITL 弹窗根据模式分发 |
-| `src/main/java/com/paicli/agent/SubAgent.java` | 同上：Multi-Agent 流式输出分发 |
+| `src/main/java/com/devcli/cli/Main.java` | TUI 入口判断（`shouldUseTui()`）；降级时保留现有 CLI；TUI 模式下用 `TuiBootstrap.launch()` 替换 JLine `LineReader` 主循环；Banner v16.0.0 |
+| `src/main/java/com/devcli/cli/CliCommandParser.java` | 新增 `CONFIG` 命令类型 + 子命令（`/config` 开配置面板）；TUI 模式下 `/clear` 清空对话流；`/exit` / `/quit` 关闭 TUI 窗口 |
+| `src/main/java/com/devcli/util/TerminalMarkdownRenderer.java` | 增强 Markdown 渲染器：支持代码块折叠 + 语法高亮输出（调用 `CodeHighlighter`）；保持 CLI 模式向后兼容 |
+| `src/main/java/com/devcli/config/DevCliConfig.java` | 新增 `tui` 配置段（`fileTree` / `editor`）；新增 `ThemeManager` 读取 / 写入 `theme` 字段 |
+| `src/main/java/com/devcli/agent/Agent.java` | 流式输出时 TUI 模式改调用 `ChatPane.appendStreamingMessage()`（直接向面板写流式文本，不经过 `System.out`）；TUI 下的 HITL 弹窗调用 `TuiHitlDialog.show()` 替代 `TerminalHitlHandler` |
+| `src/main/java/com/devcli/hitl/TerminalHitlHandler.java` | 新增 `TuiHitlDialog` 内部类（Lanterna 模态框弹窗），保留 CLI 模式兼容；`requestApproval` 根据 `LanternaWindow.isTuiMode()` 分发到 TUI 或 CLI |
+| `src/main/java/com/devcli/agent/PlanExecuteAgent.java` | 同上：流式输出和 HITL 弹窗根据模式分发 |
+| `src/main/java/com/devcli/agent/SubAgent.java` | 同上：Multi-Agent 流式输出分发 |
 
 ### 4.3 联动文档
 
@@ -490,9 +490,9 @@ public String highlight(String code, String language) {
 ### 5.6 主题持久化
 
 **配置路径**：
-1. `PaiCliConfig` 初始化时读 `config.json` 的 `tui.theme` 字段
+1. `DevCliConfig` 初始化时读 `config.json` 的 `tui.theme` 字段
 2. `ThemeManager` 维护当前主题（`"dark"` 默认）
-3. `/config` 编辑主题后调用 `PaiCliConfig.save(config)` 写回
+3. `/config` 编辑主题后调用 `DevCliConfig.save(config)` 写回
 4. 下次启动时读取
 
 **Lanterna 主题适配**：
@@ -528,7 +528,7 @@ public String highlight(String code, String language) {
 🔄 使用 ReAct 模式
 
 ┌───项目结构───┬───────────────────────────────┬──状态──┐
-│ 📁 paicli    │  对话开始...                   │ 🟢 Ready│
+│ 📁 devcli    │  对话开始...                   │ 🟢 Ready│
 │ 📁 src       │                               │ 💡 2k/200k│
 │ 📁 main      │                               │ ⏱ --  │
 │ 📄 pom.xml   │                               │        │
@@ -561,7 +561,7 @@ public String highlight(String code, String language) {
 ```
 │ 📄 README.md（前 50 行）                          │
 │ ┌─────────────────────────────────────────────┐  │
-│ │ # PaiCLI                                     │  │
+│ │ # DevCLI                                     │  │
 │ │ 一个 Java Agent CLI...                       │  │
 │ └─────────────────────────────────────────────┘  │
 ```
@@ -629,7 +629,7 @@ public String highlight(String code, String language) {
 │ 📁 main       │ ← ← 收起
 │ 📁 java       │
 │ 📁 com        │
-│ 📁 paicli     │
+│ 📁 devcli     │
 │ 📁 agent      │
 │ 📄 Agent.java │ ← Enter 插入 @file:// 引用
 │ 📄 Main.java  │
@@ -647,19 +647,19 @@ public String highlight(String code, String language) {
 **场景 A：正常 TUI 启动**
 ```bash
 # 终端尺寸 ≥ 80×24，显式启用 TUI
-PAICLI_TUI=true java -jar target/paicli-1.0-SNAPSHOT.jar
+DEVCLI_TUI=true java -jar target/devcli-1.0-SNAPSHOT.jar
 ```
 **期望**：Lanterna 三栏窗口正常渲染，输入框可交互，可以提交任务。
 
 **场景 B：默认 CLI**
 ```bash
-java -jar target/paicli-1.0-SNAPSHOT.jar
+java -jar target/devcli-1.0-SNAPSHOT.jar
 ```
 **期望**：进入 JLine 行编辑器，不弹 Lanterna 全屏窗口。
 
 **场景 C：CLI 强制降级**
 ```bash
-PAICLI_TUI=true NO_TUI=true java -jar target/paicli-1.0-SNAPSHOT.jar
+DEVCLI_TUI=true NO_TUI=true java -jar target/devcli-1.0-SNAPSHOT.jar
 ```
 **期望**：降级到 JLine 行编辑器，所有现有 CLI 功能正常。
 
@@ -677,13 +677,13 @@ PAICLI_TUI=true NO_TUI=true java -jar target/paicli-1.0-SNAPSHOT.jar
 **期望**：
 1. Agent 调 `list_dir("src/main/java")`
 2. TUI 文件树自动展开到 `src/main/java`，显示 `.java` 文件列表
-3. 用 `↑` / `↓` 移动选中 `Agent.java`，按 `Enter` 插入 `@file://src/main/java/com/paicli/agent/Agent.java`
+3. 用 `↑` / `↓` 移动选中 `Agent.java`，按 `Enter` 插入 `@file://src/main/java/com/devcli/agent/Agent.java`
 4. Agent 收到引用后调 `read_file` 并展示内容
 
 ### 7.3 代码高亮
 
 ```
-> 帮我看下 src/main/java/com/paicli/agent/Agent.java 里的 run() 方法做了什么
+> 帮我看下 src/main/java/com/devcli/agent/Agent.java 里的 run() 方法做了什么
 ```
 **期望**：
 1. Agent 调 `read_file` 拿 `Agent.java`
@@ -786,7 +786,7 @@ PAICLI_TUI=true NO_TUI=true java -jar target/paicli-1.0-SNAPSHOT.jar
 
 ```
 > # 终端尺寸 79×23
-> java -jar target/paicli-1.0-SNAPSHOT.jar
+> java -jar target/devcli-1.0-SNAPSHOT.jar
 ```
 **期望**：检测到 cols < 80 或 rows < 24 → 降级 CLI 模式，Banner 加降级提示。
 
@@ -806,11 +806,11 @@ PAICLI_TUI=true NO_TUI=true java -jar target/paicli-1.0-SNAPSHOT.jar
 3. **代码高亮性能**：大文件（> 500 行）正则着色可能阻塞事件线程。解决：在后台线程做 `CodeHighlighter.highlight()`，完成后再 `postRunnable` 更新 UI。
 4. **JLine History 迁移**：现有 CLI 的 JLine `History` 是输入命令历史（`/plan`、`/search` 等），TUI 的 `ConversationHistoryManager` 是**对话快照历史**（用户和 Agent 的完整对话），两者不能混用。TUI 模式下 JLine History 仍可保留（按 `↑` 在输入框内展示命令历史）。
 5. **Lanterna 在 Windows ConEmu / Cmder 的兼容性**：部分 Windows 虚拟终端对 ANSI TrueColor 支持不完整，可能导致颜色显示异常。需要在 Windows 上做 fallback 到 16 色方案。
-6. **文件树的 `Files.walk` 性能**：大仓库（如 `paicli` 自己，src/ 下 100+ 文件）`Files.walk` 可能 100ms+。解决：只懒加载一层（展开目录时 `Files.list`），不做预扫描。
+6. **文件树的 `Files.walk` 性能**：大仓库（如 `devcli` 自己，src/ 下 100+ 文件）`Files.walk` 可能 100ms+。解决：只懒加载一层（展开目录时 `Files.list`），不做预扫描。
 7. **`CodeChunker` 的语言识别精度**：`CodeChunker` 靠文件名后缀识别语言（`.java` → `java`），没有后缀的文件（如 `Makefile`、`Dockerfile`）拿不到语言。解决：内置 `Makefile` / `Dockerfile` / `Jenkinsfile` 等无后缀文件的扩展识别表。
 8. **Lanterna Screen 重绘频率**：流式输出每来一个 chunk 就 `postRunnable` 刷新 `TextArea`，事件线程会密集刷新屏幕。解决：做 50ms 节流（`ScheduledExecutorService.scheduleAtFixedRate`），每 50ms 批量合并多个 chunk 一次性刷新。
 9. **TUI 下的多行输入**：Lanterna `TextField` 默认是单行的。`Shift+Enter` 插入 `\n` 让输入框支持多行，提交时合并为一段。
-10. **降级 CLI 模式的 TUI 专属功能降级行为**：`/config` 在 CLI 模式下应该降级为打印配置值（`PaiCliConfig.toString()`），不弹出配置面板（因为 CLI 没有面板能力）。
+10. **降级 CLI 模式的 TUI 专属功能降级行为**：`/config` 在 CLI 模式下应该降级为打印配置值（`DevCliConfig.toString()`），不弹出配置面板（因为 CLI 没有面板能力）。
 
 ### 已决策（不要再讨论）
 
@@ -818,15 +818,15 @@ PAICLI_TUI=true NO_TUI=true java -jar target/paicli-1.0-SNAPSHOT.jar
 |---|---|
 | TUI 框架 | **Lanterna 3**（不引入 Textual / Bubble Tea 等跨语言方案） |
 | 代码高亮引擎 | **自研正则词法着色**（不引入第三方高亮库，复用 `CodeChunker` 语言识别） |
-| TUI vs CLI 关系 | **CLI 为主，TUI opt-in**（`PAICLI_TUI=true` 或 `-Dpaicli.tui=true` 才启动全屏界面） |
+| TUI vs CLI 关系 | **CLI 为主，TUI opt-in**（`DEVCLI_TUI=true` 或 `-Ddevcli.tui=true` 才启动全屏界面） |
 | 文件树 Git 状态 | **不做**（留后续期） |
 | TUI 内嵌代码编辑器 | **不做**（只展示，改文件走 `write_file` 工具） |
 | 多窗口 / 分屏 | **本期不做**（单窗口） |
 | 主题数量 | **两种**（深色 / 浅色），不搞主题市场 |
 | 对话历史 | **新设计 `ConversationSnapshot`**，不依赖 JLine History |
 | `CodeHighlighter` 依赖 | **零第三方依赖**（纯正则 + 已有 `CodeChunker`） |
-| 主题持久化路径 | `~/.paicli/config.json` 的 `theme` 字段 |
-| 对话历史持久化 | `~/.paicli/history/conversations-YYYY-MM-DD.jsonl`（按天，JSONL） |
+| 主题持久化路径 | `~/.devcli/config.json` 的 `theme` 字段 |
+| 对话历史持久化 | `~/.devcli/history/conversations-YYYY-MM-DD.jsonl`（按天，JSONL） |
 | 降级提示文案 | 默认 CLI 不提示；显式启用 TUI 但环境不满足时才提示具体原因 |
 | TUI 启动失败 | 降级 CLI 模式，不直接退出 |
 | 快捷键冲突 | `Ctrl+C` / `Ctrl+D` / `Esc` / `Enter` / `↑↓` 保留终端默认语义，不做自定义冲突映射 |
@@ -840,15 +840,15 @@ PAICLI_TUI=true NO_TUI=true java -jar target/paicli-1.0-SNAPSHOT.jar
 ### Day 1：项目骨架 + `TuiBootstrap` + `LanternaWindow` + 降级检测
 
 **产出**：
-- `com.paicli.tui` 包结构
+- `com.devcli.tui` 包结构
 - `TuiBootstrap`：`shouldUseTui()` 判断 + `launch()` 入口
 - `LanternaWindow`：`Screen` / `Window` / 主题初始化 / 大小监听
 - 三栏布局骨架（空 `Panel` 占位）
 - `Main.java`：`shouldUseTui()` 分支判断 + 降级 CLI 路径
 
 **测试**：
-- `TuiBootstrapTest`：未显式设置 `PAICLI_TUI=true` → `shouldUseTui()` 返回 `false`
-- `TuiBootstrapTest`：`PAICLI_TUI=true` 且 `NO_TUI=true` → `shouldUseTui()` 返回 `false`
+- `TuiBootstrapTest`：未显式设置 `DEVCLI_TUI=true` → `shouldUseTui()` 返回 `false`
+- `TuiBootstrapTest`：`DEVCLI_TUI=true` 且 `NO_TUI=true` → `shouldUseTui()` 返回 `false`
 - `TuiBootstrapTest`：小终端尺寸模拟 → `shouldUseTui()` 返回 `false`（1 用例）
 - `LanternaWindowTest`：创建窗口 + 设置主题 + 调整大小（2 用例）
 
@@ -913,7 +913,7 @@ PAICLI_TUI=true NO_TUI=true java -jar target/paicli-1.0-SNAPSHOT.jar
 - Banner v16.0.0 + 标语 + 快捷键提示
 - `pom.xml` 添加 Lanterna 依赖
 - **安装包分发**（参见 §6.7）：
-  - `mvn clean package` 产出 `target/paicli-1.0-SNAPSHOT.jar`（pom.xml 仍保持 `1.0-SNAPSHOT`，Banner 显示 `16.0.0`）
+  - `mvn clean package` 产出 `target/devcli-1.0-SNAPSHOT.jar`（pom.xml 仍保持 `1.0-SNAPSHOT`，Banner 显示 `16.0.0`）
   - 配置 `maven-assembly-plugin` 或 `maven-shade-plugin` 做**可执行 fat jar**（包含 Lanterna 依赖，用户 `java -jar` 即可运行）
   - 编写 `INSTALL.md`（安装说明：JDK 17 + `java -jar` 两步）
   - GitHub Actions Release workflow 留给后续分发增强
@@ -995,14 +995,14 @@ PAICLI_TUI=true NO_TUI=true java -jar target/paicli-1.0-SNAPSHOT.jar
 
 ## 13. 完成判定（DoD）
 
-- [x] `com.paicli.tui` 包落地，`Main.java` 接入 TUI / CLI 分支
-- [x] `shouldUseTui()` 默认返回 CLI；显式 `PAICLI_TUI=true` / `-Dpaicli.tui=true` 才检查 TUI 条件；`NO_TUI=true` 和小终端降级
+- [x] `com.devcli.tui` 包落地，`Main.java` 接入 TUI / CLI 分支
+- [x] `shouldUseTui()` 默认返回 CLI；显式 `DEVCLI_TUI=true` / `-Ddevcli.tui=true` 才检查 TUI 条件；`NO_TUI=true` 和小终端降级
 - [x] 三栏布局渲染：文件树 + 对话流 + 状态栏 + 底部输入栏
 - [x] TUI 输入桥接真实 Agent runtime：普通输入走 ReAct，`/plan <任务>` 走 Plan-and-Execute，`/team <任务>` 走 Multi-Agent
 - [x] TUI 支持核心命令：`/clear`、`/context`、`/memory`、`/memory clear`、`/save <事实>`、`/hitl`、`/hitl on`、`/hitl off`、`/config`、`/cancel`、`/exit`
 - [x] `CodeHighlighter` 支持 Java / Python / TypeScript / Bash / JSON / Markdown 等常见语言，`CenterPane` 可渲染高亮代码块
 - [x] HITL 弹窗 TUI 模态框（Lanterna），CLI 模式保留原有 `TerminalHitlHandler`；TUI 不默认批准危险操作
-- [x] 对话历史写入 `~/.paicli/history/session_*.jsonl`
+- [x] 对话历史写入 `~/.devcli/history/session_*.jsonl`
 - [x] `pom.xml` 添加 Lanterna 依赖，`mvn clean package` 产出可执行 fat jar（含 Lanterna 依赖）
 - [x] Banner 升 v16.0.0，标语 `Terminal-First Agent IDE`
 - [x] `mvn test` 全绿（482 tests）
@@ -1033,17 +1033,17 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 | TUI 框架 | **Lanterna 3**（当前 v3.1.3） |
 | 布局 | **三栏**（文件树 25% + 对话流 65% + 状态栏 10%） |
 | 代码高亮引擎 | **自研正则词法着色**（不引入第三方高亮库） |
-| TUI vs CLI | **CLI 为主，TUI opt-in**（`PAICLI_TUI=true` 或 `-Dpaicli.tui=true`） |
+| TUI vs CLI | **CLI 为主，TUI opt-in**（`DEVCLI_TUI=true` 或 `-Ddevcli.tui=true`） |
 | 文件树 Git 状态 | **不做**（留后续期） |
 | TUI 内嵌编辑器 | **不做** |
 | 多窗口 / 分屏 | **本期不做** |
 | 主题 | **深色 / 浅色两种**，Catppuccin 调色板，`config.json` 持久化 |
-| 对话历史 | **新设计 `ConversationSnapshot`**，`~/.paicli/history/` JSONL 持久化 |
+| 对话历史 | **新设计 `ConversationSnapshot`**，`~/.devcli/history/` JSONL 持久化 |
 | HITL 弹窗 | **TUI 模态框**（Lanterna）+ CLI 弹窗（原有 `TerminalHitlHandler`）双路 |
 | 流式输出节流 | **50ms**（`ScheduledExecutorService.scheduleAtFixedRate`） |
 | 代码块折叠阈值 | **20 行** |
 | 对话流保留消息数 | **最近 200 条**（历史归档到 `ConversationStore`） |
-| 文件树忽略规则 | `~/.paicli/filetree-ignore.txt`（每行一个 glob），不存在用内置默认 |
+| 文件树忽略规则 | `~/.devcli/filetree-ignore.txt`（每行一个 glob），不存在用内置默认 |
 | 安装包分发 | **fat jar**（`maven-shade-plugin`），GitHub Actions Release workflow 留作后续增强 |
 | `CodeChunker` 无后缀文件识别 | **内置扩展表**（`Makefile` / `Dockerfile` / `Jenkinsfile` 等） |
 | 第 17 期范围 | **按 ROADMAP 更新为 LSP 诊断注入**，TUI 不碰；图片复制粘贴输入后移第 21 期 |
@@ -1063,8 +1063,8 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 
 **前置**：
 - Lanterna 3.1.3 依赖已引入
-- `~/.paicli/config.json` 已存在（第 15 期已有）
-- `PAICLI_TUI=true`
+- `~/.devcli/config.json` 已存在（第 15 期已有）
+- `DEVCLI_TUI=true`
 - 终端尺寸 ≥ 80×24
 
 **测试场景序列**：
@@ -1072,7 +1072,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 ### 场景 A：文件树 + 代码高亮 + 对话流渲染
 
 ```
-> 帮我看下 src/main/java/com/paicli/agent/Agent.java 里的 Agent 类主要做了什么
+> 帮我看下 src/main/java/com/devcli/agent/Agent.java 里的 Agent 类主要做了什么
 ```
 
 **期望行为序列**：
@@ -1116,7 +1116,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 ### 场景 C：TUI 降级 + HITL 弹窗
 
 ```
-> java -jar target/paicli-1.0-SNAPSHOT.jar
+> java -jar target/devcli-1.0-SNAPSHOT.jar
 [默认 CLI 模式]
 
 > /hitl on
@@ -1131,7 +1131,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 ```
 
 **期望行为序列**：
-1. 未显式设置 `PAICLI_TUI=true` → `shouldUseTui()` 返回 `false`
+1. 未显式设置 `DEVCLI_TUI=true` → `shouldUseTui()` 返回 `false`
 2. 不弹 Lanterna 全屏窗口
 3. HITL 弹窗走 `TerminalHitlHandler` 原有路径，行为不变
 4. `Ctrl+C` 正常退出

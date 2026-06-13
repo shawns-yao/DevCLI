@@ -5,9 +5,9 @@
 > **开工前必读**：
 > 1. 仓库根 `AGENTS.md`（仓库规则、文档联动硬规则）
 > 2. `docs/phase-13-chrome-devtools-mcp.md` / `docs/phase-14-cdp-session-reuse.md`（已完成，本期用浏览器能力）
-> 3. `src/main/java/com/paicli/agent/Agent.java`、`PlanExecuteAgent.java`、`SubAgent.java`（系统提示词构造路径）
-> 4. `src/main/java/com/paicli/tool/ToolRegistry.java`（本期新增内置工具 `load_skill` 的注册位置）
-> 5. `src/main/java/com/paicli/cli/Main.java` / `CliCommandParser.java`（本期新增 `/skill` 命令组）
+> 3. `src/main/java/com/devcli/agent/Agent.java`、`PlanExecuteAgent.java`、`SubAgent.java`（系统提示词构造路径）
+> 4. `src/main/java/com/devcli/tool/ToolRegistry.java`（本期新增内置工具 `load_skill` 的注册位置）
+> 5. `src/main/java/com/devcli/cli/Main.java` / `CliCommandParser.java`（本期新增 `/skill` 命令组）
 > 6. 参考品：Anthropic 公开的 Claude Code skills（`~/.claude/skills/web-access/` 是用户本机已有的优秀范例，开发 Agent 可读取参考结构与文风，但**不能直接搬代码**——许可与工程化口径都不一样）
 >
 > **核心原则**：本期不是写工具，是把「Agent 该怎么思考」沉淀成可复用单元。Skill 是**决策手册** + **按需取用的资料库** + **可执行依赖**三件套，不是 prompt 片段。
@@ -18,7 +18,7 @@
 
 ## 1. 目标与产出物
 
-让 PaiCLI 拥有自己的 Skill 体系。Skill 是一个目录（含 `SKILL.md` + 可选 `references/` + 可选 `scripts/`），其中：
+让 DevCLI 拥有自己的 Skill 体系。Skill 是一个目录（含 `SKILL.md` + 可选 `references/` + 可选 `scripts/`），其中：
 
 - `SKILL.md` 是 Agent 的决策手册（哲学 + 工具选择表 + 优先级 + 兜底策略）
 - `references/` 是按需读取的资料库（典型用法：站点经验目录 `references/site-patterns/<domain>.md`）
@@ -27,7 +27,7 @@
 最终交付：
 
 - 通用 Skill 加载器：扫描三层目录（jar 内置 / 用户级 / 项目级），解析 frontmatter 与正文
-- Skill 启用状态持久化：`~/.paicli/skills.json` 存 disabled 列表（默认全启用）
+- Skill 启用状态持久化：`~/.devcli/skills.json` 存 disabled 列表（默认全启用）
 - 启动期把所有启用 Skill 的 `name` + `description` 注入三处 Agent 系统提示词
 - 新增内置工具 `load_skill(name)`：LLM 主动调用以把 SKILL.md 正文注入下一轮上下文（lazy 展开）
 - CLI 命令组 `/skill`：`list` / `show <name>` / `on <name>` / `off <name>` / `reload`
@@ -55,10 +55,10 @@
 | 维度 | 定义 |
 |---|---|
 | 形态 | 一个目录，根文件必须是 `SKILL.md` |
-| 加载顺序 | jar 内置 < 用户级 `~/.paicli/skills/` < 项目级 `<project>/.paicli/skills/`（同名后者覆盖前者） |
-| 启用控制 | 默认启用；`~/.paicli/skills.json` 的 `disabled` 列表关掉 |
+| 加载顺序 | jar 内置 < 用户级 `~/.devcli/skills/` < 项目级 `<project>/.devcli/skills/`（同名后者覆盖前者） |
+| 启用控制 | 默认启用；`~/.devcli/skills.json` 的 `disabled` 列表关掉 |
 | 系统提示词占位 | 启用后只把 `name` + `description` 进 system prompt（"轻量索引"） |
-| 完整指令展开 | LLM 调 `load_skill("name")` 后，PaiCLI 把 SKILL.md 正文（去 frontmatter）拼到 next user message 的开头 |
+| 完整指令展开 | LLM 调 `load_skill("name")` 后，DevCLI 把 SKILL.md 正文（去 frontmatter）拼到 next user message 的开头 |
 
 ### 2.2 SKILL.md 格式
 
@@ -69,7 +69,7 @@ description: |
   所有联网操作必须通过此 skill 处理，包括搜索、网页抓取、登录后操作。
   触发场景：用户要求搜索信息、查看网页、访问需登录站点、抓取社交媒体内容、读取动态渲染页面。
 version: "1.0.0"
-author: PaiCLI
+author: DevCLI
 tags: [web, browser, fetch]
 ---
 
@@ -111,7 +111,7 @@ tags: [web, browser, fetch]
 
 注入位置选 user message 而非 system，理由：
 - system prompt 在多轮对话里只发一次（节省 token），但本期 LLM 自决加载是**每轮可能不同**的
-- user message 是每轮重发，注入 body 会随轮次自然衰减（PaiCLI 控制只保留最近 1 轮的注入，避免堆积）
+- user message 是每轮重发，注入 body 会随轮次自然衰减（DevCLI 控制只保留最近 1 轮的注入，避免堆积）
 - system prompt 不变 → prompt cache 命中率高（第 12 期能力依赖）
 
 ---
@@ -123,8 +123,8 @@ tags: [web, browser, fetch]
 三层目录扫描顺序（后者覆盖前者同名 skill）：
 
 1. **内置**：jar 内 `src/main/resources/skills/<name>/SKILL.md`
-2. **用户级**：`~/.paicli/skills/<name>/SKILL.md`
-3. **项目级**：`<project>/.paicli/skills/<name>/SKILL.md`
+2. **用户级**：`~/.devcli/skills/<name>/SKILL.md`
+3. **项目级**：`<project>/.devcli/skills/<name>/SKILL.md`
 
 实现要点：
 - jar 内置用 `getResourceAsStream`，把 `SKILL.md` 拷到内存即可（不解压到磁盘）
@@ -149,7 +149,7 @@ frontmatter 用 SnakeYAML（项目已经依赖 Jackson + 不依赖 SnakeYAML，*
 
 ### 3.3 启用状态持久化
 
-`~/.paicli/skills.json`：
+`~/.devcli/skills.json`：
 
 ```json
 {
@@ -200,7 +200,7 @@ frontmatter 用 SnakeYAML（项目已经依赖 Jackson + 不依赖 SnakeYAML，*
 - body 长度限 5KB，超出截断并附 `(skill body truncated, full content via /skill show <name>)`
 - **不直接返回正文给 LLM 当工具结果**，而是：
   - 工具结果只返回简短确认：`已加载 skill 'web-access' 的完整指引（X bytes），将在下一轮上下文中体现`
-  - 把 body 写入 `SkillContextBuffer`（per-session，per-agent-role），下一轮 user message 末尾被 PaiCLI 拼接
+  - 把 body 写入 `SkillContextBuffer`（per-session，per-agent-role），下一轮 user message 末尾被 DevCLI 拼接
 
 为什么这样设计：
 - 直接返回正文 → LLM 在当前轮就吃下，但工具结果通常被 LLM 当"事实输入"，不当"指令"
@@ -233,7 +233,7 @@ LLM 调 load_skill("web-access")
 - Jina 集成：**只**在 `SKILL.md` 写一段「web_fetch 拿不到正文时，可让 `execute_command` 调 `curl https://r.jina.ai/<url>` 取干净 markdown，限 20 RPM」——**不**改 web_fetch 工具
 
 **不做**：
-- **不**复制 `~/.claude/skills/web-access/scripts/cdp-proxy.mjs`（那是 568 行的 HTTP 代理，PaiCLI 第 13 / 14 期已经有 chrome-devtools MCP + shared 模式，能力等价，重写一个反而引入维护负担）
+- **不**复制 `~/.claude/skills/web-access/scripts/cdp-proxy.mjs`（那是 568 行的 HTTP 代理，DevCLI 第 13 / 14 期已经有 chrome-devtools MCP + shared 模式，能力等价，重写一个反而引入维护负担）
 - **不**写 `scripts/` 任何脚本（本期内置版 scripts/ 留空目录或干脆不建）
 - **不**预置 5KB 以上的超长 SKILL.md（决策手册要精炼，超长内容拆到 references/）
 - **不**抄用户本机 `~/.claude/skills/web-access/SKILL.md` 的具体文风（许可与立场不同，参考结构即可）
@@ -300,7 +300,7 @@ Skill 内 SKILL.md 提示 LLM 调用危险工具时（如 `execute_command "curl
 ```
 📚 Skills 加载（3 个）...
    ✓ web-access      builtin   description 88 字符
-   ✓ paicli-internal user      description 124 字符
+   ✓ devcli-internal user      description 124 字符
    ✓ project-tweaks  project   description 67 字符
    3/3 启用，索引段共 0.6KB
 ```
@@ -312,7 +312,7 @@ Skill 内 SKILL.md 提示 LLM 调用危险工具时（如 `execute_command "curl
 🔄 重新扫描 skill 目录...
 📚 Skills 加载（4 个）...
    ✓ web-access      builtin   description 88 字符
-   ✓ paicli-internal user      description 124 字符
+   ✓ devcli-internal user      description 124 字符
    ✓ project-tweaks  project   description 67 字符
    ✓ new-one         user      description 102 字符
    4/4 启用，索引段共 0.8KB
@@ -323,7 +323,7 @@ Skill 内 SKILL.md 提示 LLM 调用危险工具时（如 `execute_command "curl
 
 ## 4. 配置文件改动
 
-### 4.1 `~/.paicli/skills.json`
+### 4.1 `~/.devcli/skills.json`
 
 启动期检测：不存在则视为空，**不**主动创建（与 sensitive_patterns.txt 一致策略）。
 
@@ -343,9 +343,9 @@ Skill 内 SKILL.md 提示 LLM 调用危险工具时（如 `execute_command "curl
 # ========== 第 15 期：Skill 系统 ==========
 # Skill 加载位置（按优先级，后者覆盖前者）：
 #   1. jar 内置（resources/skills/）
-#   2. 用户级：~/.paicli/skills/<name>/SKILL.md
-#   3. 项目级：<project>/.paicli/skills/<name>/SKILL.md
-# 禁用列表持久化：~/.paicli/skills.json（{"disabled": ["name1", ...]}）
+#   2. 用户级：~/.devcli/skills/<name>/SKILL.md
+#   3. 项目级：<project>/.devcli/skills/<name>/SKILL.md
+# 禁用列表持久化：~/.devcli/skills.json（{"disabled": ["name1", ...]}）
 # 内置 web-access skill 包含 6 个 site-patterns 示例，可在 references/site-patterns/ 下补充自己的
 ```
 
@@ -366,10 +366,10 @@ src/main/resources/skills/
             └── zhuanlan.zhihu.com.md
 ```
 
-注意：`references/` 内的文件在 jar 内是只读 resources，LLM 通过 `read_file` 读取时需要走特殊路径——本期约定 **`references/` 文件由用户级或项目级 skill 提供**，jar 内置 skill 的 references 在启动期解压到 `~/.paicli/skills-cache/<name>/references/`，后续 LLM 用绝对路径读取。
+注意：`references/` 内的文件在 jar 内是只读 resources，LLM 通过 `read_file` 读取时需要走特殊路径——本期约定 **`references/` 文件由用户级或项目级 skill 提供**，jar 内置 skill 的 references 在启动期解压到 `~/.devcli/skills-cache/<name>/references/`，后续 LLM 用绝对路径读取。
 
 解压策略：
-- 启动期检测 `~/.paicli/skills-cache/<name>/.version` 与 jar 内置版本号是否一致
+- 启动期检测 `~/.devcli/skills-cache/<name>/.version` 与 jar 内置版本号是否一致
 - 不一致或不存在 → 重写整个 cache 目录
 - 一致 → 跳过（避免每次启动 IO）
 - SKILL.md 在 `Agent` 启动注入索引时由 jar 内 `getResourceAsStream` 读，不依赖解压
@@ -382,26 +382,26 @@ src/main/resources/skills/
 
 | 文件 | 职责 |
 |---|---|
-| `src/main/java/com/paicli/skill/Skill.java` | record，含 name / description / version / author / tags / source(builtin/user/project) / bodyPath / cachedReferencesDir |
-| `src/main/java/com/paicli/skill/SkillFrontmatterParser.java` | 极简 YAML 子集解析（§3.2） |
-| `src/main/java/com/paicli/skill/SkillRegistry.java` | 单例（由 Main 注入），扫描三层目录、合并、过滤 disabled、对外提供 `enabledSkills()` / `findSkill(name)` / `reload()` |
-| `src/main/java/com/paicli/skill/SkillIndexFormatter.java` | 把 enabled skills 渲染成 system prompt 索引段（§3.8 模板，含 token 预算硬上限） |
-| `src/main/java/com/paicli/skill/SkillContextBuffer.java` | per-session 内存 buffer（§3.6），提供 push(name, body) / drain() |
-| `src/main/java/com/paicli/skill/SkillBuiltinExtractor.java` | 启动期把 jar 内 `resources/skills/<name>/references/` 解压到 `~/.paicli/skills-cache/<name>/`（§4.3） |
-| `src/main/java/com/paicli/skill/SkillStateStore.java` | 读写 `~/.paicli/skills.json` |
-| `src/main/java/com/paicli/skill/LoadSkillTool.java` | 内置工具实现，调用时往 SkillContextBuffer 写入 |
+| `src/main/java/com/devcli/skill/Skill.java` | record，含 name / description / version / author / tags / source(builtin/user/project) / bodyPath / cachedReferencesDir |
+| `src/main/java/com/devcli/skill/SkillFrontmatterParser.java` | 极简 YAML 子集解析（§3.2） |
+| `src/main/java/com/devcli/skill/SkillRegistry.java` | 单例（由 Main 注入），扫描三层目录、合并、过滤 disabled、对外提供 `enabledSkills()` / `findSkill(name)` / `reload()` |
+| `src/main/java/com/devcli/skill/SkillIndexFormatter.java` | 把 enabled skills 渲染成 system prompt 索引段（§3.8 模板，含 token 预算硬上限） |
+| `src/main/java/com/devcli/skill/SkillContextBuffer.java` | per-session 内存 buffer（§3.6），提供 push(name, body) / drain() |
+| `src/main/java/com/devcli/skill/SkillBuiltinExtractor.java` | 启动期把 jar 内 `resources/skills/<name>/references/` 解压到 `~/.devcli/skills-cache/<name>/`（§4.3） |
+| `src/main/java/com/devcli/skill/SkillStateStore.java` | 读写 `~/.devcli/skills.json` |
+| `src/main/java/com/devcli/skill/LoadSkillTool.java` | 内置工具实现，调用时往 SkillContextBuffer 写入 |
 
 ### 5.2 修改类
 
 | 文件 | 改动 |
 |---|---|
-| `src/main/java/com/paicli/cli/Main.java` | 启动期初始化 SkillBuiltinExtractor + SkillRegistry + SkillContextBuffer；Banner v15.0.0；启动 hint 加 `/skill list` 提示；`/skill` 命令分发 |
-| `src/main/java/com/paicli/cli/CliCommandParser.java` | 新增 `SKILL` 命令类型 + 子命令 `list` / `show <name>` / `on <name>` / `off <name>` / `reload` |
-| `src/main/java/com/paicli/tool/ToolRegistry.java` | 注册 `load_skill` 工具；构造时接收 SkillRegistry + SkillContextBuffer 引用 |
-| `src/main/java/com/paicli/agent/Agent.java` | system prompt 加 §3.8 skill 索引段；构造 user message 时调 `SkillContextBuffer.drain()` 拼接到原内容前 |
-| `src/main/java/com/paicli/agent/PlanExecuteAgent.java` | 同上 |
-| `src/main/java/com/paicli/agent/SubAgent.java` | 同上（三种角色都共享同一索引；buffer 在主 Agent 与子 Agent 间不共享，子 Agent 有自己的 buffer 实例） |
-| `src/main/java/com/paicli/agent/AgentOrchestrator.java` | 在创建 SubAgent 时为每个 SubAgent 构造独立 SkillContextBuffer |
+| `src/main/java/com/devcli/cli/Main.java` | 启动期初始化 SkillBuiltinExtractor + SkillRegistry + SkillContextBuffer；Banner v15.0.0；启动 hint 加 `/skill list` 提示；`/skill` 命令分发 |
+| `src/main/java/com/devcli/cli/CliCommandParser.java` | 新增 `SKILL` 命令类型 + 子命令 `list` / `show <name>` / `on <name>` / `off <name>` / `reload` |
+| `src/main/java/com/devcli/tool/ToolRegistry.java` | 注册 `load_skill` 工具；构造时接收 SkillRegistry + SkillContextBuffer 引用 |
+| `src/main/java/com/devcli/agent/Agent.java` | system prompt 加 §3.8 skill 索引段；构造 user message 时调 `SkillContextBuffer.drain()` 拼接到原内容前 |
+| `src/main/java/com/devcli/agent/PlanExecuteAgent.java` | 同上 |
+| `src/main/java/com/devcli/agent/SubAgent.java` | 同上（三种角色都共享同一索引；buffer 在主 Agent 与子 Agent 间不共享，子 Agent 有自己的 buffer 实例） |
+| `src/main/java/com/devcli/agent/AgentOrchestrator.java` | 在创建 SubAgent 时为每个 SubAgent 构造独立 SkillContextBuffer |
 
 ### 5.3 联动文档
 
@@ -421,7 +421,7 @@ src/main/resources/skills/
 
 📚 Skills（3 个）
   ● web-access       builtin   v1.0.0  所有联网操作必须通过此 skill 处理...
-  ● paicli-internal  user      v0.2.0  PaiCLI 项目内部约定与文档导航...
+  ● devcli-internal  user      v0.2.0  DevCLI 项目内部约定与文档导航...
   ○ verbose-debug    project   v0.1.0  在每个工具调用前打印决策原因...
 
 提示：
@@ -437,7 +437,7 @@ src/main/resources/skills/
 
 📖 Skill: web-access (builtin, v1.0.0)
   路径: jar:resources/skills/web-access/SKILL.md
-  references/: ~/.paicli/skills-cache/web-access/references/ (6 个文件)
+  references/: ~/.devcli/skills-cache/web-access/references/ (6 个文件)
 
 ---
 name: web-access
@@ -466,7 +466,7 @@ version: "1.0.0"
 ## 已加载 Skill：web-access
 <SKILL.md body>
 ---
-用户输入：（PaiCLI 不重复用户原话，但 LLM 已有上下文）
+用户输入：（DevCLI 不重复用户原话，但 LLM 已有上下文）
 
 [LLM 按 web-access 指引：先试 web_fetch，失败 → 上 chrome-devtools MCP，take_snapshot 拿正文]
 ```
@@ -477,7 +477,7 @@ version: "1.0.0"
 > /skill off verbose-debug
 
 ⏸️ 已禁用 skill: verbose-debug
-   下一轮 LLM 调用生效；已写入 ~/.paicli/skills.json
+   下一轮 LLM 调用生效；已写入 ~/.devcli/skills.json
 ```
 
 ---
@@ -488,7 +488,7 @@ version: "1.0.0"
 
 前置：
 - jar 内置 `web-access`（v1.0.0）
-- 用户级 `~/.paicli/skills/web-access/SKILL.md`（v9.9.9，description 改成"用户版"）
+- 用户级 `~/.devcli/skills/web-access/SKILL.md`（v9.9.9，description 改成"用户版"）
 - 不放项目级
 
 ```
@@ -497,7 +497,7 @@ version: "1.0.0"
 
 **期望**：只显示一个 `web-access`，version `v9.9.9`，来源 `user`。
 
-再加项目级 `<project>/.paicli/skills/web-access/SKILL.md`（v0.0.1）：
+再加项目级 `<project>/.devcli/skills/web-access/SKILL.md`（v0.0.1）：
 
 ```
 > /skill reload
@@ -516,7 +516,7 @@ version: "1.0.0"
 
 **期望**：
 1. LLM 在第一轮调用 `load_skill("web-access")`
-2. PaiCLI 输出 `已加载 skill 'web-access'...`
+2. DevCLI 输出 `已加载 skill 'web-access'...`
 3. 下一轮按 web-access 指引：先 `web_fetch` 试 → 失败 → 上 `mcp__chrome-devtools__navigate_page` → `take_snapshot` 拿正文
 
 **验收点**：
@@ -539,13 +539,13 @@ version: "1.0.0"
 
 ### 7.4 Skill 间不影响
 
-启用两个 skill：web-access 和 paicli-internal。让 LLM 完成跨域任务：
+启用两个 skill：web-access 和 devcli-internal。让 LLM 完成跨域任务：
 
 ```
-> 看下 PaiCLI 项目的 ROADMAP.md，再去网上搜一下 LangGraph4J 最新版本
+> 看下 DevCLI 项目的 ROADMAP.md，再去网上搜一下 LangGraph4J 最新版本
 ```
 
-**期望**：LLM 加载 paicli-internal 处理 ROADMAP，加载 web-access 处理搜索；两个 skill body 都进 user message（按调用顺序拼接）。
+**期望**：LLM 加载 devcli-internal 处理 ROADMAP，加载 web-access 处理搜索；两个 skill body 都进 user message（按调用顺序拼接）。
 
 ### 7.5 `/skill off` 立即生效
 
@@ -587,9 +587,9 @@ body
 
 ### 7.8 启动期 builtin extractor
 
-清空 `~/.paicli/skills-cache/`，启动 PaiCLI：
+清空 `~/.devcli/skills-cache/`，启动 DevCLI：
 
-**期望**：自动重建 `~/.paicli/skills-cache/web-access/references/`，6 个 site-patterns 文件齐全，`.version` 文件存在。
+**期望**：自动重建 `~/.devcli/skills-cache/web-access/references/`，6 个 site-patterns 文件齐全，`.version` 文件存在。
 
 ### 7.9 Jina Reader 走 execute_command 路径
 
@@ -624,9 +624,9 @@ body
 1. **frontmatter 手写解析的边界**：用户写 SKILL.md 时可能用各种 YAML 怪招（quoted string with colon、`>` 折叠、`---` 在 body 里）。Day 1 测试用例必须覆盖至少 6 种合法 + 3 种非法格式。
 2. **jar 内置 references 解压**：Windows 路径分隔符 / Linux mode bits / macOS 隐藏 `.DS_Store` 都可能搞砸 `Files.walk`。建议只解压 `*.md` 文件，其他忽略。
 3. **`load_skill` 描述写不好 LLM 不主动调**：description 字段必须明确写「当 system prompt 里某个 skill 的 description 看起来匹配时调用我」。Day 5 端到端必测 LLM 真的会主动调。如果 GLM-5.1 / DeepSeek V4 不主动调，回 Day 3 重写工具 description。
-4. **SkillContextBuffer 与流式输出竞态**：LLM 流式返回 tool_calls 时，PaiCLI 还没 flush 完上一轮 reasoning，就收到新一轮 user message——buffer drain 时机要在**新 user message 构造时**而不是上一轮 LLM 完成时，避免提前清空。
+4. **SkillContextBuffer 与流式输出竞态**：LLM 流式返回 tool_calls 时，DevCLI 还没 flush 完上一轮 reasoning，就收到新一轮 user message——buffer drain 时机要在**新 user message 构造时**而不是上一轮 LLM 完成时，避免提前清空。
 5. **三层目录覆盖语义**：用户级 SKILL.md 必须**完整覆盖**内置版（不是字段级 merge），避免出现"用户改了 description 但 references 还指向 builtin 缓存路径"的诡异状态。
-6. **builtin extractor 与多用户**：如果系统多用户共用 `~/.paicli`，extractor 写入要带文件锁。本期接受单用户假设，文档明示。
+6. **builtin extractor 与多用户**：如果系统多用户共用 `~/.devcli`，extractor 写入要带文件锁。本期接受单用户假设，文档明示。
 7. **AgentOrchestrator 多个 SubAgent 同时 load_skill**：Worker × 2 同时各自调 load_skill 写入各自 buffer，无冲突；但 Reviewer 角色不应继承 Worker 的 buffer——三个角色各自独立 buffer。
 8. **`/skill reload` 期间正在跑的 turn**：当前轮 system prompt 已发出，reload 不影响；测试要明确这一点而不是死锁等当前轮结束。
 9. **description 在多语言下截断的字符边界**：用 `String.length()` 截断会切坏中文/emoji。改用 codepoint 计数或字符位置 `Character.isHighSurrogate` 检查。
@@ -700,7 +700,7 @@ body
 - 启动期 banner v15.0.0、标语、startup hint、skill 加载日志
 - **写真实的 web-access SKILL.md**（参考 `~/.claude/skills/web-access/SKILL.md` 结构与精神，**不抄具体内容**）：
   - 浏览哲学四步法（自己组织语言）
-  - 工具选择表（基于 PaiCLI 第 9 / 13 / 14 期能力）
+  - 工具选择表（基于 DevCLI 第 9 / 13 / 14 期能力）
   - 浏览器优先级（先 web_fetch → chrome-devtools isolated → /browser connect 切 shared）
   - Jina Reader 兜底说明（execute_command + curl r.jina.ai/）
   - 站点经验目录使用说明
@@ -793,13 +793,13 @@ body
 - [ ] `/skill list` / `show <name>` / `on <name>` / `off <name>` / `reload` 五个子命令实现
 - [ ] frontmatter 解析容错（未知字段忽略、嵌套对象报错但不阻塞）
 - [ ] 三层目录扫描 + 优先级覆盖 + name 字典序处理
-- [ ] `~/.paicli/skills.json` 读写持久化
+- [ ] `~/.devcli/skills.json` 读写持久化
 - [ ] `load_skill` 内置工具注册，写入 SkillContextBuffer
 - [ ] 三处 Agent system prompt 加 skill 索引段（含 token 预算）
 - [ ] 三处 Agent user message 构造时 drain buffer 并前置
 - [ ] AgentOrchestrator 给每个 SubAgent 分配独立 buffer
 - [ ] jar 内置 web-access skill：SKILL.md（决策手册）+ 6 个 site-patterns + cdp-cheatsheet.md
-- [ ] SkillBuiltinExtractor 启动期解压 references/ 到 `~/.paicli/skills-cache/`
+- [ ] SkillBuiltinExtractor 启动期解压 references/ 到 `~/.devcli/skills-cache/`
 - [ ] description 截断（codepoint 边界）+ enabled 上限 20 + 索引段 4KB 上限
 - [ ] `mvn test` 全绿（含原有用例 + 新增）
 - [ ] §9 Day 5 手测 10 条全部跑过，结果写入 commit message
@@ -832,7 +832,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 | 索引段位置 | system prompt 末尾，独立段 |
 | 索引段上限 | 单 description 500 codepoint，启用 20 个，总 4KB |
 | 加载位置 | jar 内置 < 用户级 < 项目级，整体覆盖（非字段 merge） |
-| 启用状态持久化 | `~/.paicli/skills.json` 的 disabled 列表 |
+| 启用状态持久化 | `~/.devcli/skills.json` 的 disabled 列表 |
 | frontmatter 格式 | YAML 子集（手写解析），不依赖 SnakeYAML |
 | 必填字段 | `name`、`description` |
 | 选填字段 | `version`、`author`、`tags` |

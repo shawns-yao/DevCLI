@@ -4,7 +4,7 @@
 
 ## 前置准备
 
-1. 准备测试图片，建议放在 `~/paicli-image-cases/` 下：
+1. 准备测试图片，建议放在 `~/devcli-image-cases/` 下：
    - `shot.png`：正常 PNG，<100KB
    - `large.png`：体积 >5MB（可用 `dd if=/dev/urandom of=large.png bs=1M count=6`，再手动覆盖前几个字节让 MIME 探测出 `image/png`，或直接拿一张高分辨率截图）
    - `not-image.txt`：纯文本文件
@@ -170,13 +170,13 @@ emulate 视口为 7680x4320，打开 https://www.apple.com，take_screenshot
 ```
 
 预期：
-- 自动写入 `~/.paicli/cache/clip-<ts>.png`
+- 自动写入 `~/.devcli/cache/clip-<ts>.png`
 - note 行 `[已附加图片: 剪贴板 (clip-<ts>.png), mimeType=image/png, bytes=…]`
 - LLM 回复明显基于图像内容
 
 ### Case 18 — Ctrl+V 注入
 
-光标停在 PaiCLI 输入框，先复制好图（同 Case 17），然后按 **Ctrl+V**（不是 Cmd+V，Cmd+V 会被终端拦截成本地粘贴文本）。
+光标停在 DevCLI 输入框，先复制好图（同 Case 17），然后按 **Ctrl+V**（不是 Cmd+V，Cmd+V 会被终端拦截成本地粘贴文本）。
 
 预期：
 - 输入行末尾自动追加 `@image:</Users/.../clip-<ts>.png> `
@@ -192,7 +192,7 @@ emulate 视口为 7680x4320，打开 https://www.apple.com，take_screenshot
 
 ### Case 20 — headless 环境（如 ssh / docker）
 
-通过 `ssh user@host` 进入远程主机，启动 PaiCLI，然后：
+通过 `ssh user@host` 进入远程主机，启动 DevCLI，然后：
 
 ```
 @clipboard

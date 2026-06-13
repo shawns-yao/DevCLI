@@ -5,7 +5,7 @@
 > **开工前必读**：
 > 1. 仓库根的 `AGENTS.md`（仓库规则、文档联动硬规则、运行前提）
 > 2. 仓库根的 `ROADMAP.md`（确认第 10 期目标与边界）
-> 3. 现有的 `src/main/java/com/paicli/tool/ToolRegistry.java`、`src/main/java/com/paicli/hitl/HitlToolRegistry.java`、`src/main/java/com/paicli/policy/AuditLog.java` —— 你要集成进这三处
+> 3. 现有的 `src/main/java/com/devcli/tool/ToolRegistry.java`、`src/main/java/com/devcli/hitl/HitlToolRegistry.java`、`src/main/java/com/devcli/policy/AuditLog.java` —— 你要集成进这三处
 >
 > **执行原则**：
 > - 严格按 Day 1 → Day 6 顺序推进，每日 `mvn test` 全绿才进入下一日
@@ -17,11 +17,11 @@
 
 ## 1. 目标与产出物
 
-让 PaiCLI 接入 MCP 生态：stdio 子进程 server 与 Streamable HTTP 远程 server 都能用，工具自动注册到 `ToolRegistry`，与 HITL / AuditLog 协同。**默认开启**。
+让 DevCLI 接入 MCP 生态：stdio 子进程 server 与 Streamable HTTP 远程 server 都能用，工具自动注册到 `ToolRegistry`，与 HITL / AuditLog 协同。**默认开启**。
 
 最终交付：
 
-- `com.paicli.mcp` 包（4 个子包，约 15 个类、~1500 行代码）
+- `com.devcli.mcp` 包（4 个子包，约 15 个类、~1500 行代码）
 - 5 个新 CLI 命令：`/mcp` / `/mcp restart <name>` / `/mcp logs <name>` / `/mcp disable <name>` / `/mcp enable <name>`
 - 配置文件格式（与 Claude Code `claude_desktop_config.json` 兼容）
 - 默认配置 4 个 demo server（3 个 stdio + 1 个远程）
@@ -33,7 +33,7 @@
 ## 2. 模块拆分
 
 ```
-src/main/java/com/paicli/mcp/
+src/main/java/com/devcli/mcp/
 ├── McpClient.java              门面，对外暴露 list/call
 ├── McpServerManager.java       多 server 生命周期 + JVM shutdown hook
 ├── McpServer.java              单 server 运行态（status/tools/transport）
@@ -59,7 +59,7 @@ src/main/java/com/paicli/mcp/
     └── McpServerConfig.java    单 server 配置 record（command / url 二选一）
 ```
 
-测试 mirror 这个结构放到 `src/test/java/com/paicli/mcp/`。
+测试 mirror 这个结构放到 `src/test/java/com/devcli/mcp/`。
 
 ---
 
@@ -143,7 +143,7 @@ MCP server 返回的 `inputSchema` 是 JSON Schema draft-07 子集，但 GLM-5.1
 
 - 有 `command` 字段 → stdio
 - 有 `url` 字段 → Streamable HTTP
-- 用户级 `~/.paicli/mcp.json` + 项目级 `.paicli/mcp.json`，**项目级覆盖用户级**（按 server 名 merge）
+- 用户级 `~/.devcli/mcp.json` + 项目级 `.devcli/mcp.json`，**项目级覆盖用户级**（按 server 名 merge）
 - `${VAR}` 在 args / env / headers 里展开（环境变量 + 内置变量 `${PROJECT_DIR}` `${HOME}`）
 - 缺失的 env 变量**直接报错**，让用户知道哪里没配好（不要静默保留 `${VAR}`）
 
@@ -158,7 +158,7 @@ MCP server 返回的 `inputSchema` 是 JSON Schema draft-07 子集，但 GLM-5.1
 
 ### 3.9 HITL 默认审批
 
-`com.paicli.hitl.ApprovalPolicy.requiresApproval` 改为：
+`com.devcli.hitl.ApprovalPolicy.requiresApproval` 改为：
 
 ```java
 return DANGEROUS_TOOLS.contains(toolName) || toolName.startsWith("mcp__");
@@ -168,7 +168,7 @@ return DANGEROUS_TOOLS.contains(toolName) || toolName.startsWith("mcp__");
 
 ### 3.10 AuditLog 集成
 
-`com.paicli.tool.ToolRegistry.AUDIT_TOOLS` 扩展为「危险工具集 + 任何 `mcp__` 前缀工具」。审计字段保持不变；`tool` 字段就是 `mcp__filesystem__read_file`，过滤时按前缀。
+`com.devcli.tool.ToolRegistry.AUDIT_TOOLS` 扩展为「危险工具集 + 任何 `mcp__` 前缀工具」。审计字段保持不变；`tool` 字段就是 `mcp__filesystem__read_file`，过滤时按前缀。
 
 ### 3.11 args 脱敏（必须做）
 
@@ -207,19 +207,19 @@ audit 写入前对 args 做脱敏，避免 token / 凭证泄漏：
 ## 4. 与现有架构的集成（要修改的文件清单）
 
 **新增**：
-- `src/main/java/com/paicli/mcp/` 整个包
-- `src/test/java/com/paicli/mcp/` 测试
+- `src/main/java/com/devcli/mcp/` 整个包
+- `src/test/java/com/devcli/mcp/` 测试
 
 **修改**：
-- `src/main/java/com/paicli/tool/ToolRegistry.java`：新增 `registerMcpTool(McpToolDescriptor)` / `unregisterMcpTool(String toolName)`，`executeTool` 路由到 `McpToolBridge`；`AUDIT_TOOLS` 判断扩展为含 `mcp__` 前缀
-- `src/main/java/com/paicli/hitl/ApprovalPolicy.java`：`requiresApproval` 加 `mcp__` 前缀判断
-- `src/main/java/com/paicli/hitl/TerminalHitlHandler.java`：弹窗加 server 信息行
-- `src/main/java/com/paicli/policy/AuditLog.java`：新增 args 脱敏（regex 替换 token / Bearer / authorization）
-- `src/main/java/com/paicli/cli/Main.java`：启动时 `McpServerManager.startAll`；shutdown hook；CLI 命令分支；启动 banner 后打印 MCP server 状态
-- `src/main/java/com/paicli/cli/CliCommandParser.java`：5 个新 `MCP_*` 命令枚举与 parse 分支
-- `src/main/java/com/paicli/agent/Agent.java`：系统提示词加 MCP 工具说明
-- `src/main/java/com/paicli/agent/PlanExecuteAgent.java`：同上
-- `src/main/java/com/paicli/agent/SubAgent.java`：同上
+- `src/main/java/com/devcli/tool/ToolRegistry.java`：新增 `registerMcpTool(McpToolDescriptor)` / `unregisterMcpTool(String toolName)`，`executeTool` 路由到 `McpToolBridge`；`AUDIT_TOOLS` 判断扩展为含 `mcp__` 前缀
+- `src/main/java/com/devcli/hitl/ApprovalPolicy.java`：`requiresApproval` 加 `mcp__` 前缀判断
+- `src/main/java/com/devcli/hitl/TerminalHitlHandler.java`：弹窗加 server 信息行
+- `src/main/java/com/devcli/policy/AuditLog.java`：新增 args 脱敏（regex 替换 token / Bearer / authorization）
+- `src/main/java/com/devcli/cli/Main.java`：启动时 `McpServerManager.startAll`；shutdown hook；CLI 命令分支；启动 banner 后打印 MCP server 状态
+- `src/main/java/com/devcli/cli/CliCommandParser.java`：5 个新 `MCP_*` 命令枚举与 parse 分支
+- `src/main/java/com/devcli/agent/Agent.java`：系统提示词加 MCP 工具说明
+- `src/main/java/com/devcli/agent/PlanExecuteAgent.java`：同上
+- `src/main/java/com/devcli/agent/SubAgent.java`：同上
 - `pom.xml`：评估下来不需要新依赖（Jackson + OkHttp 已有），如果中途发现需要请回到上游确认
 
 **联动文档**（按 AGENTS.md 5.x 硬规则）：
@@ -240,7 +240,7 @@ audit 写入前对 args 做脱敏，避免 token / 凭证泄漏：
 | `/mcp disable <name>` | 运行时禁用，从 ToolRegistry 移除工具 | name |
 | `/mcp enable <name>` | 运行时启用 | name |
 
-**不**实现 `/mcp add` / `/mcp remove`：配置编辑通过文件 + 重启 PaiCLI。
+**不**实现 `/mcp add` / `/mcp remove`：配置编辑通过文件 + 重启 DevCLI。
 
 `CliCommandParser.CommandType` 新增：`MCP_LIST` / `MCP_RESTART` / `MCP_LOGS` / `MCP_DISABLE` / `MCP_ENABLE`。
 
@@ -260,9 +260,9 @@ audit 写入前对 args 做脱敏，避免 token / 凭证泄漏：
 ### 6.2 已决策（不要再讨论）
 
 - 环境变量缺失 → **报错**，不静默保留
-- server 启动失败 → **不阻塞** PaiCLI 启动，标 ERROR 跳过
+- server 启动失败 → **不阻塞** DevCLI 启动，标 ERROR 跳过
 - 工具描述截断长度：1000 字符
-- MCP 工具调用日志：写到 `~/.paicli/logs/mcp/<server>.log`（按天滚动，复用 logback 风格但用单独 logger）
+- MCP 工具调用日志：写到 `~/.devcli/logs/mcp/<server>.log`（按天滚动，复用 logback 风格但用单独 logger）
 
 ---
 
@@ -440,7 +440,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 |---|---|
 | Streamable HTTP demo server 用哪个 | Day 6 自己找一个公开免费的；找不到就自起 Python minimal MCP server，写到 README |
 | Windows 支持 | 第一版只测 macOS + Linux，README 明示 Windows 留 follow-up |
-| 配置文件位置 | `~/.paicli/mcp.json`（用户级）+ `.paicli/mcp.json`（项目级，可入 git） |
+| 配置文件位置 | `~/.devcli/mcp.json`（用户级）+ `.devcli/mcp.json`（项目级，可入 git） |
 | 是否引入新依赖 | 不引入。如果中途发现需要，停下来回上游确认 |
 | Banner 升级 | 升 v10.0.0，标语改 `MCP-Enabled Agent CLI` |
 | 工具命名前缀 | `mcp__{server}__{tool}` 完整前缀，跟 Claude Code 对齐 |

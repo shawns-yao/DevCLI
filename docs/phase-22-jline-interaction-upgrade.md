@@ -1,6 +1,6 @@
 # Phase 22: JLine-first 交互升级
 
-本阶段目标：把 PaiCLI 从“使用 JLine 的 CLI”升级为“以 JLine 4 为核心 UI runtime 的 Agent 终端”，交互体验对齐 Claude Code / Qoder CLI 一类产品。
+本阶段目标：把 DevCLI 从“使用 JLine 的 CLI”升级为“以 JLine 4 为核心 UI runtime 的 Agent 终端”，交互体验对齐 Claude Code / Qoder CLI 一类产品。
 
 参考文档：
 
@@ -74,7 +74,7 @@ Terminal
 
 目标：输入框成为真正的 Agent command line。
 
-- 增加 `PaiCliHighlighter`：高亮 `/command`、`@path`、`@image:`、`@clipboard`。
+- 增加 `DevCliHighlighter`：高亮 `/command`、`@path`、`@image:`、`@clipboard`。
 - 对危险命令关键词做视觉提示。
 - 对未闭合括号/引号做轻量提示。
 - 保持右提示 `message / @path / @image`。
@@ -85,7 +85,7 @@ Terminal
 
 目标：补全从命令列表升级到上下文感知。
 
-- 已扩展 `PaiCliCompleter` 的上下文补全入口，避免多个输入态各自维护补全逻辑。
+- 已扩展 `DevCliCompleter` 的上下文补全入口，避免多个输入态各自维护补全逻辑。
 - `/model` 已补 provider：`glm-5.1`、`glm-5v-turbo`、`deepseek`、`step`、`kimi`。
 - `/mcp` 已补 `restart/logs/disable/enable/resources/prompts` 子命令，并从 resource cache 补 server name。
 - `/skill on/off/show` 已补 skill name，candidate description 使用 skill 描述。
@@ -101,9 +101,9 @@ Terminal
 
 目标：历史好用，但不泄露敏感内容。
 
-- 已接入 `PaiCliHistory`，基于 JLine `DefaultHistory` 做 PaiCLI 过滤策略。
-- 默认配置 `~/.paicli/history/input.history` 持久化，可用 `paicli.history.file` / `PAICLI_HISTORY_FILE` 覆盖；如果配置值指向目录，则使用该目录下的 `input.history`。
-- 已设置 history size / file size，默认 `2000` / `10000`，可用 `paicli.history.size`、`paicli.history.fileSize` 或对应环境变量覆盖。
+- 已接入 `DevCliHistory`，基于 JLine `DefaultHistory` 做 DevCLI 过滤策略。
+- 默认配置 `~/.devcli/history/input.history` 持久化，可用 `devcli.history.file` / `DEVCLI_HISTORY_FILE` 覆盖；如果配置值指向目录，则使用该目录下的 `input.history`。
+- 已设置 history size / file size，默认 `2000` / `10000`，可用 `devcli.history.size`、`devcli.history.fileSize` 或对应环境变量覆盖。
 - 已忽略空白、重复、超长输入。
 - 已过滤 API key、Bearer、Authorization、password、secret、token、private key、base64 图片等敏感内容。
 - 已禁用 event expansion，避免 `!` 类历史展开产生意外行为。
@@ -156,7 +156,7 @@ HITL：
 
 目标：借鉴 JLine 能力，但不冒进替换主命令系统。
 
-- 暂不使用 `jline-shell` 替换 PaiCLI 现有命令解析。
+- 暂不使用 `jline-shell` 替换 DevCLI 现有命令解析。
 - 优先借鉴 `SystemCompleter` 思路强化 `/` 命令补全。
 - `console-ui` 可小实验用于 Plan review / HITL。
 - `less/table/nano` 可用于后续长审计、MCP logs、搜索结果查看。
@@ -168,7 +168,7 @@ HITL：
 - `InlineRenderer` printAbove fallback。
 - printAbove 多行与并发写。
 - `BottomStatusBar` 宽度 / 截断。
-- `PaiCliCompleter` 上下文补全。
+- `DevCliCompleter` 上下文补全。
 - 输入 highlighter。
 - History 过滤。
 - Plan review / HITL key binding。
@@ -182,4 +182,4 @@ HITL：
 - Ctrl+O、ESC、Ctrl+V、Tab、上下键正常。
 - Plan review 方向键不误判 ESC。
 - HITL 审批期间不吞输入。
-- `java -jar target/paicli-1.0-SNAPSHOT.jar` 真机验证。
+- `java -jar target/devcli-1.0-SNAPSHOT.jar` 真机验证。

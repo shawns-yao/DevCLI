@@ -16,7 +16,7 @@ This is a future design document. It records issues exposed by interviews and do
 
 ## 当前已有
 
-- PaiCLI 是本地 Java Agent CLI。
+- DevCLI 是本地 Java Agent CLI。
 - `RuntimeApiServer（运行时 API 服务）` 提供本地 API 能力。
 - `DurableTaskManager（持久任务管理器）` 已有本地任务管理雏形。
 - RAG 当前使用本地 SQLite。
@@ -153,5 +153,5 @@ worker heartbeat lost
 
 面试时可以这样讲：
 
-> PaiCLI 当前是本地 CLI，不能直接说已经具备企业级平台能力。如果做万人规模 Code RAG 服务，索引侧要事件驱动：Git webhook 进 Kafka/Pulsar，diff parser 只处理变更文件，chunk hash 命中就复用 embedding cache，热点文件做 debounce 和 coalescing。查询侧不能向量 topK 后一条条查图，那会 N+1，要提供 batch graph expansion API，把 BFS、关系过滤、limit 下推到图服务。执行侧 HTTP 只做 control plane，Agent 长任务进入 durable worker，每个 DAG step、tool call、PatchSet、memory summary 都 checkpoint，Worker 挂了以后靠 lease timeout 和 fencing token 恢复。
+> DevCLI 当前是本地 CLI，不能直接说已经具备企业级平台能力。如果做万人规模 Code RAG 服务，索引侧要事件驱动：Git webhook 进 Kafka/Pulsar，diff parser 只处理变更文件，chunk hash 命中就复用 embedding cache，热点文件做 debounce 和 coalescing。查询侧不能向量 topK 后一条条查图，那会 N+1，要提供 batch graph expansion API，把 BFS、关系过滤、limit 下推到图服务。执行侧 HTTP 只做 control plane，Agent 长任务进入 durable worker，每个 DAG step、tool call、PatchSet、memory summary 都 checkpoint，Worker 挂了以后靠 lease timeout 和 fencing token 恢复。
 

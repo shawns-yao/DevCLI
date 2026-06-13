@@ -145,5 +145,5 @@ baseline snapshot
 
 面试时可以这样讲：
 
-> 当前 PaiCLI 已经实现了文件级 `ResourceLease（资源租约）`，能挡住多个 Worker 同时覆盖同一个文件。但这只是物理冲突治理。生产级还要治理语义一致性，所以我会给每个 Worker 建 `WorkerContextManifest（Worker 上下文清单）`，记录它依赖过哪些文件、符号和索引版本。任何 Worker 改了公共符号后，通过 `ContextInvalidationEvent（上下文失效事件）` 找到受影响 Worker，把它们切到 `STALE_CONTEXT（上下文过期）`，并通过 `StaleWriteBarrier（过期写入屏障）` 禁止继续写。并发执行层面，后续会从共享工作区写入升级到 per-Worker `Worktree（工作树）`，Worker 只产出 `PatchSet（补丁集）`，由 Orchestrator 统一合并、编译和审查。
+> 当前 DevCLI 已经实现了文件级 `ResourceLease（资源租约）`，能挡住多个 Worker 同时覆盖同一个文件。但这只是物理冲突治理。生产级还要治理语义一致性，所以我会给每个 Worker 建 `WorkerContextManifest（Worker 上下文清单）`，记录它依赖过哪些文件、符号和索引版本。任何 Worker 改了公共符号后，通过 `ContextInvalidationEvent（上下文失效事件）` 找到受影响 Worker，把它们切到 `STALE_CONTEXT（上下文过期）`，并通过 `StaleWriteBarrier（过期写入屏障）` 禁止继续写。并发执行层面，后续会从共享工作区写入升级到 per-Worker `Worktree（工作树）`，Worker 只产出 `PatchSet（补丁集）`，由 Orchestrator 统一合并、编译和审查。
 

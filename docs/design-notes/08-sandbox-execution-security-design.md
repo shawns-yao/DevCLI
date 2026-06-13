@@ -123,5 +123,5 @@ copy snapshot into sandbox
 
 面试时可以这样讲：
 
-> 当前 PaiCLI 是本地 CLI，所以已有 PathGuard、CommandGuard、HITL 和 AuditLog，但这不是服务端强沙箱。生产级我会把执行面分层：可信本地项目可以用本地进程策略，不可信任务进入 Docker，更高风险用 gVisor 或 Firecracker。命令不是任意 shell，而是 `CommandProfile（命令画像）`，例如 Maven compile、Maven test、read-only shell，每类都有 timeout、资源限制、网络策略和参数白名单。沙箱不直接写宿主机，只导出 `PatchSet（补丁集）`，通过路径校验、编译测试和 Reviewer 后再合并。
+> 当前 DevCLI 是本地 CLI，所以已有 PathGuard、CommandGuard、HITL 和 AuditLog，但这不是服务端强沙箱。生产级我会把执行面分层：可信本地项目可以用本地进程策略，不可信任务进入 Docker，更高风险用 gVisor 或 Firecracker。命令不是任意 shell，而是 `CommandProfile（命令画像）`，例如 Maven compile、Maven test、read-only shell，每类都有 timeout、资源限制、网络策略和参数白名单。沙箱不直接写宿主机，只导出 `PatchSet（补丁集）`，通过路径校验、编译测试和 Reviewer 后再合并。
 

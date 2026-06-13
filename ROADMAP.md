@@ -1,4 +1,4 @@
-# PaiCLI 迭代路线图（21 期）
+# DevCLI 迭代路线图（21 期）
 
 从零开始，逐步构建生产级 Java Agent CLI
 
@@ -119,13 +119,13 @@
 **HITL 增强（后续补丁，归在本期叙事下）**：
 - `PathGuard` 路径围栏：`read_file` / `write_file` / `list_dir` / `create_project` 强制限定在项目根之内，拦截绝对路径越界、`..` 穿越、符号链接逃逸
 - `CommandGuard` 命令快速拒绝：HITL 之前的 fast-fail 黑名单（sudo / rm -rf 全盘 / mkfs / dd 写裸设备 / fork bomb / curl|sh / find / / chmod 777 / / shutdown），减少 HITL 弹窗骚扰
-- `AuditLog` 操作审计链：危险工具调用按天写 JSONL 到 `~/.paicli/audit/`，含 `outcome (allow|deny|error)` 与 `approver (hitl|policy|none)`
+- `AuditLog` 操作审计链：危险工具调用按天写 JSONL 到 `~/.devcli/audit/`，含 `outcome (allow|deny|error)` 与 `approver (hitl|policy|none)`
 - `write_file` 单文件 5MB 上限
 - CLI 命令：`/policy` 看安全策略状态、`/audit [N]` 看最近审计
 
 **为什么不叫沙箱**：
 - 真正的沙箱是隔离的执行环境（Docker / microVM / chroot），本地 Agent CLI（参考 Claude Code / Cursor / Aider）默认都不做沙箱——沙箱削弱 Agent 能力、给虚假安全感、体验更差
-- PaiCLI 的安全模型是 **HITL + 路径校验 + 命令快速拒绝 + 审计**，不是隔离
+- DevCLI 的安全模型是 **HITL + 路径校验 + 命令快速拒绝 + 审计**，不是隔离
 - 想做容器隔离的请参考 Pro 升级版本章节，或自行实现 `SandboxDriver` 接口
 
 **核心知识点**：
@@ -172,7 +172,7 @@
 - `AbstractOpenAiCompatibleClient` 基类：共享 SSE 流式解析、请求构建、工具调用增量合并逻辑
 - `GLMClient` / `DeepSeekClient` / `StepClient` / `KimiClient` 瘦子类：仅提供 API URL、模型名、API Key 与 provider 差异
 - 运行时模型切换：`/model glm-5.1` / `/model glm-5v-turbo` 明确切 GLM 模型；`/model deepseek` / `/model step` / `/model kimi` 切 provider 并读取配置里的具体模型
-- 配置持久化：`~/.paicli/config.json` 存储默认模型，支持 `.env` 回退读取 API Key
+- 配置持久化：`~/.devcli/config.json` 存储默认模型，支持 `.env` 回退读取 API Key
 - `LlmClientFactory` 工厂：根据 provider 名称和配置创建对应客户端
 
 **核心知识点**：
@@ -210,7 +210,7 @@
 
 **已完成**
 
-**目标**：把 PaiCLI 接入 MCP 生态。stdio 子进程 server 与 Streamable HTTP 远程 server 都能用，工具自动注册到 ToolRegistry，与 HITL / AuditLog 协同。
+**目标**：把 DevCLI 接入 MCP 生态。stdio 子进程 server 与 Streamable HTTP 远程 server 都能用，工具自动注册到 ToolRegistry，与 HITL / AuditLog 协同。
 
 **功能迭代**：
 - 手写 `JsonRpcClient`：JSON-RPC 2.0 客户端，请求-响应配对、通知、错误码、超时
@@ -220,7 +220,7 @@
 - `initialize` 握手 + capabilities 协商 + protocol version negotiation
 - `tools/list` + `tools/call`：工具按 `mcp__{server}__{tool}` 前缀注册到 `ToolRegistry`
 - MCP 返回 `content` 数组扁平化（text 拼接，image / resource 给 fallback 提示）
-- 配置文件：`~/.paicli/mcp.json`（用户级）+ `.paicli/mcp.json`（项目级，可入 git），格式与 Claude Code `claude_desktop_config.json` 兼容
+- 配置文件：`~/.devcli/mcp.json`（用户级）+ `.devcli/mcp.json`（项目级，可入 git），格式与 Claude Code `claude_desktop_config.json` 兼容
 - 启动时 eager 并行启动所有 server（复用第 7 期并行调度）
 - **默认开启**，`/mcp disable <name>` 关单个
 - HITL + AuditLog 集成：MCP 工具默认走 HITL，audit `tool` 字段带 `mcp__` 前缀
@@ -316,11 +316,11 @@
 **功能迭代**（详细开发任务见 `docs/phase-13-chrome-devtools-mcp.md`）：
 
 - 接入 Google 官方 `chrome-devtools-mcp@latest`（28 个工具：导航 / 输入 / 调试 / 网络 / 性能 / 模拟 / 扩展 / 内存）
-- **默认 enabled**：`~/.paicli/mcp.json` 不存在时启动自动创建模板，含 chrome-devtools 条目
+- **默认 enabled**：`~/.devcli/mcp.json` 不存在时启动自动创建模板，含 chrome-devtools 条目
 - `image` content 处理走**路线 B**：fallback 文案引导 LLM 优先用 `take_snapshot`（DOM 文本快照）而非 `take_screenshot`；不做真 图片复制粘贴输入（拆到第 21 期）
 - HITL「全部放行」改为 **server 维度**：用户对 chrome-devtools 选 `a → server` 后，连续浏览器操作只需确认一次（`approvedAllByServer` 集合 + 子菜单）
 - `Agent` / `PlanExecuteAgent` / `SubAgent` 系统提示词加「web_fetch vs 浏览器 MCP」决策表，明示微信公众号 / 知乎 / 推特等典型 web_fetch 失败站点直接走浏览器
-- `McpClient.initialize` 超时 30s → 60s（chrome-devtools 首次启动需 npx 拉包 + Chrome 冷启 ≈ 20s+），可被 `paicli.mcp.initialize.timeout.seconds` 覆盖
+- `McpClient.initialize` 超时 30s → 60s（chrome-devtools 首次启动需 npx 拉包 + Chrome 冷启 ≈ 20s+），可被 `devcli.mcp.initialize.timeout.seconds` 覆盖
 - `McpServerManager.startAll` 启动期间另起 status printer 线程，每 5s 打印未就绪 server 等待时长
 - 必跑端到端测试：微信公众号文章（`https://mp.weixin.qq.com/s/RB7kF_BbsJZ5_Hmu9PxWdg`），验证 web_fetch 失败 → LLM 自动 fallback 到浏览器 → take_snapshot 拿正文
 
@@ -370,15 +370,15 @@
 
 **前置依赖**：第 9 期 web 工具、第 13 期 Chrome DevTools MCP、第 14 期 CDP 会话复用全部就绪
 
-**目标**：做出 PaiCLI 自己的 Skill 加载机制，把零散的工具与决策指引打包成可复用单元，并以 web-access 作为首个落地 Skill
+**目标**：做出 DevCLI 自己的 Skill 加载机制，把零散的工具与决策指引打包成可复用单元，并以 web-access 作为首个落地 Skill
 
 **功能迭代**（详细开发任务见 `docs/phase-15-skill-system.md`）：
-- Skill 加载机制：三层目录扫描（jar 内置 / 用户级 `~/.paicli/skills/` / 项目级 `<project>/.paicli/skills/`），按 name 整体覆盖，frontmatter 走手写 YAML 子集解析（不引 SnakeYAML）
+- Skill 加载机制：三层目录扫描（jar 内置 / 用户级 `~/.devcli/skills/` / 项目级 `<project>/.devcli/skills/`），按 name 整体覆盖，frontmatter 走手写 YAML 子集解析（不引 SnakeYAML）
 - 启动期把启用 skill 的 `name` + `description` 注入 system prompt 索引段（单 description ≤ 500 codepoint，启用上限 20 个，索引段 ≤ 4KB）
 - 内置工具 `load_skill(name)`：LLM 主动调用以把 SKILL.md 正文写入 `SkillContextBuffer`，下一轮 user message 自动前置注入（lazy 展开，节省 token）
 - `SkillContextBuffer`：一次性消费、最多保留 3 个 skill body、`/clear` 可 reset
 - 内置 web-access Skill：决策手册（浏览哲学四步法 + 工具选择表 + 浏览器优先级 + Jina 兜底说明）+ 6 个站点经验文件（mp.weixin / zhuanlan.zhihu / x.com / xiaohongshu / github / juejin）+ cdp-cheatsheet
-- 启动期 `SkillBuiltinExtractor` 把 jar 内置 skill 解压到 `~/.paicli/skills-cache/`，按 `.version` 文件控制重建
+- 启动期 `SkillBuiltinExtractor` 把 jar 内置 skill 解压到 `~/.devcli/skills-cache/`，按 `.version` 文件控制重建
 - CLI 命令：`/skill` / `/skill list` / `/skill show <name>` / `/skill on <name>` / `/skill off <name>` / `/skill reload`
 - Jina Reader 集成：**只**在 web-access SKILL.md 写入「web_fetch 失败可让 execute_command 调 r.jina.ai」的提示，**不**改 `web_fetch` 工具内部链路（保持第 9 期纯本地约定）
 - Skill 与 HITL 协同：Skill 内调用 `execute_command` / 浏览器 MCP 等危险工具仍走 HITL 审批，沿用 `execute_command` 工具维度全放行；不给 Skill 单独审批维度
@@ -403,7 +403,7 @@
 - 终端TUI界面（Lanterna/JLine）
 - 文件树浏览
 - 代码高亮显示
-- 对话历史可视化（`~/.paicli/history/session_*.jsonl`）
+- 对话历史可视化（`~/.devcli/history/session_*.jsonl`）
 - 配置文件管理（TUI `/config` 面板）
 - TUI 输入桥接真实 ReAct / Plan / Team 执行链
 - TUI HITL 模态审批（批准 / 拒绝 / 跳过）
@@ -413,7 +413,7 @@
 - 抽出 `Renderer` 接口 + 三个实现：inline 流式（默认）/ lanterna 全屏（保留）/ plain 兜底
 - 默认形态切换为 **inline 流式 TUI**（Claude Code 风格），主屏直出 + 底部 DECSTBM 状态栏 + 行内可折叠工具块（`ctrl+o`）+ 行内 diff
 - HITL 改为单字符 `[y/n/a/s/m]` 提示；`/config` 改为浮起 palette
-- 切换：`PAICLI_RENDERER=inline|lanterna|plain`，旧 `PAICLI_TUI=true` 兼容映射到 lanterna
+- 切换：`DEVCLI_RENDERER=inline|lanterna|plain`，旧 `DEVCLI_TUI=true` 兼容映射到 lanterna
 
 **核心知识点**：
 - TUI开发
@@ -440,7 +440,7 @@
 - TUI 展示：inline 模式下诊断块以红色/黄色 ANSI 渲染，用户可以直观看到 Agent 引入的编译问题
 - 优雅降级：LSP server 启动失败或超时时只打 trace 日志，不阻塞 Agent 主流程；没有对应 LSP server 的语言跳过
 
-**设计参考**：DeepSeek TUI `crates/tui/src/lsp/`——`LspManager`（惰性 transport pool）+ `lsp_hooks.rs`（post-edit 挂钩）+ `diagnostics.rs`（诊断类型与渲染）。PaiCLI 的 Java 生态可以用 Eclipse JDT LS（`org.eclipse.jdt.ls`）或直接复用已有的 `CodeAnalyzer` 做轻量版。
+**设计参考**：DeepSeek TUI `crates/tui/src/lsp/`——`LspManager`（惰性 transport pool）+ `lsp_hooks.rs`（post-edit 挂钩）+ `diagnostics.rs`（诊断类型与渲染）。DevCLI 的 Java 生态可以用 Eclipse JDT LS（`org.eclipse.jdt.ls`）或直接复用已有的 `CodeAnalyzer` 做轻量版。
 
 **核心知识点**：
 - LSP（Language Server Protocol）的 JSON-RPC 子集
@@ -461,7 +461,7 @@
 **目标**：Agent 每次 turn 前后自动做 workspace 快照，用户可以一键回滚到任意 turn 之前的状态，不污染用户的 `.git` 历史。对标 DeepSeek TUI 的 `snapshot/` 系统。
 
 **功能迭代**：
-- `SideGitManager`：在 `~/.paicli/snapshots/<project_hash>/<worktree_hash>/.git` 维护独立 side-git 仓库，通过 JGit 纯 Java 实现，与用户的工作区 `.git` 完全隔离
+- `SideGitManager`：在 `~/.devcli/snapshots/<project_hash>/<worktree_hash>/.git` 维护独立 side-git 仓库，通过 JGit 纯 Java 实现，与用户的工作区 `.git` 完全隔离
 - `preTurnSnapshot()`：每个 turn 开始前，对 workspace 执行 JGit add/commit 并标记 `"pre-turn <turn_id>"`；MVP 采用同步 pre 快照，确保 Agent 改文件前已经保存基线
 - `postTurnSnapshot()`：turn 结束后异步执行第二次快照，commit message 标记 `"post-turn <turn_id>"`
 - `/restore <N>` 命令：从最近 N 个 turn 的 pre-turn 快照中恢复文件到工作区，不改变用户 `.git` 和对话历史
@@ -484,7 +484,7 @@
 
 **前置依赖**：第 1–16 期全链路（所有 system prompt 的累积）
 
-**当前状态**：MVP 已落地。ReAct、Plan task executor、Multi-Agent 三角色、Planner 已接入 `PromptAssembler`，内置资源位于 `src/main/resources/prompts/`，覆盖路径支持 `~/.paicli/prompts/...` 与 `.paicli/prompts/...`。
+**当前状态**：MVP 已落地。ReAct、Plan task executor、Multi-Agent 三角色、Planner 已接入 `PromptAssembler`，内置资源位于 `src/main/resources/prompts/`，覆盖路径支持 `~/.devcli/prompts/...` 与 `.devcli/prompts/...`。
 
 **目标**：把分散在 `Agent.java` / `PlanExecuteAgent.java` / `SubAgent.java` 三处的硬编码 system prompt 重构为编译时嵌入的 Markdown 分层，支持用户级覆盖，让 prompt 调优从"改 Java 源码 + 重编译"变成"改 Markdown 文件"。
 
@@ -495,7 +495,7 @@
   - `approvals/suggest.md` / `approvals/auto.md` / `approvals/never.md`：审批策略
   - `personalities/calm.md`：语调（保留现有 `AGENTS.md` 中的 Personality 规范）
 - `PromptAssembler`：按固定顺序组装（base → personality → mode → approval → project_context → skills → context_mgmt → handoff），遵循"volatile content last"原则以最大化 KV prefix cache 命中率
-- 用户级覆盖：`~/.paicli/prompts/base.md` 可整体替换内置 base.md；`~/.paicli/prompts/modes/agent.md` 可覆盖特定模式；项目级 `.paicli/prompts/...` 优先级更高
+- 用户级覆盖：`~/.devcli/prompts/base.md` 可整体替换内置 base.md；`~/.devcli/prompts/modes/agent.md` 可覆盖特定模式；项目级 `.devcli/prompts/...` 优先级更高
 - 启动时校验：必含 `## Language` section（保证 reasoning_content 语言跟随）
 - 兼容旧有 API：`Agent.java` / `PlanExecuteAgent.java` / `SubAgent.java` / `Planner.java` 不再手写运行模式 prompt，改为调 `PromptAssembler.assemble(mode, context)`
 - 自带 prompt 质量审计模板（参考 DeepSeek TUI `PROMPT_ANALYSIS.md`）：每次改 prompt 都应该写 Gap 分析
@@ -516,7 +516,7 @@
 
 **前置依赖**：第 13 期 Chrome DevTools MCP 已能产出截图等 image content；第 12 期长上下文工程已就绪。
 
-**目标**：用户可以在 TUI 里提交后台任务（如"重构整个模块"），关掉终端走人，回来查看结果。同时暴露 HTTP/SSE Runtime API，让 PaiCLI 可以嵌入 CI/CD、IDE 插件、Web 面板。
+**目标**：用户可以在 TUI 里提交后台任务（如"重构整个模块"），关掉终端走人，回来查看结果。同时暴露 HTTP/SSE Runtime API，让 DevCLI 可以嵌入 CI/CD、IDE 插件、Web 面板。
 
 **功能迭代**：
 
@@ -531,7 +531,7 @@
 - 持久化恢复：进程重启后未完成的任务自动重入队
 
 **Runtime API**：
-- `RuntimeApiServer`：嵌入式 HTTP/SSE 服务端（`paicli serve --http --port 8080`），基于已有的 OkHttp / Javalin 或 Spring Boot 内嵌
+- `RuntimeApiServer`：嵌入式 HTTP/SSE 服务端（`devcli serve --http --port 8080`），基于已有的 OkHttp / Javalin 或 Spring Boot 内嵌
 - 兼容 OpenAI Assistants API 的端点：
   - `POST /v1/threads`：创建对话线程
   - `POST /v1/threads/{id}/turns`：发起一轮 Agent 交互
@@ -548,13 +548,13 @@
 - OpenAI Assistants API 兼容层设计
 
 **当前 MVP 已落地**：
-- `DurableTaskManager`：SQLite 后台任务队列，默认 `~/.paicli/tasks/tasks.db`
+- `DurableTaskManager`：SQLite 后台任务队列，默认 `~/.devcli/tasks/tasks.db`
 - `/task`、`/task add`、`/task cancel`、`/task log` CLI 闭环
 - 进程启动时将残留 `running` 任务恢复为 `enqueued`
-- Worker Pool 默认 2，可用 `PAICLI_TASK_WORKERS` / `-Dpaicli.task.workers` 覆盖
+- Worker Pool 默认 2，可用 `DEVCLI_TASK_WORKERS` / `-Ddevcli.task.workers` 覆盖
 - `RuntimeApiServer`：基于 JDK `HttpServer`，仅监听 `127.0.0.1`
 - `RuntimeThreadStore`：SQLite 保存 thread 与 event 时间线
-- Runtime API 强制 `PAICLI_RUNTIME_API_KEY` / `-Dpaicli.runtime.api.key`
+- Runtime API 强制 `DEVCLI_RUNTIME_API_KEY` / `-Ddevcli.runtime.api.key`
 - 详细实现文档：`docs/phase-20-runtime-api.md`
 
 **教程标题候选**：《不想守在终端前？后台任务 + HTTP API，Agent 可以在后台跑》
@@ -565,7 +565,7 @@
 
 **前置依赖**：第 13 期 Chrome DevTools MCP 已能产出截图等 image content；第 12 期长上下文工程已就绪；第 17–20 期安全网与架构已就绪。
 
-**目标**：让 PaiCLI 真正"看见"图片——浏览器截图、用户粘贴的图片、文档中的图表，都能直接喂给 LLM 让它理解，而不是 fallback 成"[此工具返回了 image]"占位。此期排在安全网（LSP + 快照）和架构重构（Prompt + Task）之后，确保模型生态成熟时再做。
+**目标**：让 DevCLI 真正"看见"图片——浏览器截图、用户粘贴的图片、文档中的图表，都能直接喂给 LLM 让它理解，而不是 fallback 成"[此工具返回了 image]"占位。此期排在安全网（LSP + 快照）和架构重构（Prompt + Task）之后，确保模型生态成熟时再做。
 
 **功能迭代**：
 
@@ -588,7 +588,7 @@
 
 **不做**：
 - 视频 / 音频输入（再独立期）
-- 图像生成（PaiCLI 是 Agent 不是绘图工具）
+- 图像生成（DevCLI 是 Agent 不是绘图工具）
 - TUI sixel 协议显示截图（依赖第 16 期 TUI 是否实现，留作扩展）
 
 **核心知识点**：
@@ -651,4 +651,4 @@ Git       Prompt    异步后台    图片
 
 ---
 
-*已完成第 16 期 TUI 产品化（含 16.1 形态修正：默认切换为 inline 流式 TUI，Lanterna 全屏 TUI 通过 `PAICLI_RENDERER=lanterna` 保留）、第 17 期 LSP 诊断注入 MVP、第 18 期 Git Side-History 快照与回滚 MVP、第 19 期 Prompt 分层架构 MVP、第 20 期后台任务 + Runtime API MVP、第 21 期图片复制粘贴输入 MVP。*
+*已完成第 16 期 TUI 产品化（含 16.1 形态修正：默认切换为 inline 流式 TUI，Lanterna 全屏 TUI 通过 `DEVCLI_RENDERER=lanterna` 保留）、第 17 期 LSP 诊断注入 MVP、第 18 期 Git Side-History 快照与回滚 MVP、第 19 期 Prompt 分层架构 MVP、第 20 期后台任务 + Runtime API MVP、第 21 期图片复制粘贴输入 MVP。*

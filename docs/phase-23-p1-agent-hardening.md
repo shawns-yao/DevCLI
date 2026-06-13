@@ -8,7 +8,7 @@
 
 ## Background
 
-PaiCLI already has the core Agent loop, Plan-and-Execute, Multi-Agent orchestration,
+DevCLI already has the core Agent loop, Plan-and-Execute, Multi-Agent orchestration,
 RAG, MCP integration, HITL approval, AuditLog, Side-Git snapshots, token budgeting,
 and JavaParser post-edit diagnostics.
 
@@ -63,10 +63,10 @@ Non-goals:
 
 Implemented files:
 
-- `src/main/java/com/paicli/mcp/protocol/McpSchemaValidator.java`
-- `src/main/java/com/paicli/tool/ToolRegistry.java`
-- `src/test/java/com/paicli/mcp/protocol/McpSchemaValidatorTest.java`
-- `src/test/java/com/paicli/mcp/McpToolRegistrationTest.java`
+- `src/main/java/com/devcli/mcp/protocol/McpSchemaValidator.java`
+- `src/main/java/com/devcli/tool/ToolRegistry.java`
+- `src/test/java/com/devcli/mcp/protocol/McpSchemaValidatorTest.java`
+- `src/test/java/com/devcli/mcp/McpToolRegistrationTest.java`
 
 Acceptance criteria:
 
@@ -122,13 +122,13 @@ Default policy:
 
 Likely files:
 
-- `src/main/java/com/paicli/agent/AgentBudget.java`
-- `src/main/java/com/paicli/agent/ToolErrorClassifier.java`
-- `src/main/java/com/paicli/agent/Agent.java`
-- `src/main/java/com/paicli/agent/SubAgent.java`
-- `src/main/java/com/paicli/agent/PlanExecuteAgent.java`
-- `src/test/java/com/paicli/agent/AgentBudgetTest.java`
-- `src/test/java/com/paicli/agent/AgentBudgetTest.java`
+- `src/main/java/com/devcli/agent/AgentBudget.java`
+- `src/main/java/com/devcli/agent/ToolErrorClassifier.java`
+- `src/main/java/com/devcli/agent/Agent.java`
+- `src/main/java/com/devcli/agent/SubAgent.java`
+- `src/main/java/com/devcli/agent/PlanExecuteAgent.java`
+- `src/test/java/com/devcli/agent/AgentBudgetTest.java`
+- `src/test/java/com/devcli/agent/AgentBudgetTest.java`
 
 Acceptance criteria:
 
@@ -186,11 +186,11 @@ Implementation notes:
 
 Implemented files:
 
-- `src/main/java/com/paicli/plan/ResourceConflictDetector.java`
-- `src/main/java/com/paicli/agent/PlanExecuteAgent.java`
-- `src/main/java/com/paicli/agent/AgentOrchestrator.java`
-- `src/test/java/com/paicli/plan/ResourceConflictDetectorTest.java`
-- `src/test/java/com/paicli/agent/AgentOrchestratorTest.java`
+- `src/main/java/com/devcli/plan/ResourceConflictDetector.java`
+- `src/main/java/com/devcli/agent/PlanExecuteAgent.java`
+- `src/main/java/com/devcli/agent/AgentOrchestrator.java`
+- `src/test/java/com/devcli/plan/ResourceConflictDetectorTest.java`
+- `src/test/java/com/devcli/agent/AgentOrchestratorTest.java`
 
 Acceptance criteria:
 
@@ -237,8 +237,8 @@ run_id
 
 Storage:
 
-- JSONL under `~/.paicli/traces/trace-YYYY-MM-DD.jsonl`
-- Configurable with `PAICLI_TRACE_DIR` / `-Dpaicli.trace.dir`
+- JSONL under `~/.devcli/traces/trace-YYYY-MM-DD.jsonl`
+- Configurable with `DEVCLI_TRACE_DIR` / `-Ddevcli.trace.dir`
 - Default enabled for metadata and summaries, not full prompts.
 
 Privacy and size rules:
@@ -250,12 +250,12 @@ Privacy and size rules:
 
 Implemented files:
 
-- `src/main/java/com/paicli/trace/TraceRecorder.java`
-- `src/main/java/com/paicli/trace/TraceContext.java`
-- `src/main/java/com/paicli/agent/Agent.java`
-- `src/main/java/com/paicli/agent/PlanExecuteAgent.java`
-- `src/main/java/com/paicli/agent/AgentOrchestrator.java`
-- `src/test/java/com/paicli/trace/TraceRecorderTest.java`
+- `src/main/java/com/devcli/trace/TraceRecorder.java`
+- `src/main/java/com/devcli/trace/TraceContext.java`
+- `src/main/java/com/devcli/agent/Agent.java`
+- `src/main/java/com/devcli/agent/PlanExecuteAgent.java`
+- `src/main/java/com/devcli/agent/AgentOrchestrator.java`
+- `src/test/java/com/devcli/trace/TraceRecorderTest.java`
 
 Acceptance criteria:
 
@@ -285,12 +285,12 @@ mvn test -Pquick
 Manual checks:
 
 ```text
-1. Start PaiCLI with MCP enabled.
+1. Start DevCLI with MCP enabled.
 2. Trigger a MCP tool with a missing required argument and verify local validation.
 3. Trigger repeated MCP failures and verify the circuit breaker stops the loop.
 4. Run a Plan task with two read-only subtasks and confirm they remain parallel.
 5. Run a Plan task with two same-file write subtasks and confirm they serialize.
-6. Inspect ~/.paicli/traces/ and verify trace JSONL contains sanitized metadata.
+6. Inspect ~/.devcli/traces/ and verify trace JSONL contains sanitized metadata.
 ```
 
 ## Resume Wording After This Phase

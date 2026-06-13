@@ -7,14 +7,14 @@
 ### 后台任务
 
 - `DurableTaskManager`：SQLite 持久化任务队列
-- 默认数据库：`~/.paicli/tasks/tasks.db`
+- 默认数据库：`~/.devcli/tasks/tasks.db`
 - 生命周期：
   - `enqueued`
   - `running`
   - `completed`
   - `failed`
   - `canceled`
-- Worker Pool：默认 2 个后台 worker，可用 `PAICLI_TASK_WORKERS` 或 `-Dpaicli.task.workers` 覆盖
+- Worker Pool：默认 2 个后台 worker，可用 `DEVCLI_TASK_WORKERS` 或 `-Ddevcli.task.workers` 覆盖
 - 进程启动时把上次残留的 `running` 任务恢复为 `enqueued`
 - CLI 命令：
   - `/task` 或 `/task list [N]`
@@ -24,22 +24,22 @@
 
 ### Runtime API
 
-实现位于 `src/main/java/com/paicli/runtime/api/`，使用 JDK 内置 `HttpServer`，不引入 Spring / Javalin。
+实现位于 `src/main/java/com/devcli/runtime/api/`，使用 JDK 内置 `HttpServer`，不引入 Spring / Javalin。
 
 启动：
 
 ```bash
-PAICLI_RUNTIME_API_KEY=your_local_api_key \
-java -jar target/paicli-1.0-SNAPSHOT.jar serve --http --port 8080
+DEVCLI_RUNTIME_API_KEY=your_local_api_key \
+java -jar target/devcli-1.0-SNAPSHOT.jar serve --http --port 8080
 ```
 
 安全策略：
 
 - 仅监听 `127.0.0.1`
-- 必须配置 `PAICLI_RUNTIME_API_KEY` 或 `-Dpaicli.runtime.api.key`
+- 必须配置 `DEVCLI_RUNTIME_API_KEY` 或 `-Ddevcli.runtime.api.key`
 - 请求头支持：
   - `Authorization: Bearer <key>`
-  - `X-PaiCLI-API-Key: <key>`
+  - `X-DevCLI-API-Key: <key>`
 
 端点：
 
@@ -74,5 +74,5 @@ mvn test -Dtest=DurableTaskManagerTest,RuntimeApiServerTest,CliCommandParserTest
 mvn test -Pquick
 mvn test
 mvn -q clean package -DskipTests
-PAICLI_RUNTIME_API_KEY=test java -jar target/paicli-1.0-SNAPSHOT.jar serve --http --port 0
+DEVCLI_RUNTIME_API_KEY=test java -jar target/devcli-1.0-SNAPSHOT.jar serve --http --port 0
 ```

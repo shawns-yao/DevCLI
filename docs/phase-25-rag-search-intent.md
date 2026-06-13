@@ -7,7 +7,7 @@
 Let the Agent pass retrieval intent into `search_code` while keeping backend
 guardrails against hallucinated parameters.
 
-PaiCLI is an Agent CLI, so the outer LLM often knows whether it is looking for a
+DevCLI is an Agent CLI, so the outer LLM often knows whether it is looking for a
 call chain, a definition, an error location, or a config item. The RAG layer now
 accepts that intent as a hint, but does not blindly trust it.
 

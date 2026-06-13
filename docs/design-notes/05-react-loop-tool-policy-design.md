@@ -127,5 +127,5 @@ progress = resolved_errors - new_errors + accepted_tests + meaningful_file_chang
 
 面试时可以这样讲：
 
-> PaiCLI 的 ReAct 不是放任模型一直调工具，而是要加 `ToolUsePolicy（工具调用策略）`。我会记录每次工具调用的 query、参数 hash、结果指纹、耗时和 token 成本。如果同一个 Agent 连续检索同一 query、读取同一文件、或者编译错误指纹不变，说明没有信息增益，就不能继续原地循环。编译错误会先变成 `ErrorFingerprint（错误指纹）` 和 root-cause digest，只把根因和代表调用点反馈给 Agent。每轮用 progress score 判断收敛还是发散，发散时由 Orchestrator 停止 Worker 并触发 re-plan。
+> DevCLI 的 ReAct 不是放任模型一直调工具，而是要加 `ToolUsePolicy（工具调用策略）`。我会记录每次工具调用的 query、参数 hash、结果指纹、耗时和 token 成本。如果同一个 Agent 连续检索同一 query、读取同一文件、或者编译错误指纹不变，说明没有信息增益，就不能继续原地循环。编译错误会先变成 `ErrorFingerprint（错误指纹）` 和 root-cause digest，只把根因和代表调用点反馈给 Agent。每轮用 progress score 判断收敛还是发散，发散时由 Orchestrator 停止 Worker 并触发 re-plan。
 

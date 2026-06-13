@@ -6,7 +6,7 @@ This document records improvement work exposed by recent technical and scenario 
 
 It is a future design document. It does not change current runtime behavior.
 
-Current PaiCLI behavior:
+Current DevCLI behavior:
 
 - `CodeRetriever（代码检索器）` supports hybrid code retrieval with keyword, semantic, and bounded graph expansion.
 - `CodeIndex（代码索引）` builds chunks and JavaParser relations into a local SQLite-backed index.

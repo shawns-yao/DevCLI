@@ -140,4 +140,4 @@ current file content
 
 面试时可以这样讲：
 
-> 当前 PaiCLI 用 JavaParser 做的是低成本 AST 索引，不会把它夸成完整编译器。对于 `userService.save()` 这种调用，当前会基于字段、局部变量、import 做 best-effort 类型推断，但生产级要升级为分层符号解析：先做源码内符号表，再接 Maven classpath 和 JavaParser SymbolSolver，最后把 LSP 的 definition/reference 写成高置信 verified edge。每条关系都带 `SymbolConfidence（符号置信度）` 和来源，graph expansion 会优先使用高置信边。pom.xml 变化时通过 `ClasspathEpoch（类路径版本）` 让旧边降级或失效。
+> 当前 DevCLI 用 JavaParser 做的是低成本 AST 索引，不会把它夸成完整编译器。对于 `userService.save()` 这种调用，当前会基于字段、局部变量、import 做 best-effort 类型推断，但生产级要升级为分层符号解析：先做源码内符号表，再接 Maven classpath 和 JavaParser SymbolSolver，最后把 LSP 的 definition/reference 写成高置信 verified edge。每条关系都带 `SymbolConfidence（符号置信度）` 和来源，graph expansion 会优先使用高置信边。pom.xml 变化时通过 `ClasspathEpoch（类路径版本）` 让旧边降级或失效。

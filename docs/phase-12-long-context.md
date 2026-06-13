@@ -1,6 +1,6 @@
 # 第 12 期开发任务：长上下文工程
 
-> 本期目标是让 PaiCLI 的运行策略随模型上下文窗口变化，而不是继续使用固定 300K token 预算和固定 RAG topK。
+> 本期目标是让 DevCLI 的运行策略随模型上下文窗口变化，而不是继续使用固定 300K token 预算和固定 RAG topK。
 
 ## 1. 已交付范围
 
@@ -17,7 +17,7 @@
   - long：`>= 100000`
 - `AgentBudget` 动态预算：
   - 默认 `80% * maxContextWindow`
-  - 仍可用 `-Dpaicli.react.token.budget=...` 覆盖
+  - 仍可用 `-Ddevcli.react.token.budget=...` 覆盖
 - Memory 策略：
   - short / balanced 保留压缩
   - long 跳过自动摘要压缩，扩大短期记忆预算
@@ -42,12 +42,12 @@
 - 不实现 Anthropic `cache_control` 块
 - 不向 GLM / DeepSeek 请求体注入未确认兼容的私有 cache 字段
 - 不把 MCP resource body 自动塞进 system prompt
-- 不改变 `pom.xml` 的 Maven 产物版本，Jar 仍是 `paicli-1.0-SNAPSHOT.jar`
+- 不改变 `pom.xml` 的 Maven 产物版本，Jar 仍是 `devcli-1.0-SNAPSHOT.jar`
 
 ## 3. 核心文件
 
 ```text
-src/main/java/com/paicli/context/
+src/main/java/com/devcli/context/
 ├── ContextMode.java
 ├── ContextProfile.java
 └── TokenUsageFormatter.java

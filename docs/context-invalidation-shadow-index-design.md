@@ -4,7 +4,7 @@
 
 This document describes future production-grade design. It is not implemented in the current runtime.
 
-Current PaiCLI behavior:
+Current DevCLI behavior:
 
 - `WorkingMemory` stores task state, volatile facts, and recent tool evidence for the current session.
 - `ConversationHistoryCompactor` controls the real LLM message window.

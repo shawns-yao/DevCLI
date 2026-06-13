@@ -149,4 +149,4 @@ SyntheticSymbolQuery（合成符号查询）
 
 面试时可以这样讲：
 
-> 当前 PaiCLI 的 RAG 已经不是单纯向量检索，而是 keyword、semantic 和 graph expansion 的混合检索。融合层先用 `RRF（倒数排名融合）` 解决不同通道分数量纲不一致的问题，再叠加符号级 boost，最后用 `CrossEncoderReranker（交叉编码器重排器）` 对候选代码块做二阶段重排。评估上不会空口说 recall，而是构建 `CodeRagBenchmark（代码 RAG 基准集）`，把已知修复案例、编译错误案例、合成符号查询分开测，指标同时看 `Recall@k（前 k 召回率）`、`MRR（平均倒数排名）`、`Precision@k（前 k 精度）` 和 Agent 后续编译通过率。
+> 当前 DevCLI 的 RAG 已经不是单纯向量检索，而是 keyword、semantic 和 graph expansion 的混合检索。融合层先用 `RRF（倒数排名融合）` 解决不同通道分数量纲不一致的问题，再叠加符号级 boost，最后用 `CrossEncoderReranker（交叉编码器重排器）` 对候选代码块做二阶段重排。评估上不会空口说 recall，而是构建 `CodeRagBenchmark（代码 RAG 基准集）`，把已知修复案例、编译错误案例、合成符号查询分开测，指标同时看 `Recall@k（前 k 召回率）`、`MRR（平均倒数排名）`、`Precision@k（前 k 精度）` 和 Agent 后续编译通过率。

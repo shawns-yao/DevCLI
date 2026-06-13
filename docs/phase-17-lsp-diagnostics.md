@@ -13,7 +13,7 @@ Agent 写完代码后，不等用户手动执行 `mvn compile`，就能在下一
 
 ## 已实现范围
 
-- `src/main/java/com/paicli/lsp/LspManager.java`
+- `src/main/java/com/devcli/lsp/LspManager.java`
   - 持有项目根路径
   - 对 `*.java` 文件运行 JavaParser 语法诊断
   - 按文件维护 pending diagnostics
@@ -32,24 +32,24 @@ Agent 写完代码后，不等用户手动执行 `mvn compile`，就能在下一
 
 ```bash
 # 默认开启
-PAICLI_LSP_ENABLED=true
+DEVCLI_LSP_ENABLED=true
 
 # 默认 20
-PAICLI_LSP_MAX_DIAGNOSTICS=20
+DEVCLI_LSP_MAX_DIAGNOSTICS=20
 ```
 
 系统属性同样支持：
 
 ```bash
--Dpaicli.lsp.enabled=false
--Dpaicli.lsp.max.diagnostics=20
+-Ddevcli.lsp.enabled=false
+-Ddevcli.lsp.max.diagnostics=20
 ```
 
 ## 当前边界
 
 - 只做 Java 语法级诊断，不做完整 Maven 编译。
 - 不启动 JDT LS / rust-analyzer / pyright / gopls。
-- 不解析 `execute_command` 里的手写补丁，也不支持 `edit_file` / `apply_patch` 工具，因为当前 PaiCLI 内置工具里还没有这两个工具。
+- 不解析 `execute_command` 里的手写补丁，也不支持 `edit_file` / `apply_patch` 工具，因为当前 DevCLI 内置工具里还没有这两个工具。
 - 多 Agent 并发时 pending diagnostics 挂在共享 `ToolRegistry` 上，下一条进入 LLM 请求的执行链会消费诊断。
 
 ## 后续增强

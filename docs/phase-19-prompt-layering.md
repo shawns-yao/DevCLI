@@ -17,7 +17,7 @@
 主模块：
 
 ```text
-src/main/java/com/paicli/prompt/
+src/main/java/com/devcli/prompt/
 ├── PromptAssembler.java
 ├── PromptContext.java
 ├── PromptMode.java
@@ -80,15 +80,15 @@ handoff
 同一路径按下面优先级读取：
 
 1. jar 内置：`src/main/resources/prompts/...`
-2. 用户级覆盖：`~/.paicli/prompts/...`
-3. 项目级覆盖：`.paicli/prompts/...`
+2. 用户级覆盖：`~/.devcli/prompts/...`
+3. 项目级覆盖：`.devcli/prompts/...`
 
 例如：
 
 ```text
-~/.paicli/prompts/base.md
-~/.paicli/prompts/modes/agent.md
-.paicli/prompts/modes/team-worker.md
+~/.devcli/prompts/base.md
+~/.devcli/prompts/modes/agent.md
+.devcli/prompts/modes/team-worker.md
 ```
 
 覆盖是“整文件替换”，不是局部 merge。
@@ -107,8 +107,8 @@ handoff
 
 - [x] 新增 `PromptMode` / `PromptContext` / `PromptRepository` / `PromptAssembler`
 - [x] 新增内置 Markdown prompt 资源
-- [x] 支持用户级覆盖 `~/.paicli/prompts/...`
-- [x] 支持项目级覆盖 `.paicli/prompts/...`
+- [x] 支持用户级覆盖 `~/.devcli/prompts/...`
+- [x] 支持项目级覆盖 `.devcli/prompts/...`
 - [x] 校验 `## Language`
 - [x] ReAct 接入
 - [x] Plan task executor 接入

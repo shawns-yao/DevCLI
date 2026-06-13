@@ -9,11 +9,11 @@
 ## 0. 启动前置
 
 ```bash
-cd /Users/itwanger/Documents/GitHub/paicli
+cd /Users/itwanger/Documents/GitHub/devcli
 mvn -q clean package -DskipTests
 ```
 
-产物：`target/paicli-1.0-SNAPSHOT.jar`，所有用例都基于这个 jar 启动。
+产物：`target/devcli-1.0-SNAPSHOT.jar`，所有用例都基于这个 jar 启动。
 
 清理副作用：跑完后用 `rm hello*.txt a.txt b.txt c.txt renamed.txt hello-test.txt 2>/dev/null` 清掉测试文件。
 
@@ -23,11 +23,11 @@ mvn -q clean package -DskipTests
 
 **启动**：
 ```bash
-java -jar target/paicli-1.0-SNAPSHOT.jar
+java -jar target/devcli-1.0-SNAPSHOT.jar
 ```
 
 **预期**：
-- Banner 显示简洁的 `PaiCLI v16.1.0` 开屏，不带右侧盒线边框
+- Banner 显示简洁的 `DevCLI v16.1.0` 开屏，不带右侧盒线边框
 - 进入 JLine REPL，输入行由 LineReader 停在当前 transcript 位置，提示 `* `
 - **不进 alternate screen**（退出后 banner、对话历史还留在 terminal scrollback 里）
 - 输入行下方留 1 行间距后显示两行 inline 状态区：反色状态栏 + 操作提示行（用例 15 详细验证）
@@ -216,7 +216,7 @@ Ctrl+O 展开后看到三个文件路径都在 `└` 缩进列表里。
 ## 10. 形态切换 — Lanterna 全屏（用例 9）
 
 ```bash
-PAICLI_RENDERER=lanterna java -jar target/paicli-1.0-SNAPSHOT.jar
+DEVCLI_RENDERER=lanterna java -jar target/devcli-1.0-SNAPSHOT.jar
 ```
 
 **预期**：进 alternate screen，三栏 Lanterna 窗口（文件树 + 对话流 + 状态栏 + 底部输入栏）。
@@ -229,14 +229,14 @@ PAICLI_RENDERER=lanterna java -jar target/paicli-1.0-SNAPSHOT.jar
 
 ---
 
-## 11. 形态切换 — 兼容旧 PAICLI_TUI（用例 10）
+## 11. 形态切换 — 兼容旧 DEVCLI_TUI（用例 10）
 
 ```bash
-PAICLI_TUI=true java -jar target/paicli-1.0-SNAPSHOT.jar
+DEVCLI_TUI=true java -jar target/devcli-1.0-SNAPSHOT.jar
 ```
 
 **预期**：
-- stderr 出现 `⚠️ PAICLI_TUI=true 已废弃，请改用 PAICLI_RENDERER=lanterna`
+- stderr 出现 `⚠️ DEVCLI_TUI=true 已废弃，请改用 DEVCLI_RENDERER=lanterna`
 - 行为等同用例 10（Lanterna 全屏）
 
 ---
@@ -244,7 +244,7 @@ PAICLI_TUI=true java -jar target/paicli-1.0-SNAPSHOT.jar
 ## 12. 形态切换 — Plain 兜底（用例 11）
 
 ```bash
-PAICLI_RENDERER=plain java -jar target/paicli-1.0-SNAPSHOT.jar
+DEVCLI_RENDERER=plain java -jar target/devcli-1.0-SNAPSHOT.jar
 ```
 
 **输入**：
@@ -264,7 +264,7 @@ PAICLI_RENDERER=plain java -jar target/paicli-1.0-SNAPSHOT.jar
 ## 13. 禁色（用例 12）
 
 ```bash
-NO_COLOR=1 java -jar target/paicli-1.0-SNAPSHOT.jar
+NO_COLOR=1 java -jar target/devcli-1.0-SNAPSHOT.jar
 ```
 
 **预期**：
@@ -277,17 +277,17 @@ NO_COLOR=1 java -jar target/paicli-1.0-SNAPSHOT.jar
 ## 14. 未知 RENDERER 值的回退（用例 13）
 
 ```bash
-PAICLI_RENDERER=weird java -jar target/paicli-1.0-SNAPSHOT.jar
+DEVCLI_RENDERER=weird java -jar target/devcli-1.0-SNAPSHOT.jar
 ```
 
-**预期**：stderr `⚠️ 未识别的 PAICLI_RENDERER='weird'，回退到 inline`，正常进 inline 模式。
+**预期**：stderr `⚠️ 未识别的 DEVCLI_RENDERER='weird'，回退到 inline`，正常进 inline 模式。
 
 ---
 
 ## 15. dumb 终端自动降级（用例 14）
 
 ```bash
-TERM=dumb java -jar target/paicli-1.0-SNAPSHOT.jar
+TERM=dumb java -jar target/devcli-1.0-SNAPSHOT.jar
 ```
 
 **预期**：stderr `⚠️ 终端不支持 ANSI，inline 模式回退到 plain`，行为等同用例 12。
@@ -306,7 +306,7 @@ TERM=dumb java -jar target/paicli-1.0-SNAPSHOT.jar
 **预期**：等待输入时，LineReader 输入行下方留 1 行间距，然后紧跟两行 inline status，中间不能出现大段空白：
 ```
 *
- PaiCLI  idle  glm-5.1  ctx 0/200.0k  HITL OFF  MCP 4/4  Skill 2/2
+ DevCLI  idle  glm-5.1  ctx 0/200.0k  HITL OFF  MCP 4/4  Skill 2/2
  Auto Model · / commands · @path/@image · Ctrl+O fold · ESC clear
 ```
 
@@ -339,7 +339,7 @@ TERM=dumb java -jar target/paicli-1.0-SNAPSHOT.jar
 
 **输入**：
 ```
-把 ROADMAP.md 第一行改成 "# PaiCLI 路线图（v16.1 测试）"
+把 ROADMAP.md 第一行改成 "# DevCLI 路线图（v16.1 测试）"
 ```
 
 HITL 按 `y` 通过。**预期**对话流里出现：
@@ -347,8 +347,8 @@ HITL 按 `y` 通过。**预期**对话流里出现：
 ```
 📝 ROADMAP.md
 @@ -1,N +1,N @@
-- # PaiCLI ROADMAP（原标题）
-+ # PaiCLI 路线图（v16.1 测试）
+- # DevCLI ROADMAP（原标题）
++ # DevCLI 路线图（v16.1 测试）
   ...（上下文行）
 ```
 
@@ -411,7 +411,7 @@ HITL 通过后**预期**：
 │   [3] HITL: OFF
 │   [4] Skill 启用数: 3
 │   [5] 渲染器: InlineRenderer
-│   [6] 配置文件: ~/.paicli/config.json (只读视图，编辑请用编辑器)
+│   [6] 配置文件: ~/.devcli/config.json (只读视图，编辑请用编辑器)
 └─ ↑↓ 切换  Enter 确认  Esc 取消  数字键直选
 ```
 
@@ -434,7 +434,7 @@ HITL 通过后**预期**：
 ## 22. /config palette — Lanterna 模式（用例 20）
 
 ```bash
-PAICLI_RENDERER=lanterna java -jar target/paicli-1.0-SNAPSHOT.jar
+DEVCLI_RENDERER=lanterna java -jar target/devcli-1.0-SNAPSHOT.jar
 ```
 
 TUI 输入框输入 `/config`。
@@ -443,10 +443,10 @@ TUI 输入框输入 `/config`。
 
 ---
 
-## 23. PAICLI_NO_STATUSBAR 禁用状态栏
+## 23. DEVCLI_NO_STATUSBAR 禁用状态栏
 
 ```bash
-PAICLI_NO_STATUSBAR=true java -jar target/paicli-1.0-SNAPSHOT.jar
+DEVCLI_NO_STATUSBAR=true java -jar target/devcli-1.0-SNAPSHOT.jar
 ```
 
 **预期**：
@@ -461,7 +461,7 @@ PAICLI_NO_STATUSBAR=true java -jar target/paicli-1.0-SNAPSHOT.jar
 **手动操作**：把终端窗口拖到 `< 5 行` 或 `< 20 列`。
 
 ```bash
-java -jar target/paicli-1.0-SNAPSHOT.jar
+java -jar target/devcli-1.0-SNAPSHOT.jar
 ```
 
 **预期**：`TerminalCapabilities.supportsScrollRegion` 返回 false，inline 模式禁用状态栏，但其它特性不变。
@@ -515,7 +515,7 @@ java -jar target/paicli-1.0-SNAPSHOT.jar
 
 **已知不在测试范围**：
 - 流式输出与状态栏并发刷新的撕裂（极小概率，肉眼几乎不可见，不阻断任务）
-- 旧 Windows cmd / PuTTY 等不适合 ANSI 光标控制的终端：用 `PAICLI_NO_STATUSBAR=true` 即可
+- 旧 Windows cmd / PuTTY 等不适合 ANSI 光标控制的终端：用 `DEVCLI_NO_STATUSBAR=true` 即可
 
 ---
 

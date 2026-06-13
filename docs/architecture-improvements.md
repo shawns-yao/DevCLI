@@ -1,7 +1,7 @@
 # 架构问题修复记录
 
 ## 修复时间
-**2026-06-12**
+**2026-06-12 / 2026-06-13**
 
 ---
 
@@ -13,26 +13,17 @@
 - Worker 崩溃后租约永不释放 → 文件永久锁死
 
 **修复方案**：
-```java
-// 租约加时间戳
-private record LeaseEntry(String stepId, long acquireTime) {}
-
-// 超时自动回收（30 秒）
-if (now - oldEntry.acquireTime > LEASE_TIMEOUT_MS) {
-    log.warn("租约超时，强制回收: {}", normalized);
-    return new LeaseEntry(stepId, now);
-}
-
-// 定期清理超时租约
-public int pruneExpiredLeases() {
-    // 遍历清理超时租约
-}
-```
+- 租约加时间戳（`LeaseEntry(stepId, acquireTime)`），`acquireWrite` 时超时（30s）自动回收
+- `write_file` 执行前二次校验 `isLeaseValid`，防止租约超时被回收后旧任务仍然写入
+- `pruneExpiredLeases()` 主动清理接口由 `ToolRegistry` 委托暴露，
+  `AgentOrchestrator.run()` / `resume()` 启动时调用一次，回收上一轮崩溃残留
 
 **价值**：
 - 避免 Worker 崩溃导致文件永久锁死
 - 30 秒超时足够正常 Worker 完成写入
-- 提供主动清理接口（可定时任务调用）
+
+**边界说明**：
+- 超时回收只写 slf4j 日志，未接 `AuditLog` 审计链
 
 ---
 
@@ -61,78 +52,50 @@ public int pruneExpiredLeases() {
 
 ---
 
-### 3. ✅ Multi-Agent - 添加 Checkpoint 断点续传
+### 3. ✅ Multi-Agent - Checkpoint 断点续传（/team resume）
 
 **问题**：
-- Worker 失败后从头开始，浪费已完成步骤
+- Worker 失败/进程崩溃后任务从头开始，浪费已完成步骤的时间和 Token
+- 早期版本 checkpoint 只写不读：未持久化计划本身，重启后重新规划产生新步骤 id，无法对位
 
-**修复方案**：
+**实现范围**（`AgentCheckpoint` + `AgentOrchestrator` + `ToolRegistry` + `Main`）：
 
-**新增 `AgentCheckpoint.java`**：
-```java
-public class AgentCheckpoint {
-    private String orchestrationId;
-    private String goal;
-    private List<String> completedSteps;      // 已完成步骤
-    private Map<String, StepArtifact> artifacts; // 步骤产物
-    private long timestamp;
-    private int failedSteps;
-    private String lastError;
+- **计划 + 进度双层落盘**：计划解析完成时把完整任务文本、步骤列表（id/描述/类型/依赖）和
+  验收点写入 checkpoint；步骤终态时保存完整 result（8KB 上限，供后续步骤当依赖上下文）
+  和本步骤实际修改的文件列表（`ToolRegistry` 按 `resourceLeaseStep` 在 write_file 写入点归集）
+- **恢复入口**：`/team resume` 恢复最近 checkpoint，`/team resume <id>` 恢复指定任务；
+  恢复时重建步骤列表——已完成步骤直接标 COMPLETED 带回 result，被重规划接管的步骤保持
+  SUPERSEDED，其余（含上次失败的）重置为 PENDING 重新执行；不重新规划、不产生新步骤 id
+- **重规划同步**：运行中触发失败重规划（原步骤接管 + 恢复步骤插入）时，最新计划结构同步回
+  checkpoint，崩溃后 resume 仍能对位
+- **原子写入**：save 先写 `.tmp` 再原子 move，崩溃瞬间不会留下半截 JSON
+- 全部成功后删除 checkpoint；失败/崩溃后保留在 `~/.devcli/checkpoints/` 供恢复或排查
 
-    // 保存 Checkpoint
-    public void save() {
-        // JSON 序列化到 ~/.devcli/checkpoints/{orchestrationId}.json
-    }
+**边界（不在实现范围内）**：
+- resume 不恢复 WorkingMemory / 会话记忆，Worker 上下文完全来自 checkpoint 内的步骤 result
+- 崩溃时执行到一半的步骤可能留下半成品文件改动，resume 不自动回滚（Side-Git 快照联动未实现）
 
-    // 加载 Checkpoint
-    public static AgentCheckpoint load(String orchestrationId) {
-        // 从磁盘加载
-    }
+---
 
-    // 列出可恢复的 Checkpoint
-    public static List<CheckpointInfo> listAvailable() {
-        // 列出所有 Checkpoint
-    }
+### 4. ✅ Runtime API - 跨 turn 上下文延续（存储即状态）
 
-    // 记录完成步骤
-    public void addCompletedStep(String stepId, List<String> modifiedFiles, String summary) {
-        completedSteps.add(stepId);
-        artifacts.put(stepId, new StepArtifact(...));
-    }
-}
-```
+**问题**：
+- `/v1/threads/{id}/turns` 语义上是多轮对话，但每个 turn 新建 Agent，turn 2 不记得 turn 1
 
-**集成方式**（AgentOrchestrator）：
-```java
-// 1. 创建或加载 Checkpoint
-AgentCheckpoint checkpoint = AgentCheckpoint.load(orchestrationId);
-if (checkpoint == null) {
-    checkpoint = new AgentCheckpoint(orchestrationId, goal);
-}
+**实现方案**（方案 A"存储即状态，计算无状态"）：
 
-// 2. 执行 DAG 时跳过已完成步骤
-for (Task task : dag) {
-    if (checkpoint.isStepCompleted(task.id)) {
-        log.info("跳过已完成步骤: {}", task.id);
-        continue;
-    }
-    
-    // 执行 Worker
-    executeWorker(task);
-    
-    // 记录完成
-    checkpoint.addCompletedStep(task.id, modifiedFiles, summary);
-    checkpoint.save();
-}
-
-// 3. 全部成功后删除 Checkpoint
-checkpoint.delete();
-```
+- `RuntimeThreadStore.turnHistory(threadId)` 从 `runtime_events` 解析已完成 turn 的
+  输入/输出对（只取有 `turn.completed` 终态的完整 turn，失败/被拒 turn 不进历史，
+  事件解析失败跳过并 warn）
+- `TurnRunner(threadId, input)` 新接口替换 Runtime API 侧的 `TaskRunner`
+  （`TaskRunner` 保持不动，`DurableTaskManager` 继续使用）
+- `Main.runHeadlessTurn`：每 turn 仍新建 Agent 保持隔离，执行前重放该 thread 最近 20 个
+  turn 的历史（`Agent.seedHistory` 注入 system message 之后），超长窗口交给既有
+  `ConversationHistoryCompactor` 治理
 
 **价值**：
-- 大型任务（20+ 步骤）失败后可断点续传
-- 节省已完成步骤的时间和 Token
-- 提供 Checkpoint 列表（用户可选择恢复）
+- 同一 thread 多轮对话有上下文延续；历史在 SQLite，进程重启不丢
+- 保留每 turn 隔离的并发安全性，无内存驻留 Agent 的淘汰/锁复杂度
 
 ---
 
@@ -140,182 +103,35 @@ checkpoint.delete();
 
 | 文件 | 状态 | 说明 |
 |------|------|------|
-| `ResourceLeaseManager.java` | ✅ 已修改 | 添加超时机制 |
+| `ResourceLeaseManager.java` | ✅ 已修改 | 超时回收 + 措辞与事实对齐 |
 | `WorkingMemory.java` | ✅ 已修改 | negativeFact 即时清理失效 RAG 证据 |
-| `AgentCheckpoint.java` | ✅ 新建 | Multi-Agent Checkpoint |
-
----
-
-## 集成指南
-
-### 1. ResourceLeaseManager 超时清理
-
-**自动回收**（acquireWrite 时自动检查）：
-```java
-// 无需修改现有代码，acquireWrite 自动处理超时
-leaseManager.acquireWrite(stepId, path);
-```
-
-**定时清理**（可选，在主循环或定时任务中）：
-```java
-// 每分钟清理一次超时租约
-ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-scheduler.scheduleAtFixedRate(() -> {
-    int removed = leaseManager.pruneExpiredLeases();
-    if (removed > 0) {
-        log.info("清理超时租约: {} 个", removed);
-    }
-}, 1, 1, TimeUnit.MINUTES);
-```
-
----
-
-### 2. MemoryManager 维护
-
-**会话结束时清理**：
-```java
-// /clear 命令路径（既有实现）
-memoryManager.clearShortTerm();
-```
-
-**失效 RAG 证据清理**（已内联，自动触发）：
-`WorkingMemory.recordToolResult` 解析 `search_code` 结果时，
-对携带 `oldSymbolVersion=` 的 negativeFact 行即时清理对应证据，无需手动调用。
-
-**内存报告**（调试用）：
-```java
-// CLI 命令：/memory
-memoryManager.getSystemStatus();
-```
-
----
-
-### 3. AgentOrchestrator Checkpoint 集成
-
-**修改 `AgentOrchestrator.java`**：
-```java
-public class AgentOrchestrator {
-    public void orchestrate(String goal, List<Task> dag) {
-        String orchestrationId = "orc_" + UUID.randomUUID().toString().substring(0, 8);
-        
-        // 1. 尝试加载 Checkpoint
-        AgentCheckpoint checkpoint = AgentCheckpoint.load(orchestrationId);
-        if (checkpoint == null) {
-            checkpoint = new AgentCheckpoint(orchestrationId, goal);
-        } else {
-            log.info("检测到未完成的 Checkpoint，继续执行: {} (已完成: {} 步)", 
-                orchestrationId, checkpoint.getCompletedSteps().size());
-        }
-        
-        // 2. 执行 DAG
-        for (Task task : dag) {
-            // 跳过已完成步骤
-            if (checkpoint.isStepCompleted(task.id)) {
-                log.info("跳过已完成步骤: {}", task.id);
-                continue;
-            }
-            
-            try {
-                // 执行 Worker
-                WorkerResult result = executeWorker(task);
-                
-                // 记录完成
-                checkpoint.addCompletedStep(
-                    task.id, 
-                    result.modifiedFiles(), 
-                    result.summary()
-                );
-                checkpoint.save();
-                
-            } catch (Exception e) {
-                // 记录失败
-                checkpoint.recordFailure(e.getMessage());
-                checkpoint.save();
-                
-                // 判断是否熔断
-                if (shouldCircuitBreak(checkpoint)) {
-                    log.error("失败比例过高，熔断执行");
-                    throw new OrchestrationException("熔断");
-                }
-            }
-        }
-        
-        // 3. 全部成功，删除 Checkpoint
-        checkpoint.delete();
-    }
-    
-    private boolean shouldCircuitBreak(AgentCheckpoint checkpoint) {
-        int total = checkpoint.getCompletedSteps().size() + checkpoint.getFailedSteps();
-        if (total == 0) return false;
-        double failureRate = (double) checkpoint.getFailedSteps() / total;
-        return failureRate >= 0.5; // 50% 失败率熔断
-    }
-}
-```
-
-**CLI 命令支持**：
-```java
-// 列出可恢复的 Checkpoint
-List<AgentCheckpoint.CheckpointInfo> checkpoints = AgentCheckpoint.listAvailable();
-for (var cp : checkpoints) {
-    System.out.printf("- %s: %s (完成: %d, 失败: %d, 时间: %s)%n",
-        cp.orchestrationId(), cp.goal(), cp.completedSteps(), cp.failedSteps(), cp.timestamp());
-}
-
-// 恢复执行
-orchestrator.resume(orchestrationId);
-```
+| `AgentCheckpoint.java` | ✅ 已扩展 | 计划层落盘 + 原子写入 + loadLatest |
+| `AgentOrchestrator.java` | ✅ 已修改 | resume() + executeSteps 共享循环 + 重规划同步 |
+| `ToolRegistry.java` | ✅ 已修改 | 按 step 归集修改文件 + prune 委托 |
+| `Main.java` | ✅ 已修改 | /team resume 入口 + runHeadlessTurn 历史重放 |
+| `TurnRunner.java` | ✅ 新建 | Runtime API 带 threadId 的执行接口 |
+| `RuntimeThreadStore.java` | ✅ 已修改 | turnHistory 解析 |
+| `Agent.java` | ✅ 已修改 | seedHistory 历史注入 |
 
 ---
 
 ## 测试验证
 
-### ResourceLeaseManager 超时测试
-```java
-@Test
-void testLeaseTimeout() throws Exception {
-    ResourceLeaseManager manager = new ResourceLeaseManager();
-    Path file = Path.of("test.txt");
-    
-    // Worker 1 获取租约
-    manager.acquireWrite("worker1", file);
-    
-    // 等待超时（30 秒）
-    Thread.sleep(31_000);
-    
-    // Worker 2 可以获取租约（自动回收）
-    assertDoesNotThrow(() -> manager.acquireWrite("worker2", file));
-}
-```
+对应测试（均不依赖真实 LLM）：
 
-### Memory 清理测试
-```java
-@Test
-void testMemoryCleanup() {
-    MemoryManager mm = new MemoryManager(...);
-    mm.addToolResult("read_file", "result");
-    
-    // 清理会话
-    MemoryMaintenanceService.clearSession(mm);
-    
-    // 验证清空
-    assertEquals(0, mm.getWorkingMemory().getToolResultsCount());
-}
-```
+- `AgentCheckpointTest`：计划+进度落盘往返、result 截断、原子写入、loadLatest
+- `AgentOrchestratorTest`：resume 跳过已完成步骤、SUPERSEDED 不参与调度、
+  未找到 checkpoint 时列出可用项、旧格式 checkpoint 拒绝恢复
+- `ToolRegistryStepFilesTest`：按 step 归集修改文件、consume 后清空、无租约写入不归集
+- `RuntimeThreadStoreTest`：turnHistory 完整 turn 解析、失败/进行中 turn 跳过、坏数据容错
+- `RuntimeApiServerTest`：TurnRunner 收到 threadId、第二轮可见第一轮历史
+- `AgentSeedHistoryTest`：注入位置、二次注入忽略、空入参容错
+- `MainTeamResumeParseTest`：/team resume 子命令解析
 
-### Checkpoint 恢复测试
-```java
-@Test
-void testCheckpointResume() {
-    AgentCheckpoint cp = new AgentCheckpoint("test_orc", "test goal");
-    cp.addCompletedStep("step1", List.of("file1.java"), "Done");
-    cp.save();
-    
-    // 加载恢复
-    AgentCheckpoint loaded = AgentCheckpoint.load("test_orc");
-    assertTrue(loaded.isStepCompleted("step1"));
-    assertFalse(loaded.isStepCompleted("step2"));
-}
+运行：
+
+```bash
+mvn test -Dtest="AgentCheckpointTest,AgentOrchestratorTest,ToolRegistryStepFilesTest,RuntimeThreadStoreTest,RuntimeApiServerTest,AgentSeedHistoryTest,MainTeamResumeParseTest" -DskipTests=false
 ```
 
 ---
@@ -323,20 +139,16 @@ void testCheckpointResume() {
 ## 简历价值提升
 
 ### 修复前
-- ❌ 无性能监控
-- ❌ 内存可能泄漏
 - ❌ 租约永久锁死
-- ❌ 失败从头开始
+- ❌ 内存可能泄漏
+- ❌ 失败从头开始（checkpoint 只写不读）
+- ❌ Runtime API turn 间无上下文
 
 ### 修复后
-- ✅ 租约超时自动回收（30s）
-- ✅ WorkingMemory 会话清理
-- ✅ RAG 证据失效管理
-- ✅ Checkpoint 断点续传
+- ✅ 租约超时自动回收（30s）+ 启动时残留清理
+- ✅ WorkingMemory 会话清理 + RAG 证据失效管理
+- ✅ Checkpoint 断点续传（计划+进度落盘，/team resume 恢复）
+- ✅ Runtime API 跨 turn 上下文（存储即状态，重启不丢）
 
 ### 面试话术
-> "Multi-Agent 并行执行时，我发现了 3 个潜在问题：1）Worker 崩溃后文件租约永久锁死；2）WorkingMemory 没有清理导致内存泄漏；3）大型任务失败后从头开始浪费成本。我通过添加租约超时机制（30s 自动回收）、Memory 维护服务（会话清理 + RAG 证据失效管理）、Checkpoint 断点续传（JSON 持久化已完成步骤）解决了这些问题。这些优化保证了系统在异常情况下的稳定性和可恢复性。"
-
----
-
-**3 个架构问题全部修复完成！系统健壮性大幅提升。**
+> "Multi-Agent 并行执行时我解决了三类可靠性问题：1）Worker 崩溃后文件租约永久锁死——租约加超时回收，写入前二次校验；2）大型任务失败后从头开始——checkpoint 同时落盘计划结构和步骤进度，恢复时重建步骤列表跳过已完成步骤，已完成步骤的完整 result 继续作为后续步骤的依赖上下文，重规划改变计划结构时同步回 checkpoint 保证崩溃后仍可对位；3）Runtime API 多轮对话无上下文——采用'存储即状态'：每 turn 新建 Agent 保持隔离，执行前从 SQLite 事件流重放该 thread 的历史输入输出对，进程重启上下文不丢。可行性的关键前提是 Worker 每步执行后清空会话、步骤上下文完全来自步骤结果列表，所以恢复只需要'计划+进度'，不需要恢复任何 LLM 会话状态。"
