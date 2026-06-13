@@ -36,50 +36,28 @@ public int pruneExpiredLeases() {
 
 ---
 
-### 2. ✅ MemoryManager - 添加维护服务
+### 2. ✅ Memory 维护职责内联到既有组件（方案演进）
 
 **问题**：
 - WorkingMemory 没有清理逻辑
 - RagEvidenceMemory 旧版本失效后未清理
 - LongTermMemory 没有淘汰策略
 
-**修复方案**：
+**最终方案**（曾设计独立的 `MemoryMaintenanceService`，因全部职责都有更自然的归属，该类已删除）：
 
-**新增 `MemoryMaintenanceService.java`**：
-```java
-// 1. 清理会话 WorkingMemory
-public static void clearSession(MemoryManager memoryManager) {
-    memoryManager.getWorkingMemory().clear();
-}
-
-// 2. 清理失效 RAG 证据
-public static int pruneInvalidRagEvidence(
-    WorkingMemory workingMemory,
-    SymbolInvalidation symbolInvalidation) {
-    return workingMemory.pruneInvalidEvidence(symbolInvalidation);
-}
-
-// 3. LongTermMemory 容量检查
-public static int evictOldMemoriesIfNeeded(
-    LongTermMemory longTermMemory, 
-    int maxEntries) {
-    // 当前版本警告，未来改为 LRU
-}
-
-// 4. 内存报告
-public static void printMemoryReport(MemoryManager memoryManager) {
-    // 打印 WorkingMemory 和 LongTermMemory 统计
-}
-```
+- 会话清理：复用既有 `MemoryManager.clearShortTerm()`（`/clear` 命令路径）
+- 失效 RAG 证据清理：`WorkingMemory` 在解析 `search_code` 结果时，对携带
+  `oldSymbolVersion=` 的 negativeFact **即时清理**对应证据（`pruneEvidenceForNegativeFact`），
+  不再依赖外部维护服务定期触发；`pruneInvalidEvidence(SymbolInvalidation)` 保留为公共接口
+- 内存报告：复用既有 `MemoryManager.getSystemStatus()`（`/memory` 命令路径）
 
 **价值**：
-- WorkingMemory 会话结束时清理，避免泄漏
-- RAG 证据绑定符号版本，失效时自动清理
-- 提供内存监控接口
+- 失效证据清理从"需要有人记得调用"变成检索链路内联自动触发
+- 少一个无人调用的维护类，职责回归数据持有者本身
 
 **注意**：
-- LongTermMemory 当前使用 `ConcurrentHashMap`，未实现 LRU
-- 建议未来改为 `LinkedHashMap` + LRU（最多 1000 条）
+- LongTermMemory 当前无容量上限和淘汰策略，属于已知缺口；
+  自动删除用户长期记忆涉及数据安全语义，淘汰策略需要单独决策后再实现
 
 ---
 
@@ -103,7 +81,7 @@ public class AgentCheckpoint {
 
     // 保存 Checkpoint
     public void save() {
-        // JSON 序列化到 ~/.paicli/checkpoints/{orchestrationId}.json
+        // JSON 序列化到 ~/.devcli/checkpoints/{orchestrationId}.json
     }
 
     // 加载 Checkpoint
@@ -163,7 +141,7 @@ checkpoint.delete();
 | 文件 | 状态 | 说明 |
 |------|------|------|
 | `ResourceLeaseManager.java` | ✅ 已修改 | 添加超时机制 |
-| `MemoryMaintenanceService.java` | ✅ 新建 | Memory 维护服务 |
+| `WorkingMemory.java` | ✅ 已修改 | negativeFact 即时清理失效 RAG 证据 |
 | `AgentCheckpoint.java` | ✅ 新建 | Multi-Agent Checkpoint |
 
 ---
@@ -196,25 +174,18 @@ scheduler.scheduleAtFixedRate(() -> {
 
 **会话结束时清理**：
 ```java
-// Agent.java 或主循环结束时
-MemoryMaintenanceService.clearSession(memoryManager);
+// /clear 命令路径（既有实现）
+memoryManager.clearShortTerm();
 ```
 
-**定期清理失效 RAG 证据**：
-```java
-// 索引重建后清理失效证据
-if (indexRebuilt) {
-    int removed = MemoryMaintenanceService.pruneInvalidRagEvidence(
-        memoryManager.getWorkingMemory(),
-        symbolInvalidation
-    );
-}
-```
+**失效 RAG 证据清理**（已内联，自动触发）：
+`WorkingMemory.recordToolResult` 解析 `search_code` 结果时，
+对携带 `oldSymbolVersion=` 的 negativeFact 行即时清理对应证据，无需手动调用。
 
 **内存报告**（调试用）：
 ```java
-// CLI 命令：/memory-report
-MemoryMaintenanceService.printMemoryReport(memoryManager);
+// CLI 命令：/memory
+memoryManager.getSystemStatus();
 ```
 
 ---
