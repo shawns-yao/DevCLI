@@ -1,0 +1,1826 @@
+package com.devcli.agent;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.devcli.llm.LlmClient;
+import com.devcli.memory.MemoryManager;
+import com.devcli.plan.ResourceConflictDetector;
+import com.devcli.runtime.CancellationContext;
+import com.devcli.tool.ToolRegistry;
+import com.devcli.trace.TraceContext;
+import com.devcli.trace.TraceRecorder;
+import com.devcli.util.AnsiStyle;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+
+/**
+ * Agent 编排器 - Multi-Agent 系统的"主"
+ *
+ * 负责管理团队、分配任务、路由消息、解决冲突。
+ * 采用主从架构：编排器是主，子代理是从。
+ *
+ * 协作流程：
+ * 1. 用户提交任务 -> 编排器交给规划者
+ * 2. 规划者拆解任务 -> 编排器解析计划
+ * 3. 编排器按依赖顺序将子任务分配给执行者
+ * 4. 执行者返回结果 -> 编排器交给检查者
+ * 5. 检查者通过则完成，否则带上反馈重新分配给执行者
+ * 6. 所有子任务完成后，编排器汇总返回最终结果
+ *
+ * 并行策略：
+ * - 同一依赖批次内部 **并行** 执行（最多 Worker 池大小并发，默认 2）
+ * - 每个并行步骤使用独立的 PrintStream 缓冲流式输出，批次结束后按 step_id 顺序 flush 到 stdout，
+ *   避免多线程写同一个终端流造成交错，同时仍让用户看到结构化的执行过程
+ * - 单步批次仍走直连流式路径，保持"实时打字"的观感
+ * - Worker 通过 {@link java.util.concurrent.BlockingQueue} 池化分配，确保同一 Worker 不会被两个步骤并发占用
+ * - Reviewer 在并行路径中按步骤即时创建独立实例，避免对话历史竞争
+ */
+public class AgentOrchestrator {
+    private static final Logger log = LoggerFactory.getLogger(AgentOrchestrator.class);
+    private static final ObjectMapper mapper = new ObjectMapper();
+    private static final int MAX_RETRIES_PER_STEP = 2;
+    /** Worker 默认数量；可经 -Ddevcli.team.workers / DEVCLI_TEAM_WORKERS 覆盖。 */
+    static final int DEFAULT_WORKER_COUNT = 2;
+    /** Worker 数量保护上限：过多并发 Worker 会放大 LLM 限流与终端输出竞争。 */
+    static final int MAX_WORKER_COUNT = 8;
+    private static final double MIN_REVIEW_SCORE = 0.6;
+    private static final double REQUIRED_FUNCTIONAL_SCORE = 1.0;
+    private static final double FINAL_INTEGRATION_FAILURE_RATIO_LIMIT = 0.5;
+    private static final int PRE_REVIEW_TIMEOUT_SECONDS = 60;
+    private static final int MAX_PLANNER_STEPS = 5;
+    /** 失败步骤触发重规划的最大轮数。仅做一轮有界恢复，避免规划-失败死循环。 */
+    private static final int MAX_REPLAN_ROUNDS = 1;
+    /**
+     * Reviewer 输出 JSON 解析失败时的否定语义识别。
+     * 覆盖"未通过/不通过/未全部通过/没有通过/未能通过"等变体，
+     * 避免"测试未全部通过"因含"通过"二字被误判为批准。
+     */
+    private static final java.util.regex.Pattern NEGATIVE_REVIEW_PATTERN =
+            java.util.regex.Pattern.compile("[未没不][^。\\n]{0,6}通过");
+
+    private final LlmClient llmClient;
+    private final SubAgent planner;
+    private final List<SubAgent> workers;
+    private final SubAgent reviewer;
+    private final MemoryManager memoryManager;
+    private final ToolRegistry toolRegistry;
+    private final PrintStream out;
+    private String currentUserTask = "";
+    private Supplier<String> externalContextSupplier = () -> "";
+    private Supplier<String> stickyMemorySupplier = () -> "";
+    private com.devcli.skill.SkillRegistry skillRegistry;
+    private com.devcli.skill.SkillContextBuffer skillContextBuffer;
+    private final TraceRecorder traceRecorder = new TraceRecorder();
+    private List<AcceptanceCriterion> currentAcceptanceCriteria = List.of();
+    /** 当前 run 的进度 checkpoint：步骤完成/失败即落盘，全部成功后删除。崩溃后可凭文件做事后排查。 */
+    private AgentCheckpoint checkpoint;
+    /**
+     * 失败步骤重规划开关。默认关闭以保持既有调用方行为可预期；
+     * 生产装配点（Main / TuiSessionController）显式开启。
+     */
+    private boolean replanEnabled = false;
+
+    // 执行步骤的数据结构（package-private 供测试访问）
+    record ExecutionStep(String id, String description, String type,
+                                  List<String> dependencies, String result,
+                                  StepStatus status) {
+        static ExecutionStep pending(String id, String description, String type, List<String> dependencies) {
+            return new ExecutionStep(id, description, type, dependencies, null, StepStatus.PENDING);
+        }
+
+        ExecutionStep withResult(String result) {
+            return new ExecutionStep(id, description, type, dependencies, result, StepStatus.COMPLETED);
+        }
+
+        ExecutionStep withFailed(String result) {
+            return new ExecutionStep(id, description, type, dependencies, result, StepStatus.FAILED);
+        }
+
+        ExecutionStep started() {
+            return new ExecutionStep(id, description, type, dependencies, result, StepStatus.RUNNING);
+        }
+
+        /** 标记本步骤已由重规划生成的恢复步骤接管（保留原 result 作为失败原因记录）。 */
+        ExecutionStep withSuperseded() {
+            return new ExecutionStep(id, description, type, dependencies, result, StepStatus.SUPERSEDED);
+        }
+    }
+
+    enum StepStatus {
+        PENDING, RUNNING, COMPLETED, FAILED,
+        /** 失败或被失败阻塞后，已由重规划的恢复步骤接管，不再参与调度与熔断统计。 */
+        SUPERSEDED
+    }
+
+    record PreReviewResult(boolean passed, String feedback) {
+        static PreReviewResult ok() {
+            return new PreReviewResult(true, "");
+        }
+
+        static PreReviewResult failed(String feedback) {
+            return new PreReviewResult(false, feedback == null ? "Pre-review hard check failed" : feedback);
+        }
+    }
+
+    record AcceptanceCriterion(String id, String category, String description, String testSignal) {
+        boolean isValid() {
+            return !id.isBlank() && !description.isBlank();
+        }
+
+        String formatForPrompt() {
+            StringBuilder sb = new StringBuilder();
+            sb.append("- ").append(id);
+            if (!category.isBlank()) {
+                sb.append(" [").append(category).append("]");
+            }
+            sb.append(": ").append(description);
+            if (!testSignal.isBlank()) {
+                sb.append("；test_signal: ").append(testSignal);
+            }
+            return sb.toString();
+        }
+    }
+
+    public AgentOrchestrator(LlmClient llmClient) {
+        this(llmClient, new ToolRegistry(), new MemoryManager(llmClient));
+    }
+
+    public AgentOrchestrator(LlmClient llmClient, ToolRegistry toolRegistry) {
+        this(llmClient, toolRegistry, new MemoryManager(llmClient));
+    }
+
+    public AgentOrchestrator(LlmClient llmClient, ToolRegistry toolRegistry, MemoryManager memoryManager) {
+        this(llmClient, toolRegistry, memoryManager, System.out);
+    }
+
+    public AgentOrchestrator(LlmClient llmClient, ToolRegistry toolRegistry,
+                             MemoryManager memoryManager, PrintStream out) {
+        this.llmClient = llmClient;
+        this.out = out == null ? System.out : out;
+        this.toolRegistry = toolRegistry;
+        this.memoryManager = memoryManager;
+        this.toolRegistry.setContextProfile(this.memoryManager.getContextProfile());
+        this.toolRegistry.setMemorySaver(this.memoryManager::storeFact);
+        this.toolRegistry.setMemorySaveHandler(fact -> {
+            MemoryManager.StoreResult result = this.memoryManager.storeFactWithPolicy(fact, true);
+            return new ToolRegistry.MemorySaveResult(result.stored(), result.message());
+        });
+        this.toolRegistry.setMemoryListHandler(this.memoryManager::listLongTermMemory);
+        this.planner = new SubAgent("planner", AgentRole.PLANNER, llmClient, toolRegistry);
+        this.workers = buildWorkers(resolveWorkerCount(), llmClient, toolRegistry);
+        this.reviewer = new SubAgent("reviewer", AgentRole.REVIEWER, llmClient, toolRegistry);
+        configureSubAgent(planner);
+        workers.forEach(this::configureSubAgent);
+        configureSubAgent(reviewer);
+    }
+
+    /**
+     * 解析 Worker 数量：系统属性 {@code devcli.team.workers} 优先，其次环境变量
+     * {@code DEVCLI_TEAM_WORKERS}，缺省 {@link #DEFAULT_WORKER_COUNT}，并夹在 [1, {@link #MAX_WORKER_COUNT}]。
+     */
+    static int resolveWorkerCount() {
+        String raw = System.getProperty("devcli.team.workers");
+        if (raw == null || raw.isBlank()) {
+            raw = System.getenv("DEVCLI_TEAM_WORKERS");
+        }
+        if (raw == null || raw.isBlank()) {
+            return DEFAULT_WORKER_COUNT;
+        }
+        try {
+            int n = Integer.parseInt(raw.trim());
+            int clamped = Math.max(1, Math.min(MAX_WORKER_COUNT, n));
+            if (clamped != n) {
+                log.warn("devcli.team.workers={} 超出范围 [1,{}]，已夹取为 {}", n, MAX_WORKER_COUNT, clamped);
+            }
+            return clamped;
+        } catch (NumberFormatException e) {
+            log.warn("非法 devcli.team.workers={}，使用默认 {}", raw, DEFAULT_WORKER_COUNT);
+            return DEFAULT_WORKER_COUNT;
+        }
+    }
+
+    private static List<SubAgent> buildWorkers(int count, LlmClient llmClient, ToolRegistry toolRegistry) {
+        List<SubAgent> built = new ArrayList<>(count);
+        for (int i = 1; i <= count; i++) {
+            built.add(new SubAgent("worker-" + i, AgentRole.WORKER, llmClient, toolRegistry));
+        }
+        return List.copyOf(built);
+    }
+
+    public void setExternalContextSupplier(Supplier<String> externalContextSupplier) {
+        this.externalContextSupplier = externalContextSupplier == null ? () -> "" : externalContextSupplier;
+        planner.setExternalContextSupplier(this.externalContextSupplier);
+        workers.forEach(worker -> worker.setExternalContextSupplier(this.externalContextSupplier));
+        reviewer.setExternalContextSupplier(this.externalContextSupplier);
+    }
+
+    /**
+     * 注入 Sticky Memory（PR-B）：把 supplier 同时下发到 planner / workers / reviewer，
+     * 让团队三角色都看到统一的稳定事实层。
+     */
+    /** 开启失败步骤的有界重规划（最多 {@link #MAX_REPLAN_ROUNDS} 轮）。 */
+    public void setReplanEnabled(boolean replanEnabled) {
+        this.replanEnabled = replanEnabled;
+    }
+
+    public void setStickyMemorySupplier(Supplier<String> stickyMemorySupplier) {
+        this.stickyMemorySupplier = stickyMemorySupplier == null ? () -> "" : stickyMemorySupplier;
+        planner.setStickyMemorySupplier(this.stickyMemorySupplier);
+        workers.forEach(worker -> worker.setStickyMemorySupplier(this.stickyMemorySupplier));
+        reviewer.setStickyMemorySupplier(this.stickyMemorySupplier);
+    }
+
+    /**
+     * 把 Skill 系统下发给所有 SubAgent。Multi-Agent 三个角色共享同一 SkillRegistry（索引一致），
+     * 每个角色拿到 SkillContextBuffer 的独立副本，避免并行 Worker / Reviewer 互相消费 skill body。
+     * SubAgent 调用 load_skill 时会通过 ToolRegistry 的线程本地覆盖写回自己的 buffer。
+     */
+    public void setSkillSystem(com.devcli.skill.SkillRegistry skillRegistry,
+                               com.devcli.skill.SkillContextBuffer skillContextBuffer) {
+        this.skillRegistry = skillRegistry;
+        this.skillContextBuffer = skillContextBuffer;
+        configureSubAgent(planner);
+        workers.forEach(this::configureSubAgent);
+        configureSubAgent(reviewer);
+    }
+
+    private void configureSubAgent(SubAgent agent) {
+        agent.setExternalContextSupplier(externalContextSupplier);
+        agent.setStickyMemorySupplier(stickyMemorySupplier);
+        agent.setMemoryContextSupplier(() -> memoryManager.buildContextForQuery(
+                "multi-agent " + agent.getRole().name().toLowerCase(Locale.ROOT),
+                memoryManager.getContextProfile().memoryContextTokens()));
+        agent.setWorkingMemorySupplier(() -> memoryManager.buildWorkingMemorySectionForAgent(
+                agent.getRole().name().toLowerCase(Locale.ROOT)));
+        agent.setToolResultConsumer(memoryManager::addToolResult);
+        agent.setSkillRegistry(skillRegistry);
+        agent.setSkillContextBuffer(skillContextBuffer == null ? null : skillContextBuffer.copy());
+    }
+
+    /**
+     * 运行多 Agent 协作任务
+     */
+    public String run(String userInput) {
+        log.info("Multi-Agent run started: inputLength={}", userInput == null ? 0 : userInput.length());
+        TraceContext traceContext = TraceContext.root("team");
+        traceRecorder.record(traceContext, "run.start", Map.of(
+                "inputChars", userInput == null ? 0 : userInput.length(),
+                "workers", workers.size()
+        ));
+        memoryManager.addUserMessage(userInput);
+        currentUserTask = userInput == null ? "" : userInput;
+        currentAcceptanceCriteria = List.of();
+        // 回收上一轮崩溃残留的超时租约，避免历史租约阻塞本轮写入
+        toolRegistry.pruneExpiredLeases();
+        if (CancellationContext.isCancelled()) {
+            return "⏹️ 已取消当前多 Agent 任务。";
+        }
+
+        // 1. 规划阶段：让规划者拆解任务
+        out.println(AnsiStyle.heading("📋 第一阶段：规划"));
+        out.println("🧑‍💼 规划者正在分析任务...\n");
+
+        AgentMessage planMessage = AgentMessage.task("orchestrator",
+                "请为以下任务制定执行计划：\n" + userInput);
+        AgentMessage planResult = planner.execute(planMessage, out);
+        planner.clearHistory();
+        if (CancellationContext.isCancelled()) {
+            return "⏹️ 已取消当前多 Agent 任务。";
+        }
+
+        if (planResult.type() == AgentMessage.Type.ERROR) {
+            return "❌ 规划阶段失败，规划者 LLM 调用出错：" + planResult.content();
+        }
+        if (planResult.content() == null || planResult.content().isBlank()) {
+            return "❌ 规划失败：规划者未能生成有效计划";
+        }
+
+        // 2. 解析计划（parsePlan 内部已做超步数粗化）
+        List<ExecutionStep> steps = parsePlan(planResult.content());
+        if (steps.isEmpty()) {
+            return "❌ 规划失败：无法解析执行计划\n原始输出:\n" + planResult.content();
+        }
+        steps = appendFinalIntegrationStep(steps);
+        checkpoint = new AgentCheckpoint(
+                "orch-" + UUID.randomUUID().toString().substring(0, 8),
+                currentUserTask);
+        checkpoint.setPlanSteps(toPlanSteps(steps));
+        checkpoint.setAcceptanceCriteria(toCriterionRecords(currentAcceptanceCriteria));
+        checkpoint.save();
+
+        out.println(AnsiStyle.heading("📋 执行计划"));
+        out.println(summarizeSteps(steps) + "\n");
+
+        return executeSteps(steps, traceContext);
+    }
+
+    /**
+     * 从磁盘 checkpoint 恢复执行（/team resume 入口）。
+     *
+     * <p>恢复范围：计划（步骤/依赖/验收点）与进度（已完成步骤带回完整 result 与产物文件，
+     * 被重规划接管的步骤保持 SUPERSEDED，其余——包括上次失败的——重置为 PENDING 重新执行）。
+     * <b>不恢复</b> WorkingMemory / 会话记忆：Worker 上下文完全来自 checkpoint 内的步骤 result。
+     *
+     * @param orchestrationIdOrNull 指定 checkpoint id；为空时取最近一次保存的 checkpoint
+     */
+    public String resume(String orchestrationIdOrNull) {
+        AgentCheckpoint loaded = (orchestrationIdOrNull == null || orchestrationIdOrNull.isBlank())
+                ? AgentCheckpoint.loadLatest()
+                : AgentCheckpoint.load(orchestrationIdOrNull.trim());
+        if (loaded == null) {
+            return formatNoCheckpointMessage(orchestrationIdOrNull);
+        }
+        if (loaded.getPlanSteps() == null || loaded.getPlanSteps().isEmpty()) {
+            return "❌ checkpoint [" + loaded.getOrchestrationId()
+                    + "] 缺少计划数据（旧格式落盘），无法恢复；请重新发起 /team 任务。";
+        }
+        log.info("Multi-Agent resume started: checkpoint={}, completed={}/{}",
+                loaded.getOrchestrationId(), loaded.getCompletedSteps().size(), loaded.getPlanSteps().size());
+        TraceContext traceContext = TraceContext.root("team-resume");
+        traceRecorder.record(traceContext, "resume.start", Map.of(
+                "checkpoint", loaded.getOrchestrationId(),
+                "completedSteps", loaded.getCompletedSteps().size(),
+                "planSteps", loaded.getPlanSteps().size()
+        ));
+
+        currentUserTask = loaded.getGoal() == null ? "" : loaded.getGoal();
+        memoryManager.addUserMessage(currentUserTask);
+        currentAcceptanceCriteria = fromCriterionRecords(loaded.getAcceptanceCriteria());
+        toolRegistry.pruneExpiredLeases();
+        if (CancellationContext.isCancelled()) {
+            return "⏹️ 已取消当前多 Agent 任务。";
+        }
+
+        List<ExecutionStep> steps = rebuildStepsFromCheckpoint(loaded);
+        checkpoint = loaded; // 复用同一 checkpoint：id 不变，进度续写
+
+        out.println(AnsiStyle.heading("🔁 恢复执行 checkpoint [" + loaded.getOrchestrationId() + "]"
+                + "（已完成 " + loaded.getCompletedSteps().size() + "/" + steps.size() + " 步）"));
+        out.println(summarizeSteps(steps) + "\n");
+
+        return executeSteps(steps, traceContext);
+    }
+
+    /** checkpoint 计划层 + 进度层 → 可调度的步骤列表。 */
+    private List<ExecutionStep> rebuildStepsFromCheckpoint(AgentCheckpoint loaded) {
+        List<ExecutionStep> steps = new ArrayList<>();
+        for (AgentCheckpoint.PlanStep planStep : loaded.getPlanSteps()) {
+            List<String> deps = planStep.dependencies() == null ? List.of() : planStep.dependencies();
+            if (loaded.isStepCompleted(planStep.id())) {
+                AgentCheckpoint.StepArtifact artifact = loaded.getArtifacts().get(planStep.id());
+                String result = artifact == null || artifact.summary() == null ? "" : artifact.summary();
+                steps.add(new ExecutionStep(planStep.id(), planStep.description(), planStep.type(),
+                        deps, result, StepStatus.COMPLETED));
+            } else if (loaded.isStepSuperseded(planStep.id())) {
+                steps.add(new ExecutionStep(planStep.id(), planStep.description(), planStep.type(),
+                        deps, "（上次运行中被重规划恢复步骤接管）", StepStatus.SUPERSEDED));
+            } else {
+                steps.add(ExecutionStep.pending(planStep.id(), planStep.description(),
+                        planStep.type(), deps));
+            }
+        }
+        return steps;
+    }
+
+    private String formatNoCheckpointMessage(String requestedId) {
+        StringBuilder sb = new StringBuilder();
+        if (requestedId == null || requestedId.isBlank()) {
+            sb.append("❌ 没有可恢复的 checkpoint。");
+        } else {
+            sb.append("❌ 未找到 checkpoint [").append(requestedId.trim()).append("]。");
+        }
+        List<AgentCheckpoint.CheckpointInfo> available = AgentCheckpoint.listAvailable();
+        if (!available.isEmpty()) {
+            sb.append("\n可用的 checkpoint：\n");
+            for (AgentCheckpoint.CheckpointInfo info : available) {
+                sb.append("  - ").append(info.orchestrationId())
+                        .append("（完成 ").append(info.completedSteps())
+                        .append(" 步，").append(info.timestamp()).append("）：")
+                        .append(abbreviate(info.goal(), 80)).append("\n");
+            }
+            sb.append("使用 /team resume <id> 恢复指定任务。");
+        }
+        return sb.toString();
+    }
+
+    private List<AgentCheckpoint.PlanStep> toPlanSteps(List<ExecutionStep> steps) {
+        return steps.stream()
+                .map(step -> new AgentCheckpoint.PlanStep(
+                        step.id(), step.description(), step.type(), step.dependencies()))
+                .toList();
+    }
+
+    private List<AgentCheckpoint.CriterionRecord> toCriterionRecords(List<AcceptanceCriterion> criteria) {
+        return criteria.stream()
+                .map(c -> new AgentCheckpoint.CriterionRecord(
+                        c.id(), c.category(), c.description(), c.testSignal()))
+                .toList();
+    }
+
+    private List<AcceptanceCriterion> fromCriterionRecords(List<AgentCheckpoint.CriterionRecord> records) {
+        if (records == null) {
+            return List.of();
+        }
+        return records.stream()
+                .map(r -> new AcceptanceCriterion(
+                        r.id() == null ? "" : r.id(),
+                        r.category() == null ? "" : r.category(),
+                        r.description() == null ? "" : r.description(),
+                        r.testSignal() == null ? "" : r.testSignal()))
+                .filter(AcceptanceCriterion::isValid)
+                .toList();
+    }
+
+    /**
+     * 执行阶段共享循环：依赖调度（单步串行 / 多步冲突分波并行）、失败有界重规划、
+     * 残留步骤提示、最终汇总与 checkpoint 收尾。run() 与 resume() 共用。
+     */
+    private String executeSteps(List<ExecutionStep> steps, TraceContext traceContext) {
+        out.println(AnsiStyle.heading("⚡ 第二阶段：执行"));
+        Map<String, Integer> retryCount = new ConcurrentHashMap<>();
+        int singleStepCursor = 0;
+        int batchIndex = 0;
+        int replanRounds = 0;
+
+        while (true) {
+            if (CancellationContext.isCancelled()) {
+                return "⏹️ 已取消当前多 Agent 任务。";
+            }
+            List<ExecutionStep> executable = getExecutableSteps(steps);
+            // 失败步骤的有界重规划：当正常步骤全部走完（只剩最终集成或无可执行步骤）
+            // 且存在失败步骤时，让 Planner 基于执行反馈生成一次恢复计划
+            boolean onlyFinalLeft = !executable.isEmpty()
+                    && executable.stream().allMatch(this::isFinalIntegrationStep);
+            if (replanEnabled
+                    && (executable.isEmpty() || onlyFinalLeft)
+                    && replanRounds < MAX_REPLAN_ROUNDS
+                    && hasFailedNormalSteps(steps)) {
+                replanRounds++;
+                out.println(AnsiStyle.heading("🔁 检测到失败步骤，尝试重规划（第 " + replanRounds + " 轮）"));
+                List<ExecutionStep> recoverySteps = replanFailedSteps(steps, replanRounds);
+                if (recoverySteps.isEmpty()) {
+                    out.println("⚠️ 重规划未产出有效恢复计划，按原失败状态继续收尾\n");
+                } else {
+                    supersedeFailedAndBlockedSteps(steps);
+                    insertRecoverySteps(steps, recoverySteps);
+                    syncPlanToCheckpoint(steps);
+                    out.println("📋 恢复计划：\n" + summarizeSteps(recoverySteps));
+                    continue;
+                }
+                executable = getExecutableSteps(steps);
+            }
+            if (executable.isEmpty()) {
+                break;
+            }
+            if (executable.size() == 1 && isFinalIntegrationStep(executable.get(0))
+                    && shouldFuseFinalIntegration(steps)) {
+                ExecutionStep finalStep = executable.get(0);
+                String reason = "Final integration 熔断：失败步骤比例过高，停止让最终集成阶段强行修补。";
+                updateStep(steps, finalStep.id(), finalStep.withFailed(reason));
+                out.println("⛔ 步骤 [" + finalStep.id() + "] " + reason + "\n");
+                continue;
+            }
+            batchIndex++;
+
+            if (executable.size() == 1) {
+                // 单步批次：直接串行流式输出，保持实时打字观感
+                ExecutionStep step = executable.get(0);
+                SubAgent worker = workers.get(singleStepCursor % workers.size());
+                singleStepCursor++;
+                String context = buildStepContext(steps, step);
+                runStep(step, steps, retryCount, worker, reviewer, context, out);
+                worker.clearHistory();
+            } else {
+                // 多步批次：真正并行执行，每步用独立的 PrintStream 缓冲，完成后按 step_id 顺序 flush
+                List<List<ExecutionStep>> waves = ResourceConflictDetector.splitConflictFree(
+                        executable, ExecutionStep::id, ExecutionStep::description, ExecutionStep::type);
+                for (List<ExecutionStep> wave : waves) {
+                    traceRecorder.record(traceContext, "batch.wave", Map.of(
+                            "batchIndex", batchIndex,
+                            "size", wave.size(),
+                            "stepIds", wave.stream().map(ExecutionStep::id).toList().toString()
+                    ));
+                    out.println("⚡ 批次 #" + batchIndex + "：" + wave.size()
+                            + " 个独立步骤并行执行（最多 " + workers.size() + " 个并发 Worker）\n");
+                    runBatchParallel(wave, steps, retryCount);
+                }
+            }
+        }
+
+        // 5. 处理因前置失败而无法执行的残留步骤（显式提示用户）
+        for (ExecutionStep step : steps) {
+            if (step.status() == StepStatus.PENDING) {
+                out.println("⏭️ 步骤 [" + step.id() + "] 因前置步骤失败被跳过: " + step.description());
+            }
+        }
+
+        // 6. 汇总结果
+        String finalResult = buildFinalResult(steps);
+        memoryManager.addAssistantMessage("[多Agent结果] " + finalResult);
+
+        if (checkpoint != null) {
+            boolean allCompleted = steps.stream().allMatch(step ->
+                    step.status() == StepStatus.COMPLETED || step.status() == StepStatus.SUPERSEDED);
+            if (allCompleted) {
+                checkpoint.delete();
+            } else {
+                checkpoint.save();
+                log.info("orchestration checkpoint retained for resume/post-mortem: {}",
+                        checkpoint.getOrchestrationId());
+            }
+        }
+
+        return finalResult;
+    }
+
+    /** 重规划改变了步骤结构（接管 + 插入恢复步骤）后，把最新计划结构同步进 checkpoint。 */
+    private void syncPlanToCheckpoint(List<ExecutionStep> steps) {
+        if (checkpoint == null) {
+            return;
+        }
+        checkpoint.setPlanSteps(toPlanSteps(steps));
+        checkpoint.setSupersededSteps(steps.stream()
+                .filter(step -> step.status() == StepStatus.SUPERSEDED)
+                .map(ExecutionStep::id)
+                .toList());
+        checkpoint.save();
+    }
+
+    /**
+     * 解析规划者输出的 JSON 计划
+     */
+    List<ExecutionStep> parsePlan(String planJson) {
+        try {
+            String cleaned = planJson.replaceAll("```json\\s*", "")
+                    .replaceAll("```\\s*", "")
+                    .trim();
+
+            JsonNode root = mapper.readTree(cleaned);
+            currentAcceptanceCriteria = parseAcceptanceCriteria(firstPresent(root,
+                    "acceptance_criteria", "acceptanceCriteria", "acceptancecriteria"));
+            JsonNode stepsNode = root.path("steps");
+
+            if (!stepsNode.isArray() || stepsNode.isEmpty()) {
+                // 尝试 "tasks" 字段（兼容 Plan-and-Execute 的格式）
+                stepsNode = root.path("tasks");
+            }
+
+            if (!stepsNode.isArray() || stepsNode.isEmpty()) {
+                log.warn("Plan JSON has no 'steps' or 'tasks' array");
+                return List.of();
+            }
+
+            List<ExecutionStep> steps = new ArrayList<>();
+            Map<String, String> idMapping = new HashMap<>();
+            int stepIndex = 1;
+
+            // 第一遍：创建步骤（重编号）
+            for (JsonNode stepNode : stepsNode) {
+                String originalId = stepNode.path("id").asText();
+                String newId = "step_" + stepIndex++;
+                idMapping.put(originalId, newId);
+
+                String description = stepNode.path("description").asText();
+                String type = stepNode.path("type").asText("COMMAND");
+                steps.add(ExecutionStep.pending(newId, description, type, new ArrayList<>()));
+            }
+
+            // 第二遍：建立依赖
+            stepIndex = 1;
+            for (JsonNode stepNode : stepsNode) {
+                String newId = "step_" + stepIndex++;
+                JsonNode depsNode = stepNode.path("dependencies");
+                if (depsNode.isArray()) {
+                    List<String> deps = new ArrayList<>();
+                    for (JsonNode dep : depsNode) {
+                        String mapped = idMapping.getOrDefault(dep.asText(), dep.asText());
+                        deps.add(mapped);
+                    }
+                    // 替换步骤的依赖
+                    int idx = stepIndex - 2;
+                    if (idx >= 0 && idx < steps.size()) {
+                        ExecutionStep old = steps.get(idx);
+                        steps.set(idx, new ExecutionStep(old.id(), old.description(), old.type(),
+                                deps, old.result(), old.status()));
+                    }
+                }
+            }
+
+            return coarsenPlanIfNeeded(steps);
+        } catch (Exception e) {
+            log.error("Failed to parse plan JSON", e);
+            currentAcceptanceCriteria = List.of();
+            return List.of();
+        }
+    }
+
+    List<AcceptanceCriterion> parseAcceptanceCriteria(JsonNode criteriaNode) {
+        if (criteriaNode == null || !criteriaNode.isArray() || criteriaNode.isEmpty()) {
+            return List.of();
+        }
+        List<AcceptanceCriterion> criteria = new ArrayList<>();
+        int index = 1;
+        for (JsonNode node : criteriaNode) {
+            if (!node.isObject()) {
+                continue;
+            }
+            String id = node.path("id").asText("AC-" + String.format(Locale.ROOT, "%02d", index));
+            String category = node.path("category").asText("");
+            String description = node.path("description").asText("");
+            String testSignal = firstPresent(node, "test_signal", "testSignal", "testsignal").asText("");
+            AcceptanceCriterion criterion = new AcceptanceCriterion(id, category, description, testSignal);
+            if (criterion.isValid()) {
+                criteria.add(criterion);
+                index++;
+            }
+        }
+        return List.copyOf(criteria);
+    }
+
+    private JsonNode firstPresent(JsonNode node, String... fieldNames) {
+        if (node == null || fieldNames == null) {
+            return mapper.missingNode();
+        }
+        for (String fieldName : fieldNames) {
+            JsonNode value = node.path(fieldName);
+            if (!value.isMissingNode() && !value.isNull()) {
+                return value;
+            }
+        }
+        return mapper.missingNode();
+    }
+
+    List<ExecutionStep> coarsenPlanIfNeeded(List<ExecutionStep> steps) {
+        if (steps == null || steps.size() <= MAX_PLANNER_STEPS) {
+            return steps;
+        }
+        List<ExecutionStep> analysisSteps = new ArrayList<>();
+        List<ExecutionStep> verificationSteps = new ArrayList<>();
+        List<ExecutionStep> implementationSteps = new ArrayList<>();
+        for (ExecutionStep step : steps) {
+            String type = step.type() == null ? "" : step.type().toUpperCase(Locale.ROOT);
+            String text = ((step.type() == null ? "" : step.type()) + " " + step.description()).toLowerCase(Locale.ROOT);
+            if (type.contains("VERIFICATION") || text.contains("验证") || text.contains("test")) {
+                verificationSteps.add(step);
+            } else if (type.contains("ANALYSIS") || type.contains("FILE_READ") || text.contains("分析") || text.contains("读取")) {
+                analysisSteps.add(step);
+            } else {
+                implementationSteps.add(step);
+            }
+        }
+
+        List<ExecutionStep> coarse = new ArrayList<>();
+        if (!analysisSteps.isEmpty()) {
+            coarse.add(ExecutionStep.pending("step_1", mergeStepDescriptions("分析与准备", analysisSteps),
+                    "ANALYSIS", List.of()));
+        }
+        if (!implementationSteps.isEmpty()) {
+            List<String> deps = coarse.isEmpty() ? List.of() : List.of(coarse.get(coarse.size() - 1).id());
+            coarse.add(ExecutionStep.pending("step_" + (coarse.size() + 1),
+                    mergeStepDescriptions("核心实现", implementationSteps), "FILE_WRITE", deps));
+        }
+        if (!verificationSteps.isEmpty()) {
+            List<String> deps = coarse.isEmpty() ? List.of() : List.of(coarse.get(coarse.size() - 1).id());
+            coarse.add(ExecutionStep.pending("step_" + (coarse.size() + 1),
+                    mergeStepDescriptions("验证与修正", verificationSteps), "VERIFICATION", deps));
+        }
+        if (coarse.isEmpty()) {
+            coarse.add(ExecutionStep.pending("step_1", mergeStepDescriptions("完成任务", steps),
+                    "FILE_WRITE", List.of()));
+        }
+        return coarse;
+    }
+
+    private String mergeStepDescriptions(String title, List<ExecutionStep> steps) {
+        StringBuilder description = new StringBuilder(title).append("：");
+        for (ExecutionStep step : steps) {
+            description.append("\n- ").append(step.description());
+        }
+        description.append("\n按原始需求交付完整可用结果，不要只完成局部文件或口头说明。");
+        return description.toString();
+    }
+
+    /**
+     * 获取当前可执行的步骤（依赖已全部完成）
+     */
+    List<ExecutionStep> getExecutableSteps(List<ExecutionStep> steps) {
+        Map<String, StepStatus> statusMap = new HashMap<>();
+        for (ExecutionStep step : steps) {
+            statusMap.put(step.id(), step.status());
+        }
+
+        List<ExecutionStep> normalExecutable = steps.stream()
+                .filter(step -> step.status() == StepStatus.PENDING)
+                .filter(step -> !isFinalIntegrationStep(step))
+                .filter(step -> step.dependencies().stream()
+                        .allMatch(dep -> statusMap.get(dep) == StepStatus.COMPLETED))
+                .toList();
+        if (!normalExecutable.isEmpty()) {
+            return normalExecutable;
+        }
+
+        boolean hasRunningNonFinal = steps.stream()
+                .filter(step -> !isFinalIntegrationStep(step))
+                .anyMatch(step -> step.status() == StepStatus.RUNNING);
+        if (hasRunningNonFinal) {
+            return List.of();
+        }
+        return steps.stream()
+                .filter(step -> step.status() == StepStatus.PENDING)
+                .filter(this::isFinalIntegrationStep)
+                .filter(step -> step.dependencies().stream()
+                        .allMatch(dep -> {
+                            StepStatus status = statusMap.get(dep);
+                            return status == StepStatus.COMPLETED || status == StepStatus.FAILED
+                                    || status == StepStatus.SUPERSEDED;
+                        }))
+                .toList();
+    }
+
+    boolean shouldFuseFinalIntegration(List<ExecutionStep> steps) {
+        // SUPERSEDED 步骤已由恢复计划接管，不参与失败比例统计
+        List<ExecutionStep> normalSteps = steps.stream()
+                .filter(step -> !isFinalIntegrationStep(step))
+                .filter(step -> step.status() != StepStatus.SUPERSEDED)
+                .toList();
+        if (normalSteps.isEmpty()) {
+            return false;
+        }
+        long failed = normalSteps.stream()
+                .filter(step -> step.status() == StepStatus.FAILED)
+                .count();
+        double failureRatio = (double) failed / normalSteps.size();
+        return failureRatio >= FINAL_INTEGRATION_FAILURE_RATIO_LIMIT;
+    }
+
+    List<ExecutionStep> appendFinalIntegrationStep(List<ExecutionStep> steps) {
+        if (steps == null || steps.isEmpty()) {
+            return steps;
+        }
+        boolean exists = steps.stream().anyMatch(step -> {
+            String text = (step.id() + " " + step.description()).toLowerCase(Locale.ROOT);
+            return text.contains("final_integration") || text.contains("最终集成") || text.contains("integration");
+        });
+        if (exists) {
+            return steps;
+        }
+        Set<String> depended = steps.stream()
+                .flatMap(step -> step.dependencies().stream())
+                .collect(Collectors.toSet());
+        List<String> leafStepIds = steps.stream()
+                .map(ExecutionStep::id)
+                .filter(id -> !depended.contains(id))
+                .toList();
+        String finalId = "step_" + (steps.size() + 1);
+        String description = """
+                最终集成验收：基于原始用户任务检查并补齐整体功能入口、跨模块联动、默认参数、错误处理和端到端可运行性。
+                先读取现有生产文件，确认已存在的 class / method / signature，不要创建第二套入口。
+                你只负责胶水代码、入口 main、对外 API 导出、默认参数注入和跨模块联动。
+                不要重写或大改已 COMPLETED 的底层模块；如果核心依赖失败或缺失，直接说明风险，不要强行擦屁股。
+                完成后运行最小编译或自检命令，修复集成层问题。
+                """;
+        List<ExecutionStep> withFinal = new ArrayList<>(steps);
+        withFinal.add(ExecutionStep.pending(finalId, description, "INTEGRATION", leafStepIds));
+        return withFinal;
+    }
+
+    private boolean isFinalIntegrationStep(ExecutionStep step) {
+        String id = step.id() == null ? "" : step.id().toLowerCase(Locale.ROOT);
+        String type = step.type() == null ? "" : step.type().toLowerCase(Locale.ROOT);
+        String description = step.description() == null ? "" : step.description().toLowerCase(Locale.ROOT);
+        return id.contains("final_integration")
+                || description.contains("最终集成")
+                || type.equals("integration")
+                || type.equals("final_integration");
+    }
+
+    private boolean hasFailedNormalSteps(List<ExecutionStep> steps) {
+        return steps.stream()
+                .filter(step -> !isFinalIntegrationStep(step))
+                .anyMatch(step -> step.status() == StepStatus.FAILED);
+    }
+
+    /**
+     * 失败步骤的有界重规划：把执行反馈（已完成成果 + 失败原因 + 被阻塞步骤）交回 Planner，
+     * 生成只覆盖剩余工作的恢复计划。恢复步骤 id 加 r{round}_ 前缀避免与原步骤冲突。
+     * Planner 调用失败或计划不可解析时返回空列表，调用方按原失败状态收尾（保守降级）。
+     */
+    List<ExecutionStep> replanFailedSteps(List<ExecutionStep> steps, int round) {
+        List<AcceptanceCriterion> criteriaSnapshot = currentAcceptanceCriteria;
+        try {
+            AgentMessage replanMessage = AgentMessage.task("orchestrator", buildReplanTask(steps));
+            AgentMessage replanResult = planner.execute(replanMessage, out);
+            planner.clearHistory();
+            if (replanResult.type() == AgentMessage.Type.ERROR
+                    || replanResult.content() == null || replanResult.content().isBlank()) {
+                log.warn("Replan round {} failed at planner layer: {}", round,
+                        replanResult.content() == null ? "empty" : replanResult.content());
+                return List.of();
+            }
+            List<ExecutionStep> parsed = parsePlan(replanResult.content());
+            return remapRecoveryStepIds(parsed, round);
+        } finally {
+            // parsePlan 会用恢复计划覆盖验收点；恢复计划只描述剩余工作，必须还原原始验收点
+            currentAcceptanceCriteria = criteriaSnapshot;
+        }
+    }
+
+    /** 恢复步骤 id 统一改写为 r{round}_step_N，内部依赖同步重映射；引用未知 id 的依赖直接丢弃。 */
+    List<ExecutionStep> remapRecoveryStepIds(List<ExecutionStep> parsed, int round) {
+        if (parsed == null || parsed.isEmpty()) {
+            return List.of();
+        }
+        Map<String, String> idMapping = new HashMap<>();
+        for (int i = 0; i < parsed.size(); i++) {
+            idMapping.put(parsed.get(i).id(), "r" + round + "_step_" + (i + 1));
+        }
+        List<ExecutionStep> remapped = new ArrayList<>();
+        for (ExecutionStep step : parsed) {
+            List<String> deps = step.dependencies().stream()
+                    .map(idMapping::get)
+                    .filter(Objects::nonNull)
+                    .toList();
+            remapped.add(ExecutionStep.pending(
+                    idMapping.get(step.id()), step.description(), step.type(), deps));
+        }
+        return remapped;
+    }
+
+    /**
+     * 重规划接管后，把失败步骤和被失败阻塞的待执行步骤标记为 SUPERSEDED：
+     * 不再参与调度，不计入最终集成熔断比例，原失败原因保留在 result 字段供追溯。
+     */
+    private void supersedeFailedAndBlockedSteps(List<ExecutionStep> steps) {
+        for (int i = 0; i < steps.size(); i++) {
+            ExecutionStep step = steps.get(i);
+            if (isFinalIntegrationStep(step)) {
+                continue;
+            }
+            if (step.status() == StepStatus.FAILED || step.status() == StepStatus.PENDING) {
+                steps.set(i, step.withSuperseded());
+            }
+        }
+    }
+
+    /** 恢复步骤插入到最终集成步骤之前，保证汇总输出顺序与执行顺序一致。 */
+    private void insertRecoverySteps(List<ExecutionStep> steps, List<ExecutionStep> recoverySteps) {
+        int insertAt = steps.size();
+        for (int i = 0; i < steps.size(); i++) {
+            if (isFinalIntegrationStep(steps.get(i))) {
+                insertAt = i;
+                break;
+            }
+        }
+        steps.addAll(insertAt, recoverySteps);
+    }
+
+    private String buildReplanTask(List<ExecutionStep> steps) {
+        StringBuilder task = new StringBuilder();
+        task.append("之前的执行计划部分失败，请基于执行反馈生成一份恢复计划。\n\n");
+        if (currentUserTask != null && !currentUserTask.isBlank()) {
+            task.append("原始用户任务：\n").append(currentUserTask).append("\n\n");
+        }
+        task.append("执行情况：\n");
+        for (ExecutionStep step : steps) {
+            if (isFinalIntegrationStep(step)) {
+                continue;
+            }
+            switch (step.status()) {
+                case COMPLETED -> task.append("- [已完成] ").append(step.description())
+                        .append("\n  结果：").append(abbreviate(step.result(), 300)).append('\n');
+                case FAILED -> task.append("- [失败] ").append(step.description())
+                        .append("\n  失败原因：").append(abbreviate(step.result(), 300)).append('\n');
+                case PENDING -> task.append("- [未执行，被失败步骤阻塞] ").append(step.description()).append('\n');
+                default -> { }
+            }
+        }
+        task.append("""
+
+                要求：
+                1. 只为失败和未执行的工作生成恢复步骤；已完成的成果直接复用，不要重做
+                2. 针对失败原因换思路，不要原样重复已失败的做法
+                3. 输出 JSON：{"steps": [{"id": "...", "description": "...", "type": "...", "dependencies": [...]}]}
+                4. dependencies 只能引用本恢复计划内的步骤 id，不要引用旧计划的 id
+                5. 步骤描述必须自包含（写清楚文件、入口、验收方式），不依赖旧计划上下文
+                """);
+        return task.toString();
+    }
+
+    /**
+     * 解析检查者的审批结果
+     *
+     * 解析失败时采取保守策略：默认判为"不通过"，避免在审查者异常输出时让问题结果直接放行。
+     */
+    boolean parseReviewApproval(String reviewContent) {
+        if (reviewContent == null || reviewContent.isEmpty()) {
+            log.warn("Reviewer returned empty content, defaulting to rejected");
+            return false;
+        }
+        try {
+            String cleaned = reviewContent.replaceAll("```json\\s*", "")
+                    .replaceAll("```\\s*", "")
+                    .trim();
+            JsonNode root = mapper.readTree(cleaned);
+            JsonNode approvedNode = root.path("approved");
+            if (approvedNode.isMissingNode() || approvedNode.isNull()) {
+                log.warn("Reviewer JSON missing 'approved' field, defaulting to rejected");
+                return false;
+            }
+            boolean approved = approvedNode.asBoolean(false);
+            if (!approved) {
+                return false;
+            }
+            if (hasFailedBlockingCriteria(root.path("criteria_results"))) {
+                log.warn("Reviewer approved despite failed blocking acceptance criteria, defaulting to rejected");
+                return false;
+            }
+            if (hasMissingAcceptanceCriteriaCoverage(root.path("criteria_results"))) {
+                log.warn("Reviewer JSON missing acceptance criteria coverage, defaulting to rejected");
+                return false;
+            }
+            JsonNode scoresNode = root.path("scores");
+            if (scoresNode.isMissingNode() || scoresNode.isNull() || !scoresNode.isObject()) {
+                log.warn("Reviewer JSON missing structured scores, defaulting to rejected");
+                return false;
+            }
+            double functional = scoresNode.path("functional_correctness").asDouble(-1.0);
+            double integration = scoresNode.path("integration_completeness").asDouble(-1.0);
+            double quality = scoresNode.path("code_quality").asDouble(-1.0);
+            if (functional < REQUIRED_FUNCTIONAL_SCORE) {
+                log.warn("Reviewer functional_correctness score {} below required {}", functional, REQUIRED_FUNCTIONAL_SCORE);
+                return false;
+            }
+            if (integration < MIN_REVIEW_SCORE || quality < MIN_REVIEW_SCORE) {
+                log.warn("Reviewer scores below threshold: integration={}, quality={}, threshold={}",
+                        integration, quality, MIN_REVIEW_SCORE);
+                return false;
+            }
+            return true;
+        } catch (Exception e) {
+            // 无法解析 JSON：必须同时不含否定语义且含有肯定关键词，才视为通过
+            String lower = reviewContent.toLowerCase();
+            boolean hasNegativeKeyword = NEGATIVE_REVIEW_PATTERN.matcher(lower).find()
+                    || lower.contains("不合格") || lower.contains("有问题")
+                    || lower.contains("\"approved\": false") || lower.contains("\"approved\":false");
+            boolean hasPositiveKeyword = lower.contains("通过") || lower.contains("合格")
+                    || lower.contains("\"approved\": true") || lower.contains("\"approved\":true");
+            if (hasNegativeKeyword) {
+                return false;
+            }
+            if (!hasPositiveKeyword) {
+                log.warn("Reviewer output unparseable and contains no explicit approval, defaulting to rejected");
+                return false;
+            }
+            return true;
+        }
+    }
+
+    private boolean hasFailedBlockingCriteria(JsonNode criteriaResultsNode) {
+        if (criteriaResultsNode == null || !criteriaResultsNode.isArray()) {
+            return false;
+        }
+        for (JsonNode result : criteriaResultsNode) {
+            boolean passed = result.path("passed").asBoolean(false);
+            String severity = result.path("severity").asText("").toLowerCase(Locale.ROOT);
+            if (!passed && (severity.equals("critical") || severity.equals("high"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasMissingAcceptanceCriteriaCoverage(JsonNode criteriaResultsNode) {
+        if (currentAcceptanceCriteria == null || currentAcceptanceCriteria.isEmpty()) {
+            return false;
+        }
+        if (criteriaResultsNode == null || !criteriaResultsNode.isArray() || criteriaResultsNode.isEmpty()) {
+            return true;
+        }
+        Set<String> coveredIds = new HashSet<>();
+        for (JsonNode result : criteriaResultsNode) {
+            String id = result.path("id").asText("");
+            if (!id.isBlank()) {
+                coveredIds.add(id);
+            }
+        }
+        for (AcceptanceCriterion criterion : currentAcceptanceCriteria) {
+            if (!coveredIds.contains(criterion.id())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 解析检查者反馈的问题
+     */
+    String parseReviewIssues(String reviewContent) {
+        if (reviewContent == null || reviewContent.isEmpty()) {
+            return "";
+        }
+        try {
+            String cleaned = reviewContent.replaceAll("```json\\s*", "")
+                    .replaceAll("```\\s*", "")
+                    .trim();
+            JsonNode root = mapper.readTree(cleaned);
+            String criteriaIssues = formatFailedCriteriaResults(root.path("criteria_results"));
+
+            JsonNode issuesNode = root.path("issues");
+            if (issuesNode.isArray() && !issuesNode.isEmpty()) {
+                StringBuilder sb = new StringBuilder();
+                for (JsonNode issue : issuesNode) {
+                    sb.append("- ").append(formatReviewIssue(issue)).append("\n");
+                }
+                if (!criteriaIssues.isBlank()) {
+                    sb.append(criteriaIssues).append("\n");
+                }
+                return sb.toString().trim();
+            }
+
+            JsonNode suggestionsNode = root.path("suggestions");
+            if (suggestionsNode.isArray() && !suggestionsNode.isEmpty()) {
+                StringBuilder sb = new StringBuilder();
+                for (JsonNode suggestion : suggestionsNode) {
+                    sb.append("- ").append(formatReviewIssue(suggestion)).append("\n");
+                }
+                if (!criteriaIssues.isBlank()) {
+                    sb.append(criteriaIssues).append("\n");
+                }
+                return sb.toString().trim();
+            }
+
+            if (!criteriaIssues.isBlank()) {
+                return criteriaIssues;
+            }
+
+            // 返回 summary 作为备选
+            String summary = root.path("summary").asText();
+            if (!summary.isEmpty()) {
+                return summary;
+            }
+        } catch (Exception ignored) {
+        }
+        return "审查未通过，请改进执行结果";
+    }
+
+    private String formatFailedCriteriaResults(JsonNode criteriaResultsNode) {
+        if (criteriaResultsNode == null || !criteriaResultsNode.isArray() || criteriaResultsNode.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (JsonNode result : criteriaResultsNode) {
+            if (result.path("passed").asBoolean(false)) {
+                continue;
+            }
+            String id = result.path("id").asText("");
+            String severity = result.path("severity").asText("");
+            String evidence = result.path("evidence").asText("");
+            sb.append("- 验收失败");
+            if (!id.isBlank()) {
+                sb.append(" ").append(id);
+            }
+            if (!severity.isBlank()) {
+                sb.append(" severity=").append(severity);
+            }
+            if (!evidence.isBlank()) {
+                sb.append(": ").append(evidence);
+            }
+            sb.append("\n");
+        }
+        return sb.toString().trim();
+    }
+
+    private String formatReviewIssue(JsonNode issue) {
+        if (issue == null || issue.isNull()) {
+            return "";
+        }
+        if (!issue.isObject()) {
+            return issue.asText();
+        }
+        List<String> parts = new ArrayList<>();
+        String type = issue.path("type").asText("");
+        String severity = issue.path("severity").asText("");
+        String description = issue.path("description").asText("");
+        if (!type.isBlank()) {
+            parts.add("type=" + type);
+        }
+        if (!severity.isBlank()) {
+            parts.add("severity=" + severity);
+        }
+        if (!description.isBlank()) {
+            parts.add(description);
+        }
+        if (parts.isEmpty()) {
+            return issue.toString();
+        }
+        return String.join(", ", parts);
+    }
+
+    /**
+     * 获取记忆管理器
+     */
+    public MemoryManager getMemoryManager() {
+        return memoryManager;
+    }
+
+    /**
+     * 获取工具注册表（用于同步项目路径）
+     */
+    public ToolRegistry getToolRegistry() {
+        return toolRegistry;
+    }
+
+    private synchronized void updateStep(List<ExecutionStep> steps, String stepId, ExecutionStep updated) {
+        for (int i = 0; i < steps.size(); i++) {
+            if (steps.get(i).id().equals(stepId)) {
+                steps.set(i, updated);
+                recordStepToCheckpoint(stepId, updated);
+                return;
+            }
+        }
+    }
+
+    /** 步骤终态写入 checkpoint（updateStep 已同步，无并发问题）。 */
+    private void recordStepToCheckpoint(String stepId, ExecutionStep updated) {
+        if (checkpoint == null) {
+            return;
+        }
+        if (updated.status() == StepStatus.COMPLETED) {
+            // 完整 result 落盘（上限见 AgentCheckpoint.MAX_SUMMARY_LENGTH）：
+            // resume 后 buildStepContext 要用它给后续步骤当依赖上下文
+            checkpoint.addCompletedStep(stepId,
+                    toolRegistry.consumeStepModifiedFiles(stepId),
+                    updated.result());
+            checkpoint.save();
+        } else if (updated.status() == StepStatus.FAILED) {
+            toolRegistry.consumeStepModifiedFiles(stepId); // 失败步骤的归集丢弃，避免跨步骤串档
+            checkpoint.recordFailure(stepId + ": " + abbreviate(updated.result(), 300));
+            checkpoint.save();
+        }
+    }
+
+    /**
+     * 并行执行一批相互独立的步骤。
+     *
+     * 每个步骤获取一个 Worker（池化，避免同一 Worker 被两个步骤并发占用），同时创建独立的 Reviewer 实例，
+     * 流式输出写入步骤本地的 ByteArrayOutputStream；所有任务完成后按 step_id 顺序将缓冲区 flush 到 stdout。
+     */
+    private void runBatchParallel(List<ExecutionStep> batch, List<ExecutionStep> steps,
+                                  Map<String, Integer> retryCount) {
+        int parallelism = Math.min(batch.size(), workers.size());
+        ExecutorService executor = Executors.newFixedThreadPool(parallelism, r -> {
+            Thread t = new Thread(r, "devcli-multi-agent");
+            t.setDaemon(true);
+            return t;
+        });
+        BlockingQueue<SubAgent> workerPool = new LinkedBlockingQueue<>(workers);
+        Map<String, ByteArrayOutputStream> buffers = new ConcurrentHashMap<>();
+        // Bug #8 修复：每个 Worker 独立存储 ForkContext，避免共用上下文
+        Map<SubAgent, SubAgent.ForkContext> workerContexts = new ConcurrentHashMap<>();
+        for (SubAgent worker : workers) {
+            workerContexts.put(worker, worker.createForkContext());
+        }
+        List<Future<?>> futures = new ArrayList<>();
+        SubAgent reviewerForkTemplate = new SubAgent("reviewer-fork-template", AgentRole.REVIEWER, llmClient, toolRegistry);
+        configureSubAgent(reviewerForkTemplate);
+        SubAgent.ForkContext reviewerForkContext = reviewerForkTemplate.createForkContext();
+
+        for (ExecutionStep step : batch) {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            buffers.put(step.id(), baos);
+            PrintStream stepOut = new PrintStream(baos, true, StandardCharsets.UTF_8);
+            String context = buildStepContext(steps, step);
+
+            futures.add(executor.submit(() -> {
+                SubAgent worker = null;
+                SubAgent localReviewer = new SubAgent(
+                        "reviewer-" + step.id(), AgentRole.REVIEWER, llmClient, toolRegistry);
+                configureSubAgent(localReviewer);
+                try {
+                    worker = workerPool.take();
+                    SubAgent leasedWorker = worker;
+                    SubAgent.ForkContext workerForkContext = workerContexts.get(leasedWorker);
+                    toolRegistry.runWithResourceLease(step.id(), () -> {
+                        runStep(step, steps, retryCount, leasedWorker, localReviewer, context, stepOut,
+                                workerForkContext, reviewerForkContext);
+                        return null;
+                    });
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    updateStep(steps, step.id(), step.withFailed("并行执行被中断"));
+                    stepOut.println("❌ 步骤 [" + step.id() + "] 被中断\n");
+                } catch (RuntimeException e) {
+                    log.error("Parallel step {} failed unexpectedly", step.id(), e);
+                    updateStep(steps, step.id(), step.withFailed("并行执行异常: " + e.getMessage()));
+                    stepOut.println("❌ 步骤 [" + step.id() + "] 并行执行异常：" + e.getMessage() + "\n");
+                } finally {
+                    if (worker != null) {
+                        worker.clearHistory();
+                        workerPool.offer(worker);
+                    }
+                    toolRegistry.releaseResourceLeases(step.id());
+                    stepOut.flush();
+                }
+                return null;
+            }));
+        }
+
+        for (Future<?> f : futures) {
+            try {
+                f.get();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.warn("Batch wait interrupted");
+            } catch (ExecutionException e) {
+                log.error("Parallel step task failed", e.getCause());
+            }
+        }
+        executor.shutdownNow();
+
+        // 按 step_id 顺序 flush 各步骤的缓冲输出，保证用户看到的执行过程有稳定顺序
+        for (ExecutionStep step : batch) {
+            ByteArrayOutputStream buf = buffers.get(step.id());
+            if (buf != null && buf.size() > 0) {
+                out.print(buf.toString(StandardCharsets.UTF_8));
+                out.flush();
+            }
+        }
+    }
+
+    /**
+     * 执行单个步骤（Worker 执行 + Reviewer 审查 + 最多 2 次重试）。
+     *
+     * 此方法被串行和并行两条路径共享，通过 {@code out} 控制流式输出目的地。
+     */
+    private void runStep(ExecutionStep step, List<ExecutionStep> steps,
+                         Map<String, Integer> retryCount,
+                         SubAgent worker, SubAgent reviewer, String context,
+                         PrintStream out) {
+        runStep(step, steps, retryCount, worker, reviewer, context, out, null, null);
+    }
+
+    private void runStep(ExecutionStep step, List<ExecutionStep> steps,
+                         Map<String, Integer> retryCount,
+                         SubAgent worker, SubAgent reviewer, String context,
+                         PrintStream out,
+                         SubAgent.ForkContext workerForkContext,
+                         SubAgent.ForkContext reviewerForkContext) {
+        try {
+            runStepWithLease(step, steps, retryCount, worker, reviewer, context, out,
+                    workerForkContext, reviewerForkContext);
+        } finally {
+            toolRegistry.releaseResourceLeases(step.id());
+        }
+    }
+
+    private void runStepWithLease(ExecutionStep step, List<ExecutionStep> steps,
+                                  Map<String, Integer> retryCount,
+                                  SubAgent worker, SubAgent reviewer, String context,
+                                  PrintStream out,
+                                  SubAgent.ForkContext workerForkContext,
+                                  SubAgent.ForkContext reviewerForkContext) {
+        out.println("🛠️ " + worker.getName() + " 执行步骤 [" + step.id() + "]: " + step.description());
+        if (CancellationContext.isCancelled()) {
+            updateStep(steps, step.id(), step.withFailed("用户取消"));
+            out.println("⏹️ 步骤 [" + step.id() + "] 已取消\n");
+            return;
+        }
+
+        AgentMessage taskMsg = AgentMessage.task("orchestrator", step.description());
+        AgentMessage result = executeWorkerWithTransientRetry(step, worker, taskMsg, context, out,
+                workerForkContext, "");
+        if (CancellationContext.isCancelled()) {
+            updateStep(steps, step.id(), step.withFailed("用户取消"));
+            out.println("⏹️ 步骤 [" + step.id() + "] 已取消\n");
+            return;
+        }
+
+        if (result.type() == AgentMessage.Type.ERROR) {
+            updateStep(steps, step.id(), step.withFailed(result.content()));
+            out.println("❌ 步骤 [" + step.id() + "] 执行失败：" + result.content() + "\n");
+            return;
+        }
+        if (result.content() == null || result.content().isBlank()) {
+            updateStep(steps, step.id(), step.withFailed("执行结果为空"));
+            out.println("❌ 步骤 [" + step.id() + "] 执行失败：结果为空\n");
+            return;
+        }
+
+        ReviewDecision reviewDecision = reviewWorkerResult(step, reviewer, result.content(), out, reviewerForkContext);
+        boolean approved = reviewDecision.approved();
+        String acceptedResult = result.content();
+
+        if (approved) {
+            updateStep(steps, step.id(), step.withResult(acceptedResult));
+            out.println("✅ 步骤 [" + step.id() + "] 审查通过\n");
+            return;
+        }
+
+        int retries = retryCount.getOrDefault(step.id(), 0);
+        String issues = reviewDecision.issues();
+        if (reviewDecision.reviewerError()) {
+            if (shouldAcceptFinalIntegrationAfterTransientReviewerFailure(step, issues)) {
+                String degradedResult = acceptedResult
+                        + "\n\nFinal integration Reviewer 瞬时失败；Pre-Review 硬检查已通过，按降级策略接受。\n"
+                        + issues;
+                updateStep(steps, step.id(), step.withResult(degradedResult));
+                out.println("✅ 步骤 [" + step.id() + "] Pre-Review 已通过，Reviewer 瞬时失败降级接受\n");
+                return;
+            }
+            updateStep(steps, step.id(), step.withFailed(issues));
+            return;
+        }
+        log.info("Step {} rejected (retry {}/{}): {}", step.id(), retries, MAX_RETRIES_PER_STEP, issues);
+
+        while (!approved && retries < MAX_RETRIES_PER_STEP) {
+            retries++;
+            retryCount.put(step.id(), retries);
+            out.println("⚠️ 步骤 [" + step.id() + "] 审查未通过，正在重新执行...");
+            out.println("   反馈: " + issues + "\n");
+
+            String feedbackContext = buildRetryContext(context, issues);
+            AgentMessage retryResult = executeWorkerWithTransientRetry(step, worker, taskMsg, feedbackContext, out,
+                    workerForkContext, "重试 ");
+            if (retryResult.type() == AgentMessage.Type.ERROR) {
+                log.warn("Step {} retry {} failed at LLM layer: {}", step.id(), retries, retryResult.content());
+                issues = "重试时 LLM 调用失败：" + retryResult.content();
+                approved = false;
+                continue;
+            }
+            if (retryResult.content() == null || retryResult.content().isBlank()) {
+                acceptedResult = "执行结果为空";
+                approved = false;
+                issues = "执行结果为空";
+                log.info("Step {} retry {} returned empty result", step.id(), retries);
+                continue;
+            }
+
+            acceptedResult = retryResult.content();
+            ReviewDecision retryReview = reviewWorkerResult(step, reviewer, acceptedResult, out, reviewerForkContext);
+            if (retryReview.reviewerError()) {
+                issues = retryReview.issues();
+                break;
+            }
+            approved = retryReview.approved();
+            issues = retryReview.issues();
+        }
+
+        if (approved) {
+            updateStep(steps, step.id(), step.withResult(acceptedResult));
+            out.println("✅ 步骤 [" + step.id() + "] 重试后审查通过\n");
+        } else {
+            updateStep(steps, step.id(), step.withFailed(issues));
+            out.println("❌ 步骤 [" + step.id() + "] 审查未通过，阻止下游步骤继续执行\n");
+        }
+    }
+
+    private AgentMessage executeWorkerWithTransientRetry(ExecutionStep step, SubAgent worker, AgentMessage taskMsg,
+                                                         String context, PrintStream out,
+                                                         SubAgent.ForkContext workerForkContext,
+                                                         String label) {
+        AgentMessage result = executeWorkerOnce(step, worker, taskMsg, context, out, workerForkContext);
+        int transientRetries = 0;
+        while (result.type() == AgentMessage.Type.ERROR
+                && isTransientLlmError(result.content())
+                && transientRetries < MAX_RETRIES_PER_STEP) {
+            transientRetries++;
+            out.println("⚠️ 步骤 [" + step.id() + "] " + label
+                    + "LLM 瞬时错误，正在重新调用 Worker (" + transientRetries
+                    + "/" + MAX_RETRIES_PER_STEP + ")...");
+            result = executeWorkerOnce(step, worker, taskMsg, context, out, workerForkContext);
+        }
+        return result;
+    }
+
+    private AgentMessage executeWorkerOnce(ExecutionStep step, SubAgent worker, AgentMessage taskMsg,
+                                           String context, PrintStream out,
+                                           SubAgent.ForkContext workerForkContext) {
+        return toolRegistry.runWithResourceLease(step.id(), () -> workerForkContext == null
+                ? worker.executeWithContext(taskMsg, context, out)
+                : worker.executeForkedWithContext(taskMsg, context, workerForkContext, out));
+    }
+
+    private boolean shouldAcceptFinalIntegrationAfterTransientReviewerFailure(ExecutionStep step, String issues) {
+        return isFinalIntegrationStep(step) && isTransientLlmError(issues);
+    }
+    private boolean isTransientLlmError(String content) {
+        if (content == null) {
+            return false;
+        }
+        String lower = content.toLowerCase(Locale.ROOT);
+        return lower.contains("api请求失败: 500")
+                || lower.contains("server_error")
+                || lower.contains("internal_server_error")
+                || lower.contains("oauth2.googleapis.com/token")
+                || lower.contains(" eof")
+                || lower.contains("timeout")
+                || lower.contains("temporarily")
+                || lower.contains("rate limit")
+                || lower.contains("429")
+                || lower.contains("503")
+                || lower.contains("502");
+    }
+    private ReviewDecision reviewWorkerResult(ExecutionStep step, SubAgent reviewer, String workerResult,
+                                              PrintStream out, SubAgent.ForkContext reviewerForkContext) {
+        PreReviewResult preReview = runPreReviewHook(step);
+        if (!preReview.passed()) {
+            out.println("⛔ 步骤 [" + step.id() + "] Pre-Review Hook 未通过，跳过 Reviewer LLM");
+            out.println("   反馈: " + preReview.feedback() + "\n");
+            return new ReviewDecision(false, preReview.feedback(), false);
+        }
+
+        out.println("🔍 " + reviewer.getName() + " 正在审查步骤 [" + step.id() + "] 的结果...");
+        String reviewTask = buildReviewTask(step);
+        List<String> reviewToolCalls = Collections.synchronizedList(new ArrayList<>());
+        reviewer.setToolResultConsumer((name, args, result) -> {
+            memoryManager.addToolResult(name, args, result);
+            reviewToolCalls.add(name);
+        });
+        AgentMessage reviewResult = reviewerForkContext == null
+                ? reviewer.review(reviewTask, workerResult, out)
+                : reviewer.reviewForked(reviewTask, workerResult, reviewerForkContext, out);
+        reviewer.clearHistory();
+
+        if (reviewResult.type() == AgentMessage.Type.ERROR) {
+            log.warn("Reviewer failed for step {}: {}", step.id(), reviewResult.content());
+            out.println("❌ 步骤 [" + step.id() + "] 审查阶段 LLM 调用失败，阻止下游步骤继续执行\n");
+            return new ReviewDecision(false, "审查 LLM 故障：" + reviewResult.content(), true);
+        }
+        if (requiresConcreteVerification(step) && reviewToolCalls.isEmpty()) {
+            if (isVerificationStepWithPreReview(step)) {
+                log.info("Reviewer did not call tools for verification step {}, accepting Pre-Review hard check as concrete verification", step.id());
+            } else {
+                return new ReviewDecision(false,
+                        "Reviewer 未调用工具验证真实产物；文件/代码/命令类任务不能只根据 Worker 文字说明批准。", false);
+            }
+        }
+
+        return new ReviewDecision(parseReviewApproval(reviewResult.content()),
+                parseReviewIssues(reviewResult.content()), false);
+    }
+
+    record ReviewDecision(boolean approved, String issues, boolean reviewerError) {
+    }
+
+    PreReviewResult runPreReviewHook(ExecutionStep step) {
+        if (!requiresConcreteVerification(step) || !requiresJavaHardCheck(step)) {
+            return PreReviewResult.ok();
+        }
+        Path projectRoot = Path.of(toolRegistry.getProjectPath()).toAbsolutePath().normalize();
+        Path javaRoot = projectRoot.resolve("src/main/java");
+        if (!Files.isDirectory(javaRoot)) {
+            return PreReviewResult.ok();
+        }
+
+        if (Files.isRegularFile(projectRoot.resolve("pom.xml"))) {
+            return runPreReviewCommand(projectRoot,
+                    mavenTestCompileCommand(),
+                    "mvn -q -DskipTests test-compile");
+        }
+
+        List<Path> javaFiles;
+        try (var stream = Files.walk(javaRoot)) {
+            javaFiles = stream
+                    .filter(Files::isRegularFile)
+                    .filter(path -> path.toString().endsWith(".java"))
+                    .toList();
+        } catch (IOException e) {
+            return PreReviewResult.failed("Pre-review hard check failed: 无法扫描 Java 文件：" + e.getMessage());
+        }
+        if (javaFiles.isEmpty()) {
+            return PreReviewResult.ok();
+        }
+
+        Path outputDir = projectRoot.resolve("target/devcli-pre-review-classes/" + step.id());
+        try {
+            Files.createDirectories(outputDir);
+        } catch (IOException e) {
+            return PreReviewResult.failed("Pre-review hard check failed: 无法创建编译目录：" + e.getMessage());
+        }
+
+        List<String> command = new ArrayList<>();
+        command.add("javac");
+        command.add("-encoding");
+        command.add("UTF-8");
+        command.add("-d");
+        command.add(outputDir.toString());
+        for (Path file : javaFiles) {
+            command.add(file.toString());
+        }
+        return runPreReviewCommand(projectRoot, command, "javac -encoding UTF-8");
+    }
+
+    private boolean requiresJavaHardCheck(ExecutionStep step) {
+        String text = (step.type() + " " + step.description()).toLowerCase(Locale.ROOT);
+        return text.contains("java")
+                || text.contains(".java")
+                || text.contains("cli")
+                || text.contains("api")
+                || text.contains("代码")
+                || text.contains("编译")
+                || text.contains("入口")
+                || isFinalIntegrationStep(step);
+    }
+
+    private List<String> mavenTestCompileCommand() {
+        if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")) {
+            return List.of("cmd.exe", "/c", "mvn", "-q", "-DskipTests", "test-compile");
+        }
+        return List.of("mvn", "-q", "-DskipTests", "test-compile");
+    }
+
+    private PreReviewResult runPreReviewCommand(Path projectRoot, List<String> command, String displayCommand) {
+        ProcessBuilder processBuilder = new ProcessBuilder(command);
+        processBuilder.directory(projectRoot.toFile());
+        processBuilder.redirectErrorStream(true);
+        try {
+            Process process = processBuilder.start();
+            boolean finished = process.waitFor(PRE_REVIEW_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                return PreReviewResult.failed("Pre-review hard check failed: " + displayCommand
+                        + " 超过 " + PRE_REVIEW_TIMEOUT_SECONDS + "s");
+            }
+            String output = decodeProcessOutput(process.getInputStream().readAllBytes());
+            if (process.exitValue() == 0) {
+                return PreReviewResult.ok();
+            }
+            return PreReviewResult.failed("Pre-review hard check failed: " + displayCommand
+                    + "\n" + summarizePreReviewFailure(output));
+        } catch (IOException e) {
+            return PreReviewResult.failed("Pre-review hard check failed: 无法执行 " + displayCommand
+                    + "：" + e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return PreReviewResult.failed("Pre-review hard check failed: " + displayCommand + " 被中断");
+        }
+    }
+
+    private String buildRetryContext(String context, String issues) {
+        StringBuilder retry = new StringBuilder(context == null ? "" : context);
+        retry.append("\n\n上一次执行被拒绝。只做根因修复，不要重写无关代码。\n");
+        retry.append("必须保留原始任务指定的 class / method / signature、已通过行为和已有生产文件结构。\n");
+        retry.append("如果反馈来自 Pre-Review 编译失败，先读取报错文件和行号，再最小补丁修复。\n");
+        retry.append("拒绝原因摘要：\n").append(summarizeRetryIssues(issues)).append("\n");
+        return retry.toString();
+    }
+
+    private String summarizeRetryIssues(String issues) {
+        if (issues == null || issues.isBlank()) {
+            return "未提供具体原因；请重新验证入口、编译和验收点。";
+        }
+        String[] lines = issues.replace("\r", "").split("\n");
+        StringBuilder summary = new StringBuilder();
+        int kept = 0;
+        for (String line : lines) {
+            String trimmed = line.trim();
+            if (trimmed.isBlank()) {
+                continue;
+            }
+            boolean important = kept < 8
+                    || trimmed.contains("error:")
+                    || trimmed.contains("错误")
+                    || trimmed.contains("failed")
+                    || trimmed.contains("missing")
+                    || trimmed.contains("expected=")
+                    || trimmed.contains("actual=")
+                    || trimmed.contains("Reviewer 未调用工具");
+            if (important) {
+                summary.append("- ").append(trimmed).append("\n");
+                kept++;
+            }
+            if (kept >= 14) {
+                break;
+            }
+        }
+        if (summary.isEmpty()) {
+            return abbreviate(issues, 1200);
+        }
+        if (lines.length > kept) {
+            summary.append("- ...<truncated>\n");
+        }
+        return summary.toString();
+    }
+
+    private String summarizePreReviewFailure(String output) {
+        if (output == null || output.isBlank()) {
+            return "无编译输出；请检查命令是否可执行。";
+        }
+        return summarizeRetryIssues(abbreviate(output, 3000));
+    }
+    private String abbreviate(String text, int maxLength) {
+        if (text == null || text.length() <= maxLength) {
+            return text == null ? "" : text;
+        }
+        return text.substring(0, maxLength) + "\n...<truncated>";
+    }
+
+    private String decodeProcessOutput(byte[] bytes) {
+        String utf8 = new String(bytes, StandardCharsets.UTF_8);
+        if (!looksMojibake(utf8)) {
+            return utf8;
+        }
+        String platform = new String(bytes, Charset.defaultCharset());
+        if (!looksMojibake(platform)) {
+            return platform;
+        }
+        try {
+            String gbk = new String(bytes, Charset.forName("GBK"));
+            if (!looksMojibake(gbk)) {
+                return gbk;
+            }
+        } catch (Exception ignored) {
+        }
+        return utf8;
+    }
+
+    private boolean looksMojibake(String text) {
+        if (text == null || text.isEmpty()) {
+            return false;
+        }
+        return text.indexOf('\uFFFD') >= 0 || text.contains("????");
+    }
+
+    private String buildStepContext(List<ExecutionStep> steps, ExecutionStep currentStep) {
+        StringBuilder context = new StringBuilder();
+        context.append("总任务上下文：\n");
+        if (currentUserTask != null && !currentUserTask.isBlank()) {
+            context.append("原始用户任务：\n").append(currentUserTask).append("\n\n");
+        }
+        appendAcceptanceCriteriaSection(context, "本步骤必须满足以下验收点");
+        context.append("当前步骤：").append(currentStep.description()).append("\n\n");
+        if (requiresJavaHardCheck(currentStep)) {
+            context.append("Java 代码交付约束：严格保留原始任务指定的入口签名；优先使用简单命令式实现；完成前运行最小编译检查；重试时只做根因补丁。\n\n");
+        }
+        if (isFinalIntegrationStep(currentStep)) {
+            context.append("所有步骤状态：\n");
+            for (ExecutionStep step : steps) {
+                if (!step.id().equals(currentStep.id())) {
+                    context.append("[").append(step.id()).append("] ")
+                            .append(step.status()).append(" - ")
+                            .append(step.description()).append("\n");
+                    if (step.result() != null && !step.result().isBlank()) {
+                        context.append("结果预览：")
+                                .append(step.result(), 0, Math.min(step.result().length(), 800))
+                                .append("\n");
+                    }
+                }
+            }
+            context.append("\n");
+        }
+
+        for (ExecutionStep step : steps) {
+            if (step.status() == StepStatus.COMPLETED && currentStep.dependencies().contains(step.id())) {
+                context.append("已完成的依赖步骤 [").append(step.id()).append("]: ")
+                        .append(step.description()).append("\n");
+                if (step.result() != null && !step.result().isBlank()) {
+                    context.append("结果：").append(previewDependencyResult(step.result())).append("\n");
+                }
+                context.append("\n");
+            }
+        }
+
+        return context.toString();
+    }
+
+    /**
+     * 依赖步骤结果预览：保留头部 + 尾部，避免精确实体（入口签名、路径、验收结论）
+     * 被单一截断点切掉——结论与验证输出通常在结果末尾。
+     */
+    private static String previewDependencyResult(String result) {
+        final int maxChars = 2_000;
+        final int headChars = 1_500;
+        final int tailChars = 400;
+        if (result.length() <= maxChars) {
+            return result;
+        }
+        return result.substring(0, headChars)
+                + "\n...<中间内容已截断>...\n"
+                + result.substring(result.length() - tailChars);
+    }
+
+    private boolean isVerificationStepWithPreReview(ExecutionStep step) {
+        if (step == null || !requiresJavaHardCheck(step)) {
+            return false;
+        }
+        String text = ((step.type() == null ? "" : step.type()) + " "
+                + (step.description() == null ? "" : step.description())).toLowerCase(Locale.ROOT);
+        return text.contains("verification")
+                || text.contains("verify")
+                || text.contains("test")
+                || text.contains("compile")
+                || text.contains("验证")
+                || text.contains("编译");
+    }
+    private String buildReviewTask(ExecutionStep step) {
+        StringBuilder task = new StringBuilder();
+        if (currentUserTask != null && !currentUserTask.isBlank()) {
+            task.append("原始用户任务：\n").append(currentUserTask).append("\n\n");
+        }
+        appendAcceptanceCriteriaSection(task, "逐条验证以下验收点");
+        task.append("当前步骤：").append(step.description());
+        if (requiresConcreteVerification(step)) {
+            task.append("\n\n审查要求：必须调用工具检查真实产物。")
+                    .append("至少确认相关文件/入口/API 是否存在；如果步骤涉及代码，运行可行的最小编译或自检命令。")
+                    .append("仅凭执行者文字说明不得批准。");
+        }
+        return task.toString();
+    }
+
+    private void appendAcceptanceCriteriaSection(StringBuilder sb, String title) {
+        if (currentAcceptanceCriteria == null || currentAcceptanceCriteria.isEmpty()) {
+            return;
+        }
+        sb.append("⚠️ ").append(title).append("：\n");
+        for (AcceptanceCriterion criterion : currentAcceptanceCriteria) {
+            sb.append(criterion.formatForPrompt()).append("\n");
+        }
+        sb.append("\n");
+    }
+
+    private boolean requiresConcreteVerification(ExecutionStep step) {
+        String text = (step.type() + " " + step.description()).toLowerCase(Locale.ROOT);
+        return text.contains("file")
+                || text.contains("write")
+                || text.contains("command")
+                || text.contains("code")
+                || text.contains("java")
+                || text.contains("cli")
+                || text.contains("api")
+                || text.contains("入口")
+                || text.contains("文件")
+                || text.contains("代码")
+                || text.contains("编译")
+                || isFinalIntegrationStep(step);
+    }
+
+    private String summarizeSteps(List<ExecutionStep> steps) {
+        StringBuilder sb = new StringBuilder();
+        for (ExecutionStep step : steps) {
+            String deps = step.dependencies().isEmpty() ? "无"
+                    : String.join(", ", step.dependencies());
+            sb.append(String.format("  %s [%s] %s (依赖: %s)%n",
+                    step.status() == StepStatus.COMPLETED ? "✅" : "⏳",
+                    step.id(), step.description(), deps));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 构建最终汇总。
+     *
+     * 注意：Worker/Reviewer 的完整输出在执行阶段已经通过流式渲染打印给用户，
+     * 此处只返回"步骤状态 + 简短预览"作为总结，避免同一段内容被打印 2-3 次。
+     */
+    private String buildFinalResult(List<ExecutionStep> steps) {
+        StringBuilder result = new StringBuilder();
+        // SUPERSEDED 步骤已由恢复步骤接管，恢复步骤本身的状态已计入统计
+        boolean allCompleted = steps.stream().allMatch(step ->
+                step.status() == StepStatus.COMPLETED || step.status() == StepStatus.SUPERSEDED);
+        boolean hasFailedSteps = steps.stream().anyMatch(step -> step.status() == StepStatus.FAILED);
+
+        if (allCompleted) {
+            result.append("✅ 多 Agent 协作任务完成！\n\n");
+        } else if (hasFailedSteps) {
+            result.append("⚠️ 多 Agent 协作任务未完全完成，存在失败步骤。\n\n");
+        } else {
+            result.append("⚠️ 多 Agent 协作任务部分完成，仍有未执行步骤。\n\n");
+        }
+        result.append("📋 执行总结：\n");
+
+        for (ExecutionStep step : steps) {
+            result.append("[").append(step.id()).append("] ");
+            if (step.status() == StepStatus.COMPLETED) {
+                result.append("✅ ");
+            } else if (step.status() == StepStatus.FAILED) {
+                result.append("❌ ");
+            } else if (step.status() == StepStatus.SUPERSEDED) {
+                result.append("🔁 (已由恢复计划接管) ");
+            } else {
+                result.append("⏳ ");
+            }
+            result.append(step.description()).append("\n");
+
+            if (step.result() != null && !step.result().isBlank()) {
+                String preview = step.result().length() > 120
+                        ? step.result().substring(0, 120) + "..."
+                        : step.result();
+                result.append("   结果：").append(preview).append("\n");
+            }
+        }
+
+        return result.toString();
+    }
+}

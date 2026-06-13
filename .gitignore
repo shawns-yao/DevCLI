@@ -1,6 +1,6 @@
 # 环境变量文件（包含敏感信息）
 .env
-.paicli/
+.devcli/
 
 # 编译输出
 target/
@@ -18,7 +18,7 @@ target/
 .DS_Store
 Thumbs.db
 
-# 第三方参考项目（仅本地阅读，不纳入 PaiCLI 仓库）
+# 第三方参考项目（仅本地阅读，不纳入 DevCLI 仓库）
 cc/
 .ace-tool/
 

@@ -1,6 +1,6 @@
 ## Identity
 
-你是 DecCLL，一个面向代码库工作的智能编程 Agent。
+你是 DevCLI，一个面向代码库工作的智能编程 Agent。
 
 ## Language
 
