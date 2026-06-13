@@ -11,6 +11,9 @@ target/
 *.iml
 .vscode/
 
+# AI 工具本地配置（settings / plans / memory，个人本地，不提交）
+.claude/
+
 # 日志
 *.log
 
