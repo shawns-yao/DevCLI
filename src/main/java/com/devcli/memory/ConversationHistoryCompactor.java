@@ -15,6 +15,11 @@ import java.util.Locale;
  * <p>v3 重构（路径 B）：旧版本曾与 {@code ContextCompressor + ConversationMemory} 双轨并存，
  * 后者只压旁路笔记本不影响 LLM 输入，已删除。本类是真正治理 LLM 输入窗口的唯一压缩点。
  *
+ * <p>第 0 层 microcompact：在任何 LLM 摘要之前，先把单条超大消息（通常是大工具结果）头尾截断
+ * （{@link #microcompactOversizeMessages}，不调 LLM、不删消息）。这既能在很多情况下直接把 token
+ * 压回阈值、省掉摘要，又保证后续保留区不被单条巨型消息撑爆（避免单条 100k 导致 splitIdx==systemEnd
+ * 而 skip）。MVP 用头尾截断，预留 offload 落盘（可重新取回）的扩展点。
+ *
  * 算法（v2，PR-1）：
  * 1. 估算 conversationHistory 当前 token，未达 trigger 直接返回 false
  * 2. <b>token 预算保留区</b>：从尾巴往前累计 token，到 retainRecentTokens 时停在
@@ -45,6 +50,27 @@ public class ConversationHistoryCompactor {
     private static final int DEFAULT_RETAIN_RECENT_ROUNDS = 3;
     /** 默认按 token 预算保留尾部。30k token 在 200k window 下约占 15%，给 LLM 充足近期上下文。 */
     private static final int DEFAULT_RETAIN_RECENT_TOKENS = 30_000;
+
+    // ── microcompact（第 0 层）：截断单条超大消息，不调 LLM ──
+    /**
+     * 普通消息触发 microcompact 截断的 content 字符阈值。超过则头尾保留、中间省略。
+     * 主要命中大工具结果（read_file 大文件 / bash 刷屏 / search 大结果）。
+     */
+    static final int MICRO_COMPACT_TRIGGER_CHARS = 24_000;
+    /** 普通超大消息截断后保留的头部字符数。 */
+    private static final int MICRO_COMPACT_HEAD_CHARS = 2_000;
+    /** 普通超大消息截断后保留的尾部字符数（错误码 / 结论常在结尾）。 */
+    private static final int MICRO_COMPACT_TAIL_CHARS = 1_000;
+    /**
+     * 最后一条消息（通常是当前请求或刚执行的工具结果）的截断阈值，比普通消息宽松，
+     * 尽量不动当前上下文；只有超过这个绝对上限才截，避免单条就撑爆保留区。
+     */
+    static final int MICRO_COMPACT_LAST_TRIGGER_CHARS = 48_000;
+    /** 最后一条消息截断后保留的头部字符数（更宽松）。 */
+    private static final int MICRO_COMPACT_LAST_HEAD_CHARS = 6_000;
+    /** 最后一条消息截断后保留的尾部字符数（更宽松）。 */
+    private static final int MICRO_COMPACT_LAST_TAIL_CHARS = 3_000;
+
     /** 单片送 LLM 的字符上限。控制单次摘要请求不会撑爆 LLM window。 */
     private static final int MAP_CHUNK_CHARS = 60_000;
     /**
@@ -228,10 +254,25 @@ public class ConversationHistoryCompactor {
      *
      * @param history       Agent 主循环的 conversationHistory，调用结束后可能被替换为更短列表
      * @param triggerTokens 触发压缩的 token 阈值（通常是 ContextProfile.compressionTriggerTokens()）
-     * @return 是否真的压缩了
+     * @return 是否做了历史级压缩（LLM 摘要或降级截断）；仅 microcompact 截断单条超大消息
+     *         不改变历史结构，返回 false（截断已在 content 留标记 + log，调用方无需提示）
      */
     public boolean compactIfNeeded(List<LlmClient.Message> history, int triggerTokens) {
         if (history == null || history.isEmpty()) return false;
+
+        // 第 0 层 microcompact：先截断单条超大消息（不调 LLM）。这既能在很多情况下直接把
+        // token 压回阈值内、省掉一次 LLM 摘要，又保证后续 full compact 的保留区不会被单条巨型
+        // 消息撑爆（解决"单条 100k 让 splitIdx==systemEnd 而 skip"的盲区）。即使在熔断/冷却期
+        // 也执行——这是降级时最划算的廉价压缩。
+        boolean microChanged = microcompactOversizeMessages(history);
+        if (TokenBudget.estimateMessagesTokens(history) < triggerTokens) {
+            if (microChanged) {
+                log.info("microcompact alone brought conversation below trigger; skip LLM summarization");
+            }
+            // micro 只是后台截断单条超大消息、不改变历史结构（不摘要、不删消息），不视为"历史压缩"，
+            // 返回 false 避免调用方打印"已压缩为摘要"的误导提示。截断已在 content 留标记 + log，非静默丢弃。
+            return false;
+        }
 
         // 检查是否在降级冷却期内
         long now = System.currentTimeMillis();
@@ -313,6 +354,70 @@ public class ConversationHistoryCompactor {
                 prev != null ? "incremental" : "full",
                 summary.length()));
         return true;
+    }
+
+    /**
+     * 第 0 层 microcompact：把单条 content 超阈值的消息头尾截断、中间用标记替代，原地修改 history。
+     * 不调 LLM、不删消息（保持 tool_call/tool_result 配对），是最廉价的一层压缩，先于任何 LLM
+     * 摘要执行，也用于熔断/冷却期降级。
+     *
+     * <p>MVP 用头尾截断；后续可把 {@link #compactOversizeContent} 换成"原文 offload 落盘、
+     * context 留路径引用（可重新取回）"的实现，即 Claude Code 式 microcompaction。
+     *
+     * <p>保护规则：
+     * <ul>
+     *   <li>最后一条消息阈值更宽松（{@link #MICRO_COMPACT_LAST_TRIGGER_CHARS}），尽量不动当前上下文</li>
+     *   <li>带图片附件（contentParts）的消息跳过，避免破坏多模态结构</li>
+     * </ul>
+     *
+     * @return 是否有消息被截断
+     */
+    boolean microcompactOversizeMessages(List<LlmClient.Message> history) {
+        if (history == null || history.isEmpty()) return false;
+        int lastIdx = history.size() - 1;
+        boolean changed = false;
+        for (int i = 0; i < history.size(); i++) {
+            LlmClient.Message msg = history.get(i);
+            if (msg.hasContentParts()) continue; // 跳过多模态消息
+            String content = msg.content();
+            if (content == null) continue;
+
+            boolean isLast = i == lastIdx;
+            int trigger = isLast ? MICRO_COMPACT_LAST_TRIGGER_CHARS : MICRO_COMPACT_TRIGGER_CHARS;
+            if (content.length() <= trigger) continue;
+
+            int head = isLast ? MICRO_COMPACT_LAST_HEAD_CHARS : MICRO_COMPACT_HEAD_CHARS;
+            int tail = isLast ? MICRO_COMPACT_LAST_TAIL_CHARS : MICRO_COMPACT_TAIL_CHARS;
+            String compacted = compactOversizeContent(content, head, tail);
+            if (compacted.length() < content.length()) {
+                history.set(i, new LlmClient.Message(
+                        msg.role(), compacted, msg.reasoningContent(), msg.toolCalls(), msg.toolCallId()));
+                changed = true;
+                log.info("microcompact truncated message[{}] role={}: {} -> {} chars",
+                        i, msg.role(), content.length(), compacted.length());
+            }
+        }
+        return changed;
+    }
+
+    /**
+     * 头尾截断单条超大 content：保留头 {@code headChars} + 尾 {@code tailChars}，中间替换为标记。
+     * 中间能省出的量太小（标记反而更长）时返回原文不截断。
+     *
+     * <p>扩展点：后续可改为把原文写盘、返回 "[结果已存盘 path=… 可重读]" 的引用形态，
+     * 使被截断内容可重新取回。
+     */
+    private static String compactOversizeContent(String content, int headChars, int tailChars) {
+        int removed = content.length() - headChars - tailChars;
+        if (removed <= 200) {
+            return content;
+        }
+        String head = content.substring(0, headChars);
+        String tail = content.substring(content.length() - tailChars);
+        return head
+                + "\n\n[... microcompact 截断 " + removed + " 字符；已保留头尾，"
+                + "完整内容可重新执行对应工具获取 ...]\n\n"
+                + tail;
     }
 
     /**
