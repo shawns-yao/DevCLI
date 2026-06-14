@@ -37,6 +37,8 @@ import java.util.Locale;
  * - 后续压缩使用增量更新（基于上轮摘要 + 仅新增消息），避免摘要套娃稀释老事实
  * - first-N 字符截断在多轮压缩下信息保留率会塌到 16% 量级（实测）
  * - Map-Reduce 朴素版多轮压缩到 27.8%；增量摘要预期突破 40%+
+ * - 摘要输出为固定九段结构化（{@link RollingSummary}，对标 Claude Code /compact 模板）；
+ *   超长时先由 {@link SummaryGarbageCollector} 程序化按段裁剪（不调 LLM），不够再 LLM recompress 兜底
  */
 public class ConversationHistoryCompactor {
 
@@ -132,14 +134,20 @@ public class ConversationHistoryCompactor {
     };
 
     private static final String SUMMARY_PROMPT = """
-            请把下面的对话历史压缩成简明摘要，保留：
-            1. 用户提出的关键诉求与目标
-            2. Agent 已经完成的关键操作（哪些工具调用了什么、返回了什么核心结果）
-            3. 已经达成的共识或结论
-            4. 仍未解决的问题或待办
+            请把下面的对话历史压缩成结构化摘要，严格按以下九个 Markdown 段落输出（标题用 ## 开头，无内容写"无"）：
 
-            不要复述每条原文，不要列举所有工具调用，不要保留无关闲聊。
-            输出 1-3 段中文，不要用列表，不要加任何前缀或元描述。
+            ## 主要请求与意图
+            ## 关键技术概念
+            ## 文件和代码
+            ## 踩过的坑和修复
+            ## 问题解决过程
+            ## 逐条用户消息
+            ## 待办任务
+            ## 当前在做什么
+            ## 下一步
+
+            要求：精确实体（文件名/路径/数字/错误码）保留原文；决策被覆盖时只保留最终值；
+            "逐条用户消息"按时间列每条用户消息的要点（不复述全文）；不保留过渡话术；不加段落外的前缀或元描述。
 
             === 待压缩的对话 ===
             %s
@@ -161,14 +169,19 @@ public class ConversationHistoryCompactor {
             """;
 
     private static final String REDUCE_PROMPT = """
-            下面是一段长对话被切成多个片段后，每片各自的摘要。请把它们合并成一份完整的整体摘要，保留：
-            1. 整段对话的最初目标和最终结论
-            2. 所有出现过的精确实体（文件名、路径、数字常量、错误码）必须以原文形式出现在合并摘要里
-            3. 决策若被覆盖过（先 A 后 B 最终 C），合并摘要里要明确"最终是 C"
-            4. 出现过的关键错误与对应处理
+            下面是一段长对话被切成多片后各自的摘要。请合并成一份完整摘要，严格按以下九个 Markdown 段落输出（标题用 ## 开头，无内容写"无"）：
 
-            不要遗漏任何片段里出现过的精确实体；不要发明片段里不存在的信息。
-            输出 3-5 段中文，不加前缀。
+            ## 主要请求与意图
+            ## 关键技术概念
+            ## 文件和代码
+            ## 踩过的坑和修复
+            ## 问题解决过程
+            ## 逐条用户消息
+            ## 待办任务
+            ## 当前在做什么
+            ## 下一步
+
+            要求：所有片段里的精确实体（文件名/路径/数字/错误码）必须以原文出现；决策被覆盖（先 A 后 B 最终 C）只保留"最终是 C"；不遗漏任何片段事实；不加段落外前缀。
 
             === 各片段摘要 ===
             %s
@@ -176,18 +189,23 @@ public class ConversationHistoryCompactor {
             """;
 
     private static final String INCREMENTAL_PROMPT = """
-            你正在维护一份长对话的滚动摘要。下面是已有摘要和自上次以来的新对话，
-            请把新对话的关键信息**整合进**已有摘要，保留：
-            1. 已有摘要里的所有事实（决策、约束、用户偏好、错误码、精确实体）一条都不能丢
-            2. 新对话里出现的具体决策（包括对已有决策的覆盖；覆盖时明确标注"最终值=X"）
-            3. 新对话里出现的精确实体（文件名/路径/数字/错误码）必须保留原文
-            4. 新对话引发的新结论或新待办
+            你在维护一份九段式滚动摘要。下面是已有摘要（九段）和自上次以来的新对话，
+            请把新对话的关键信息按段整合进已有摘要，输出更新后的完整九段摘要（同样的 ## 段落结构）：
 
-            不要重新组织已有摘要的句式；只在结尾追加新增内容，必要时修改被覆盖的字段。
-            丢弃过渡话术（"好的，继续"、"我理解了"）和应答性回复。
-            输出更新后的完整摘要，3-6 段中文，不加前缀。
+            ## 主要请求与意图
+            ## 关键技术概念
+            ## 文件和代码
+            ## 踩过的坑和修复
+            ## 问题解决过程
+            ## 逐条用户消息
+            ## 待办任务
+            ## 当前在做什么
+            ## 下一步
 
-            === 已有摘要 ===
+            要求：新信息并入对应段；决策被覆盖时该段只保留最终值；精确实体（文件名/路径/数字/错误码）保留原文；
+            "逐条用户消息"段在末尾追加新出现的用户消息要点；丢弃过渡话术；不加段落外前缀。
+
+            === 已有摘要（九段） ===
             %s
             === 已有摘要（结束） ===
 
@@ -210,6 +228,8 @@ public class ConversationHistoryCompactor {
 
     private LlmClient llmClient;
     private final int retainRecentTokens;
+    /** 九段摘要的程序化垃圾回收（capSummarySize 优先用它裁剪，不调 LLM）。 */
+    private final SummaryGarbageCollector summaryGc = new SummaryGarbageCollector();
 
     /**
      * 连续压缩失败计数。每次摘要 LLM 调用失败 / 返回空 / 找不到分割点时 +1；
@@ -806,6 +826,23 @@ public class ConversationHistoryCompactor {
     private String capSummarySize(String summary) {
         if (summary == null || summary.length() <= MAX_SUMMARY_CHARS) {
             return summary;
+        }
+        // 先程序化 GC（不调 LLM）：解析九段 → 按段裁剪 → 渲染
+        RollingSummary parsed = RollingSummary.parse(summary);
+        if (!parsed.isEmpty()) {
+            summaryGc.gc(parsed, MAX_SUMMARY_CHARS);
+            String collected = parsed.render();
+            if (collected.length() < summary.length()) {
+                log.info("rolling summary GC'd: {} -> {} chars", summary.length(), collected.length());
+                if (collected.length() <= MAX_SUMMARY_CHARS) {
+                    return collected;
+                }
+                summary = collected; // GC 缩小但仍超，继续 LLM 兜底
+            }
+        }
+        // 程序化 GC 不足（非九段格式无法解析，或裁后仍超）→ LLM recompress 兜底
+        if (llmClient == null) {
+            return summary; // 无 LLM 可兜底，返回 GC 后结果（可能略超，宁可不崩）
         }
         int targetChars = MAX_SUMMARY_CHARS / 2;
         try {

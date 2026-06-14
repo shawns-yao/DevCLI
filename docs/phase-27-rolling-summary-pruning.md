@@ -1,6 +1,8 @@
 # Phase 27: Rolling Summary Pruning
 
 > 范围：本文是第 27 期改造设计，用于补齐 `ConversationHistoryCompactor` 的滚动摘要裁剪能力。本文只描述方案，不代表当前代码已完成实现。
+>
+> 落地状态（更新）：27-A/B/C 已实现——摘要改为结构化、`RollingSummary` 提供 parse/render、`SummaryGarbageCollector` 程序化裁剪。**段结构最终采用 Claude Code `/compact` 九段模板（非本文的六段）**：主要请求与意图 / 关键技术概念 / 文件和代码 / 踩过的坑和修复 / 问题解决过程 / 逐条用户消息 / 待办任务 / 当前在做什么 / 下一步。TaskLedger（27-D）、Eval（27-E）未做。
 
 ## 1. 目标
 
