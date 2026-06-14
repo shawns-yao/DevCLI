@@ -289,6 +289,11 @@ public class PlanExecuteAgent {
         out.println("🚀 开始执行计划...\n");
 
         plan.markStarted();
+        LinkedHashMap<String, String> ledgerSteps = new LinkedHashMap<>();
+        for (Task ledgerTask : plan.getAllTasks()) {
+            ledgerSteps.put(ledgerTask.getId(), ledgerTask.getDescription());
+        }
+        memoryManager.setTaskLedgerPlan(plan.getId(), plan.getGoal(), ledgerSteps);
         StringBuilder finalResult = new StringBuilder();
         Map<String, Boolean> streamedTaskOutputs = new HashMap<>();
 
@@ -307,6 +312,7 @@ public class PlanExecuteAgent {
 
                 if (!batchResult.failed()) {
                     task.markCompleted(batchResult.result());
+                    memoryManager.completeTaskStep(task.getId());
                     streamedTaskOutputs.put(task.getId(), batchResult.streamedOutput());
                     log.info("Task completed: {} status={} resultChars={}",
                             task.getId(), task.getStatus(), batchResult.result() == null ? 0 : batchResult.result().length());
@@ -321,6 +327,7 @@ public class PlanExecuteAgent {
 
                 Exception error = batchResult.error();
                 task.markFailed(error.getMessage());
+                memoryManager.failTaskStep(task.getId(), error.getMessage());
                 log.warn("Task failed: {} error={}", task.getId(), error.getMessage());
                 out.println("❌ 失败 [" + task.getId() + "]: " + error.getMessage() + "\n");
 
@@ -396,6 +403,7 @@ public class PlanExecuteAgent {
             log.info("Executing single task: {} type={}", task.getId(), task.getType());
             out.println("▶️ 执行任务 [" + task.getId() + "]: " + task.getDescription());
             task.markStarted();
+            memoryManager.startTaskStep(task.getId());
 
             try {
                 return List.of(TaskExecutionResult.success(task, toolRegistry.runWithResourceLease(task.getId(),
@@ -424,6 +432,7 @@ public class PlanExecuteAgent {
             for (Task task : executableTasks) {
                 out.println("▶️ 并行任务 [" + task.getId() + "]: " + task.getDescription());
                 task.markStarted();
+                memoryManager.startTaskStep(task.getId());
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
                 buffers.put(task.getId(), baos);
                 PrintStream taskOut = new PrintStream(baos, true, StandardCharsets.UTF_8);

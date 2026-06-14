@@ -79,6 +79,7 @@ public class WorkingMemory {
     private final LinkedList<RagEvidence> ragEvidenceMemory = new LinkedList<>();
     private final LinkedList<String> volatileFacts = new LinkedList<>();
     private final LinkedHashMap<String, String> taskState = new LinkedHashMap<>();
+    private final TaskLedger taskLedger = new TaskLedger();
 
     public enum View {
         FULL,
@@ -205,6 +206,15 @@ public class WorkingMemory {
     }
 
     // ─────────────────────────────────────────────────────────
+    // taskLedger（计划执行进度投影）
+    // ─────────────────────────────────────────────────────────
+
+    /** 任务账本：计划执行进度的结构化投影，供 MemoryManager 门面写入、renderForPrompt 注入。 */
+    public synchronized TaskLedger taskLedger() {
+        return taskLedger;
+    }
+
+    // ─────────────────────────────────────────────────────────
     // volatileFacts
     // ─────────────────────────────────────────────────────────
 
@@ -243,6 +253,10 @@ public class WorkingMemory {
     public synchronized String renderForPrompt(View view) {
         View effectiveView = view == null ? View.FULL : view;
         StringBuilder sb = new StringBuilder();
+        String ledger = taskLedger.render();
+        if (!ledger.isEmpty()) {
+            sb.append(ledger).append("\n\n");
+        }
         if (!taskState.isEmpty()) {
             sb.append("### 当前任务状态\n\n");
             for (Map.Entry<String, String> e : taskState.entrySet()) {
@@ -358,6 +372,7 @@ public class WorkingMemory {
         ragEvidenceMemory.clear();
         volatileFacts.clear();
         taskState.clear();
+        taskLedger.clear();
     }
 
     private void recordRagEvidenceIfPresent(String toolName, String argsJson, String result) {

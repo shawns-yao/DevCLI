@@ -126,6 +126,30 @@ public class MemoryManager implements AutoCloseable {
         workingMemory.setTaskState(key, value);
     }
 
+    // ─────────────────────────────────────────────────────────
+    // TaskLedger（计划执行进度投影，注入 working memory 段）
+    // ─────────────────────────────────────────────────────────
+
+    /** 设置当前计划及全部步骤（PlanExecuteAgent 在计划创建后调用，覆盖旧账本）。 */
+    public void setTaskLedgerPlan(String planId, String goal, Map<String, String> stepIdToDesc) {
+        workingMemory.taskLedger().setPlan(planId, goal, stepIdToDesc);
+    }
+
+    /** 标记步骤开始执行。 */
+    public void startTaskStep(String stepId) {
+        workingMemory.taskLedger().startStep(stepId);
+    }
+
+    /** 标记步骤完成。 */
+    public void completeTaskStep(String stepId) {
+        workingMemory.taskLedger().completeStep(stepId);
+    }
+
+    /** 标记步骤失败并记录错误。 */
+    public void failTaskStep(String stepId, String error) {
+        workingMemory.taskLedger().failStep(stepId, error);
+    }
+
     /** 添加一条本会话临时事实。 */
     public void addVolatileFact(String fact) {
         workingMemory.addVolatileFact(fact);

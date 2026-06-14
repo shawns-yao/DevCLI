@@ -2,7 +2,7 @@
 
 > 范围：本文是第 27 期改造设计，用于补齐 `ConversationHistoryCompactor` 的滚动摘要裁剪能力。本文只描述方案，不代表当前代码已完成实现。
 >
-> 落地状态（更新）：27-A/B/C 已实现——摘要改为结构化、`RollingSummary` 提供 parse/render、`SummaryGarbageCollector` 程序化裁剪。**段结构最终采用 Claude Code `/compact` 九段模板（非本文的六段）**：主要请求与意图 / 关键技术概念 / 文件和代码 / 踩过的坑和修复 / 问题解决过程 / 逐条用户消息 / 待办任务 / 当前在做什么 / 下一步。TaskLedger（27-D）、Eval（27-E）未做。
+> 落地状态（更新）：27-A/B/C 已实现——摘要改为结构化、`RollingSummary` 提供 parse/render、`SummaryGarbageCollector` 程序化裁剪。**段结构最终采用 Claude Code `/compact` 九段模板（非本文的六段）**：主要请求与意图 / 关键技术概念 / 文件和代码 / 踩过的坑和修复 / 问题解决过程 / 逐条用户消息 / 待办任务 / 当前在做什么 / 下一步。TaskLedger（27-D）已实现 MVP（见下方 27-D 落地状态：仅 `PlanExecuteAgent` 闭环）。Eval（27-E）未做。
 
 ## 1. 目标
 
@@ -379,6 +379,8 @@ WorkingMemory
 - `MemoryManager` 提供 `setTaskStep(...)` / `completeTaskStep(...)` / `failTaskStep(...)`。
 - `Agent` / `PlanExecuteAgent` / `SubAgent` 在计划拆解、工具执行、错误恢复时更新 TaskLedger。
 - `PromptAssembler` 在 working memory 段中注入紧凑 TaskLedger 视图。
+
+> 落地状态（MVP，已实现）：`TaskLedger`（含内嵌 `Entry` 与 `render()`，未单独拆 `TaskLedgerRenderer`）挂在 `WorkingMemory`；`MemoryManager` 提供 `setTaskLedgerPlan` / `startTaskStep` / `completeTaskStep` / `failTaskStep` 门面；**仅 `PlanExecuteAgent` 接入**（计划创建时注册步骤，task 开始/完成/失败时更新）；经 `WorkingMemory.renderForPrompt()` → `buildWorkingMemorySection()` 注入 "## Working Memory" 段（非 `PromptAssembler` 直接注入）。TaskLedger 挂在 WorkingMemory、不进 conversationHistory，压缩不触碰它。`Agent`（ReAct）/ `SubAgent`（Multi-Agent）接入留后续。
 
 ### 27-E Eval 与回归
 
