@@ -20,6 +20,14 @@ public interface LlmClient {
         return 128_000;
     }
 
+    /**
+     * 模型单次响应的最大输出 token 数。上下文压缩用它预留输出空间，
+     * 避免压缩后剩余窗口装不下模型回复。默认 8192，对齐请求默认 max_tokens。
+     */
+    default int maxOutputTokens() {
+        return 8_192;
+    }
+
     default boolean supportsPromptCaching() {
         return false;
     }

@@ -10,7 +10,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * 验证 ContextProfile 的派生公式。
  *
  * 设计原则：没有"长 / 短模式"分档，所有参数都是 maxContextWindow 的简单函数；
- * 全模型走同一阈值（90% 触发压缩）。
+ * 压缩阈值取 90% 比例触发与 "预留输出空间" 两者更早的那个，全模型同一套规则。
  */
 class ContextProfileTest {
 
@@ -73,5 +73,34 @@ class ContextProfileTest {
         assertEquals(128_000, profile.maxContextWindow());
         assertEquals(0.90, profile.compressionTriggerRatio(), 0.001);
         assertFalse(profile.promptCachingSupported());
+    }
+
+    @Test
+    void midWindowReservesOutputSpaceInsteadOfPureRatio() {
+        // 128k：纯 90% 触发在 115200、只剩 12800 给输出，不足一次回复；
+        // 改为预留 20k 输出 → 提前在 108000 触发
+        ContextProfile profile = ContextProfile.custom(128_000, 4_000);
+        assertEquals(108_000, profile.compressionTriggerTokens());
+    }
+
+    @Test
+    void smallWindowCapsReserveAtHalfWindow() {
+        // 8k：预留 20k 不现实，封顶为 window/2；阈值 = 4000，仍为正且留一半给输出
+        ContextProfile profile = ContextProfile.custom(8_000, 1_000);
+        assertEquals(4_000, profile.compressionTriggerTokens());
+    }
+
+    @Test
+    void largeWindowStillUsesRatioTrigger() {
+        // ≥ 200k：90% 比例触发主导（留 10% 已足够装下输出），预留逻辑不提前触发
+        assertEquals(180_000, ContextProfile.custom(200_000, 1_000).compressionTriggerTokens());
+        assertEquals(900_000, ContextProfile.custom(1_000_000, 1_000).compressionTriggerTokens());
+    }
+
+    @Test
+    void outputReserveDerivedFromClient() {
+        // from(client) 从模型 maxOutputTokens 派生预留依据；GLM 用接口默认 8192
+        ContextProfile profile = ContextProfile.from(new GLMClient("test-key"));
+        assertEquals(8_192, profile.outputReserveTokens());
     }
 }
