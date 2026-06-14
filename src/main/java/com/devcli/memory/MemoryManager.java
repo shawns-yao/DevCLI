@@ -5,6 +5,7 @@ import com.devcli.context.ContextProfile;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -196,14 +197,25 @@ public class MemoryManager implements AutoCloseable {
     }
 
     private void storeFact(String fact, Map<String, String> metadata) {
+        Map<String, String> effectiveMetadata =
+                metadata == null || metadata.isEmpty() ? Map.of("source", "fact") : metadata;
+        String subject = MemorySubjectExtractor.extract(fact, effectiveMetadata);
         MemoryEntry entry = new MemoryEntry(
                 "fact-" + UUID.randomUUID().toString().substring(0, 8),
                 fact,
                 MemoryEntry.MemoryType.FACT,
-                metadata == null || metadata.isEmpty() ? Map.of("source", "fact") : metadata,
-                MemoryEntry.estimateTokens(fact)
+                Instant.now(),
+                effectiveMetadata,
+                MemoryEntry.estimateTokens(fact),
+                subject,
+                true,
+                ""
         );
-        longTermMemory.store(entry);
+        if (subject.isBlank()) {
+            longTermMemory.store(entry);               // 无法确定主题：追加，不覆盖
+        } else {
+            longTermMemory.storeWithSubject(entry);    // 同主题旧事实被 supersede
+        }
     }
 
     public record StoreResult(boolean stored, LongTermMemoryPolicy.Decision decision, String message) {}
@@ -222,8 +234,14 @@ public class MemoryManager implements AutoCloseable {
         StringBuilder sb = new StringBuilder("长期记忆（LongTermMemory）当前持久化条目：\n");
         for (MemoryEntry entry : entries) {
             sb.append("- id=").append(entry.getId())
-                    .append(", type=").append(entry.getType())
-                    .append(", created_at=").append(entry.getTimestamp())
+                    .append(", type=").append(entry.getType());
+            if (!entry.getSubject().isBlank()) {
+                sb.append(", subject=").append(entry.getSubject());
+            }
+            if (!entry.isActive()) {
+                sb.append(", active=false, superseded_by=").append(entry.getSupersededBy());
+            }
+            sb.append(", created_at=").append(entry.getTimestamp())
                     .append("\n  content: ").append(entry.getContent());
             if (!entry.getMetadata().isEmpty()) {
                 sb.append("\n  metadata: ").append(entry.getMetadata());
@@ -260,15 +278,18 @@ public class MemoryManager implements AutoCloseable {
     }
 
     private String buildLongTermMemoryInventorySnapshot(int limit, int maxTokens) {
-        int total = longTermMemory.size();
+        List<MemoryEntry> activeEntries = longTermMemory.getAll().stream()
+                .filter(MemoryEntry::isActive)
+                .sorted(java.util.Comparator.comparing(MemoryEntry::getTimestamp).reversed())
+                .toList();
+        int total = activeEntries.size();
         if (total == 0) {
             return "## 长期记忆索引快照\n\n- total: 0\n- 当前持久化长期记忆为空。";
         }
         StringBuilder context = new StringBuilder("## 长期记忆索引快照\n\n");
         context.append("- total: ").append(total).append('\n');
         context.append("- 说明: 这是持久化长期记忆的轻量目录；用户要求完整查看或审计时调用 list_memory。\n");
-        List<MemoryEntry> entries = longTermMemory.getAll().stream()
-                .sorted(java.util.Comparator.comparing(MemoryEntry::getTimestamp).reversed())
+        List<MemoryEntry> entries = activeEntries.stream()
                 .limit(Math.max(1, limit))
                 .toList();
         int usedTokens = MemoryEntry.estimateTokens(context.toString());

@@ -11,6 +11,7 @@ First implementation phase completed.
 - Completed: `NegativeFact（负向事实）` is emitted with retrieved stale symbols and injected into `WorkingMemory（工作记忆）`.
 - Completed: `search_code` output now carries `symbolVersion`, `indexEpoch`, and `classpathEpoch（类路径版本）` evidence metadata.
 - Completed: `WorkingMemory（工作记忆）` extracts `search_code` output into `RagEvidenceMemory（RAG 证据记忆）` and injects it into prompt context.
+- Completed: `LongTermMemory（长期记忆）` 支持 `subject（主题键）` 冲突消解——同主题新事实写入时旧事实置为 `superseded（已取代）`，检索只返回 `active（有效）` 条目。
 - Not completed: running Worker interruption and Orchestrator-level re-plan.
 
 ## 暴露的问题
@@ -31,6 +32,7 @@ First implementation phase completed.
 - `LongTermMemory（长期记忆）` 保存跨会话稳定事实。
 - 长期记忆主要通过 `/save` 或用户明确要求保存。
 - 敏感信息和模糊个人状态不会自动保存。
+- `LongTermMemory（长期记忆）` 按 `subject（主题键）` 归并：同主题新事实写入时旧事实标记为 `superseded（已取代）`，检索只返回 `active（有效）` 条目。
 - Multi-Agent 按 Planner / Worker / Reviewer 注入不同视图。
 
 ## 不足
@@ -102,6 +104,20 @@ It was replaced by OrderService.createOrder(CreateOrderRequest).
 - 当前 DAG 状态。
 - 失败原因。
 
+### 6. 长期记忆主题冲突消解
+
+用户推翻旧设定（如"原来用 Fastjson，现在合规要求改用 Jackson"）时，旧事实必须失效，不能与新事实并存误导模型。
+
+数据模型：`MemoryEntry（记忆条目）` 增加 `subject（主题键）`、`active（是否有效）`、`supersededBy（被哪条取代）` 三个字段，`memory_facts` 表加同名列与 `(subject, active)` 索引；旧库通过 `addColumnIfMissing` 幂等补列平滑升级。
+
+写入：`MemorySubjectExtractor（主题抽取器）` 用确定性规则从事实抽 subject（含库名词典，让 Fastjson / Jackson / Gson 归到 `project.json_library`）。命中主题走 `LongTermMemory.storeWithSubject`——同主题现存 active 旧条先标记为失效（`supersededBy` 指向新条），再写入新条；抽不到主题则退回普通追加，不覆盖。体现"能确定冲突才覆盖，不确定就保留"的保守策略。
+
+检索：`search` 与 `MemoryRetriever.retrieveLongTerm` 只返回 active 条目，注入 system prompt 的索引快照同样只统计 active；被取代的旧事实软删除保留供审计（`list_memory` 标记 `active=false` 与 `superseded_by`）。
+
+分层判定：第一版只做规则主题键；显式 `/save` / `save_memory` 可由上游带入 subject，优先级最高；语义判定（向量相似度 / 小模型）作为后续可插拔增强，不影响本机制对外契约。
+
+边界（第一版未做）：被取代的历史只软删除、暂不淘汰（无 TTL / 容量上限）；规则词典未覆盖的异词同题会漏判，此时退回追加而非误覆盖。
+
 ## 设计边界
 
 - 不把所有历史都塞进上下文。
@@ -118,6 +134,7 @@ It was replaced by OrderService.createOrder(CreateOrderRequest).
 - Worker 刷新上下文时能看到 negative facts。已完成。
 - 长期记忆策略能拒绝敏感和模糊事实。
 - 压缩后仍保留路径、签名、错误指纹等硬锚点。
+- 用户推翻旧设定后，同主题旧事实失效且不再被检索召回。已完成。
 
 ## 本次落地
 

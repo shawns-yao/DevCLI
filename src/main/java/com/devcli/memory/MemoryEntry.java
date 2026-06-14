@@ -13,6 +13,12 @@ public class MemoryEntry {
     private final Instant timestamp;
     private final Map<String, String> metadata;
     private final int tokenCount;
+    /** 主题键：同主题的旧事实在写入新事实时被标记为失效（用于冲突消解）。空串表示不参与主题归并。 */
+    private final String subject;
+    /** 是否为当前有效事实；被同主题新事实取代后置 false（软删除，保留审计）。 */
+    private final boolean active;
+    /** 取代本条的新事实 id；active=false 时有意义，否则为空串。 */
+    private final String supersededBy;
 
     public enum MemoryType {
         CONVERSATION,  // 对话记忆
@@ -27,12 +33,25 @@ public class MemoryEntry {
 
     public MemoryEntry(String id, String content, MemoryType type, Instant timestamp,
                        Map<String, String> metadata, int tokenCount) {
+        this(id, content, type, timestamp, metadata, tokenCount, "", true, "");
+    }
+
+    /**
+     * 完整构造（含冲突消解字段）。旧构造默认 {@code subject="" / active=true / supersededBy=""}，
+     * 保持对既有调用点的兼容。
+     */
+    public MemoryEntry(String id, String content, MemoryType type, Instant timestamp,
+                       Map<String, String> metadata, int tokenCount,
+                       String subject, boolean active, String supersededBy) {
         this.id = id;
         this.content = content;
         this.type = type;
         this.timestamp = timestamp != null ? timestamp : Instant.now();
         this.metadata = metadata != null ? metadata : Map.of();
         this.tokenCount = tokenCount;
+        this.subject = subject == null ? "" : subject;
+        this.active = active;
+        this.supersededBy = supersededBy == null ? "" : supersededBy;
     }
 
     public String getId() { return id; }
@@ -41,6 +60,9 @@ public class MemoryEntry {
     public Instant getTimestamp() { return timestamp; }
     public Map<String, String> getMetadata() { return metadata; }
     public int getTokenCount() { return tokenCount; }
+    public String getSubject() { return subject; }
+    public boolean isActive() { return active; }
+    public String getSupersededBy() { return supersededBy; }
 
     /**
      * 粗略估算 token 数（中文约 1.5 字/token，英文约 4 字符/token）

@@ -114,6 +114,61 @@ public class LongTermMemory implements Memory, AutoCloseable {
         }
     }
 
+    /**
+     * 带主题的写入：同 {@code subject} 的现存 active 事实先被标记为失效（{@code supersededBy}
+     * 指向新条），再写入新事实，实现"同主题新事实覆盖旧事实"的冲突消解。旧条软删除保留审计，
+     * 检索侧（{@link #search} / MemoryRetriever）按 active 过滤后不再召回。
+     *
+     * <p>顺序关键——先 supersede 旧条再 {@link #store} 新条：否则当新旧 content 相同时，
+     * 新条会被 {@link #findDuplicateContent} 判为重复而跳过，导致该主题失去 active 条。
+     *
+     * <p>{@code entry.subject} 为空时退化为普通 {@link #store}（不参与主题归并）。
+     */
+    public synchronized void storeWithSubject(MemoryEntry entry) {
+        if (entry == null) return;
+        String subject = entry.getSubject();
+        if (subject == null || subject.isBlank()) {
+            store(entry);
+            return;
+        }
+        // 1. 同主题现存 active 旧条 → 标记 inactive，superseded_by 指向新条
+        List<MemoryEntry> supersededTargets = new ArrayList<>();
+        for (MemoryEntry existing : entries.values()) {
+            if (existing.isActive()
+                    && subject.equals(existing.getSubject())
+                    && !existing.getId().equals(entry.getId())) {
+                supersededTargets.add(existing);
+            }
+        }
+        for (MemoryEntry old : supersededTargets) {
+            MemoryEntry inactive = asSuperseded(old, entry.getId());
+            // content/token 未变，无需动 tokenCounter / contentHashes / 向量索引
+            boolean persisted = store.upsert(inactive);
+            if (!persisted && persistentStore) {
+                log.warn("Failed to persist supersede of {} (subject={}); kept in-memory only",
+                        old.getId(), subject);
+            }
+            entries.put(inactive.getId(), inactive);
+        }
+        // 2. 写入新条（走标准 store：维护 hash/token、向量钩子、active-only 去重）
+        store(entry);
+    }
+
+    /** 基于旧条派生一个被取代的失效副本：仅改 active=false 与 supersededBy，其余保持不变。 */
+    private static MemoryEntry asSuperseded(MemoryEntry old, String newId) {
+        return new MemoryEntry(
+                old.getId(),
+                old.getContent(),
+                old.getType(),
+                old.getTimestamp(),
+                old.getMetadata(),
+                old.getTokenCount(),
+                old.getSubject(),
+                false,
+                newId
+        );
+    }
+
     @Override
     public Optional<MemoryEntry> retrieve(String id) {
         return Optional.ofNullable(entries.get(id));
@@ -123,6 +178,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
     public List<MemoryEntry> search(String query, int limit) {
         Set<String> queryTokens = MemoryQueryTokenizer.tokenize(query);
         return entries.values().stream()
+                .filter(MemoryEntry::isActive)
                 .filter(entry -> {
                     if (MemoryQueryTokenizer.matches(entry.getContent(), queryTokens)) {
                         return true;
@@ -174,7 +230,10 @@ public class LongTermMemory implements Memory, AutoCloseable {
             return null;
         }
         for (MemoryEntry existing : entries.values()) {
-            if (!existing.getId().equals(entry.getId()) && existing.getContent().equals(entry.getContent())) {
+            // 仅比对 active：被 supersede 的旧条 content 不应阻止同内容新事实重新写入
+            if (existing.isActive()
+                    && !existing.getId().equals(entry.getId())
+                    && existing.getContent().equals(entry.getContent())) {
                 return existing;
             }
         }

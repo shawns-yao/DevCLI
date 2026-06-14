@@ -62,7 +62,10 @@ public class MemoryRetriever {
     public List<MemoryEntry> retrieveLongTerm(String query, int limit) {
         Map<String, MemoryEntry> byId = new HashMap<>();
         for (MemoryEntry entry : longTermMemory.getAll()) {
-            byId.put(entry.getId(), entry);
+            // 只把 active 事实纳入候选：被 supersede 的旧条即使被语义命中也不会注入 prompt
+            if (entry.isActive()) {
+                byId.put(entry.getId(), entry);
+            }
         }
 
         Map<String, ScoredEntry> scoredById = new HashMap<>();

@@ -36,9 +36,15 @@ import java.util.Map;
  *     timestamp_ms INTEGER NOT NULL,
  *     metadata_json TEXT NOT NULL,    -- 永远是合法 JSON，空 metadata 用 "{}"
  *     token_count INTEGER NOT NULL,
+ *     subject TEXT NOT NULL DEFAULT '',        -- 主题键，冲突消解归并维度
+ *     active INTEGER NOT NULL DEFAULT 1,       -- 1=当前有效，0=被同主题新事实取代
+ *     superseded_by TEXT NOT NULL DEFAULT '',  -- 取代本条的新事实 id
  *     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
  *   )
  * </pre>
+ *
+ * <p>旧库升级：{@code subject / active / superseded_by} 通过 {@link #addColumnIfMissing} 幂等补列，
+ * 旧行默认 {@code subject='' / active=1}，平滑兼容。
  *
  * <p>失败模式：构造器初始化 SQLite 失败时所有方法降级为 no-op（loadAll 返回空 list），
  * LongTermMemory 仍能在纯内存模式下工作，避免阻塞 DevCLI 启动。
@@ -71,10 +77,19 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
                             timestamp_ms INTEGER NOT NULL,
                             metadata_json TEXT NOT NULL DEFAULT '{}',
                             token_count INTEGER NOT NULL,
+                            subject TEXT NOT NULL DEFAULT '',
+                            active INTEGER NOT NULL DEFAULT 1,
+                            superseded_by TEXT NOT NULL DEFAULT '',
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
                         """);
+                // 旧库迁移：CREATE TABLE IF NOT EXISTS 不会给已存在的表补列，这里幂等补齐
+                addColumnIfMissing(stmt, "subject", "TEXT NOT NULL DEFAULT ''");
+                addColumnIfMissing(stmt, "active", "INTEGER NOT NULL DEFAULT 1");
+                addColumnIfMissing(stmt, "superseded_by", "TEXT NOT NULL DEFAULT ''");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_memory_facts_type ON memory_facts(type)");
+                stmt.execute("CREATE INDEX IF NOT EXISTS idx_memory_facts_subject_active "
+                        + "ON memory_facts(subject, active)");
             }
             ready = true;
         } catch (Exception e) {
@@ -98,7 +113,8 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
         List<MemoryEntry> entries = new ArrayList<>();
         try (Statement stmt = connection.createStatement();
              ResultSet rs = stmt.executeQuery(
-                     "SELECT id, content, type, timestamp_ms, metadata_json, token_count "
+                     "SELECT id, content, type, timestamp_ms, metadata_json, token_count, "
+                             + "subject, active, superseded_by "
                              + "FROM memory_facts ORDER BY timestamp_ms ASC")) {
             while (rs.next()) {
                 MemoryEntry entry = parseRow(rs);
@@ -116,14 +132,18 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
     public boolean upsert(MemoryEntry entry) {
         if (!usable || entry == null) return false;
         String sql = """
-                INSERT INTO memory_facts(id, content, type, timestamp_ms, metadata_json, token_count)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO memory_facts(id, content, type, timestamp_ms, metadata_json, token_count,
+                                         subject, active, superseded_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     content = excluded.content,
                     type = excluded.type,
                     timestamp_ms = excluded.timestamp_ms,
                     metadata_json = excluded.metadata_json,
-                    token_count = excluded.token_count
+                    token_count = excluded.token_count,
+                    subject = excluded.subject,
+                    active = excluded.active,
+                    superseded_by = excluded.superseded_by
                 """;
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setString(1, entry.getId());
@@ -132,6 +152,9 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
             ps.setLong(4, entry.getTimestamp().toEpochMilli());
             ps.setString(5, metadataToJson(entry.getMetadata()));
             ps.setInt(6, entry.getTokenCount());
+            ps.setString(7, entry.getSubject());
+            ps.setInt(8, entry.isActive() ? 1 : 0);
+            ps.setString(9, entry.getSupersededBy());
             ps.executeUpdate();
             return true;
         } catch (SQLException | JsonProcessingException e) {
@@ -177,6 +200,25 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
         }
     }
 
+    /**
+     * 幂等补列：SQLite 的 {@code CREATE TABLE IF NOT EXISTS} 不会给已存在的旧表补新列，
+     * 这里先用 {@code PRAGMA table_info} 检查再 {@code ALTER TABLE}，保证旧库平滑升级。
+     */
+    private static void addColumnIfMissing(Statement stmt, String column, String definition) throws SQLException {
+        boolean exists = false;
+        try (ResultSet rs = stmt.executeQuery("PRAGMA table_info(memory_facts)")) {
+            while (rs.next()) {
+                if (column.equalsIgnoreCase(rs.getString("name"))) {
+                    exists = true;
+                    break;
+                }
+            }
+        }
+        if (!exists) {
+            stmt.execute("ALTER TABLE memory_facts ADD COLUMN " + column + " " + definition);
+        }
+    }
+
     private MemoryEntry parseRow(ResultSet rs) throws SQLException {
         try {
             String id = rs.getString("id");
@@ -185,7 +227,11 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
             Instant timestamp = Instant.ofEpochMilli(rs.getLong("timestamp_ms"));
             Map<String, String> metadata = parseMetadata(rs.getString("metadata_json"));
             int tokenCount = rs.getInt("token_count");
-            return new MemoryEntry(id, content, type, timestamp, metadata, tokenCount);
+            String subject = rs.getString("subject");
+            boolean active = rs.getInt("active") != 0;
+            String supersededBy = rs.getString("superseded_by");
+            return new MemoryEntry(id, content, type, timestamp, metadata, tokenCount,
+                    subject, active, supersededBy);
         } catch (IllegalArgumentException e) {
             log.warn("Skip corrupted row in memory_facts: {}", e.getMessage());
             return null;
