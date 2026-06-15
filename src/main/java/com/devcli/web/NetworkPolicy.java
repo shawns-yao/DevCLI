@@ -29,14 +29,25 @@ public class NetworkPolicy {
     private final int maxPerWindow;
     private final AtomicLong windowStart = new AtomicLong(0);
     private final AtomicLong counter = new AtomicLong(0);
+    private final HostResolver hostResolver;
 
     public NetworkPolicy() {
         this(DEFAULT_WINDOW_MILLIS, DEFAULT_MAX_PER_WINDOW);
     }
 
     NetworkPolicy(long windowMillis, int maxPerWindow) {
+        this(windowMillis, maxPerWindow, InetAddress::getAllByName);
+    }
+
+    /** 注入自定义主机解析器（测试用：脱离真实 DNS，确定性验证 SSRF 解析判断）。 */
+    NetworkPolicy(HostResolver hostResolver) {
+        this(DEFAULT_WINDOW_MILLIS, DEFAULT_MAX_PER_WINDOW, hostResolver);
+    }
+
+    NetworkPolicy(long windowMillis, int maxPerWindow, HostResolver hostResolver) {
         this.windowMillis = windowMillis;
         this.maxPerWindow = maxPerWindow;
+        this.hostResolver = hostResolver == null ? InetAddress::getAllByName : hostResolver;
     }
 
     /**
@@ -107,7 +118,7 @@ public class NetworkPolicy {
         }
 
         try {
-            InetAddress[] addrs = InetAddress.getAllByName(host);
+            InetAddress[] addrs = hostResolver.resolve(host);
             for (InetAddress addr : addrs) {
                 if (addr.isLoopbackAddress()) {
                     return "禁止访问环回地址（" + addr.getHostAddress() + "）";
@@ -126,5 +137,14 @@ public class NetworkPolicy {
             return "无法解析主机: " + host;
         }
         return null;
+    }
+
+    /**
+     * 主机名解析抽象。默认实现是真实 DNS 解析（{@link InetAddress#getAllByName}）；
+     * 测试注入假实现，自定义 "域名 → IP" 映射，使 SSRF 解析判断脱离真实网络、可确定性验证。
+     */
+    @FunctionalInterface
+    public interface HostResolver {
+        InetAddress[] resolve(String host) throws UnknownHostException;
     }
 }

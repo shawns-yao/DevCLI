@@ -2,6 +2,9 @@ package com.devcli.web;
 
 import org.junit.jupiter.api.Test;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -55,8 +58,36 @@ class NetworkPolicyTest {
 
     @Test
     void allowsPublicHttps() {
-        assertNull(policy.checkUrl("https://example.com/path"));
-        assertNull(policy.checkUrl("https://paicoding.com"));
+        // 注入假解析器：公网域名解析到公网 IP，不碰真实 DNS（断网 / CI 也能跑）
+        NetworkPolicy local = new NetworkPolicy(host -> new InetAddress[]{InetAddress.getByName("1.2.3.4")});
+        assertNull(local.checkUrl("https://good.com/path"));
+    }
+
+    @Test
+    void blocksPublicDomainResolvingToInternalIp() {
+        // SSRF 核心：公网域名被 DNS 解析到内网 IP，必须拦截（字面量黑名单挡不住）
+        NetworkPolicy local = new NetworkPolicy(host -> new InetAddress[]{InetAddress.getByName("192.168.1.1")});
+        String reason = local.checkUrl("https://evil.com/path");
+        assertNotNull(reason);
+        assertTrue(reason.contains("站内"));
+    }
+
+    @Test
+    void blocksPublicDomainResolvingToLoopback() {
+        // 域名解析到环回地址（DNS rebinding 类）也必须拦截
+        NetworkPolicy local = new NetworkPolicy(host -> new InetAddress[]{InetAddress.getByName("127.0.0.1")});
+        assertNotNull(local.checkUrl("https://sneaky.com/"));
+    }
+
+    @Test
+    void rejectsUnresolvableHost() {
+        // 解析失败的主机拒绝访问，且不依赖真实网络（假解析器直接抛 UnknownHostException）
+        NetworkPolicy local = new NetworkPolicy((NetworkPolicy.HostResolver) host -> {
+            throw new UnknownHostException(host);
+        });
+        String reason = local.checkUrl("https://nonexistent.invalid/");
+        assertNotNull(reason);
+        assertTrue(reason.contains("无法解析"));
     }
 
     @Test
