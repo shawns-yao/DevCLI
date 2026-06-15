@@ -109,4 +109,40 @@ class PromptAssemblerTest {
         assertTrue(!prompt.contains("## Sticky Memory"),
                 "stickyMemory 为空时不应产生空段污染 prompt");
     }
+
+    @Test
+    void fixedPrefixStaysStableWhenDynamicSectionsChange() {
+        // prompt cache 契约：自动前缀缓存按请求 token 前缀命中，固定头部（base/personality/mode/approval）
+        // 不能被每轮变化的 memory / workingMemory 内容污染，否则 prefix cache 从第一条 message 就 miss。
+        PromptAssembler assembler = PromptAssembler.createDefault();
+
+        String withA = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
+                .memoryContext("MEMORY_TOKEN_AAA")
+                .workingMemory("WORKING_TOKEN_AAA")
+                .build());
+        String withB = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
+                .memoryContext("MEMORY_TOKEN_BBB_totally_different")
+                .workingMemory("WORKING_TOKEN_BBB_totally_different")
+                .build());
+
+        String commonPrefix = longestCommonPrefix(withA, withB);
+
+        assertTrue(commonPrefix.contains("## Language"),
+                "固定头部应落在稳定前缀内，供自动前缀缓存命中");
+        assertTrue(!commonPrefix.contains("MEMORY_TOKEN_AAA"),
+                "memory 动态内容不应污染固定前缀");
+        assertTrue(!commonPrefix.contains("WORKING_TOKEN_AAA"),
+                "workingMemory 动态内容不应污染固定前缀");
+        assertTrue(commonPrefix.length() > 200,
+                "固定前缀应有实质长度供 prefix cache 命中，实际: " + commonPrefix.length());
+    }
+
+    private static String longestCommonPrefix(String a, String b) {
+        int n = Math.min(a.length(), b.length());
+        int i = 0;
+        while (i < n && a.charAt(i) == b.charAt(i)) {
+            i++;
+        }
+        return a.substring(0, i);
+    }
 }
