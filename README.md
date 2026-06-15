@@ -78,6 +78,7 @@ Main
   - `DEEPSEEK_API_KEY`
   - `STEP_API_KEY`
   - `KIMI_API_KEY` 或 `MOONSHOT_API_KEY`
+  - `OPENAI_API_KEY`（OpenAI 官方或兼容端点，可配 `OPENAI_BASE_URL` / `OPENAI_MODEL`）
 
 Embedding（向量检索）默认使用 Ollama：
 
@@ -185,6 +186,10 @@ STEP_MODEL=step-3.5-flash
 
 KIMI_API_KEY=your_api_key_here
 KIMI_MODEL=kimi-k2.6
+
+OPENAI_API_KEY=your_api_key_here
+OPENAI_MODEL=gpt-4o
+OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
 运行时可用 `/model` 切换已配置的 provider。

@@ -30,7 +30,7 @@
 ## 运行前提
 
 - Java 17+ / Maven
-- 至少一个 API Key：`GLM_API_KEY` / `DEEPSEEK_API_KEY` / `STEP_API_KEY` / `KIMI_API_KEY`
+- 至少一个 API Key：`GLM_API_KEY` / `DEEPSEEK_API_KEY` / `STEP_API_KEY` / `KIMI_API_KEY` / `OPENAI_API_KEY`（OpenAI 兼容，可配 `OPENAI_BASE_URL`）
 
 ## 常用命令
 
@@ -91,7 +91,7 @@ src/main/java/com/devcli/
 ├── agent/       Agent.java, PlanExecuteAgent.java, SubAgent.java, AgentOrchestrator.java
 ├── cli/         Main.java, CliCommandParser.java, PlanReviewInputParser.java
 ├── browser/     BrowserSession, BrowserGuard, SensitivePagePolicy
-├── llm/         GLMClient, DeepSeekClient, StepClient, KimiClient
+├── llm/         GLMClient, DeepSeekClient, StepClient, KimiClient, OpenAiClient
 ├── context/     ContextProfile, ContextMode, TokenUsageFormatter
 ├── memory/      MemoryManager, ConversationHistoryCompactor, LongTermMemory, TaskLedger
 ├── plan/        Planner, ExecutionPlan, Task

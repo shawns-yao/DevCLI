@@ -83,6 +83,34 @@ class LlmClientFactoryTest {
         assertNull(LlmClientFactory.create("unknown", config));
     }
 
+    @Test
+    void createsOpenAiClientWithCustomBaseUrl() {
+        DevCliConfig config = new DevCliConfig();
+        config.setProviders(new LinkedHashMap<>());
+        config.getProviders().put("openai",
+                new DevCliConfig.ProviderConfig(
+                        "test-openai-key",
+                        "https://my-gateway.example.com/v1",
+                        "gpt-4o-mini"));
+
+        LlmClient client = LlmClientFactory.create("openai", config);
+
+        OpenAiClient openAiClient = assertInstanceOf(OpenAiClient.class, client);
+        assertEquals("openai", openAiClient.getProviderName());
+        assertEquals("gpt-4o-mini", openAiClient.getModelName());
+        assertEquals("https://my-gateway.example.com/v1/chat/completions", openAiClient.getApiUrl());
+    }
+
+    @Test
+    void createsOpenAiClientFromGptAlias() {
+        DevCliConfig config = new DevCliConfig();
+        config.setProviders(new LinkedHashMap<>());
+        config.getProviders().put("openai",
+                new DevCliConfig.ProviderConfig("test-key", null, "gpt-4o"));
+
+        assertInstanceOf(OpenAiClient.class, LlmClientFactory.create("gpt", config));
+    }
+
     private static String expectedStepChatUrl(String baseUrl) {
         String normalized = baseUrl != null && !baseUrl.isBlank()
                 ? baseUrl.trim()
