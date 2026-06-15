@@ -2,7 +2,7 @@
 
 > 范围：本文是第 27 期改造设计，用于补齐 `ConversationHistoryCompactor` 的滚动摘要裁剪能力。本文只描述方案，不代表当前代码已完成实现。
 >
-> 落地状态（更新）：27-A/B/C 已实现——摘要改为结构化、`RollingSummary` 提供 parse/render、`SummaryGarbageCollector` 程序化裁剪。**段结构最终采用 Claude Code `/compact` 九段模板（非本文的六段）**：主要请求与意图 / 关键技术概念 / 文件和代码 / 踩过的坑和修复 / 问题解决过程 / 逐条用户消息 / 待办任务 / 当前在做什么 / 下一步。TaskLedger（27-D）已实现 MVP（见下方 27-D 落地状态：仅 `PlanExecuteAgent` 闭环）。Eval（27-E）未做。
+> 落地状态（更新）：27-A/B/C 已实现——摘要改为结构化、`RollingSummary` 提供 parse/render、`SummaryGarbageCollector` 程序化裁剪。**段结构最终采用 Claude Code `/compact` 九段模板（非本文的六段）**：主要请求与意图 / 关键技术概念 / 文件和代码 / 踩过的坑和修复 / 问题解决过程 / 逐条用户消息 / 待办任务 / 当前在做什么 / 下一步。TaskLedger（27-D）已实现 MVP（见下方 27-D 落地状态：仅 `PlanExecuteAgent` 闭环）。Eval（27-E）部分落地：连续多轮压缩摘要有界已补测，其余结构性场景由现有测试覆盖；LLM 语义质量（A→B→C 覆盖、里程碑折叠）需真实模型 benchmark，不在确定性单测范围。
 
 ## 1. 目标
 
@@ -391,6 +391,8 @@ WorkingMemory
 - 已完成任务场景：done steps 被压缩成一行，不丢测试结论。
 - 噪声工具输出场景：超长 `ls -R` 不进入主摘要。
 - 多次压缩场景：连续 5 次压缩后 summary token 不线性增长。
+
+> 落地状态（部分实现）：确定性可单测的场景已覆盖——tool_call 配对、user 边界、单次 token 严格下降、增量不套娃、熔断 / PTL 由 `ConversationHistoryCompactorTest` 覆盖；按段折叠 / 截断由 `SummaryGarbageCollectorTest` 覆盖；**连续多轮压缩摘要有界（不线性增长）由 `ConversationHistoryCompactorStabilityTest` 新增覆盖**。覆盖事实 A→B→C 只留 C、已完成里程碑折一行 等属 LLM 摘要语义质量，依赖真实模型输出，无法用固定 stub 确定性断言，需放 test-benchmark + API key 的集成评测（未做）。
 
 ## 12. 测试建议
 
