@@ -2,6 +2,8 @@ package com.devcli.tool;
 
 import com.devcli.browser.BrowserConnector;
 import com.devcli.mcp.protocol.McpToolDescriptor;
+import com.devcli.rag.CodeChunk;
+import com.devcli.rag.VectorStore;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -45,6 +47,80 @@ class ToolRegistryTest {
         String result = registry.executeTool("search_tools", "{\"query\":\"python\"}");
 
         assertTrue(result.contains("create_project"), result);
+    }
+
+    @Test
+    void mcpToolSnapshotIncludesSchemaFingerprint() {
+        ToolRegistry registry = new ToolRegistry();
+        var issueSchema = JsonNodeFactory.instance.objectNode();
+        issueSchema.put("type", "object");
+        issueSchema.putObject("properties").putObject("repo").put("type", "string");
+        var pullSchema = JsonNodeFactory.instance.objectNode();
+        pullSchema.put("type", "object");
+        pullSchema.putObject("properties").putObject("state").put("type", "string");
+        registry.registerMcpTool(new McpToolDescriptor(
+                "github",
+                "list_issues",
+                McpToolDescriptor.namespaced("github", "list_issues"),
+                "List GitHub issues",
+                issueSchema
+        ), args -> "ok");
+        registry.registerMcpTool(new McpToolDescriptor(
+                "github",
+                "list_pulls",
+                McpToolDescriptor.namespaced("github", "list_pulls"),
+                "List GitHub pull requests",
+                pullSchema
+        ), args -> "ok");
+
+        String snapshot = registry.mcpToolSnapshot();
+
+        assertTrue(snapshot.matches("github:2@[0-9a-f]{12}#v0"), snapshot);
+    }
+
+    @Test
+    void mcpToolSnapshotIncludesServerLifecycleVersion() {
+        ToolRegistry registry = new ToolRegistry();
+        registry.registerMcpTool(new McpToolDescriptor(
+                "github",
+                "list_issues",
+                McpToolDescriptor.namespaced("github", "list_issues"),
+                "List GitHub issues",
+                JsonNodeFactory.instance.objectNode()
+        ), args -> "ok");
+
+        registry.setMcpServerLifecycleVersion("github", 7);
+
+        String snapshot = registry.mcpToolSnapshot();
+
+        assertTrue(snapshot.matches("github:1@[0-9a-f]{12}#v7"), snapshot);
+    }
+
+    @Test
+    void currentRagIndexEpochSnapshotReadsProjectVectorStore(@TempDir Path tempDir) throws Exception {
+        String oldRagDir = System.getProperty("devcli.rag.dir");
+        System.setProperty("devcli.rag.dir", tempDir.resolve("rag").toString());
+        try {
+            ToolRegistry registry = new ToolRegistry();
+            registry.setProjectPath(tempDir.toString());
+            try (VectorStore store = new VectorStore(tempDir.toString())) {
+                store.clearProject();
+                store.replaceProjectIndex(
+                        List.of(new VectorStore.CodeChunkEntry(
+                                CodeChunk.fileChunk("README.md", "indexed content"),
+                                new float[]{1.0f})),
+                        List.of(),
+                        "idx-global");
+            }
+
+            assertEquals("idx-global", registry.currentRagIndexEpochSnapshot());
+        } finally {
+            if (oldRagDir == null) {
+                System.clearProperty("devcli.rag.dir");
+            } else {
+                System.setProperty("devcli.rag.dir", oldRagDir);
+            }
+        }
     }
 
     @Test

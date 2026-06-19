@@ -105,6 +105,36 @@ class AgentMemoryHintTest {
         }
     }
 
+    @Test
+    void shouldMaintainSessionPreSummaryAfterLongTurn(@TempDir Path tempDir) {
+        String oldMemoryDir = System.getProperty("devcli.memory.dir");
+        System.setProperty("devcli.memory.dir", tempDir.resolve("memory").toString());
+        Agent agent = null;
+        try {
+            RecordingStubGLMClient llmClient = new RecordingStubGLMClient(List.of(
+                    new LlmClient.ChatResponse("assistant", "长会话回答", null, 20, 10),
+                    new LlmClient.ChatResponse("assistant", "自动维护的会话预摘要", null, 20, 10)
+            ));
+            agent = new Agent(llmClient);
+
+            agent.run("请记住这段上下文：" + "x".repeat(10_000));
+
+            assertTrue(agent.getMemoryManager().getSessionMemory().currentPreSummary().isPresent());
+            assertEquals("自动维护的会话预摘要",
+                    agent.getMemoryManager().getSessionMemory().currentPreSummary().orElseThrow().summary());
+            assertEquals(2, llmClient.messagesByCall.size(), "一次任务响应后应追加一次预摘要维护调用");
+        } finally {
+            if (agent != null) {
+                agent.close();
+            }
+            if (oldMemoryDir == null) {
+                System.clearProperty("devcli.memory.dir");
+            } else {
+                System.setProperty("devcli.memory.dir", oldMemoryDir);
+            }
+        }
+    }
+
     private static final class StubGLMClient extends GLMClient {
         private final Queue<ChatResponse> responses;
 

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.LlmTraceLogger;
 import com.devcli.lsp.LspDiagnosticReport;
+import com.devcli.memory.CompactBoundaryRuntimeState;
 import com.devcli.memory.ConversationHistoryCompactor;
 import com.devcli.context.ContextProfile;
 import com.devcli.prompt.PromptAssembler;
@@ -29,6 +30,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -90,6 +92,7 @@ public class SubAgent {
         this.conversationHistory = new ArrayList<>();
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
         this.historyCompactor.setPostCompactContextSupplier(this::buildPostCompactRestoreSection);
+        this.historyCompactor.setCompactBoundaryRuntimeStateSupplier(this::buildCompactBoundaryRuntimeState);
         this.historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(this.toolRegistry.getProjectPath()));
         this.conversationHistory.add(LlmClient.Message.system(getSystemPrompt()));
     }
@@ -178,6 +181,36 @@ public class SubAgent {
             }
         }
         return String.join("\n\n", sections);
+    }
+
+    private CompactBoundaryRuntimeState buildCompactBoundaryRuntimeState() {
+        return new CompactBoundaryRuntimeState(
+                skillContextBuffer == null ? List.of() : skillContextBuffer.activeSkillNames(),
+                CompactBoundaryRuntimeState.mergeRagEpochSnapshots(
+                        extractRagEpochSnapshot(buildWorkingMemory()),
+                        toolRegistry.currentRagIndexEpochSnapshot()),
+                toolRegistry.mcpToolSnapshot(),
+                false);
+    }
+
+    private static String extractRagEpochSnapshot(String workingMemory) {
+        if (workingMemory == null || workingMemory.isBlank()) {
+            return "none";
+        }
+        LinkedHashSet<String> epochs = new LinkedHashSet<>();
+        for (String line : workingMemory.split("\\R")) {
+            int idx = line.indexOf("indexEpoch=");
+            if (idx < 0) {
+                continue;
+            }
+            int start = idx + "indexEpoch=".length();
+            int end = line.indexOf(" | ", start);
+            String epoch = (end < 0 ? line.substring(start) : line.substring(start, end)).trim();
+            if (!epoch.isBlank()) {
+                epochs.add(epoch);
+            }
+        }
+        return epochs.isEmpty() ? "none" : String.join(", ", epochs);
     }
 
     private String buildStickyMemory() {

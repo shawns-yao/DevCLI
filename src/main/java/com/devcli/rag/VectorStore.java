@@ -624,6 +624,25 @@ public class VectorStore implements AutoCloseable {
         return new IndexStats(chunks, relations);
     }
 
+    public String currentIndexEpoch() throws SQLException {
+        String sql = """
+                SELECT index_epoch
+                FROM code_chunks
+                WHERE project_path = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """;
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, projectPath);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return safeIndexEpoch(rs.getString("index_epoch"));
+                }
+            }
+        }
+        return IndexEpoch.none().value();
+    }
+
     private double cosineSimilarity(float[] a, float[] b) {
         if (a.length != b.length) {
             return 0.0;

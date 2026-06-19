@@ -28,9 +28,9 @@
 ### 阶段 1：结构化压缩边界与压缩元数据
 
 - 状态：部分实现（2026-06-19）
-- 已实现：`ConversationHistoryCompactor` 在摘要消息中追加 `<compact_boundary>` 结构化边界块，记录压缩类型、触发原因、压缩模式、压缩前后 token、原始消息数、重建消息数、保留消息数和摘要字符数；增量压缩读取上一轮摘要时会剥离边界块，避免边界元数据进入 LLM 摘要正文
-- 未实现：已加载 Skill、RAG epoch、MCP 工具快照、压缩后上下文恢复入口尚未写入边界元数据
-- 影响范围：`ConversationHistoryCompactor`、`CompactBoundaryMetadata`、相关 memory 测试；暂未触及 `Agent` / `PlanExecuteAgent` 的 history 组装
+- 已实现：`ConversationHistoryCompactor` 在摘要消息中追加 `<compact_boundary>` 结构化边界块，记录压缩类型、触发原因、压缩模式、压缩前后 token、原始消息数、重建消息数、保留消息数和摘要字符数；增量压缩读取上一轮摘要时会剥离边界块，避免边界元数据进入 LLM 摘要正文；边界元数据已补充已加载 Skill、RAG epoch、MCP 工具快照和压缩后恢复入口状态，ReAct / Plan / SubAgent 压缩路径会注入当前运行时快照；MCP 工具快照已按 server 记录工具数量、schema 指纹和 server 生命周期版本；RAG epoch 已合并 WorkingMemory 已命中证据 epoch 与当前项目全局索引版本快照
+- 未实现：阶段 1 当前无剩余核心项；后续可在阶段 3 继续细化 MCP 工具状态和角色化恢复内容
+- 影响范围：`ConversationHistoryCompactor`、`CompactBoundaryMetadata`、`CompactBoundaryRuntimeState`、`Agent`、`PlanExecuteAgent`、`SubAgent`、`MemoryManager`、`ToolRegistry`、`SkillContextBuffer`、`McpServer`、`McpServerManager`、`VectorStore`、相关 memory / MCP / RAG / tool 测试
 - 目标：把当前基于 `[已压缩的历史对话摘要]` 文本标记的机制扩展为结构化 compact boundary，记录压缩类型、触发原因、压缩前后 token、保留消息范围、已加载 Skill、RAG epoch 和 MCP 工具快照
 - 参考点：cc 的 `compact_boundary` / `microcompact_boundary` 元数据
 - 验证建议：新增或扩展 `ConversationHistoryCompactorTest`、`ConversationHistoryCompactorStabilityTest`
@@ -39,9 +39,9 @@
 ### 阶段 2：Session Memory 前置摘要
 
 - 状态：部分实现（2026-06-19）
-- 已实现：新增 `SessionMemory` 会话预摘要缓存，按待压缩消息指纹判断预摘要是否覆盖旧消息；`ConversationHistoryCompactor` 首次全量压缩时优先复用匹配的预摘要，避免重复调用 LLM 摘要；`MemoryManager` 持有当前会话的 `SessionMemory`，ReAct 与 Plan 路径的压缩器共享该实例
-- 未实现：主 Agent turn 结束后自动维护预摘要、按 token 增量和工具调用次数触发预摘要刷新、预摘要过期策略和后台异步调度尚未接入
-- 影响范围：`SessionMemory`、`ConversationHistoryCompactor`、`MemoryManager`、`Agent`、`PlanExecuteAgent`、相关 memory 测试
+- 已实现：新增 `SessionMemory` 会话预摘要缓存，按待压缩消息指纹判断预摘要是否覆盖旧消息；`ConversationHistoryCompactor` 首次全量压缩时优先复用匹配的预摘要，避免重复调用 LLM 摘要；`MemoryManager` 持有当前会话的 `SessionMemory`，ReAct 与 Plan 路径的压缩器共享该实例；ReAct turn 结束后会按 token 增量、工具调用次数和大工具结果阈值维护会话预摘要，当前只写入进程内 `SessionMemory`，不写长期记忆
+- 未实现：Plan / Multi-Agent turn 结束后的自动预摘要维护、预摘要过期策略和后台异步调度尚未接入
+- 影响范围：`SessionMemory`、`ConversationHistoryCompactor`、`MemoryManager`、`Agent`、`PlanExecuteAgent`、相关 memory / agent 测试
 - 目标：在普通对话过程中按 token 增量和工具调用次数后台维护会话摘要；自动压缩时优先使用已维护摘要，缺失或过期时再调用现有 LLM 摘要压缩
 - 参考点：cc 的 Session Memory extraction hook 与 `trySessionMemoryCompaction`
 - 验证建议：新增 session memory 阈值判断、摘要更新时间、压缩复用路径测试

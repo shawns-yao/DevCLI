@@ -5,6 +5,7 @@ import com.devcli.llm.LlmTraceLogger;
 import com.devcli.context.ContextProfile;
 import com.devcli.context.TokenUsageFormatter;
 import com.devcli.lsp.LspDiagnosticReport;
+import com.devcli.memory.CompactBoundaryRuntimeState;
 import com.devcli.memory.ConversationHistoryCompactor;
 import com.devcli.memory.ExplicitMemoryHints;
 import com.devcli.memory.MemoryManager;
@@ -71,6 +72,7 @@ public class Agent implements AutoCloseable {
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
         this.historyCompactor.setSessionMemory(memoryManager.getSessionMemory());
         this.historyCompactor.setPostCompactContextSupplier(this::buildPostCompactRestoreSection);
+        this.historyCompactor.setCompactBoundaryRuntimeStateSupplier(this::buildCompactBoundaryRuntimeState);
         this.historyCompactor.setMicrocompactOutputRoot(Path.of(this.toolRegistry.getProjectPath()));
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
         this.toolRegistry.setMemorySaver(memoryManager::storeFact);
@@ -180,6 +182,8 @@ public class Agent implements AutoCloseable {
         long startNanos = System.nanoTime();
         AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
         TraceContext traceContext = TraceContext.root("react");
+        int turnToolCalls = 0;
+        int largestToolResultChars = 0;
         traceRecorder.record(traceContext, "run.start", java.util.Map.of(
                 "model", modelLabel(),
                 "inputChars", userInput == null ? 0 : userInput.length()
@@ -259,7 +263,10 @@ public class Agent implements AutoCloseable {
                     renderer().appendToolCalls(response.toolCalls());
 
                     List<ToolExecutionResult> toolResults = executeToolCalls(response.toolCalls(), iteration);
+                    turnToolCalls += toolResults.size();
                     for (ToolExecutionResult toolResult : toolResults) {
+                        largestToolResultChars = Math.max(largestToolResultChars,
+                                toolResult.result() == null ? 0 : toolResult.result().length());
                         traceRecorder.record(traceContext, "tool.result", java.util.Map.of(
                                 "iteration", iteration,
                                 "tool", toolResult.name(),
@@ -298,10 +305,13 @@ public class Agent implements AutoCloseable {
 
                 if (streamRenderer.hasStreamedOutput()) {
                     streamRenderer.finish();
+                    maintainSessionPreSummaryAfterTurn(turnToolCalls, largestToolResultChars);
                     return "";
                 }
                 streamRenderer.clearThinkingPanel();
-                return formatUserFacingResponse(reasoningTranscript.toString(), response.content());
+                String finalResponse = formatUserFacingResponse(reasoningTranscript.toString(), response.content());
+                maintainSessionPreSummaryAfterTurn(turnToolCalls, largestToolResultChars);
+                return finalResponse;
 
             } catch (IOException e) {
                 log.error("LLM call failed in ReAct loop", e);
@@ -428,6 +438,27 @@ public class Agent implements AutoCloseable {
             }
         }
         return String.join("\n\n", sections);
+    }
+
+    private CompactBoundaryRuntimeState buildCompactBoundaryRuntimeState() {
+        return new CompactBoundaryRuntimeState(
+                skillContextBuffer == null ? List.of() : skillContextBuffer.activeSkillNames(),
+                CompactBoundaryRuntimeState.mergeRagEpochSnapshots(
+                        memoryManager.currentRagEpochSnapshot(),
+                        toolRegistry.currentRagIndexEpochSnapshot()),
+                toolRegistry.mcpToolSnapshot(),
+                false);
+    }
+
+    private void maintainSessionPreSummaryAfterTurn(int turnToolCalls, int largestToolResultChars) {
+        MemoryManager.SessionPreSummaryMaintenanceResult result =
+                memoryManager.maintainSessionPreSummaryAfterTurn(
+                        conversationHistory,
+                        turnToolCalls,
+                        largestToolResultChars);
+        if (result == MemoryManager.SessionPreSummaryMaintenanceResult.MAINTAINED) {
+            log.debug("session pre-summary refreshed after ReAct turn");
+        }
     }
 
     private String buildExternalContext() {

@@ -6,6 +6,7 @@ import com.devcli.mcp.protocol.McpToolDescriptor;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class McpServer {
     private final String name;
@@ -15,6 +16,7 @@ public class McpServer {
     private volatile List<McpToolDescriptor> tools = List.of();
     private volatile String errorMessage;
     private volatile Instant startedAt;
+    private final AtomicLong lifecycleVersion = new AtomicLong();
 
     public McpServer(String name, McpServerConfig config) {
         this.name = name;
@@ -70,6 +72,15 @@ public class McpServer {
 
     public void markStarted() {
         this.startedAt = Instant.now();
+        lifecycleVersion.incrementAndGet();
+    }
+
+    public void markToolsChanged() {
+        lifecycleVersion.incrementAndGet();
+    }
+
+    public long lifecycleVersion() {
+        return lifecycleVersion.get();
     }
 
     public Duration uptime() {

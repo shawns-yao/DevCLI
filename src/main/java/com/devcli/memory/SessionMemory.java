@@ -40,6 +40,10 @@ public class SessionMemory {
         return Optional.of(preSummary);
     }
 
+    public synchronized Optional<PreSummary> currentPreSummary() {
+        return Optional.ofNullable(preSummary);
+    }
+
     public synchronized void clearPreSummary() {
         this.preSummary = null;
     }

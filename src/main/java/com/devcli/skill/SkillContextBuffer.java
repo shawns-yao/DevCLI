@@ -118,6 +118,10 @@ public final class SkillContextBuffer {
         return Collections.unmodifiableSet(allowedTools);
     }
 
+    public synchronized List<String> activeSkillNames() {
+        return List.copyOf(activeSkillNames);
+    }
+
     public synchronized String renderPostCompactRestoreSection() {
         if (activeSkillNames.isEmpty()) {
             return "";

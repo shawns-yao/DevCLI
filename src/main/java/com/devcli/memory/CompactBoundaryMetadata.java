@@ -1,6 +1,7 @@
 package com.devcli.memory;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -16,10 +17,34 @@ public record CompactBoundaryMetadata(
         int originalMessages,
         int rebuiltMessages,
         int retainedMessages,
-        int summaryChars
+        int summaryChars,
+        List<String> loadedSkills,
+        String ragEpoch,
+        String mcpToolSnapshot,
+        boolean postCompactRestoreEnabled
 ) {
     private static final String START = "<compact_boundary>";
     private static final String END = "</compact_boundary>";
+
+    public CompactBoundaryMetadata {
+        loadedSkills = loadedSkills == null ? List.of() : List.copyOf(loadedSkills);
+        ragEpoch = blankToNone(ragEpoch);
+        mcpToolSnapshot = blankToNone(mcpToolSnapshot);
+    }
+
+    public CompactBoundaryMetadata(
+            String compactType,
+            String trigger,
+            String mode,
+            int preTokens,
+            int postTokens,
+            int originalMessages,
+            int rebuiltMessages,
+            int retainedMessages,
+            int summaryChars) {
+        this(compactType, trigger, mode, preTokens, postTokens, originalMessages, rebuiltMessages,
+                retainedMessages, summaryChars, List.of(), "none", "none", false);
+    }
 
     public String renderBoundaryBlock() {
         return START + "\n"
@@ -32,6 +57,10 @@ public record CompactBoundaryMetadata(
                 + "rebuiltMessages=" + rebuiltMessages + "\n"
                 + "retainedMessages=" + retainedMessages + "\n"
                 + "summaryChars=" + summaryChars + "\n"
+                + "loadedSkills=" + renderList(loadedSkills) + "\n"
+                + "ragEpoch=" + ragEpoch + "\n"
+                + "mcpToolSnapshot=" + mcpToolSnapshot + "\n"
+                + "postCompactRestore=" + (postCompactRestoreEnabled ? "enabled" : "disabled") + "\n"
                 + END;
     }
 
@@ -71,7 +100,11 @@ public record CompactBoundaryMetadata(
                     parseInt(values.get("originalMessages")),
                     parseInt(values.get("rebuiltMessages")),
                     parseInt(values.get("retainedMessages")),
-                    parseInt(values.get("summaryChars"))
+                    parseInt(values.get("summaryChars")),
+                    parseList(values.get("loadedSkills")),
+                    blankToNone(values.get("ragEpoch")),
+                    blankToNone(values.get("mcpToolSnapshot")),
+                    "enabled".equalsIgnoreCase(values.getOrDefault("postCompactRestore", "disabled"))
             ));
         } catch (RuntimeException e) {
             return Optional.empty();
@@ -98,5 +131,26 @@ public record CompactBoundaryMetadata(
             throw new IllegalArgumentException("missing integer metadata");
         }
         return Integer.parseInt(value);
+    }
+
+    private static String renderList(List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return "none";
+        }
+        return String.join(", ", values);
+    }
+
+    private static List<String> parseList(String value) {
+        if (value == null || value.isBlank() || "none".equalsIgnoreCase(value.trim())) {
+            return List.of();
+        }
+        return List.of(value.split(",")).stream()
+                .map(String::trim)
+                .filter(s -> !s.isBlank())
+                .toList();
+    }
+
+    private static String blankToNone(String value) {
+        return value == null || value.isBlank() ? "none" : value.trim();
     }
 }

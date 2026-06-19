@@ -5,8 +5,11 @@ import com.devcli.context.ContextProfile;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -36,6 +39,9 @@ import java.util.UUID;
  */
 public class MemoryManager implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(MemoryManager.class);
+    private static final int SESSION_PRE_SUMMARY_TOKEN_DELTA = 2_000;
+    private static final int SESSION_PRE_SUMMARY_TOOL_CALLS = 4;
+    private static final int SESSION_PRE_SUMMARY_LARGE_TOOL_CHARS = 12_000;
     private final WorkingMemory workingMemory;
     private final SessionMemory sessionMemory;
     private final LongTermMemory longTermMemory;
@@ -44,6 +50,7 @@ public class MemoryManager implements AutoCloseable {
     private final Map<String, Integer> memoryCandidateOccurrences = new java.util.concurrent.ConcurrentHashMap<>();
     /** recurrence 候选计数器的容量上限，防止长会话下无界增长。 */
     private static final int MAX_MEMORY_CANDIDATE_ENTRIES = 512;
+    private LlmClient llmClient;
     private TokenBudget tokenBudget;
     private ContextProfile contextProfile;
 
@@ -65,6 +72,7 @@ public class MemoryManager implements AutoCloseable {
     }
 
     private MemoryManager(LlmClient llmClient, ContextProfile contextProfile, LongTermMemory longTermMemory) {
+        this.llmClient = llmClient;
         this.contextProfile = contextProfile;
         this.workingMemory = new WorkingMemory();
         this.sessionMemory = new SessionMemory();
@@ -74,6 +82,7 @@ public class MemoryManager implements AutoCloseable {
     }
 
     public void setLlmClient(LlmClient llmClient) {
+        this.llmClient = llmClient;
         applyContextProfile(ContextProfile.from(llmClient));
     }
 
@@ -358,6 +367,91 @@ public class MemoryManager implements AutoCloseable {
         return workingMemory.renderForPostCompactRestore();
     }
 
+    public String currentRagEpochSnapshot() {
+        LinkedHashSet<String> epochs = new LinkedHashSet<>();
+        for (WorkingMemory.RagEvidence evidence : workingMemory.getRagEvidenceMemory()) {
+            String epoch = evidence.indexEpoch();
+            if (epoch != null && !epoch.isBlank()) {
+                epochs.add(epoch);
+            }
+        }
+        return epochs.isEmpty() ? "none" : String.join(", ", epochs);
+    }
+
+    /**
+     * turn 结束后的会话预摘要维护入口。
+     *
+     * <p>该入口只维护当前进程内 SessionMemory，不写长期记忆。触发条件保持保守：
+     * token 增量、工具调用次数或单个大工具结果达到阈值时才调用 LLM 生成预摘要。
+     */
+    public SessionPreSummaryMaintenanceResult maintainSessionPreSummaryAfterTurn(
+            List<LlmClient.Message> history,
+            int turnToolCalls,
+            int largestToolResultChars) {
+        if (llmClient == null || history == null || history.isEmpty()) {
+            return SessionPreSummaryMaintenanceResult.SKIPPED_EMPTY_HISTORY;
+        }
+        int systemEnd = "system".equals(history.get(0).role()) ? 1 : 0;
+        if (history.size() <= systemEnd) {
+            return SessionPreSummaryMaintenanceResult.SKIPPED_EMPTY_HISTORY;
+        }
+        List<LlmClient.Message> coveredMessages = new ArrayList<>(history.subList(systemEnd, history.size()));
+        if (sessionMemory.findReusablePreSummary(coveredMessages).isPresent()) {
+            return SessionPreSummaryMaintenanceResult.SKIPPED_ALREADY_CURRENT;
+        }
+        int tokenEstimate = TokenBudget.estimateMessagesTokens(coveredMessages);
+        int previousTokenEstimate = sessionMemory.currentPreSummary()
+                .map(SessionMemory.PreSummary::tokenEstimate)
+                .orElse(0);
+        int tokenDelta = tokenEstimate - previousTokenEstimate;
+        boolean triggered = tokenDelta >= SESSION_PRE_SUMMARY_TOKEN_DELTA
+                || turnToolCalls >= SESSION_PRE_SUMMARY_TOOL_CALLS
+                || largestToolResultChars >= SESSION_PRE_SUMMARY_LARGE_TOOL_CHARS;
+        if (!triggered) {
+            return SessionPreSummaryMaintenanceResult.SKIPPED_BELOW_THRESHOLD;
+        }
+        try {
+            LlmClient.ChatResponse response = llmClient.chat(List.of(
+                    LlmClient.Message.system("你是会话预摘要维护器。请保留用户目标、关键决策、文件路径、工具结果和未完成事项，输出简洁中文摘要。"),
+                    LlmClient.Message.user("请为以下会话内容生成可供后续上下文压缩复用的预摘要：\n\n"
+                            + renderMessagesForPreSummary(coveredMessages))
+            ), List.of());
+            String summary = response.content();
+            if (summary == null || summary.isBlank()) {
+                return SessionPreSummaryMaintenanceResult.FAILED;
+            }
+            sessionMemory.recordPreSummary(coveredMessages, summary);
+            return SessionPreSummaryMaintenanceResult.MAINTAINED;
+        } catch (IOException | RuntimeException e) {
+            log.warn("session pre-summary maintenance failed", e);
+            return SessionPreSummaryMaintenanceResult.FAILED;
+        }
+    }
+
+    private static String renderMessagesForPreSummary(List<LlmClient.Message> messages) {
+        StringBuilder sb = new StringBuilder();
+        for (LlmClient.Message message : messages) {
+            sb.append("[").append(message.role()).append("] ");
+            if (message.toolCallId() != null && !message.toolCallId().isBlank()) {
+                sb.append("toolCallId=").append(message.toolCallId()).append(' ');
+            }
+            if (message.toolCalls() != null && !message.toolCalls().isEmpty()) {
+                sb.append("toolCalls=");
+                for (LlmClient.ToolCall toolCall : message.toolCalls()) {
+                    if (toolCall.function() != null) {
+                        sb.append(toolCall.function().name()).append(' ');
+                    }
+                }
+            }
+            String content = message.content();
+            if (content != null && !content.isBlank()) {
+                sb.append(truncateForPrompt(content, 2_000));
+            }
+            sb.append("\n\n");
+        }
+        return sb.toString().trim();
+    }
+
     /**
      * 为 Multi-Agent 角色构建隔离后的工作记忆视图。
      *
@@ -441,6 +535,14 @@ public class MemoryManager implements AutoCloseable {
     public MemoryRetriever getRetriever() { return retriever; }
     public TokenBudget getTokenBudget() { return tokenBudget; }
     public ContextProfile getContextProfile() { return contextProfile; }
+
+    public enum SessionPreSummaryMaintenanceResult {
+        MAINTAINED,
+        SKIPPED_EMPTY_HISTORY,
+        SKIPPED_BELOW_THRESHOLD,
+        SKIPPED_ALREADY_CURRENT,
+        FAILED
+    }
 
     /**
      * 关闭底层记忆资源。Main 长进程不需要主动调（JVM 退出释放）；

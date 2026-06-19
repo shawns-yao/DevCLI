@@ -98,6 +98,25 @@ class VectorStoreTest {
     }
 
     @Test
+    void currentIndexEpochTracksLatestProjectIndex() throws Exception {
+        CodeChunk oldChunk = CodeChunk.fileChunk("old.md", "old content");
+        CodeChunk newChunk = CodeChunk.fileChunk("new.md", "new content");
+
+        assertEquals("none", store.currentIndexEpoch());
+
+        store.replaceProjectIndex(
+                List.of(new VectorStore.CodeChunkEntry(oldChunk, new float[]{1.0f})),
+                List.of(),
+                "idx-old");
+        store.replaceProjectIndex(
+                List.of(new VectorStore.CodeChunkEntry(newChunk, new float[]{1.0f})),
+                List.of(),
+                "idx-new");
+
+        assertEquals("idx-new", store.currentIndexEpoch());
+    }
+
+    @Test
     void testRelationStorage() throws Exception {
         CodeRelation rel = new CodeRelation("A.java", "A", "B.java", "B", "extends",
                 CodeRelation.SOURCE_RESOLVED, 0.8, "epoch-1");

@@ -41,6 +41,8 @@ import java.io.BufferedReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Function;
@@ -61,6 +63,7 @@ public class ToolRegistry {
     private static final Set<String> AUDIT_TOOLS = Set.of("write_file", "execute_command", "create_project", "revert_turn");
     private final Map<String, Tool> tools = new ConcurrentHashMap<>();
     private final Map<String, McpRegisteredTool> mcpTools = new ConcurrentHashMap<>();
+    private final Map<String, Long> mcpServerLifecycleVersions = new ConcurrentHashMap<>();
     private final long commandTimeoutSeconds;
     private final long toolBatchTimeoutSeconds;
     private static final int DEFAULT_FETCH_MAX_CHARS = 8_000;
@@ -968,6 +971,77 @@ public class ToolRegistry {
         tools.remove(toolName);
     }
 
+    public synchronized String mcpToolSnapshot() {
+        if (mcpTools.isEmpty()) {
+            return "none";
+        }
+        Map<String, List<McpRegisteredTool>> toolsByServer = new TreeMap<>();
+        for (McpRegisteredTool registered : mcpTools.values()) {
+            String serverName = registered.descriptor().serverName();
+            String normalizedServer = serverName == null || serverName.isBlank() ? "unknown" : serverName;
+            toolsByServer.computeIfAbsent(normalizedServer, ignored -> new ArrayList<>()).add(registered);
+        }
+        List<String> parts = new ArrayList<>();
+        for (Map.Entry<String, List<McpRegisteredTool>> entry : toolsByServer.entrySet()) {
+            List<McpRegisteredTool> serverTools = entry.getValue().stream()
+                    .sorted(Comparator.comparing(tool -> tool.descriptor().name()))
+                    .toList();
+            long lifecycleVersion = mcpServerLifecycleVersions.getOrDefault(entry.getKey(), 0L);
+            parts.add(entry.getKey() + ":" + serverTools.size()
+                    + "@" + mcpToolSchemaFingerprint(serverTools)
+                    + "#v" + Math.max(0, lifecycleVersion));
+        }
+        return String.join(", ", parts);
+    }
+
+    public synchronized void setMcpServerLifecycleVersion(String serverName, long lifecycleVersion) {
+        String normalized = normalizeMcpServerName(serverName);
+        if (normalized == null) {
+            return;
+        }
+        mcpServerLifecycleVersions.put(normalized, Math.max(0, lifecycleVersion));
+    }
+
+    public String currentRagIndexEpochSnapshot() {
+        try (VectorStore store = new VectorStore(projectPath)) {
+            return store.currentIndexEpoch();
+        } catch (Exception e) {
+            return "none";
+        }
+    }
+
+    private static String mcpToolSchemaFingerprint(List<McpRegisteredTool> serverTools) {
+        StringBuilder payload = new StringBuilder();
+        for (McpRegisteredTool tool : serverTools) {
+            McpToolDescriptor descriptor = tool.descriptor();
+            payload.append(descriptor.name()).append('\n')
+                    .append(descriptor.namespacedName()).append('\n')
+                    .append(canonicalJson(descriptor.inputSchema())).append('\n');
+        }
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(payload.toString().getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder();
+            for (int i = 0; i < 6; i++) {
+                hex.append(String.format(Locale.ROOT, "%02x", digest[i]));
+            }
+            return hex.toString();
+        } catch (NoSuchAlgorithmException e) {
+            return Integer.toHexString(payload.toString().hashCode());
+        }
+    }
+
+    private static String canonicalJson(JsonNode node) {
+        if (node == null) {
+            return "";
+        }
+        try {
+            return mapper.writeValueAsString(node);
+        } catch (JsonProcessingException e) {
+            return node.toString();
+        }
+    }
+
     public synchronized void replaceMcpToolsForServer(String serverName, List<McpToolDescriptor> newTools,
                                                       Function<McpToolDescriptor, Function<String, String>> invokerFactory) {
         replaceMcpToolOutputsForServer(serverName, newTools,
@@ -976,9 +1050,16 @@ public class ToolRegistry {
 
     public synchronized void replaceMcpToolOutputsForServer(String serverName, List<McpToolDescriptor> newTools,
                                                             Function<McpToolDescriptor, Function<String, ToolOutput>> invokerFactory) {
+        replaceMcpToolOutputsForServer(serverName, newTools, 0, invokerFactory);
+    }
+
+    public synchronized void replaceMcpToolOutputsForServer(String serverName, List<McpToolDescriptor> newTools,
+                                                            long lifecycleVersion,
+                                                            Function<McpToolDescriptor, Function<String, ToolOutput>> invokerFactory) {
         Objects.requireNonNull(serverName, "serverName");
         Objects.requireNonNull(newTools, "newTools");
         Objects.requireNonNull(invokerFactory, "invokerFactory");
+        setMcpServerLifecycleVersion(serverName, lifecycleVersion);
         String prefix = "mcp__" + serverName + "__";
         List<String> existing = mcpTools.keySet().stream()
                 .filter(name -> name.startsWith(prefix))
@@ -990,6 +1071,13 @@ public class ToolRegistry {
         for (McpToolDescriptor descriptor : newTools) {
             registerMcpToolOutput(descriptor, invokerFactory.apply(descriptor));
         }
+    }
+
+    private static String normalizeMcpServerName(String serverName) {
+        if (serverName == null || serverName.isBlank()) {
+            return null;
+        }
+        return serverName.trim();
     }
 
     /**

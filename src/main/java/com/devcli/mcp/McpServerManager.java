@@ -416,10 +416,10 @@ public class McpServerManager implements AutoCloseable {
             client.initialize();
             registerNotificationHandlers(server, client);
             List<McpToolDescriptor> tools = buildToolList(server, client);
-            replaceTools(server, client, tools);
             server.client(client);
-            server.tools(tools);
             server.markStarted();
+            replaceTools(server, client, tools);
+            server.tools(tools);
             server.status(McpServerStatus.READY);
         } catch (Exception e) {
             server.close();
@@ -441,6 +441,7 @@ public class McpServerManager implements AutoCloseable {
 
     private void replaceTools(McpServer server, McpClient client, List<McpToolDescriptor> tools) {
         toolRegistry.replaceMcpToolOutputsForServer(server.name(), tools,
+                server.lifecycleVersion(),
                 descriptor -> isResourceVirtualTool(descriptor)
                         ? args -> ToolOutput.text(McpResourceTool.invoker(client, descriptor).apply(args))
                         : args -> invokeMcpToolOutput(client, descriptor, args));
@@ -456,6 +457,7 @@ public class McpServerManager implements AutoCloseable {
         router.on("notifications/tools/list_changed", ignored -> {
             try {
                 List<McpToolDescriptor> tools = buildToolList(server, client);
+                server.markToolsChanged();
                 replaceTools(server, client, tools);
                 server.tools(tools);
             } catch (Exception e) {

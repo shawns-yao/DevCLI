@@ -77,6 +77,55 @@ class MemoryManagerTest {
     }
 
     @Test
+    void maintainSessionPreSummaryAfterTurnTriggersOnTokenGrowth() {
+        try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of(new LlmClient.ChatResponse(
+                             "assistant", "AUTO PRE SUMMARY", null, 100, 20))),
+                     4096, 128000, ltm)) {
+            List<LlmClient.Message> history = List.of(
+                    LlmClient.Message.system("SYSTEM_PROMPT"),
+                    LlmClient.Message.user(longText(10_000)),
+                    LlmClient.Message.assistant(longText(10_000))
+            );
+
+            MemoryManager.SessionPreSummaryMaintenanceResult result =
+                    memoryManager.maintainSessionPreSummaryAfterTurn(history, 0, 0);
+
+            assertEquals(MemoryManager.SessionPreSummaryMaintenanceResult.MAINTAINED, result);
+            SessionMemory.PreSummary preSummary = memoryManager.getSessionMemory()
+                    .findReusablePreSummary(history.subList(1, history.size()))
+                    .orElseThrow();
+            assertEquals("AUTO PRE SUMMARY", preSummary.summary());
+        }
+    }
+
+    @Test
+    void maintainSessionPreSummaryAfterTurnTriggersOnToolCallCount() {
+        try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of(new LlmClient.ChatResponse(
+                             "assistant", "TOOL PRE SUMMARY", null, 30, 10))),
+                     4096, 128000, ltm)) {
+            List<LlmClient.Message> history = List.of(
+                    LlmClient.Message.system("SYSTEM_PROMPT"),
+                    LlmClient.Message.user("short question"),
+                    LlmClient.Message.assistant("short answer")
+            );
+
+            MemoryManager.SessionPreSummaryMaintenanceResult result =
+                    memoryManager.maintainSessionPreSummaryAfterTurn(history, 4, 0);
+
+            assertEquals(MemoryManager.SessionPreSummaryMaintenanceResult.MAINTAINED, result);
+            assertTrue(memoryManager.getSessionMemory()
+                    .findReusablePreSummary(history.subList(1, history.size()))
+                    .orElseThrow()
+                    .summary()
+                    .contains("TOOL PRE SUMMARY"));
+        }
+    }
+
+    @Test
     void clearShortTermShouldClearWorkingMemoryButPreserveLongTerm() {
         try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
              MemoryManager memoryManager = new MemoryManager(
@@ -422,5 +471,9 @@ class MemoryManagerTest {
             }
             return response;
         }
+    }
+
+    private static String longText(int chars) {
+        return "x".repeat(chars);
     }
 }

@@ -247,6 +247,7 @@ public class ConversationHistoryCompactor {
     private final SummaryGarbageCollector summaryGc = new SummaryGarbageCollector();
     private SessionMemory sessionMemory;
     private Supplier<String> postCompactContextSupplier;
+    private Supplier<CompactBoundaryRuntimeState> compactBoundaryRuntimeStateSupplier;
     private Path microcompactOutputRoot;
 
     /**
@@ -293,6 +294,11 @@ public class ConversationHistoryCompactor {
 
     public void setPostCompactContextSupplier(Supplier<String> postCompactContextSupplier) {
         this.postCompactContextSupplier = postCompactContextSupplier;
+    }
+
+    public void setCompactBoundaryRuntimeStateSupplier(
+            Supplier<CompactBoundaryRuntimeState> compactBoundaryRuntimeStateSupplier) {
+        this.compactBoundaryRuntimeStateSupplier = compactBoundaryRuntimeStateSupplier;
     }
 
     public void setMicrocompactOutputRoot(Path microcompactOutputRoot) {
@@ -415,6 +421,8 @@ public class ConversationHistoryCompactor {
         rebuilt.addAll(history.subList(splitIdx, history.size()));
 
         int afterTokens = TokenBudget.estimateMessagesTokens(rebuilt);
+        CompactBoundaryRuntimeState runtimeState =
+                buildCompactBoundaryRuntimeState(!restoreContext.isBlank());
         CompactBoundaryMetadata metadata = new CompactBoundaryMetadata(
                 "history",
                 "token_threshold",
@@ -424,7 +432,11 @@ public class ConversationHistoryCompactor {
                 originalMessages,
                 rebuilt.size(),
                 retainedMessages,
-                summary.length());
+                summary.length(),
+                runtimeState.loadedSkills(),
+                runtimeState.ragEpoch(),
+                runtimeState.mcpToolSnapshot(),
+                runtimeState.postCompactRestoreEnabled());
         rebuilt.set(systemEnd, LlmClient.Message.user(
                 SUMMARY_MARKER + metadata.renderBoundaryBlock() + "\n" + summary.trim()));
         history.clear();
@@ -440,6 +452,22 @@ public class ConversationHistoryCompactor {
                 prev != null ? "incremental" : "full",
                 summary.length()));
         return true;
+    }
+
+    private CompactBoundaryRuntimeState buildCompactBoundaryRuntimeState(boolean hasPostCompactRestoreContext) {
+        CompactBoundaryRuntimeState state = CompactBoundaryRuntimeState.EMPTY;
+        if (compactBoundaryRuntimeStateSupplier != null) {
+            try {
+                CompactBoundaryRuntimeState supplied = compactBoundaryRuntimeStateSupplier.get();
+                if (supplied != null) {
+                    state = supplied;
+                }
+            } catch (RuntimeException e) {
+                log.warn("compact boundary runtime state supplier failed; use empty snapshot", e);
+            }
+        }
+        return state.withPostCompactRestoreEnabled(
+                state.postCompactRestoreEnabled() || hasPostCompactRestoreContext);
     }
 
     private String buildPostCompactRestoreContext() {

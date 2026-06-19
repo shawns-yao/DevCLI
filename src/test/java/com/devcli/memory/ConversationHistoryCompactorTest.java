@@ -111,6 +111,34 @@ class ConversationHistoryCompactorTest {
     }
 
     @Test
+    void compactionBoundaryIncludesRuntimeStateSnapshot() {
+        StubCompactor c = new StubCompactor("MOCK SUMMARY OF OLD CONTENT", 3_000, true);
+        c.setCompactBoundaryRuntimeStateSupplier(() -> new CompactBoundaryRuntimeState(
+                List.of("web-access", "controlled"),
+                "index-epoch-20260619",
+                "github:2, chrome-devtools:5",
+                true
+        ));
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("SYSTEM_PROMPT"));
+        for (int i = 0; i < 6; i++) {
+            history.add(LlmClient.Message.user("Q" + i + ": " + longText(5_000)));
+            history.add(LlmClient.Message.assistant("A" + i + ": " + longText(5_000)));
+        }
+
+        boolean compacted = c.compactIfNeeded(history, 100);
+
+        assertTrue(compacted);
+        CompactBoundaryMetadata metadata = CompactBoundaryMetadata
+                .parseFromSummaryMessage(history.get(1).content())
+                .orElseThrow();
+        assertEquals(List.of("web-access", "controlled"), metadata.loadedSkills());
+        assertEquals("index-epoch-20260619", metadata.ragEpoch());
+        assertEquals("github:2, chrome-devtools:5", metadata.mcpToolSnapshot());
+        assertTrue(metadata.postCompactRestoreEnabled());
+    }
+
+    @Test
     void compactionReusesSessionMemoryPreSummaryWhenItCoversOldMessages() {
         SessionMemory sessionMemory = new SessionMemory();
         StubCompactor c = new StubCompactor("SHOULD NOT BE USED", 3_000, true);

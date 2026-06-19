@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.LlmTraceLogger;
 import com.devcli.lsp.LspDiagnosticReport;
+import com.devcli.memory.CompactBoundaryRuntimeState;
 import com.devcli.memory.ConversationHistoryCompactor;
 import com.devcli.memory.MemoryManager;
 import com.devcli.plan.*;
@@ -151,6 +152,7 @@ public class PlanExecuteAgent {
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
         this.historyCompactor.setSessionMemory(this.memoryManager.getSessionMemory());
         this.historyCompactor.setPostCompactContextSupplier(this::buildPostCompactRestoreSection);
+        this.historyCompactor.setCompactBoundaryRuntimeStateSupplier(this::buildCompactBoundaryRuntimeState);
         this.historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(this.toolRegistry.getProjectPath()));
         this.toolRegistry.setContextProfile(this.memoryManager.getContextProfile());
         this.toolRegistry.setMemorySaver(this.memoryManager::storeFact);
@@ -245,6 +247,16 @@ public class PlanExecuteAgent {
             }
         }
         return String.join("\n\n", sections);
+    }
+
+    private CompactBoundaryRuntimeState buildCompactBoundaryRuntimeState() {
+        return new CompactBoundaryRuntimeState(
+                skillContextBuffer == null ? List.of() : skillContextBuffer.activeSkillNames(),
+                CompactBoundaryRuntimeState.mergeRagEpochSnapshots(
+                        memoryManager.currentRagEpochSnapshot(),
+                        toolRegistry.currentRagIndexEpochSnapshot()),
+                toolRegistry.mcpToolSnapshot(),
+                false);
     }
 
     /**
