@@ -1,9 +1,12 @@
 package com.devcli.skill;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 单 Agent 实例的 skill 注入缓冲区。
@@ -12,6 +15,7 @@ import java.util.Map;
  *
  * 关键约束：
  * - drain 是一次性消费（防止跨轮重复注入）
+ * - allowedTools 属于已加载 Skill 的运行时权限状态，不随 drain 清空，只随 clear 复位
  * - 同一会话内最多保留 3 个 skill body（上限 3 个，超出 LRU 淘汰最旧）
  * - 同一 skill 重复 push 会替换旧 body 并刷新到末尾，避免重复
  * - /clear 命令调 clear() 复位
@@ -24,16 +28,32 @@ public final class SkillContextBuffer {
     private static final int MAX_SKILLS = 3;
 
     private final Map<String, String> entries = new LinkedHashMap<>();
+    private final Map<String, List<String>> activeAllowedToolsBySkill = new LinkedHashMap<>();
 
     public synchronized void push(String skillName, String body) {
+        push(skillName, body, List.of());
+    }
+
+    public synchronized void push(String skillName, String body, List<String> allowedTools) {
         if (skillName == null || skillName.isBlank() || body == null) {
             return;
         }
         entries.remove(skillName);
         entries.put(skillName, body);
+        List<String> normalizedAllowedTools = normalizeAllowedTools(allowedTools);
+        if (normalizedAllowedTools.isEmpty()) {
+            activeAllowedToolsBySkill.remove(skillName);
+        } else {
+            activeAllowedToolsBySkill.put(skillName, normalizedAllowedTools);
+        }
         while (entries.size() > MAX_SKILLS) {
             String oldest = entries.keySet().iterator().next();
             entries.remove(oldest);
+            activeAllowedToolsBySkill.remove(oldest);
+        }
+        while (activeAllowedToolsBySkill.size() > MAX_SKILLS) {
+            String oldest = activeAllowedToolsBySkill.keySet().iterator().next();
+            activeAllowedToolsBySkill.remove(oldest);
         }
     }
 
@@ -81,13 +101,36 @@ public final class SkillContextBuffer {
         return entries.size();
     }
 
+    public synchronized Set<String> activeAllowedTools() {
+        LinkedHashSet<String> allowedTools = new LinkedHashSet<>();
+        for (List<String> tools : activeAllowedToolsBySkill.values()) {
+            allowedTools.addAll(tools);
+        }
+        return Collections.unmodifiableSet(allowedTools);
+    }
+
     public synchronized void clear() {
         entries.clear();
+        activeAllowedToolsBySkill.clear();
     }
 
     public synchronized SkillContextBuffer copy() {
         SkillContextBuffer copy = new SkillContextBuffer();
         copy.entries.putAll(this.entries);
+        copy.activeAllowedToolsBySkill.putAll(this.activeAllowedToolsBySkill);
         return copy;
+    }
+
+    private static List<String> normalizeAllowedTools(List<String> allowedTools) {
+        if (allowedTools == null || allowedTools.isEmpty()) {
+            return List.of();
+        }
+        LinkedHashSet<String> normalized = new LinkedHashSet<>();
+        for (String tool : allowedTools) {
+            if (tool != null && !tool.isBlank()) {
+                normalized.add(tool.trim());
+            }
+        }
+        return List.copyOf(normalized);
     }
 }

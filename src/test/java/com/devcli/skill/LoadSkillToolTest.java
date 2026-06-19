@@ -107,6 +107,33 @@ class LoadSkillToolTest {
     }
 
     @Test
+    void loadedSkillAllowedToolsBlocksOtherTools(@TempDir Path tempDir) throws IOException {
+        Path userRoot = tempDir.resolve("user-skills");
+        Path skillDir = userRoot.resolve("controlled");
+        Files.createDirectories(skillDir);
+        Files.writeString(skillDir.resolve("SKILL.md"),
+                "---\n"
+                        + "name: controlled\n"
+                        + "description: desc\n"
+                        + "allowedTools: [read_file]\n"
+                        + "---\n"
+                        + "body\n");
+        SkillRegistry registry = new SkillRegistry(null, userRoot, null,
+                new SkillStateStore(tempDir.resolve("skills.json")));
+        registry.reload();
+        ToolRegistry tools = new ToolRegistry();
+        tools.setSkillRegistry(registry);
+        tools.setSkillContextBuffer(new SkillContextBuffer());
+
+        tools.executeTool("load_skill", "{\"name\":\"controlled\"}");
+        String result = tools.executeTool("execute_command", "{\"command\":\"echo denied\"}");
+
+        assertTrue(result.contains("Skill 工具权限拒绝"), result);
+        assertTrue(result.contains("read_file"), result);
+        assertTrue(result.contains("execute_command"), result);
+    }
+
+    @Test
     void failsWhenNameMissing() {
         ToolRegistry tools = new ToolRegistry();
         tools.setSkillRegistry(new SkillRegistry(null, null, null, null));

@@ -2,6 +2,7 @@ package com.devcli.agent;
 
 import com.devcli.llm.GLMClient;
 import com.devcli.llm.LlmClient;
+import com.devcli.skill.SkillContextBuffer;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -44,6 +45,19 @@ class AgentSeedHistoryTest {
             agent.seedHistory(List.of());
 
             assertEquals(1, agent.conversationHistorySnapshot().size());
+        }
+    }
+
+    @Test
+    void clearHistoryClearsSkillToolPolicy() {
+        SkillContextBuffer buffer = new SkillContextBuffer();
+        buffer.push("controlled", "body", List.of("read_file"));
+        try (Agent agent = new Agent(new GLMClient("test-key"))) {
+            agent.setSkillContextBuffer(buffer);
+
+            agent.clearHistory();
+
+            assertTrue(buffer.activeAllowedTools().isEmpty());
         }
     }
 }

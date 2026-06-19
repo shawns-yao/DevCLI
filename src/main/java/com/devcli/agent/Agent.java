@@ -321,6 +321,9 @@ public class Agent implements AutoCloseable {
 
         // 清空当前会话工作记忆
         memoryManager.clearShortTerm();
+        if (skillContextBuffer != null) {
+            skillContextBuffer.clear();
+        }
     }
 
     /**

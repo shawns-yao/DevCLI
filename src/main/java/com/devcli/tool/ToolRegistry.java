@@ -601,7 +601,7 @@ public class ToolRegistry {
                     }
                     SkillContextBuffer targetBuffer = activeSkillContextBuffer();
                     if (targetBuffer != null) {
-                        targetBuffer.push(name, injected);
+                        targetBuffer.push(name, injected, skill.allowedTools());
                     }
                     String allowedTools = skill.allowedTools().isEmpty()
                             ? ""
@@ -1019,6 +1019,10 @@ public class ToolRegistry {
         if (tool == null) {
             return ToolOutput.text("未知工具: " + name);
         }
+        ToolOutput skillPermissionError = validateSkillToolAllowed(name);
+        if (skillPermissionError != null) {
+            return skillPermissionError;
+        }
 
         boolean shouldAudit = shouldAudit(name);
         long start = System.nanoTime();
@@ -1072,6 +1076,20 @@ public class ToolRegistry {
             }
             return ToolOutput.text("工具执行失败: " + e.getMessage());
         }
+    }
+
+    protected ToolOutput validateSkillToolAllowed(String name) {
+        SkillContextBuffer buffer = activeSkillContextBuffer();
+        if (buffer == null) {
+            return null;
+        }
+        Set<String> allowedTools = buffer.activeAllowedTools();
+        if (allowedTools.isEmpty() || allowedTools.contains(name)) {
+            return null;
+        }
+        return ToolOutput.text("Skill 工具权限拒绝: 当前已加载 Skill 只允许使用 "
+                + String.join(", ", allowedTools)
+                + "；被拒绝工具: " + name);
     }
 
     protected ToolOutput validateToolArguments(String name, String argumentsJson) {

@@ -154,10 +154,11 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 ### Skill System
 
 - 三层加载：jar 内置 < 用户级 ~/.devcli/skills/ < 项目级 .devcli/skills/
-- frontmatter：name(必填) / description(必填,<=500) / version / author / tags
+- frontmatter：name(必填) / description(必填,<=500) / version / author / tags / allowedTools
 - system prompt 索引段注入到三处提示词末尾，上限 20 个 / 4KB
 - load_skill 工具把 SKILL.md 正文(5KB 截断)写入 SkillContextBuffer
 - buffer 一次性消费，最多 3 个 skill body
+- allowedTools 为空表示不启用工具限制；声明 allowedTools 的已加载 Skill 会把后续工具调用限制在当前 SkillContextBuffer 白名单内，主 Agent、Plan 和 SubAgent 通过各自 buffer 隔离，/clear 清空白名单状态
 
 ### TUI (v16.1 Renderer Architecture)
 

@@ -72,9 +72,9 @@
 ### 阶段 5：Skill 受控执行增强
 
 - 状态：部分实现（2026-06-19）
-- 已实现：Skill frontmatter 支持 `allowedTools: [tool_a, tool_b]`；`SkillRegistry` 会将允许工具列表写入 `Skill` 元数据；`load_skill` 返回结果会提示该 Skill 的允许工具范围，便于模型按 Skill 约束选择工具
-- 未实现：`allowedTools` 的运行时强制拦截、`context: fork`、`paths` 条件激活、Skill 使用频率排序、压缩后已调用 Skill 内容专用恢复尚未实现
-- 影响范围：`Skill`、`SkillRegistry`、`ToolRegistry.load_skill`、Skill / CLI 补全相关测试
+- 已实现：Skill frontmatter 支持 `allowedTools: [tool_a, tool_b]`；`SkillRegistry` 会将允许工具列表写入 `Skill` 元数据；`load_skill` 返回结果会提示该 Skill 的允许工具范围；声明了 `allowedTools` 的已加载 Skill 会在运行时强制限制后续工具调用，白名单状态随 `SkillContextBuffer` 隔离并在 `/clear` 时清空
+- 未实现：`context: fork`、`paths` 条件激活、Skill 使用频率排序、压缩后已调用 Skill 内容专用恢复尚未实现
+- 影响范围：`Skill`、`SkillRegistry`、`SkillContextBuffer`、`ToolRegistry.load_skill`、`HitlToolRegistry`、Skill / CLI 补全相关测试
 - 目标：支持 `allowedTools`、`context: fork`、`paths` 条件激活、Skill 使用频率排序，并在压缩后恢复已调用 Skill 内容
 - 参考点：cc 的 Skill inline / fork 双路径、Safe Properties 权限白名单、条件激活和 invoked skills 恢复
 - 验证建议：扩展 `SkillRegistryTest`、`SkillFrontmatterParserTest`、`LoadSkillToolTest`、新增 fork skill 行为测试

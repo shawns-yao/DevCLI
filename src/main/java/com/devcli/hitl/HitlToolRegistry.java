@@ -38,6 +38,10 @@ public class HitlToolRegistry extends ToolRegistry {
         if (!hitlHandler.isEnabled() || !ApprovalPolicy.requiresApproval(name)) {
             return super.doExecuteTool(name, argumentsJson);
         }
+        ToolOutput skillPermissionError = validateSkillToolAllowed(name);
+        if (skillPermissionError != null) {
+            return skillPermissionError;
+        }
         ToolOutput validationError = validateToolArguments(name, argumentsJson);
         if (validationError != null) {
             return validationError;
