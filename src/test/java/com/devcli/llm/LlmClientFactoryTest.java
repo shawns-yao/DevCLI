@@ -111,6 +111,56 @@ class LlmClientFactoryTest {
         assertInstanceOf(OpenAiClient.class, LlmClientFactory.create("gpt", config));
     }
 
+    @Test
+    void createsAnthropicClientWithMessagesEndpoint() {
+        DevCliConfig config = new DevCliConfig();
+        config.setProviders(new LinkedHashMap<>());
+        config.getProviders().put("anthropic",
+                new DevCliConfig.ProviderConfig(
+                        "test-anthropic-key",
+                        "https://muyuan.do",
+                        "claude-sonnet-4-20250514"));
+
+        LlmClient client = LlmClientFactory.create("anthropic", config);
+
+        AnthropicClient anthropicClient = assertInstanceOf(AnthropicClient.class, client);
+        assertEquals("anthropic", anthropicClient.getProviderName());
+        assertEquals("claude-sonnet-4-20250514", anthropicClient.getModelName());
+        assertEquals("https://muyuan.do/v1/messages", anthropicClient.getApiUrl());
+    }
+
+    @Test
+    void createsAnthropicClientFromClaudeAlias() {
+        DevCliConfig config = new DevCliConfig();
+        config.setProviders(new LinkedHashMap<>());
+        config.getProviders().put("anthropic",
+                new DevCliConfig.ProviderConfig("test-key", "https://muyuan.do/v1", "claude-test"));
+
+        LlmClient client = LlmClientFactory.create("claude", config);
+
+        AnthropicClient anthropicClient = assertInstanceOf(AnthropicClient.class, client);
+        assertEquals("https://muyuan.do/v1/messages", anthropicClient.getApiUrl());
+    }
+
+    @Test
+    void createFromConfigUsesAnthropicAsDefaultProvider() {
+        DevCliConfig config = new DevCliConfig();
+        config.setProviders(new LinkedHashMap<>());
+        config.getProviders().put("anthropic",
+                new DevCliConfig.ProviderConfig("test-anthropic-key", "https://muyuan.do", "claude-sonnet-4-20250514"));
+        config.getProviders().put("openai",
+                new DevCliConfig.ProviderConfig("test-openai-key", null, "gpt-4o"));
+        config.getProviders().put("glm",
+                new DevCliConfig.ProviderConfig("test-glm-key", null, "glm-5.1"));
+
+        LlmClient client = LlmClientFactory.createFromConfig(config);
+
+        AnthropicClient anthropicClient = assertInstanceOf(AnthropicClient.class, client);
+        assertEquals("anthropic", config.getDefaultProvider());
+        assertEquals("anthropic", anthropicClient.getProviderName());
+        assertEquals("claude-sonnet-4-20250514", anthropicClient.getModelName());
+    }
+
     private static String expectedStepChatUrl(String baseUrl) {
         String normalized = baseUrl != null && !baseUrl.isBlank()
                 ? baseUrl.trim()

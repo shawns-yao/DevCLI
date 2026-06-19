@@ -1,5 +1,8 @@
 package com.devcli.llm;
 
+import com.devcli.config.DevCliConfig;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
 /**
  * OpenAI 兼容 client：对接 OpenAI 官方及任意 OpenAI Chat Completions 兼容端点
  * （vLLM / Ollama OpenAI 模式 / OneAPI / 各类代理网关）。base URL 与 model 由用户经
@@ -61,6 +64,21 @@ public class OpenAiClient extends AbstractOpenAiCompatibleClient {
     @Override
     public String promptCacheMode() {
         return "openai-automatic-prefix-cache";
+    }
+
+    @Override
+    protected void customizeRequestBody(ObjectNode requestBody) {
+        // 某些网关(如 runanytime.hxi.me)要求指定分组/渠道名，否则默认分到 default 分组可能无权限
+        // 通过 OPENAI_CHANNEL 或 OPENAI_GROUP 配置，常见值: Other / ClaudeCode / Codex
+        String channel = DevCliConfig.getEnvOrDotEnv("OPENAI_CHANNEL");
+        if (channel == null || channel.isBlank()) {
+            channel = DevCliConfig.getEnvOrDotEnv("OPENAI_GROUP");
+        }
+        if (channel != null && !channel.isBlank()) {
+            // 同时添加多个可能的字段名，网关会自动识别
+            requestBody.put("channel", channel);
+            requestBody.put("group", channel);
+        }
     }
 
     private static String toChatCompletionsUrl(String baseUrl) {

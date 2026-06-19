@@ -47,6 +47,21 @@ class CliCommandParserTest {
         assertNull(provider.model());
         assertEquals(false, provider.explicitModel());
 
+        Main.ModelSelection openai = Main.resolveModelSelection("openai");
+        assertEquals("openai", openai.provider());
+        assertNull(openai.model());
+        assertEquals(false, openai.explicitModel());
+
+        Main.ModelSelection anthropic = Main.resolveModelSelection("anthropic");
+        assertEquals("anthropic", anthropic.provider());
+        assertNull(anthropic.model());
+        assertEquals(false, anthropic.explicitModel());
+
+        Main.ModelSelection claudeModel = Main.resolveModelSelection("claude-sonnet-4-20250514");
+        assertEquals("anthropic", claudeModel.provider());
+        assertEquals("claude-sonnet-4-20250514", claudeModel.model());
+        assertEquals(true, claudeModel.explicitModel());
+
         Main.ModelSelection defaultGlm = Main.resolveModelSelection("glm");
         assertEquals("glm", defaultGlm.provider());
         assertEquals("glm-5.1", defaultGlm.model());

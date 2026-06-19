@@ -201,7 +201,7 @@ public class Main {
         LlmClient llmClient = LlmClientFactory.createFromConfig(config);
         if (llmClient == null) {
             System.err.println("❌ 错误: 未找到可用的 API Key");
-            System.err.println("请在 .env 文件中添加 GLM_API_KEY、DEEPSEEK_API_KEY、STEP_API_KEY 或 KIMI_API_KEY");
+            System.err.println("请在 .env 文件中添加 ANTHROPIC_AUTH_TOKEN、OPENAI_API_KEY、GLM_API_KEY、DEEPSEEK_API_KEY、STEP_API_KEY 或 KIMI_API_KEY");
             System.exit(1);
         }
         AtomicReference<LlmClient> llmClientRef = new AtomicReference<>(llmClient);
@@ -510,6 +510,9 @@ public class Main {
                             ui.println("   GLM 明确模型：");
                             ui.println("   /model glm-5.1       - 切换到 GLM-5.1");
                             ui.println("   /model glm-5v-turbo  - 切换到 GLM-5V-Turbo 多模态");
+                            ui.println("   默认 provider：");
+                            ui.println("   /model anthropic    - 切换到 Anthropic Messages（读取 ANTHROPIC_* 配置）");
+                            ui.println("   /model openai       - 切换到 OpenAI 兼容端点（读取 OPENAI_* 配置）");
                             ui.println("   其它 provider 使用你配置里的具体模型：");
                             ui.println("   /model deepseek      - 切换到 DeepSeek（读取配置模型）");
                             ui.println("   /model step          - 切换到 StepFun（读取配置模型）");
@@ -801,6 +804,7 @@ public class Main {
         LlmClient client = LlmClientFactory.createFromConfig(config);
         if (client == null) {
             System.err.println("❌ 错误: 未找到可用的 API Key");
+            System.err.println("请在 .env 文件中添加 ANTHROPIC_AUTH_TOKEN、OPENAI_API_KEY、GLM_API_KEY、DEEPSEEK_API_KEY、STEP_API_KEY 或 KIMI_API_KEY");
             System.exit(1);
         }
         int port = parseServePort(args, 8080);
@@ -1365,6 +1369,8 @@ public class Main {
     static List<SlashCommandHint> slashCommandHints() {
         return List.of(
                 new SlashCommandHint("/model", "/model", "查看当前模型"),
+                new SlashCommandHint("/model anthropic", "/model anthropic", "切换到 Anthropic Messages"),
+                new SlashCommandHint("/model openai", "/model openai", "切换到 OpenAI 兼容端点"),
                 new SlashCommandHint("/model glm-5.1", "/model glm-5.1", "切换到 GLM-5.1"),
                 new SlashCommandHint("/model glm-5v-turbo", "/model glm-5v-turbo", "切换到 GLM-5V-Turbo 多模态"),
                 new SlashCommandHint("/model deepseek", "/model deepseek", "切换到 DeepSeek（读取配置模型）"),
@@ -1531,7 +1537,7 @@ public class Main {
             return;
         }
         String hint = switch (selected) {
-            case 0, 1 -> "💡 GLM: /model glm-5.1 / /model glm-5v-turbo；其它: /model deepseek|step|kimi 读取配置模型";
+            case 0, 1 -> "💡 默认 Anthropic Messages: /model anthropic；其它: /model openai|glm-5.1|deepseek|step|kimi";
             case 2 -> "💡 切换 HITL: /hitl on / /hitl off";
             case 3 -> "💡 管理 Skill: /skill list / /skill on <name> / /skill off <name>";
             case 4 -> "💡 切换渲染器（重启后生效）: DEVCLI_RENDERER=inline|lanterna|plain";
@@ -2250,6 +2256,7 @@ public class Main {
         String value = raw == null ? "" : raw.trim();
         String normalized = value.toLowerCase(Locale.ROOT);
         return switch (normalized) {
+            case "anthropic", "claude" -> new ModelSelection("anthropic", null, false);
             case "glm" -> new ModelSelection("glm", "glm-5.1", true);
             case "deepseek" -> new ModelSelection("deepseek", null, false);
             case "step", "stepfun", "step-fun" -> new ModelSelection("step", null, false);
@@ -2266,6 +2273,9 @@ public class Main {
                 }
                 if (normalized.startsWith("kimi-") || normalized.startsWith("moonshot-")) {
                     yield new ModelSelection("kimi", value, true);
+                }
+                if (normalized.startsWith("claude-")) {
+                    yield new ModelSelection("anthropic", value, true);
                 }
                 yield new ModelSelection(normalized, null, false);
             }

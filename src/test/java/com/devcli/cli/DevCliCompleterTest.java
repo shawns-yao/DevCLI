@@ -55,9 +55,9 @@ class DevCliCompleterTest {
         DevCliCompleter completer = new DevCliCompleter(List::of);
         List<Candidate> candidates = new ArrayList<>();
 
-        completer.complete(null, parsed("/model st", "st"), candidates);
+        completer.complete(null, parsed("/model a", "a"), candidates);
 
-        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("step")));
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("anthropic")));
     }
 
     @Test

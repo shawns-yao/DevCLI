@@ -20,7 +20,7 @@ public class DevCliConfig {
     private static final Path CONFIG_FILE = CONFIG_DIR.resolve("config.json");
     private static final ObjectMapper mapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
 
-    private String defaultProvider = "glm";
+    private String defaultProvider = "anthropic";
     private Map<String, ProviderConfig> providers = new LinkedHashMap<>();
 
     @JsonIgnoreProperties(ignoreUnknown = true)
@@ -100,6 +100,21 @@ public class DevCliConfig {
         }
     }
 
+    public static String getEnvOrDotEnv(String key) {
+        if (key == null || key.isBlank()) {
+            return null;
+        }
+        String envValue = System.getenv(key);
+        if (envValue != null && !envValue.isBlank()) {
+            return envValue.trim();
+        }
+        String dotEnvValue = readFromDotEnv(key);
+        if (dotEnvValue != null && !dotEnvValue.isBlank()) {
+            return dotEnvValue.trim();
+        }
+        return null;
+    }
+
     private static String loadModelFromEnv(String provider) {
         String envKey = switch (provider.toLowerCase()) {
             case "glm" -> "GLM_MODEL";
@@ -133,6 +148,15 @@ public class DevCliConfig {
     }
 
     private static String loadApiKeyFromEnv(String provider) {
+        if ("anthropic".equalsIgnoreCase(provider)) {
+            String authToken = getEnvOrDotEnv("ANTHROPIC_AUTH_TOKEN");
+            if (authToken != null && !authToken.isBlank()) {
+                return authToken.trim();
+            }
+            String apiKey = getEnvOrDotEnv("ANTHROPIC_API_KEY");
+            return apiKey == null || apiKey.isBlank() ? null : apiKey.trim();
+        }
+
         String envKey = switch (provider.toLowerCase()) {
             case "glm" -> "GLM_API_KEY";
             case "deepseek" -> "DEEPSEEK_API_KEY";

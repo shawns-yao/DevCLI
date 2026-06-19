@@ -25,6 +25,7 @@ public class LlmClientFactory {
                 configuredProvider.equals(normalized) ? null : config.getBaseUrl(configuredProvider));
 
         return switch (normalized) {
+            case "anthropic" -> new AnthropicClient(apiKey, model, baseUrl);
             case "glm" -> new GLMClient(apiKey, model);
             case "deepseek" -> new DeepSeekClient(apiKey, model);
             case "step" -> new StepClient(apiKey, model, baseUrl);
@@ -40,7 +41,7 @@ public class LlmClientFactory {
             return client;
         }
 
-        for (String provider : new String[]{"glm", "deepseek", "step", "kimi", "openai"}) {
+        for (String provider : new String[]{"anthropic", "openai", "glm", "deepseek", "step", "kimi"}) {
             client = create(provider, config);
             if (client != null) {
                 return client;
@@ -56,6 +57,7 @@ public class LlmClientFactory {
             case "stepfun", "step-fun" -> "step";
             case "moonshot", "moonshotai", "moonshot-ai" -> "kimi";
             case "gpt", "openai-compatible", "oai" -> "openai";
+            case "claude", "anthropic-messages" -> "anthropic";
             default -> normalized;
         };
     }

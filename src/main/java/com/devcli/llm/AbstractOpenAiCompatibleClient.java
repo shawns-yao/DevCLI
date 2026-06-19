@@ -67,6 +67,7 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                 .url(getApiUrl())
                 .header("Authorization", "Bearer " + getApiKey())
                 .header("Content-Type", "application/json")
+                .header("User-Agent", "ClaudeCode/1.0")
                 .post(body)
                 .build();
 

@@ -73,12 +73,13 @@ Main
 - Java 17+
 - Maven 3.8+
 - Node.js / npm，只有使用默认 Chrome DevTools MCP 时需要
-- 至少一个 LLM API Key：
+- 至少一个 LLM API Key；默认 provider 是 Anthropic Messages 原生接口：
+  - `ANTHROPIC_AUTH_TOKEN`（Claude / Anthropic Messages 兼容端点，可配 `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL`）
+  - `OPENAI_API_KEY`（OpenAI 官方或兼容端点，可配 `OPENAI_BASE_URL` / `OPENAI_MODEL`）
   - `GLM_API_KEY`
   - `DEEPSEEK_API_KEY`
   - `STEP_API_KEY`
   - `KIMI_API_KEY` 或 `MOONSHOT_API_KEY`
-  - `OPENAI_API_KEY`（OpenAI 官方或兼容端点，可配 `OPENAI_BASE_URL` / `OPENAI_MODEL`）
 
 Embedding（向量检索）默认使用 Ollama：
 
@@ -106,17 +107,15 @@ cd DevCLI
 cp .env.example .env
 ```
 
-编辑 `.env`，至少填写一个模型 API Key：
+编辑 `.env`，默认填写 Anthropic Messages 配置：
 
 ```bash
-GLM_API_KEY=your_api_key_here
-# 或
-DEEPSEEK_API_KEY=your_api_key_here
-# 或
-STEP_API_KEY=your_api_key_here
-# 或
-KIMI_API_KEY=your_api_key_here
+ANTHROPIC_AUTH_TOKEN=your_api_key_here
+ANTHROPIC_BASE_URL=https://api.anthropic.com
+ANTHROPIC_MODEL=claude-sonnet-4-20250514
 ```
+
+也可以改填 `OPENAI_API_KEY`、`GLM_API_KEY`、`DEEPSEEK_API_KEY`、`STEP_API_KEY` 或 `KIMI_API_KEY`，运行时用 `/model` 切换 provider。
 
 如果使用默认本地 embedding：
 
@@ -175,6 +174,17 @@ DevCLI 会从 `.env` 或系统环境变量读取模型配置。
 常用配置：
 
 ```bash
+ANTHROPIC_AUTH_TOKEN=your_api_key_here
+ANTHROPIC_BASE_URL=https://api.anthropic.com
+ANTHROPIC_MODEL=claude-sonnet-4-20250514
+
+OPENAI_API_KEY=your_api_key_here
+OPENAI_MODEL=gpt-4o
+OPENAI_BASE_URL=https://api.openai.com/v1
+# 中转站如要求渠道/分组，可选配
+OPENAI_CHANNEL=Other
+OPENAI_GROUP=Other
+
 GLM_API_KEY=your_api_key_here
 GLM_MODEL=glm-5.1
 
@@ -186,13 +196,9 @@ STEP_MODEL=step-3.5-flash
 
 KIMI_API_KEY=your_api_key_here
 KIMI_MODEL=kimi-k2.6
-
-OPENAI_API_KEY=your_api_key_here
-OPENAI_MODEL=gpt-4o
-OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
-运行时可用 `/model` 切换已配置的 provider。
+未显式切换时默认使用 `anthropic` provider；运行时可用 `/model` 切换已配置的 provider。
 
 ### Embedding
 

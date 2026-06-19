@@ -240,6 +240,8 @@ McpServerManager / McpClient / JsonRpcClient / StdioTransport / StreamableHttpTr
 TuiBootstrap / LanternaWindow / TuiSessionController / pane/ / hitl/ / history/ / highlight/
 
 ### LLM Clients
+- AnthropicClient：默认 provider，Claude / Anthropic Messages 原生兼容端点
+- OpenAiClient：OpenAI 官方或 Chat Completions 兼容端点
 - GLMClient：glm-5.1，glm-5v 开头切多模态接口
 - DeepSeekClient：deepseek-v4-flash
 - StepClient：step-3.5-flash，可通过 STEP_BASE_URL 切通道
@@ -250,7 +252,15 @@ TuiBootstrap / LanternaWindow / TuiSessionController / pane/ / hitl/ / history/ 
 ## .env.example Reference
 
 ```bash
-GLM_API_KEY=your_api_key_here
+# ANTHROPIC_AUTH_TOKEN=your_anthropic_auth_token_here
+# ANTHROPIC_BASE_URL=https://api.anthropic.com
+# ANTHROPIC_MODEL=claude-sonnet-4-20250514
+# OPENAI_API_KEY=your_openai_api_key_here
+# OPENAI_MODEL=gpt-4o
+# OPENAI_BASE_URL=https://api.openai.com/v1
+# OPENAI_CHANNEL=Other
+# OPENAI_GROUP=Other
+# GLM_API_KEY=your_glm_api_key_here
 # GLM_MODEL=glm-5.1
 # GLM_MODEL=glm-5v-turbo
 # DEEPSEEK_API_KEY=your_deepseek_api_key_here

@@ -181,6 +181,8 @@ class MainInputNormalizationTest {
     void slashCommandChoicesAreRenderedDirectlyWithoutJLineConfirmationText() {
         String choices = Main.formatSlashCommandChoices(120);
 
+        assertTrue(choices.contains("/model anthropic"), choices);
+        assertTrue(choices.contains("/model openai"), choices);
         assertTrue(choices.contains("/model glm-5.1"), choices);
         assertTrue(choices.contains("/model glm-5v-turbo"), choices);
         assertTrue(choices.contains("/model step"), choices);

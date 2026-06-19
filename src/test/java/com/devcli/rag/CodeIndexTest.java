@@ -1,13 +1,30 @@
 package com.devcli.rag;
 
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class CodeIndexTest {
+
+    @TempDir
+    Path ragDir;
+
+    @BeforeEach
+    void configureRagDir() {
+        System.setProperty("devcli.rag.dir", ragDir.toString());
+    }
+
+    @AfterEach
+    void clearRagDir() {
+        System.clearProperty("devcli.rag.dir");
+    }
 
     @Test
     void testIndexNonExistentPath() {
@@ -19,8 +36,7 @@ class CodeIndexTest {
 
     @Test
     void testIndexCurrentProject() {
-        System.setProperty("devcli.rag.dir", "/tmp/devcli-test-rag-index");
-        CodeIndex indexer = new CodeIndex();
+        CodeIndex indexer = new CodeIndex(new DeterministicEmbeddingClient());
         // 索引测试资源目录
         CodeIndex.IndexResult result = indexer.index("src/test/resources/rag");
         assertTrue(result.chunkCount() > 0, "应该至少索引一个代码块");
@@ -31,7 +47,7 @@ class CodeIndexTest {
     @Test
     void reportsProgressThroughListener() {
         List<String> messages = new ArrayList<>();
-        CodeIndex indexer = new CodeIndex(messages::add);
+        CodeIndex indexer = new CodeIndex(new DeterministicEmbeddingClient(), messages::add);
 
         CodeIndex.IndexResult result = indexer.index("src/test/resources/rag");
 
@@ -40,5 +56,16 @@ class CodeIndexTest {
         assertTrue(messages.stream().anyMatch(message -> message.startsWith("🧭 IndexEpoch")));
         assertTrue(messages.stream().anyMatch(message -> message.startsWith("📁 发现")));
         assertTrue(messages.stream().anyMatch(message -> message.startsWith("✅ 索引完成")));
+    }
+
+    private static final class DeterministicEmbeddingClient extends EmbeddingClient {
+        private DeterministicEmbeddingClient() {
+            super("ollama", "test-embedding", "http://localhost:11434", "");
+        }
+
+        @Override
+        public float[] embed(String text) {
+            return new float[]{1.0f, text == null ? 0.0f : text.length()};
+        }
     }
 }

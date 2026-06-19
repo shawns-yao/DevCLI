@@ -12,6 +12,11 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -41,6 +46,9 @@ class RagRetrievalBenchmarkIT {
             datasets.add(sampleProjectDataset(tempDir));
             if (Boolean.getBoolean("devcli.benchmark.rag.currentSource")) {
                 datasets.add(devCliSourceDataset());
+            }
+            if (Boolean.getBoolean("devcli.benchmark.rag.codesearchnet")) {
+                datasets.add(codeSearchNetJavaDataset(tempDir));
             }
             for (BenchmarkDataset dataset : datasets) {
                 CodeIndex.IndexResult indexResult = new CodeIndex(embeddingClient).index(dataset.projectRoot().toString());
@@ -89,6 +97,31 @@ class RagRetrievalBenchmarkIT {
                 new QueryCase("OrderService checkout 依赖哪些下游服务", "call_chain", 3,
                         List.of("OrderService.checkout", "PaymentGateway.charge", "InventoryService.reserve"))
         ));
+    }
+
+    private static BenchmarkDataset codeSearchNetJavaDataset(Path tempDir) throws Exception {
+        int length = Math.max(1, Integer.getInteger("devcli.benchmark.rag.codesearchnet.length", 50));
+        int offset = Math.max(0, Integer.getInteger("devcli.benchmark.rag.codesearchnet.offset", 0));
+        String url = "https://datasets-server.huggingface.co/rows?dataset=code-search-net/code_search_net"
+                + "&config=java&split=test&offset=" + offset + "&length=" + length;
+        HttpRequest request = HttpRequest.newBuilder(URI.create(url)).GET().build();
+        HttpResponse<String> response = HttpClient.newHttpClient()
+                .send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        if (response.statusCode() / 100 != 2) {
+            throw new IOException("CodeSearchNet Java rows request failed: HTTP "
+                    + response.statusCode() + " - " + response.body());
+        }
+        List<CodeSearchNetJavaDatasetAdapter.SourceCase> sourceCases =
+                CodeSearchNetJavaDatasetAdapter.fromHuggingFaceRows(JSON.readTree(response.body()), length);
+        if (sourceCases.isEmpty()) {
+            throw new IOException("CodeSearchNet Java rows response did not contain usable Java functions");
+        }
+        Path project = tempDir.resolve("codesearchnet-java-public");
+        CodeSearchNetJavaDatasetAdapter.writeSyntheticProject(project, sourceCases);
+        List<QueryCase> queries = sourceCases.stream()
+                .map(sourceCase -> new QueryCase(sourceCase.query(), "definition", 0, List.of(sourceCase.goldName())))
+                .toList();
+        return new BenchmarkDataset("codesearchnet-java-public", "public_codesearchnet_java", project, queries);
     }
 
     private static BenchmarkDataset devCliSourceDataset() {

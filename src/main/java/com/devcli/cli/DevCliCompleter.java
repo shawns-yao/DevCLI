@@ -88,6 +88,8 @@ final class DevCliCompleter implements Completer {
         }
         String value = input.length() <= 7 ? "" : input.substring(7);
         addMatching(candidates, "模型", value,
+                option("anthropic", "Anthropic Messages，读取 ANTHROPIC_* 配置"),
+                option("openai", "OpenAI 兼容端点，读取 OPENAI_* 配置"),
                 option("glm-5.1", "GLM-5.1 长上下文"),
                 option("glm-5v-turbo", "GLM-5V 多模态"),
                 option("deepseek", "DeepSeek，读取配置模型"),
