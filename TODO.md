@@ -82,8 +82,10 @@
 
 ### 阶段 6：MCP 运行时治理增强
 
-- 状态：未实现
-- 影响范围：`McpServerManager`、`McpClient`、`McpConfigLoader`、`ToolRegistry`、MCP 命令与文档
+- 状态：部分实现（2026-06-19）
+- 已实现：`McpToolDescriptor` 支持工具 `annotations` 元数据；`McpClient.tools/list` 会解析 `readOnlyHint`、`destructiveHint`、`openWorldHint`；MCP 工具注册到 `ToolRegistry` 后，工具描述会携带 `readOnly`、`destructive`、`openWorld` / `closedWorld` 标签，便于模型和 HITL 层识别风险语义
+- 未实现：MCP 工具发现缓存、连接事件、自动重连、OAuth 基础流程、长运行进度和结果折叠分类尚未实现；annotations 当前只进入描述和元数据，尚未接入强制审批策略
+- 影响范围：`McpToolDescriptor`、`McpClient`、`ToolRegistry`、MCP 注册测试
 - 目标：补充 MCP 工具发现缓存、连接事件、重连、OAuth 基础流程、工具注解映射（readOnly/destructive/openWorld）、长运行进度和结果折叠分类
 - 参考点：cc 的 MCP manager、tool discovery cache、OAuth/XAA、MCPTool collapse classification
 - 验证建议：扩展 `McpServerManagerTest`、`McpClientTest`、`McpToolRegistrationTest`、协议 schema 测试

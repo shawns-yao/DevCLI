@@ -87,10 +87,22 @@ public class McpClient implements AutoCloseable {
                     name,
                     McpToolDescriptor.namespaced(serverName, name),
                     description,
-                    schema
+                    schema,
+                    parseToolAnnotations(tool.path("annotations"))
             ));
         }
         return descriptors;
+    }
+
+    private static McpToolDescriptor.Annotations parseToolAnnotations(JsonNode annotations) {
+        if (annotations == null || annotations.isMissingNode() || !annotations.isObject()) {
+            return null;
+        }
+        return new McpToolDescriptor.Annotations(
+                annotations.path("readOnlyHint").asBoolean(false),
+                annotations.path("destructiveHint").asBoolean(false),
+                annotations.path("openWorldHint").asBoolean(true)
+        );
     }
 
     public String callTool(String toolName, String argumentsJson) throws IOException {

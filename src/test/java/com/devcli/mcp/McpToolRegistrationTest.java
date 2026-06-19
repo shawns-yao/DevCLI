@@ -36,6 +36,31 @@ class McpToolRegistrationTest {
     }
 
     @Test
+    void mcpToolDefinitionIncludesAnnotationSummary(@TempDir Path tempDir) throws Exception {
+        withAuditDir(tempDir, () -> {
+            ToolRegistry registry = new ToolRegistry();
+            McpToolDescriptor descriptor = new McpToolDescriptor(
+                    "demo",
+                    "inspect",
+                    McpToolDescriptor.namespaced("demo", "inspect"),
+                    "Inspect project data",
+                    MAPPER.createObjectNode(),
+                    new McpToolDescriptor.Annotations(true, false, false)
+            );
+            registry.registerMcpTool(descriptor, args -> "ok");
+
+            LlmClient.Tool tool = registry.getToolDefinitions().stream()
+                    .filter(t -> t.name().equals("mcp__demo__inspect"))
+                    .findFirst()
+                    .orElseThrow();
+
+            assertTrue(tool.description().contains("readOnly"), tool.description());
+            assertTrue(tool.description().contains("closedWorld"), tool.description());
+            assertFalse(tool.description().contains("destructive"), tool.description());
+        });
+    }
+
+    @Test
     void structuredMcpOutputSurvivesBatchExecution(@TempDir Path tempDir) throws Exception {
         withAuditDir(tempDir, () -> {
             ToolRegistry registry = new ToolRegistry();

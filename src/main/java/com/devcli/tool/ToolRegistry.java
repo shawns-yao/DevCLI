@@ -1147,7 +1147,25 @@ public class ToolRegistry {
         String base = descriptor.description() == null || descriptor.description().isBlank()
                 ? "MCP server 提供的外部工具"
                 : descriptor.description();
-        return base + " (MCP server: " + descriptor.serverName() + ", tool: " + descriptor.name() + ")";
+        String annotations = mcpAnnotationSummary(descriptor.annotations());
+        return base + " (MCP server: " + descriptor.serverName() + ", tool: " + descriptor.name()
+                + (annotations.isBlank() ? "" : ", annotations: " + annotations)
+                + ")";
+    }
+
+    private static String mcpAnnotationSummary(McpToolDescriptor.Annotations annotations) {
+        if (annotations == null) {
+            return "";
+        }
+        List<String> labels = new ArrayList<>();
+        if (annotations.readOnly()) {
+            labels.add("readOnly");
+        }
+        if (annotations.destructive()) {
+            labels.add("destructive");
+        }
+        labels.add(annotations.openWorld() ? "openWorld" : "closedWorld");
+        return String.join(", ", labels);
     }
 
     private String executeCommand(String command) {
