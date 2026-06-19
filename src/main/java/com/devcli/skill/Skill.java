@@ -17,6 +17,7 @@ public record Skill(
         String version,
         String author,
         List<String> tags,
+        List<String> allowedTools,
         Source source,
         String body,
         Path skillMdPath,
@@ -38,6 +39,11 @@ public record Skill(
             tags = List.of();
         } else {
             tags = List.copyOf(tags);
+        }
+        if (allowedTools == null) {
+            allowedTools = List.of();
+        } else {
+            allowedTools = List.copyOf(allowedTools);
         }
         if (body == null) {
             body = "";

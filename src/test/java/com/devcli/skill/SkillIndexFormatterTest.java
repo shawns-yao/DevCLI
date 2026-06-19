@@ -64,6 +64,6 @@ class SkillIndexFormatterTest {
     }
 
     private static Skill mockSkill(String name, String desc, Skill.Source source) {
-        return new Skill(name, desc, "1.0.0", null, List.of(), source, "body", null, null);
+        return new Skill(name, desc, "1.0.0", null, List.of(), List.of(), source, "body", null, null);
     }
 }

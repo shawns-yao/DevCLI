@@ -133,6 +133,7 @@ public final class SkillRegistry {
         String version = stringField(fm, "version");
         String author = stringField(fm, "author");
         List<String> tags = listField(fm, "tags");
+        List<String> allowedTools = listField(fm, "allowedTools");
 
         Path referencesDir = skillDir.resolve("references");
         if (!Files.isDirectory(referencesDir)) {
@@ -145,6 +146,7 @@ public final class SkillRegistry {
                 version,
                 author,
                 tags,
+                allowedTools,
                 source,
                 parsed.body(),
                 skillMd,

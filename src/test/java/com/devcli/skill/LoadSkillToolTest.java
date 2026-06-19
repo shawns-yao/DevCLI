@@ -83,6 +83,30 @@ class LoadSkillToolTest {
     }
 
     @Test
+    void loadSkillReportsAllowedTools(@TempDir Path tempDir) throws IOException {
+        Path userRoot = tempDir.resolve("user-skills");
+        Path skillDir = userRoot.resolve("controlled");
+        Files.createDirectories(skillDir);
+        Files.writeString(skillDir.resolve("SKILL.md"),
+                "---\n"
+                        + "name: controlled\n"
+                        + "description: desc\n"
+                        + "allowedTools: [read_file, search_code]\n"
+                        + "---\n"
+                        + "body\n");
+        SkillRegistry registry = new SkillRegistry(null, userRoot, null,
+                new SkillStateStore(tempDir.resolve("skills.json")));
+        registry.reload();
+        ToolRegistry tools = new ToolRegistry();
+        tools.setSkillRegistry(registry);
+        tools.setSkillContextBuffer(new SkillContextBuffer());
+
+        String result = tools.executeTool("load_skill", "{\"name\":\"controlled\"}");
+
+        assertTrue(result.contains("允许工具: read_file, search_code"), result);
+    }
+
+    @Test
     void failsWhenNameMissing() {
         ToolRegistry tools = new ToolRegistry();
         tools.setSkillRegistry(new SkillRegistry(null, null, null, null));

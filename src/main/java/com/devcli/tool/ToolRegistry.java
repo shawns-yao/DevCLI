@@ -602,8 +602,12 @@ public class ToolRegistry {
                     if (targetBuffer != null) {
                         targetBuffer.push(name, injected);
                     }
+                    String allowedTools = skill.allowedTools().isEmpty()
+                            ? ""
+                            : "允许工具: " + String.join(", ", skill.allowedTools()) + "。";
                     return "已加载 skill '" + name + "' 的完整指引（" + originalLen
-                            + " bytes），将在下一轮上下文中以 \"## 已加载 Skill：" + name + "\" 段出现。";
+                            + " bytes），" + allowedTools
+                            + "将在下一轮上下文中以 \"## 已加载 Skill：" + name + "\" 段出现。";
                 }
         ));
     }

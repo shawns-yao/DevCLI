@@ -87,6 +87,28 @@ class SkillRegistryTest {
     }
 
     @Test
+    void parsesAllowedToolsFromFrontmatter(@TempDir Path tempDir) throws IOException {
+        Path user = tempDir.resolve("user");
+        Path skillDir = user.resolve("controlled");
+        Files.createDirectories(skillDir);
+        Files.writeString(skillDir.resolve("SKILL.md"),
+                "---\n"
+                        + "name: controlled\n"
+                        + "description: desc\n"
+                        + "allowedTools: [read_file, search_code]\n"
+                        + "---\n"
+                        + "body\n");
+        SkillRegistry registry = new SkillRegistry(null, user, null,
+                new SkillStateStore(tempDir.resolve("skills.json")));
+        registry.reload();
+
+        Skill skill = registry.findSkill("controlled");
+
+        assertNotNull(skill);
+        assertEquals(List.of("read_file", "search_code"), skill.allowedTools());
+    }
+
+    @Test
     void skipsFileWithMalformedFrontmatterButContinues(@TempDir Path tempDir) throws IOException {
         Path user = tempDir.resolve("user");
         Files.createDirectories(user.resolve("good"));
