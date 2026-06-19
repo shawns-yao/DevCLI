@@ -27,8 +27,10 @@
 
 ### 阶段 1：结构化压缩边界与压缩元数据
 
-- 状态：未实现
-- 影响范围：`ConversationHistoryCompactor`、`Agent` / `PlanExecuteAgent` 的 history 组装、相关 memory 测试
+- 状态：部分实现（2026-06-19）
+- 已实现：`ConversationHistoryCompactor` 在摘要消息中追加 `<compact_boundary>` 结构化边界块，记录压缩类型、触发原因、压缩模式、压缩前后 token、原始消息数、重建消息数、保留消息数和摘要字符数；增量压缩读取上一轮摘要时会剥离边界块，避免边界元数据进入 LLM 摘要正文
+- 未实现：已加载 Skill、RAG epoch、MCP 工具快照、压缩后上下文恢复入口尚未写入边界元数据
+- 影响范围：`ConversationHistoryCompactor`、`CompactBoundaryMetadata`、相关 memory 测试；暂未触及 `Agent` / `PlanExecuteAgent` 的 history 组装
 - 目标：把当前基于 `[已压缩的历史对话摘要]` 文本标记的机制扩展为结构化 compact boundary，记录压缩类型、触发原因、压缩前后 token、保留消息范围、已加载 Skill、RAG epoch 和 MCP 工具快照
 - 参考点：cc 的 `compact_boundary` / `microcompact_boundary` 元数据
 - 验证建议：新增或扩展 `ConversationHistoryCompactorTest`、`ConversationHistoryCompactorStabilityTest`

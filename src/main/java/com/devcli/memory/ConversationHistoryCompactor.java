@@ -352,6 +352,8 @@ public class ConversationHistoryCompactor {
         summary = capSummarySize(summary);
 
         // 5) 重建：[system] + [user(摘要)] + [assistant("好的")] + 保留尾部
+        int originalMessages = history.size();
+        int retainedMessages = history.size() - splitIdx;
         List<LlmClient.Message> rebuilt = new ArrayList<>();
         for (int i = 0; i < systemEnd; i++) {
             rebuilt.add(history.get(i));
@@ -361,6 +363,18 @@ public class ConversationHistoryCompactor {
         rebuilt.addAll(history.subList(splitIdx, history.size()));
 
         int afterTokens = TokenBudget.estimateMessagesTokens(rebuilt);
+        CompactBoundaryMetadata metadata = new CompactBoundaryMetadata(
+                "history",
+                "token_threshold",
+                prev != null ? "incremental" : "full",
+                currentTokens,
+                afterTokens,
+                originalMessages,
+                rebuilt.size(),
+                retainedMessages,
+                summary.length());
+        rebuilt.set(systemEnd, LlmClient.Message.user(
+                SUMMARY_MARKER + metadata.renderBoundaryBlock() + "\n" + summary.trim()));
         history.clear();
         history.addAll(rebuilt);
         // 成功压缩：清零失败计数，让下次失败重新累计
@@ -654,7 +668,8 @@ public class ConversationHistoryCompactor {
         if (!"user".equals(first.role())) return null;
         String content = first.content();
         if (content == null || !content.startsWith(SUMMARY_MARKER)) return null;
-        String summaryText = content.substring(SUMMARY_MARKER.length()).trim();
+        String summaryText = CompactBoundaryMetadata.stripBoundaryBlock(
+                content.substring(SUMMARY_MARKER.length()).trim());
         // endIdx 跳过摘要 user + 紧随的 assistant 确认（如果有）
         int endIdx = systemEnd + 1;
         if (endIdx < history.size() && "assistant".equals(history.get(endIdx).role())) {

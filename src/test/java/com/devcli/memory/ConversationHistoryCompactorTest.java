@@ -81,6 +81,36 @@ class ConversationHistoryCompactorTest {
     }
 
     @Test
+    void compactionSummaryIncludesStructuredBoundaryMetadata() {
+        StubCompactor c = new StubCompactor("MOCK SUMMARY OF OLD CONTENT", 3_000, true);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("SYSTEM_PROMPT"));
+        for (int i = 0; i < 6; i++) {
+            history.add(LlmClient.Message.user("Q" + i + ": " + longText(5_000)));
+            history.add(LlmClient.Message.assistant("A" + i + ": " + longText(5_000)));
+        }
+
+        boolean compacted = c.compactIfNeeded(history, 100);
+
+        assertTrue(compacted);
+        String summaryMessage = history.get(1).content();
+        CompactBoundaryMetadata metadata = CompactBoundaryMetadata
+                .parseFromSummaryMessage(summaryMessage)
+                .orElseThrow();
+        assertEquals("history", metadata.compactType());
+        assertEquals("token_threshold", metadata.trigger());
+        assertEquals("full", metadata.mode());
+        assertTrue(metadata.preTokens() > metadata.postTokens());
+        assertEquals(13, metadata.originalMessages());
+        assertEquals(history.size(), metadata.rebuiltMessages());
+        assertEquals(4, metadata.retainedMessages());
+        assertEquals("MOCK SUMMARY OF OLD CONTENT".length(), metadata.summaryChars());
+        assertEquals("MOCK SUMMARY OF OLD CONTENT",
+                CompactBoundaryMetadata.stripBoundaryBlock(
+                        summaryMessage.substring(ConversationHistoryCompactor.SUMMARY_MARKER.length()).trim()));
+    }
+
+    @Test
     void preservesToolCallPairAtSplitBoundary() {
         // 故意构造一个尾部带 tool_call/tool_result 的形态，验证不会被切断。
         // retainTokens=5：从尾巴累计 → RecentA2(2)+RecentQ2(4 user) < 5 不返回
