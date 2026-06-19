@@ -37,6 +37,7 @@ import java.util.UUID;
 public class MemoryManager implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(MemoryManager.class);
     private final WorkingMemory workingMemory;
+    private final SessionMemory sessionMemory;
     private final LongTermMemory longTermMemory;
     private final MemoryRetriever retriever;
     // Bug #12 修复：使用 ConcurrentHashMap 支持 Multi-Agent 并发调用
@@ -66,6 +67,7 @@ public class MemoryManager implements AutoCloseable {
     private MemoryManager(LlmClient llmClient, ContextProfile contextProfile, LongTermMemory longTermMemory) {
         this.contextProfile = contextProfile;
         this.workingMemory = new WorkingMemory();
+        this.sessionMemory = new SessionMemory();
         this.longTermMemory = longTermMemory != null ? longTermMemory : new LongTermMemory();
         this.retriever = new MemoryRetriever(this.longTermMemory);
         this.tokenBudget = new TokenBudget(contextProfile.maxContextWindow());
@@ -396,6 +398,7 @@ public class MemoryManager implements AutoCloseable {
     /** 清空工作记忆（用于 /clear 命令；长期记忆保持不变）。 */
     public void clearShortTerm() {
         workingMemory.clear();
+        sessionMemory.clearPreSummary();
     }
 
     /** 清空长期记忆（用于 /memory clear 命令）。 */
@@ -418,6 +421,7 @@ public class MemoryManager implements AutoCloseable {
     // ─────────────────────────────────────────────────────────
 
     public WorkingMemory getWorkingMemory() { return workingMemory; }
+    public SessionMemory getSessionMemory() { return sessionMemory; }
 
     /**
      * @deprecated v2 重构后短期记忆已升级为 {@link WorkingMemory}；保留旧方法名兼容老测试。

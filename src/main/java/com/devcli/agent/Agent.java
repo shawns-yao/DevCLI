@@ -69,6 +69,7 @@ public class Agent implements AutoCloseable {
         this.conversationHistory = new ArrayList<>();
         this.memoryManager = new MemoryManager(llmClient);
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
+        this.historyCompactor.setSessionMemory(memoryManager.getSessionMemory());
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
         this.toolRegistry.setMemorySaver(memoryManager::storeFact);
         this.toolRegistry.setMemorySaveHandler(fact -> {

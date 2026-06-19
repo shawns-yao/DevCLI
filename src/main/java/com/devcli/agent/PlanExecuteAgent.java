@@ -149,6 +149,7 @@ public class PlanExecuteAgent {
         this.reviewHandler = reviewHandler == null ? (goal, plan) -> PlanReviewDecision.execute() : reviewHandler;
         this.memoryManager = memoryManager != null ? memoryManager : new MemoryManager(llmClient);
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
+        this.historyCompactor.setSessionMemory(this.memoryManager.getSessionMemory());
         this.toolRegistry.setContextProfile(this.memoryManager.getContextProfile());
         this.toolRegistry.setMemorySaver(this.memoryManager::storeFact);
         this.toolRegistry.setMemorySaveHandler(fact -> {

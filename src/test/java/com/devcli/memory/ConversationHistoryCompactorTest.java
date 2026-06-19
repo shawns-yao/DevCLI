@@ -111,6 +111,30 @@ class ConversationHistoryCompactorTest {
     }
 
     @Test
+    void compactionReusesSessionMemoryPreSummaryWhenItCoversOldMessages() {
+        SessionMemory sessionMemory = new SessionMemory();
+        StubCompactor c = new StubCompactor("SHOULD NOT BE USED", 3_000, true);
+        c.setSessionMemory(sessionMemory);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("SYSTEM_PROMPT"));
+        for (int i = 0; i < 6; i++) {
+            history.add(LlmClient.Message.user("Q" + i + ": " + longText(5_000)));
+            history.add(LlmClient.Message.assistant("A" + i + ": " + longText(5_000)));
+        }
+        sessionMemory.recordPreSummary(history.subList(1, 9), "SESSION PRE SUMMARY");
+
+        boolean compacted = c.compactIfNeeded(history, 100);
+
+        assertTrue(compacted);
+        assertEquals(0, c.summarizeCalls.get(), "覆盖旧消息的预摘要应避免再次调用 LLM 摘要");
+        assertTrue(history.get(1).content().contains("SESSION PRE SUMMARY"));
+        CompactBoundaryMetadata metadata = CompactBoundaryMetadata
+                .parseFromSummaryMessage(history.get(1).content())
+                .orElseThrow();
+        assertEquals("SESSION PRE SUMMARY".length(), metadata.summaryChars());
+    }
+
+    @Test
     void preservesToolCallPairAtSplitBoundary() {
         // 故意构造一个尾部带 tool_call/tool_result 的形态，验证不会被切断。
         // retainTokens=5：从尾巴累计 → RecentA2(2)+RecentQ2(4 user) < 5 不返回

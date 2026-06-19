@@ -38,8 +38,10 @@
 
 ### 阶段 2：Session Memory 前置摘要
 
-- 状态：未实现
-- 影响范围：新增会话摘要维护组件，接入 `MemoryManager`、主 Agent turn 结束流程和压缩入口
+- 状态：部分实现（2026-06-19）
+- 已实现：新增 `SessionMemory` 会话预摘要缓存，按待压缩消息指纹判断预摘要是否覆盖旧消息；`ConversationHistoryCompactor` 首次全量压缩时优先复用匹配的预摘要，避免重复调用 LLM 摘要；`MemoryManager` 持有当前会话的 `SessionMemory`，ReAct 与 Plan 路径的压缩器共享该实例
+- 未实现：主 Agent turn 结束后自动维护预摘要、按 token 增量和工具调用次数触发预摘要刷新、预摘要过期策略和后台异步调度尚未接入
+- 影响范围：`SessionMemory`、`ConversationHistoryCompactor`、`MemoryManager`、`Agent`、`PlanExecuteAgent`、相关 memory 测试
 - 目标：在普通对话过程中按 token 增量和工具调用次数后台维护会话摘要；自动压缩时优先使用已维护摘要，缺失或过期时再调用现有 LLM 摘要压缩
 - 参考点：cc 的 Session Memory extraction hook 与 `trySessionMemoryCompaction`
 - 验证建议：新增 session memory 阈值判断、摘要更新时间、压缩复用路径测试

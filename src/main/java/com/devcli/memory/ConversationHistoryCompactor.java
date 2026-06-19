@@ -230,6 +230,7 @@ public class ConversationHistoryCompactor {
     private final int retainRecentTokens;
     /** 九段摘要的程序化垃圾回收（capSummarySize 优先用它裁剪，不调 LLM）。 */
     private final SummaryGarbageCollector summaryGc = new SummaryGarbageCollector();
+    private SessionMemory sessionMemory;
 
     /**
      * 连续压缩失败计数。每次摘要 LLM 调用失败 / 返回空 / 找不到分割点时 +1；
@@ -267,6 +268,10 @@ public class ConversationHistoryCompactor {
 
     public void setLlmClient(LlmClient llmClient) {
         this.llmClient = llmClient;
+    }
+
+    public void setSessionMemory(SessionMemory sessionMemory) {
+        this.sessionMemory = sessionMemory;
     }
 
     /**
@@ -342,13 +347,24 @@ public class ConversationHistoryCompactor {
         List<LlmClient.Message> oldMsgs = new ArrayList<>(history.subList(systemEnd, splitIdx));
         if (oldMsgs.isEmpty()) return false;
 
-        // 4) 摘要：增量 vs 全量 Map-Reduce（含 PTL retry：摘要自身 OOM 时丢头部 round 重试）
-        SummaryAttempt attempt = summarizeWithPtlRetry(prev, history, splitIdx, oldMsgs);
-        if (attempt.terminated()) {
-            // attempt 内部已经 recordFailure
-            return false;
+        // 4) 摘要：优先复用会话预摘要，否则走增量 vs 全量 Map-Reduce。
+        String summary = null;
+        if (prev == null && sessionMemory != null) {
+            var reusablePreSummary = sessionMemory.findReusablePreSummary(oldMsgs);
+            if (reusablePreSummary.isPresent()) {
+                summary = reusablePreSummary.get().summary();
+                log.info("reuse session memory pre-summary for {} old messages",
+                        reusablePreSummary.get().messageCount());
+            }
         }
-        String summary = attempt.summary();
+        if (summary == null) {
+            SummaryAttempt attempt = summarizeWithPtlRetry(prev, history, splitIdx, oldMsgs);
+            if (attempt.terminated()) {
+                // attempt 内部已经 recordFailure
+                return false;
+            }
+            summary = attempt.summary();
+        }
         summary = capSummarySize(summary);
 
         // 5) 重建：[system] + [user(摘要)] + [assistant("好的")] + 保留尾部

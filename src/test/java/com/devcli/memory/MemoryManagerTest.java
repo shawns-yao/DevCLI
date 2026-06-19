@@ -17,6 +17,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -64,6 +65,14 @@ class MemoryManagerTest {
 
             assertTrue(memoryManager.getWorkingMemory().getVolatileFacts().isEmpty());
             assertTrue(memoryManager.getWorkingMemory().getRecentToolResults().isEmpty());
+        }
+    }
+
+    @Test
+    void exposesStableSessionMemoryForConversationCompactor() {
+        try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {
+            assertSame(memoryManager.getSessionMemory(), memoryManager.getSessionMemory());
         }
     }
 
