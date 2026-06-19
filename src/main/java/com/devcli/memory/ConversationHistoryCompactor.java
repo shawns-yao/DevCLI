@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.function.Supplier;
 
 /**
  * 压缩 ReAct 主循环里的 {@code conversationHistory}（即 {@code List<LlmClient.Message>}）。
@@ -82,6 +83,8 @@ public class ConversationHistoryCompactor {
     private static final int MAX_REDUCE_FANIN = 8;
     /** 摘要消息的统一前缀，用于识别"上一轮压缩留下的摘要"。 */
     static final String SUMMARY_MARKER = "[已压缩的历史对话摘要]\n";
+    static final String POST_COMPACT_RESTORE_MARKER = "[压缩后恢复上下文]\n";
+    private static final int MAX_POST_COMPACT_RESTORE_CHARS = 8_000;
 
     /**
      * 滚动摘要的字符上限。增量摘要"只追加不删除"会让摘要单调膨胀，
@@ -231,6 +234,7 @@ public class ConversationHistoryCompactor {
     /** 九段摘要的程序化垃圾回收（capSummarySize 优先用它裁剪，不调 LLM）。 */
     private final SummaryGarbageCollector summaryGc = new SummaryGarbageCollector();
     private SessionMemory sessionMemory;
+    private Supplier<String> postCompactContextSupplier;
 
     /**
      * 连续压缩失败计数。每次摘要 LLM 调用失败 / 返回空 / 找不到分割点时 +1；
@@ -272,6 +276,10 @@ public class ConversationHistoryCompactor {
 
     public void setSessionMemory(SessionMemory sessionMemory) {
         this.sessionMemory = sessionMemory;
+    }
+
+    public void setPostCompactContextSupplier(Supplier<String> postCompactContextSupplier) {
+        this.postCompactContextSupplier = postCompactContextSupplier;
     }
 
     /**
@@ -376,6 +384,11 @@ public class ConversationHistoryCompactor {
         }
         rebuilt.add(LlmClient.Message.user(SUMMARY_MARKER + summary.trim()));
         rebuilt.add(LlmClient.Message.assistant("好的，我已了解之前的上下文，请继续。"));
+        String restoreContext = buildPostCompactRestoreContext();
+        if (!restoreContext.isBlank()) {
+            rebuilt.add(LlmClient.Message.user(POST_COMPACT_RESTORE_MARKER + restoreContext));
+            rebuilt.add(LlmClient.Message.assistant("好的，我已恢复压缩后的工作上下文。"));
+        }
         rebuilt.addAll(history.subList(splitIdx, history.size()));
 
         int afterTokens = TokenBudget.estimateMessagesTokens(rebuilt);
@@ -404,6 +417,28 @@ public class ConversationHistoryCompactor {
                 prev != null ? "incremental" : "full",
                 summary.length()));
         return true;
+    }
+
+    private String buildPostCompactRestoreContext() {
+        if (postCompactContextSupplier == null) {
+            return "";
+        }
+        try {
+            String context = postCompactContextSupplier.get();
+            if (context == null || context.isBlank()) {
+                return "";
+            }
+            String trimmed = context.trim();
+            if (trimmed.length() <= MAX_POST_COMPACT_RESTORE_CHARS) {
+                return trimmed;
+            }
+            int omitted = trimmed.length() - MAX_POST_COMPACT_RESTORE_CHARS;
+            return trimmed.substring(0, MAX_POST_COMPACT_RESTORE_CHARS)
+                    + "\n\n[恢复上下文已截断 " + omitted + " 字符]";
+        } catch (RuntimeException e) {
+            log.warn("post-compact context supplier failed; skip restore context", e);
+            return "";
+        }
     }
 
     /**

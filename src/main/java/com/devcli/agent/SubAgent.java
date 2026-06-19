@@ -89,6 +89,7 @@ public class SubAgent {
         this.toolRegistry = toolRegistry;
         this.conversationHistory = new ArrayList<>();
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
+        this.historyCompactor.setPostCompactContextSupplier(this::buildWorkingMemory);
         this.conversationHistory.add(LlmClient.Message.system(getSystemPrompt()));
     }
 

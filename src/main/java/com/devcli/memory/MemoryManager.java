@@ -352,6 +352,14 @@ public class MemoryManager implements AutoCloseable {
     }
 
     /**
+     * 压缩成功后恢复给 messages 的短上下文。当前复用 WorkingMemory 派生视图；
+     * 后续阶段可在这里加入 Skill、MCP 状态和 RAG epoch 的预算化恢复。
+     */
+    public String buildPostCompactRestoreSection() {
+        return buildWorkingMemorySection();
+    }
+
+    /**
      * 为 Multi-Agent 角色构建隔离后的工作记忆视图。
      *
      * Planner 只需要任务状态和关键事件，避免被 Worker 的工具原文证据污染；

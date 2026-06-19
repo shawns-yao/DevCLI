@@ -135,6 +135,28 @@ class ConversationHistoryCompactorTest {
     }
 
     @Test
+    void compactionInjectsPostCompactRestoreContextBeforeRetainedTail() {
+        StubCompactor c = new StubCompactor("MOCK SUMMARY OF OLD CONTENT", 3_000, true);
+        c.setPostCompactContextSupplier(() -> "## 最近工具调用证据\n- read_file {\"path\":\"src/Main.java\"}");
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("SYSTEM_PROMPT"));
+        for (int i = 0; i < 6; i++) {
+            history.add(LlmClient.Message.user("Q" + i + ": " + longText(5_000)));
+            history.add(LlmClient.Message.assistant("A" + i + ": " + longText(5_000)));
+        }
+
+        boolean compacted = c.compactIfNeeded(history, 100);
+
+        assertTrue(compacted);
+        assertEquals("user", history.get(3).role());
+        assertTrue(history.get(3).content().contains("[压缩后恢复上下文]"));
+        assertTrue(history.get(3).content().contains("src/Main.java"));
+        assertEquals("assistant", history.get(4).role());
+        assertEquals("user", history.get(5).role(), "恢复上下文后保留尾部仍应以 user 起头");
+        assertTrue(history.get(5).content().startsWith("Q4"));
+    }
+
+    @Test
     void preservesToolCallPairAtSplitBoundary() {
         // 故意构造一个尾部带 tool_call/tool_result 的形态，验证不会被切断。
         // retainTokens=5：从尾巴累计 → RecentA2(2)+RecentQ2(4 user) < 5 不返回

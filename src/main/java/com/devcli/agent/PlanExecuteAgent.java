@@ -150,6 +150,7 @@ public class PlanExecuteAgent {
         this.memoryManager = memoryManager != null ? memoryManager : new MemoryManager(llmClient);
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
         this.historyCompactor.setSessionMemory(this.memoryManager.getSessionMemory());
+        this.historyCompactor.setPostCompactContextSupplier(this.memoryManager::buildPostCompactRestoreSection);
         this.toolRegistry.setContextProfile(this.memoryManager.getContextProfile());
         this.toolRegistry.setMemorySaver(this.memoryManager::storeFact);
         this.toolRegistry.setMemorySaveHandler(fact -> {
