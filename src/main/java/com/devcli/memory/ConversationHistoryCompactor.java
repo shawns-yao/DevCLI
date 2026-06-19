@@ -5,6 +5,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -85,6 +91,12 @@ public class ConversationHistoryCompactor {
     static final String SUMMARY_MARKER = "[已压缩的历史对话摘要]\n";
     static final String POST_COMPACT_RESTORE_MARKER = "[压缩后恢复上下文]\n";
     private static final int MAX_POST_COMPACT_RESTORE_CHARS = 8_000;
+    static final String MICROCOMPACT_OUTPUTS_DIR = ".devcli/microcompact_tool_outputs";
+    private static final DateTimeFormatter MICROCOMPACT_SESSION_ID_FMT =
+            DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", Locale.ROOT)
+                    .withZone(ZoneId.systemDefault());
+    private static final String MICROCOMPACT_SESSION_ID =
+            MICROCOMPACT_SESSION_ID_FMT.format(Instant.now());
 
     /**
      * 滚动摘要的字符上限。增量摘要"只追加不删除"会让摘要单调膨胀，
@@ -235,6 +247,7 @@ public class ConversationHistoryCompactor {
     private final SummaryGarbageCollector summaryGc = new SummaryGarbageCollector();
     private SessionMemory sessionMemory;
     private Supplier<String> postCompactContextSupplier;
+    private Path microcompactOutputRoot;
 
     /**
      * 连续压缩失败计数。每次摘要 LLM 调用失败 / 返回空 / 找不到分割点时 +1；
@@ -280,6 +293,16 @@ public class ConversationHistoryCompactor {
 
     public void setPostCompactContextSupplier(Supplier<String> postCompactContextSupplier) {
         this.postCompactContextSupplier = postCompactContextSupplier;
+    }
+
+    public void setMicrocompactOutputRoot(Path microcompactOutputRoot) {
+        this.microcompactOutputRoot = microcompactOutputRoot == null
+                ? null
+                : microcompactOutputRoot.toAbsolutePath().normalize();
+    }
+
+    static String microcompactSessionId() {
+        return MICROCOMPACT_SESSION_ID;
     }
 
     /**
@@ -473,7 +496,9 @@ public class ConversationHistoryCompactor {
 
             int head = isLast ? MICRO_COMPACT_LAST_HEAD_CHARS : MICRO_COMPACT_HEAD_CHARS;
             int tail = isLast ? MICRO_COMPACT_LAST_TAIL_CHARS : MICRO_COMPACT_TAIL_CHARS;
-            String compacted = compactOversizeContent(content, head, tail);
+            String compacted = "tool".equals(msg.role()) && msg.toolCallId() != null
+                    ? compactOversizeToolContent(msg.toolCallId(), content, head, tail)
+                    : compactOversizeContent(content, head, tail);
             if (compacted.length() < content.length()) {
                 history.set(i, new LlmClient.Message(
                         msg.role(), compacted, msg.reasoningContent(), msg.toolCalls(), msg.toolCallId()));
@@ -485,6 +510,40 @@ public class ConversationHistoryCompactor {
         return changed;
     }
 
+    private String compactOversizeToolContent(String toolCallId, String content, int headChars, int tailChars) {
+        if (microcompactOutputRoot == null) {
+            return compactOversizeContent(content, headChars, tailChars);
+        }
+        try {
+            Path outputDir = microcompactOutputRoot
+                    .resolve(MICROCOMPACT_OUTPUTS_DIR)
+                    .resolve(MICROCOMPACT_SESSION_ID);
+            Files.createDirectories(outputDir);
+            Path outputFile = outputDir.resolve(sanitizeFileName(toolCallId) + ".txt")
+                    .toAbsolutePath()
+                    .normalize();
+            if (!outputFile.startsWith(microcompactOutputRoot)) {
+                return compactOversizeContent(content, headChars, tailChars);
+            }
+            Files.writeString(outputFile, content, StandardCharsets.UTF_8);
+            return compactOversizeContent(
+                    content,
+                    headChars,
+                    tailChars,
+                    "\n\n<microcompact_boundary>\n"
+                            + "type=tool_result\n"
+                            + "toolCallId=" + toolCallId + "\n"
+                            + "originalChars=" + content.length() + "\n"
+                            + "storedPath=" + outputFile + "\n"
+                            + "</microcompact_boundary>\n"
+                            + "[完整工具结果已落盘；可用 read_file 读取 storedPath。]");
+        } catch (IOException | RuntimeException e) {
+            log.warn("failed to persist microcompact tool output for {}; fallback to inline truncation",
+                    toolCallId, e);
+            return compactOversizeContent(content, headChars, tailChars);
+        }
+    }
+
     /**
      * 头尾截断单条超大 content：保留头 {@code headChars} + 尾 {@code tailChars}，中间替换为标记。
      * 中间能省出的量太小（标记反而更长）时返回原文不截断。
@@ -493,16 +552,29 @@ public class ConversationHistoryCompactor {
      * 使被截断内容可重新取回。
      */
     private static String compactOversizeContent(String content, int headChars, int tailChars) {
+        return compactOversizeContent(content, headChars, tailChars,
+                "\n\n[... microcompact 截断 %d 字符；已保留头尾，完整内容可重新执行对应工具获取 ...]");
+    }
+
+    private static String compactOversizeContent(String content, int headChars, int tailChars, String marker) {
         int removed = content.length() - headChars - tailChars;
         if (removed <= 200) {
             return content;
         }
         String head = content.substring(0, headChars);
         String tail = content.substring(content.length() - tailChars);
+        String middle = marker.contains("%d") ? String.format(Locale.ROOT, marker, removed) : marker;
         return head
-                + "\n\n[... microcompact 截断 " + removed + " 字符；已保留头尾，"
-                + "完整内容可重新执行对应工具获取 ...]\n\n"
+                + middle + "\n\n"
                 + tail;
+    }
+
+    private static String sanitizeFileName(String value) {
+        if (value == null || value.isBlank()) {
+            return "tool-result";
+        }
+        String sanitized = value.replaceAll("[^A-Za-z0-9._-]", "_");
+        return sanitized.isBlank() ? "tool-result" : sanitized;
     }
 
     /**

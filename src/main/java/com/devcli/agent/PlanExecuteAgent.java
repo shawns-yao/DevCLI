@@ -151,6 +151,7 @@ public class PlanExecuteAgent {
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
         this.historyCompactor.setSessionMemory(this.memoryManager.getSessionMemory());
         this.historyCompactor.setPostCompactContextSupplier(this.memoryManager::buildPostCompactRestoreSection);
+        this.historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(this.toolRegistry.getProjectPath()));
         this.toolRegistry.setContextProfile(this.memoryManager.getContextProfile());
         this.toolRegistry.setMemorySaver(this.memoryManager::storeFact);
         this.toolRegistry.setMemorySaveHandler(fact -> {
@@ -202,6 +203,7 @@ public class PlanExecuteAgent {
         if (historyCompactor == null) return;
         int trigger = memoryManager.getContextProfile().compressionTriggerTokens();
         try {
+            historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(toolRegistry.getProjectPath()));
             boolean compacted = historyCompactor.compactIfNeeded(messages, trigger);
             if (compacted && out != null) {
                 out.println("📦 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");

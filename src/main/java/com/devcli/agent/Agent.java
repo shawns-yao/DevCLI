@@ -71,6 +71,7 @@ public class Agent implements AutoCloseable {
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
         this.historyCompactor.setSessionMemory(memoryManager.getSessionMemory());
         this.historyCompactor.setPostCompactContextSupplier(memoryManager::buildPostCompactRestoreSection);
+        this.historyCompactor.setMicrocompactOutputRoot(Path.of(this.toolRegistry.getProjectPath()));
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
         this.toolRegistry.setMemorySaver(memoryManager::storeFact);
         this.toolRegistry.setMemorySaveHandler(fact -> {
@@ -353,6 +354,7 @@ public class Agent implements AutoCloseable {
         if (historyCompactor == null) return;
         int trigger = memoryManager.getContextProfile().compressionTriggerTokens();
         try {
+            historyCompactor.setMicrocompactOutputRoot(Path.of(toolRegistry.getProjectPath()));
             boolean compacted = historyCompactor.compactIfNeeded(conversationHistory, trigger);
             if (compacted) {
                 renderer().stream().println("📦 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");

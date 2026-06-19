@@ -2,8 +2,11 @@ package com.devcli.memory;
 
 import com.devcli.llm.LlmClient;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -14,6 +17,9 @@ import static org.junit.jupiter.api.Assertions.*;
  * microcompact（第 0 层）测试：截断单条超大消息，不调 LLM、不删消息、不破坏 tool_call 配对。
  */
 class ConversationHistoryCompactorMicrocompactTest {
+
+    @TempDir
+    Path tempDir;
 
     @Test
     void truncatesOversizeNonLastMessageAndKeepsMetadata() {
@@ -34,6 +40,31 @@ class ConversationHistoryCompactorMicrocompactTest {
         assertEquals("c1", history.get(2).toolCallId(), "截断不应丢 toolCallId（保 tool_call 配对）");
         assertEquals("tool", history.get(2).role(), "role 不变");
         assertEquals(4, history.size(), "microcompact 不删消息");
+    }
+
+    @Test
+    void microcompactPersistsOversizeToolResultWhenOutputRootConfigured() throws IOException {
+        ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 30_000, true);
+        c.setMicrocompactOutputRoot(tempDir);
+        String original = "tool-output-".repeat(3_000);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("S"));
+        history.add(LlmClient.Message.user("Q"));
+        history.add(new LlmClient.Message("tool", original, null, null, "call/with:unsafe"));
+        history.add(LlmClient.Message.assistant("done"));
+
+        boolean changed = c.microcompactOversizeMessages(history);
+
+        assertTrue(changed);
+        String compacted = history.get(2).content();
+        assertTrue(compacted.contains("<microcompact_boundary>"));
+        assertTrue(compacted.contains("toolCallId=call/with:unsafe"));
+        assertTrue(compacted.contains("完整工具结果已落盘"));
+        Path output = tempDir.resolve(ConversationHistoryCompactor.MICROCOMPACT_OUTPUTS_DIR)
+                .resolve(ConversationHistoryCompactor.microcompactSessionId())
+                .resolve("call_with_unsafe.txt");
+        assertTrue(Files.isRegularFile(output), "应落盘完整工具结果");
+        assertEquals(original, Files.readString(output), "落盘内容应保留完整原文");
     }
 
     @Test

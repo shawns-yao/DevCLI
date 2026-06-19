@@ -90,6 +90,7 @@ public class SubAgent {
         this.conversationHistory = new ArrayList<>();
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
         this.historyCompactor.setPostCompactContextSupplier(this::buildWorkingMemory);
+        this.historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(this.toolRegistry.getProjectPath()));
         this.conversationHistory.add(LlmClient.Message.system(getSystemPrompt()));
     }
 
@@ -191,6 +192,7 @@ public class SubAgent {
         ContextProfile profile = toolRegistry == null ? null : toolRegistry.getContextProfile();
         if (profile == null) return;
         try {
+            historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(toolRegistry.getProjectPath()));
             boolean compacted = historyCompactor.compactIfNeeded(history, profile.compressionTriggerTokens());
             if (compacted && out != null) {
                 out.println("📦 [" + name + "] 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
