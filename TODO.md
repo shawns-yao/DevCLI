@@ -50,9 +50,9 @@
 ### 阶段 3：压缩后上下文恢复
 
 - 状态：部分实现（2026-06-19）
-- 已实现：`ConversationHistoryCompactor` 支持压缩成功后插入 `[压缩后恢复上下文]` 消息；恢复内容位于摘要确认消息之后、保留尾部之前，并保持后续保留区仍从 user 消息边界开始；ReAct、Plan、SubAgent 路径已接入 WorkingMemory 派生恢复视图
-- 未实现：Skill 已调用内容、MCP 工具状态、RAG epoch、未完成子任务状态的专用恢复格式尚未拆分；恢复内容当前复用 WorkingMemory 渲染结果，后续需要细化预算和去重策略
-- 影响范围：`ConversationHistoryCompactor`、`MemoryManager`、`Agent`、`PlanExecuteAgent`、`SubAgent`、相关 memory / agent 测试
+- 已实现：`ConversationHistoryCompactor` 支持压缩成功后插入 `[压缩后恢复上下文]` 消息；恢复内容位于摘要确认消息之后、保留尾部之前，并保持后续保留区仍从 user 消息边界开始；ReAct、Plan、SubAgent 路径已接入压缩恢复 supplier；`MemoryManager` 会输出结构化恢复段，拆分为最近读写文件、未完成任务、关键工具结果引用和 RAG 证据 epoch；`SkillContextBuffer` 会在压缩后恢复已加载 Skill 及其允许工具
+- 未实现：MCP 工具状态、未完成子任务状态的专用恢复格式尚未拆分；恢复内容仍需进一步做预算去重和按角色裁剪
+- 影响范围：`ConversationHistoryCompactor`、`MemoryManager`、`WorkingMemory`、`SkillContextBuffer`、`Agent`、`PlanExecuteAgent`、`SubAgent`、相关 memory / skill / agent 测试
 - 目标：压缩后重新注入最近读取文件摘要、任务账本、已调用 Skill、MCP 工具状态、未完成子任务状态和关键 RAG 证据，减少模型压缩后重复读文件或丢失执行状态
 - 参考点：cc 的 post-compact file attachments、invoked skills attachment、plan mode attachment、MCP instructions delta
 - 验证建议：新增压缩后恢复内容的单元测试，覆盖 Skill、RAG 证据和工具结果去重

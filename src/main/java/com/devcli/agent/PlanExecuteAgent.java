@@ -150,7 +150,7 @@ public class PlanExecuteAgent {
         this.memoryManager = memoryManager != null ? memoryManager : new MemoryManager(llmClient);
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
         this.historyCompactor.setSessionMemory(this.memoryManager.getSessionMemory());
-        this.historyCompactor.setPostCompactContextSupplier(this.memoryManager::buildPostCompactRestoreSection);
+        this.historyCompactor.setPostCompactContextSupplier(this::buildPostCompactRestoreSection);
         this.historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(this.toolRegistry.getProjectPath()));
         this.toolRegistry.setContextProfile(this.memoryManager.getContextProfile());
         this.toolRegistry.setMemorySaver(this.memoryManager::storeFact);
@@ -230,6 +230,21 @@ public class PlanExecuteAgent {
         String drained = skillContextBuffer.drain();
         if (drained.isEmpty()) return content;
         return drained + "\n" + content;
+    }
+
+    private String buildPostCompactRestoreSection() {
+        List<String> sections = new ArrayList<>();
+        String workingMemory = memoryManager.buildPostCompactRestoreSection();
+        if (workingMemory != null && !workingMemory.isBlank()) {
+            sections.add(workingMemory.trim());
+        }
+        if (skillContextBuffer != null) {
+            String skills = skillContextBuffer.renderPostCompactRestoreSection();
+            if (!skills.isBlank()) {
+                sections.add(skills);
+            }
+        }
+        return String.join("\n\n", sections);
     }
 
     /**

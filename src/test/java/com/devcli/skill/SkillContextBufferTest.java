@@ -59,6 +59,19 @@ class SkillContextBufferTest {
     }
 
     @Test
+    void postCompactRestoreListsLoadedSkillAndAllowedToolsAfterDrain() {
+        SkillContextBuffer buffer = new SkillContextBuffer();
+        buffer.push("controlled", "body", java.util.List.of("read_file", "search_code"));
+        buffer.drain();
+
+        String restore = buffer.renderPostCompactRestoreSection();
+
+        assertTrue(restore.contains("### 已加载 Skill"), restore);
+        assertTrue(restore.contains("controlled"), restore);
+        assertTrue(restore.contains("read_file, search_code"), restore);
+    }
+
+    @Test
     void preservesInsertionOrder() {
         SkillContextBuffer buffer = new SkillContextBuffer();
         buffer.push("alpha", "A");

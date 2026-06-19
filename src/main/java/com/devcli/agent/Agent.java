@@ -70,7 +70,7 @@ public class Agent implements AutoCloseable {
         this.memoryManager = new MemoryManager(llmClient);
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
         this.historyCompactor.setSessionMemory(memoryManager.getSessionMemory());
-        this.historyCompactor.setPostCompactContextSupplier(memoryManager::buildPostCompactRestoreSection);
+        this.historyCompactor.setPostCompactContextSupplier(this::buildPostCompactRestoreSection);
         this.historyCompactor.setMicrocompactOutputRoot(Path.of(this.toolRegistry.getProjectPath()));
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
         this.toolRegistry.setMemorySaver(memoryManager::storeFact);
@@ -413,6 +413,21 @@ public class Agent implements AutoCloseable {
         String drained = skillContextBuffer.drain();
         if (drained.isEmpty()) return userInput;
         return drained + "\n用户输入：\n" + userInput;
+    }
+
+    private String buildPostCompactRestoreSection() {
+        List<String> sections = new ArrayList<>();
+        String workingMemory = memoryManager.buildPostCompactRestoreSection();
+        if (workingMemory != null && !workingMemory.isBlank()) {
+            sections.add(workingMemory.trim());
+        }
+        if (skillContextBuffer != null) {
+            String skills = skillContextBuffer.renderPostCompactRestoreSection();
+            if (!skills.isBlank()) {
+                sections.add(skills);
+            }
+        }
+        return String.join("\n\n", sections);
     }
 
     private String buildExternalContext() {

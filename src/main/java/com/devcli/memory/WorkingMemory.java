@@ -71,6 +71,7 @@ public class WorkingMemory {
     private static final Pattern SEARCH_RESULT_NEGATIVE_FACT = Pattern.compile("^\\s*negativeFact: (.+)$");
     /** 从 negativeFact 行提取被失效的旧 symbolVersion，用于即时清理对应的过期 RAG 证据。 */
     private static final Pattern NEGATIVE_FACT_OLD_SYMBOL_VERSION = Pattern.compile("oldSymbolVersion=([^,\\s]+)");
+    private static final Pattern PATH_ARG = Pattern.compile("\"path\"\\s*:\\s*\"([^\"]+)\"");
 
     private final int maxToolResults;
     private final int maxVolatileFacts;
@@ -309,6 +310,114 @@ public class WorkingMemory {
         return sb.toString().trim();
     }
 
+    /**
+     * 压缩后恢复 messages 的结构化短上下文。
+     *
+     * <p>这里不复用完整 {@link #renderForPrompt()}，避免把大段工具输出再次写回
+     * conversationHistory。恢复段只保留可定位实体：文件路径、未完成任务、短工具引用和 RAG epoch。
+     */
+    public synchronized String renderForPostCompactRestore() {
+        StringBuilder sb = new StringBuilder();
+        appendRecentFileSection(sb);
+        appendOpenTaskSection(sb);
+        appendKeyToolReferenceSection(sb);
+        appendRagEpochSection(sb);
+        return sb.toString().trim();
+    }
+
+    private void appendRecentFileSection(StringBuilder sb) {
+        LinkedHashMap<String, String> files = new LinkedHashMap<>();
+        for (ToolEvidence ev : recentToolResults) {
+            if (!"read_file".equals(ev.toolName) && !"write_file".equals(ev.toolName)) {
+                continue;
+            }
+            String path = extractPath(ev.argsJson);
+            if (path.isBlank()) {
+                continue;
+            }
+            files.remove(path);
+            files.put(path, ev.toolName);
+        }
+        if (files.isEmpty()) {
+            return;
+        }
+        appendSectionBreak(sb);
+        sb.append("### 最近读写文件\n\n");
+        List<Map.Entry<String, String>> entries = new ArrayList<>(files.entrySet());
+        Collections.reverse(entries);
+        for (Map.Entry<String, String> entry : entries) {
+            sb.append("- ").append(entry.getValue()).append(": `").append(entry.getKey()).append("`\n");
+        }
+    }
+
+    private void appendOpenTaskSection(StringBuilder sb) {
+        String ledger = taskLedger.render();
+        if (taskState.isEmpty() && ledger.isBlank()) {
+            return;
+        }
+        appendSectionBreak(sb);
+        sb.append("### 未完成任务\n\n");
+        if (!ledger.isBlank()) {
+            sb.append(ledger).append('\n');
+        }
+        for (Map.Entry<String, String> entry : taskState.entrySet()) {
+            sb.append("- ").append(entry.getKey()).append(": ").append(entry.getValue()).append('\n');
+        }
+    }
+
+    private void appendKeyToolReferenceSection(StringBuilder sb) {
+        if (recentToolResults.isEmpty()) {
+            return;
+        }
+        appendSectionBreak(sb);
+        sb.append("### 关键工具结果引用\n\n");
+        List<ToolEvidence> reversed = new ArrayList<>(recentToolResults);
+        Collections.reverse(reversed);
+        int count = 0;
+        for (ToolEvidence ev : reversed) {
+            if (count >= 5) {
+                break;
+            }
+            sb.append("- **").append(ev.toolName).append("**");
+            if (!ev.argsJson.isBlank()) {
+                sb.append(" args: `").append(truncate(ev.argsJson, 120)).append('`');
+            }
+            String result = truncate(ev.result, 240).replaceAll("\\s+", " ").trim();
+            if (!result.isBlank()) {
+                sb.append(" -> ").append(result);
+            }
+            sb.append('\n');
+            count++;
+        }
+    }
+
+    private void appendRagEpochSection(StringBuilder sb) {
+        if (ragEvidenceMemory.isEmpty()) {
+            return;
+        }
+        appendSectionBreak(sb);
+        sb.append("### RAG 证据 epoch\n\n");
+        List<RagEvidence> reversed = new ArrayList<>(ragEvidenceMemory);
+        Collections.reverse(reversed);
+        for (RagEvidence evidence : reversed) {
+            sb.append("- [").append(evidence.chunkType()).append(':').append(evidence.symbolName()).append("] ")
+                    .append(evidence.filePath())
+                    .append(" | symbolVersion=").append(evidence.symbolVersion())
+                    .append(" | indexEpoch=").append(evidence.indexEpoch())
+                    .append(" | classpathEpoch=").append(evidence.classpathEpoch());
+            if (!evidence.query().isBlank()) {
+                sb.append(" | query=").append(evidence.query());
+            }
+            sb.append('\n');
+        }
+    }
+
+    private static void appendSectionBreak(StringBuilder sb) {
+        if (!sb.isEmpty()) {
+            sb.append('\n');
+        }
+    }
+
     private static boolean shouldRenderVolatileFacts(View view) {
         return view == View.FULL || view == View.PLANNER || view == View.WORKER;
     }
@@ -458,6 +567,14 @@ public class WorkingMemory {
             return "";
         }
         Matcher matcher = Pattern.compile("\"query\"\\s*:\\s*\"([^\"]+)\"").matcher(argsJson);
+        return matcher.find() ? matcher.group(1) : "";
+    }
+
+    private static String extractPath(String argsJson) {
+        if (argsJson == null || argsJson.isBlank()) {
+            return "";
+        }
+        Matcher matcher = PATH_ARG.matcher(argsJson);
         return matcher.find() ? matcher.group(1) : "";
     }
 

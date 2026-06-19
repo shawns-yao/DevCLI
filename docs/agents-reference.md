@@ -157,8 +157,14 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - frontmatter：name(必填) / description(必填,<=500) / version / author / tags / allowedTools
 - system prompt 索引段注入到三处提示词末尾，上限 20 个 / 4KB
 - load_skill 工具把 SKILL.md 正文(5KB 截断)写入 SkillContextBuffer
-- buffer 一次性消费，最多 3 个 skill body
+- buffer 正文一次性消费，最多 3 个 skill body；已加载 Skill 名称和 allowedTools 状态保留给压缩后恢复，直到 clear
 - allowedTools 为空表示不启用工具限制；声明 allowedTools 的已加载 Skill 会把后续工具调用限制在当前 SkillContextBuffer 白名单内，主 Agent、Plan 和 SubAgent 通过各自 buffer 隔离，/clear 清空白名单状态
+
+### Post-Compact Restore
+
+- ConversationHistoryCompactor 压缩成功后会在摘要确认消息之后、保留尾部之前插入 `[压缩后恢复上下文]`
+- WorkingMemory 的恢复段不复用完整 system prompt 视图，而是按最近读写文件、未完成任务、关键工具结果引用、RAG 证据 epoch 输出短结构化上下文
+- Agent / PlanExecuteAgent / SubAgent 会在恢复段追加本地 SkillContextBuffer 的已加载 Skill 与 allowedTools 状态
 
 ### TUI (v16.1 Renderer Architecture)
 

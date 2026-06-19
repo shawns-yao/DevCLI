@@ -89,7 +89,7 @@ public class SubAgent {
         this.toolRegistry = toolRegistry;
         this.conversationHistory = new ArrayList<>();
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
-        this.historyCompactor.setPostCompactContextSupplier(this::buildWorkingMemory);
+        this.historyCompactor.setPostCompactContextSupplier(this::buildPostCompactRestoreSection);
         this.historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(this.toolRegistry.getProjectPath()));
         this.conversationHistory.add(LlmClient.Message.system(getSystemPrompt()));
     }
@@ -163,6 +163,21 @@ public class SubAgent {
             log.warn("Failed to render working memory in SubAgent {}", name, e);
             return "";
         }
+    }
+
+    private String buildPostCompactRestoreSection() {
+        List<String> sections = new ArrayList<>();
+        String workingMemory = buildWorkingMemory();
+        if (!workingMemory.isBlank()) {
+            sections.add(workingMemory);
+        }
+        if (skillContextBuffer != null) {
+            String skills = skillContextBuffer.renderPostCompactRestoreSection();
+            if (!skills.isBlank()) {
+                sections.add(skills);
+            }
+        }
+        return String.join("\n\n", sections);
     }
 
     private String buildStickyMemory() {

@@ -28,6 +28,7 @@ public final class SkillContextBuffer {
     private static final int MAX_SKILLS = 3;
 
     private final Map<String, String> entries = new LinkedHashMap<>();
+    private final LinkedHashSet<String> activeSkillNames = new LinkedHashSet<>();
     private final Map<String, List<String>> activeAllowedToolsBySkill = new LinkedHashMap<>();
 
     public synchronized void push(String skillName, String body) {
@@ -40,6 +41,8 @@ public final class SkillContextBuffer {
         }
         entries.remove(skillName);
         entries.put(skillName, body);
+        activeSkillNames.remove(skillName);
+        activeSkillNames.add(skillName);
         List<String> normalizedAllowedTools = normalizeAllowedTools(allowedTools);
         if (normalizedAllowedTools.isEmpty()) {
             activeAllowedToolsBySkill.remove(skillName);
@@ -49,6 +52,12 @@ public final class SkillContextBuffer {
         while (entries.size() > MAX_SKILLS) {
             String oldest = entries.keySet().iterator().next();
             entries.remove(oldest);
+            activeAllowedToolsBySkill.remove(oldest);
+            activeSkillNames.remove(oldest);
+        }
+        while (activeSkillNames.size() > MAX_SKILLS) {
+            String oldest = activeSkillNames.iterator().next();
+            activeSkillNames.remove(oldest);
             activeAllowedToolsBySkill.remove(oldest);
         }
         while (activeAllowedToolsBySkill.size() > MAX_SKILLS) {
@@ -109,14 +118,34 @@ public final class SkillContextBuffer {
         return Collections.unmodifiableSet(allowedTools);
     }
 
+    public synchronized String renderPostCompactRestoreSection() {
+        if (activeSkillNames.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder("### 已加载 Skill\n\n");
+        for (String skillName : activeSkillNames) {
+            sb.append("- ").append(skillName);
+            List<String> allowedTools = activeAllowedToolsBySkill.get(skillName);
+            if (allowedTools == null || allowedTools.isEmpty()) {
+                sb.append(" | 允许工具: 不限制");
+            } else {
+                sb.append(" | 允许工具: ").append(String.join(", ", allowedTools));
+            }
+            sb.append('\n');
+        }
+        return sb.toString().trim();
+    }
+
     public synchronized void clear() {
         entries.clear();
+        activeSkillNames.clear();
         activeAllowedToolsBySkill.clear();
     }
 
     public synchronized SkillContextBuffer copy() {
         SkillContextBuffer copy = new SkillContextBuffer();
         copy.entries.putAll(this.entries);
+        copy.activeSkillNames.addAll(this.activeSkillNames);
         copy.activeAllowedToolsBySkill.putAll(this.activeAllowedToolsBySkill);
         return copy;
     }

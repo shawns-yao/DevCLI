@@ -307,6 +307,32 @@ class MemoryManagerTest {
     }
 
     @Test
+    void buildPostCompactRestoreSectionUsesStructuredSections() {
+        try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {
+            memoryManager.setTaskState("plan_task", "task_2 running");
+            memoryManager.addToolResult("read_file", "{\"path\":\"src/Main.java\"}", "class Main {}");
+            memoryManager.addToolResult("write_file", "{\"path\":\"src/Main.java\"}", "写入文件成功: src/Main.java");
+            memoryManager.addToolResult("search_code", "{\"query\":\"CodeRetriever search\"}", """
+                    检索结果:
+                    1. [method:CodeRetriever.search(String,int,String,int)] (相似度: 0.910) src/main/java/com/devcli/rag/CodeRetriever.java
+                       evidence: symbolVersion=sv_test123, indexEpoch=idx-1, classpathEpoch=cp-1
+                    """);
+
+            String section = memoryManager.buildPostCompactRestoreSection();
+
+            assertTrue(section.contains("### 最近读写文件"), section);
+            assertTrue(section.contains("src/Main.java"), section);
+            assertTrue(section.contains("### 未完成任务"), section);
+            assertTrue(section.contains("plan_task"), section);
+            assertTrue(section.contains("### 关键工具结果引用"), section);
+            assertTrue(section.contains("write_file"), section);
+            assertTrue(section.contains("### RAG 证据 epoch"), section);
+            assertTrue(section.contains("indexEpoch=idx-1"), section);
+        }
+    }
+
+    @Test
     void buildWorkingMemorySectionForAgentShouldIsolateRoleSpecificViews() {
         try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
              MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {

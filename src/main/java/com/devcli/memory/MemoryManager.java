@@ -352,11 +352,10 @@ public class MemoryManager implements AutoCloseable {
     }
 
     /**
-     * 压缩成功后恢复给 messages 的短上下文。当前复用 WorkingMemory 派生视图；
-     * 后续阶段可在这里加入 Skill、MCP 状态和 RAG epoch 的预算化恢复。
+     * 压缩成功后恢复给 messages 的结构化短上下文。
      */
     public String buildPostCompactRestoreSection() {
-        return buildWorkingMemorySection();
+        return workingMemory.renderForPostCompactRestore();
     }
 
     /**
