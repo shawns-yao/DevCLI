@@ -110,6 +110,7 @@ public class ToolRegistry {
         registerBrowserTools();
         registerMemoryTools();
         registerSkillTools();
+        registerToolSearchTools();
         registerSnapshotTools();
     }
 
@@ -612,6 +613,18 @@ public class ToolRegistry {
         ));
     }
 
+    private void registerToolSearchTools() {
+        tools.put("search_tools", new Tool(
+                "search_tools",
+                "Search currently available tools by name and description. Use this when the exact MCP or built-in tool name is unknown.",
+                createParameters(
+                        new Param("query", "string", "keywords to search in tool name and description", true),
+                        new Param("limit", "string", "maximum number of matches to return, default 10", false)
+                ),
+                args -> searchTools(args.get("query"), args.get("limit"))
+        ));
+    }
+
     private void registerMemoryTools() {
         tools.put("save_memory", new Tool(
                 "save_memory",
@@ -811,6 +824,69 @@ public class ToolRegistry {
         sb.append("\n\n---\n\n");
         sb.append(result.markdown());
         return sb.toString();
+    }
+
+    private String searchTools(String query, String limitValue) {
+        String normalized = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
+        if (normalized.isBlank()) {
+            return "search_tools 失败: query 不能为空";
+        }
+        int limit = parseSearchToolLimit(limitValue);
+        List<String> terms = Arrays.stream(normalized.split("\\s+"))
+                .filter(s -> !s.isBlank())
+                .toList();
+        List<ToolSearchMatch> matches = tools.values().stream()
+                .filter(tool -> !"search_tools".equals(tool.name()))
+                .map(tool -> new ToolSearchMatch(tool, scoreTool(tool, terms)))
+                .filter(match -> match.score() > 0)
+                .sorted(Comparator
+                        .comparingInt(ToolSearchMatch::score).reversed()
+                        .thenComparing(match -> match.tool().name()))
+                .limit(limit)
+                .toList();
+        if (matches.isEmpty()) {
+            return "未找到匹配工具: " + query;
+        }
+        StringBuilder sb = new StringBuilder("匹配工具:\n");
+        for (ToolSearchMatch match : matches) {
+            Tool tool = match.tool();
+            sb.append("- ").append(tool.name()).append(": ")
+                    .append(oneLine(tool.description())).append('\n');
+        }
+        return sb.toString().stripTrailing();
+    }
+
+    private static int parseSearchToolLimit(String value) {
+        if (value == null || value.isBlank()) {
+            return 10;
+        }
+        try {
+            return Math.max(1, Math.min(30, Integer.parseInt(value.trim())));
+        } catch (NumberFormatException e) {
+            return 10;
+        }
+    }
+
+    private static int scoreTool(Tool tool, List<String> terms) {
+        String name = tool.name() == null ? "" : tool.name().toLowerCase(Locale.ROOT);
+        String description = tool.description() == null ? "" : tool.description().toLowerCase(Locale.ROOT);
+        int score = 0;
+        for (String term : terms) {
+            if (name.contains(term)) {
+                score += 3;
+            }
+            if (description.contains(term)) {
+                score += 1;
+            }
+        }
+        return score;
+    }
+
+    private static String oneLine(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.replace('\n', ' ').replaceAll("\\s+", " ").trim();
     }
 
     /**
@@ -1320,6 +1396,8 @@ public class ToolRegistry {
                     enumValues == null || enumValues.length == 0 ? List.of() : List.of(enumValues));
         }
     }
+
+    private record ToolSearchMatch(Tool tool, int score) {}
 
     public record Tool(String name, String description, JsonNode parameters, ToolExecutor executor) {}
 

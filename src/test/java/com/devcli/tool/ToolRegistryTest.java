@@ -1,6 +1,8 @@
 package com.devcli.tool;
 
 import com.devcli.browser.BrowserConnector;
+import com.devcli.mcp.protocol.McpToolDescriptor;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -16,6 +18,25 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ToolRegistryTest {
+
+    @Test
+    void searchToolsFindsBuiltinAndMcpTools() {
+        ToolRegistry registry = new ToolRegistry();
+        registry.registerMcpTool(new McpToolDescriptor(
+                "github",
+                "list_issues",
+                McpToolDescriptor.namespaced("github", "list_issues"),
+                "List GitHub issues",
+                JsonNodeFactory.instance.objectNode()
+        ), args -> "ok");
+
+        String builtin = registry.executeTool("search_tools", "{\"query\":\"shell command\"}");
+        String mcp = registry.executeTool("search_tools", "{\"query\":\"github issues\"}");
+
+        assertTrue(builtin.contains("execute_command"), builtin);
+        assertTrue(mcp.contains("mcp__github__list_issues"), mcp);
+        assertTrue(mcp.contains("List GitHub issues"), mcp);
+    }
 
     @Test
     void shouldRunCommandInProjectDirectory(@TempDir Path tempDir) {
