@@ -21,6 +21,8 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -109,6 +111,26 @@ class PlanExecuteAgentTest {
 
             assertEquals("⏹️ 已取消本次计划执行。", result);
             assertEquals(0, longTermMemory.size());
+        }
+    }
+
+    @Test
+    void shouldScheduleSessionPreSummaryMaintenanceAfterPlanTurn() throws Exception {
+        StubGLMClient llmClient = new StubGLMClient(List.of(
+                new LlmClient.ChatResponse("assistant", "计划任务结果", null, 20, 10)
+        ));
+        try (CountingMemoryManager memoryManager = new CountingMemoryManager(llmClient, tempDir.resolve("memory-store-plan").toFile())) {
+            PlanExecuteAgent agent = new PlanExecuteAgent(
+                    llmClient,
+                    new ToolRegistry(),
+                    new StubPlanner(llmClient),
+                    memoryManager,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute()
+            );
+
+            agent.run("执行一个计划任务");
+
+            assertEquals(1, memoryManager.asyncMaintenanceCalls.get());
         }
     }
 
@@ -208,6 +230,23 @@ class PlanExecuteAgentTest {
             plan.addTask(new Task("task_1", "读取测试文件", Task.TaskType.FILE_READ));
             plan.computeExecutionOrder();
             return plan;
+        }
+    }
+
+    private static final class CountingMemoryManager extends MemoryManager {
+        private final AtomicInteger asyncMaintenanceCalls = new AtomicInteger();
+
+        private CountingMemoryManager(LlmClient llmClient, java.io.File storageDir) {
+            super(llmClient, 4096, 128000, new LongTermMemory(storageDir));
+        }
+
+        @Override
+        public CompletableFuture<SessionPreSummaryMaintenanceResult> maintainSessionPreSummaryAfterTurnAsync(
+                List<LlmClient.Message> history,
+                int turnToolCalls,
+                int largestToolResultChars) {
+            asyncMaintenanceCalls.incrementAndGet();
+            return CompletableFuture.completedFuture(SessionPreSummaryMaintenanceResult.SKIPPED_BELOW_THRESHOLD);
         }
     }
 

@@ -95,6 +95,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
   2. `ConversationHistoryCompactor` 压缩 conversationHistory（真正发给 LLM 的消息）
 - 第二道压缩切割在 user message 边界，保留最近 3 个 user 起算的尾部
 - 三条路径(ReAct/Plan/SubAgent)都接入第二道压缩
+- `SessionMemory` 保存当前进程内会话预摘要，按消息指纹复用，默认 30 分钟过期；Plan / Multi-Agent turn 结束后通过 `MemoryManager` 的单线程后台 executor 维护预摘要，避免主流程等待摘要 LLM 调用
 - 压缩边界 `<compact_boundary>` 记录已加载 Skill、RAG epoch、MCP 工具快照和压缩后恢复入口状态；RAG epoch 合并当前会话已命中证据与当前项目全局索引版本，MCP 工具快照包含 server 工具数量、schema 指纹和生命周期版本
 - 长期记忆主要通过 `/save` 或用户明确要求保存；少量稳定个人属性和多次重复出现的稳定项目/偏好事实可由策略自动保存
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；敏感信息和模糊新个人状态必须确认或跳过

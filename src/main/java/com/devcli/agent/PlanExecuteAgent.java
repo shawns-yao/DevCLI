@@ -266,27 +266,47 @@ public class PlanExecuteAgent {
         log.info("Plan run started: inputLength={}", userInput == null ? 0 : userInput.length());
         memoryManager.addUserMessage(userInput);
         StreamState streamState = new StreamState();
+        String resultForSummary = "";
         try {
             if (CancellationContext.isCancelled()) {
-                return "⏹️ 已取消当前计划执行。";
+                resultForSummary = "⏹️ 已取消当前计划执行。";
+                return resultForSummary;
             }
             PlanRunOutcome outcome = runWithPlan(userInput, streamState);
             if (outcome.persistAssistantMessage() && outcome.result() != null && !outcome.result().isBlank()) {
                 memoryManager.addAssistantMessage("[计划结果] " + outcome.result());
             }
             if (streamState.hasStreamedOutput() && (outcome.result() == null || outcome.result().isBlank())) {
+                resultForSummary = "";
                 return "";
             }
+            resultForSummary = outcome.result();
             return outcome.result();
         } catch (Exception e) {
             log.error("Plan run failed", e);
             String errorMessage = "❌ 执行失败: " + e.getMessage();
             memoryManager.addAssistantMessage(errorMessage);
+            resultForSummary = errorMessage;
             return errorMessage;
+        } finally {
+            scheduleSessionPreSummaryMaintenance(userInput, resultForSummary, streamState);
         }
     }
 
-/**
+    private void scheduleSessionPreSummaryMaintenance(String userInput, String result, StreamState streamState) {
+        List<LlmClient.Message> turnHistory = new ArrayList<>();
+        turnHistory.add(LlmClient.Message.system("PLAN_TURN"));
+        turnHistory.add(LlmClient.Message.user(userInput == null ? "" : userInput));
+        if (result != null && !result.isBlank()) {
+            turnHistory.add(LlmClient.Message.assistant(result));
+        }
+        memoryManager.maintainSessionPreSummaryAfterTurnAsync(
+                turnHistory,
+                streamState.turnToolCalls(),
+                streamState.largestToolResultChars());
+    }
+
+    /**
      * 使用Plan-and-Execute模式执行
      */
     private PlanRunOutcome runWithPlan(String goal, StreamState streamState) throws IOException {
@@ -639,6 +659,7 @@ public class PlanExecuteAgent {
             streamRenderer.resetBetweenIterations();
 
             List<ToolExecutionResult> toolResults = executeToolCalls(task.getId(), response.toolCalls());
+            streamState.recordToolResults(toolResults);
             for (ToolExecutionResult toolResult : toolResults) {
                 traceRecorder.record(traceContext, "tool.result", Map.of(
                         "taskId", task.getId(),
@@ -826,6 +847,8 @@ public class PlanExecuteAgent {
 
     private static final class StreamState {
         private volatile boolean streamedOutput;
+        private int turnToolCalls;
+        private int largestToolResultChars;
 
         private void markStreamed() {
             this.streamedOutput = true;
@@ -833,6 +856,25 @@ public class PlanExecuteAgent {
 
         private boolean hasStreamedOutput() {
             return streamedOutput;
+        }
+
+        private void recordToolResults(List<ToolExecutionResult> toolResults) {
+            if (toolResults == null || toolResults.isEmpty()) {
+                return;
+            }
+            turnToolCalls += toolResults.size();
+            for (ToolExecutionResult toolResult : toolResults) {
+                largestToolResultChars = Math.max(largestToolResultChars,
+                        toolResult.result() == null ? 0 : toolResult.result().length());
+            }
+        }
+
+        private int turnToolCalls() {
+            return turnToolCalls;
+        }
+
+        private int largestToolResultChars() {
+            return largestToolResultChars;
         }
     }
 

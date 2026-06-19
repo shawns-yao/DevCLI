@@ -283,43 +283,62 @@ public class AgentOrchestrator {
         if (CancellationContext.isCancelled()) {
             return "⏹️ 已取消当前多 Agent 任务。";
         }
+        String finalResultForSummary = "";
+        try {
+            // 1. 规划阶段：让规划者拆解任务
+            out.println(AnsiStyle.heading("📋 第一阶段：规划"));
+            out.println("🧑‍💼 规划者正在分析任务...\n");
 
-        // 1. 规划阶段：让规划者拆解任务
-        out.println(AnsiStyle.heading("📋 第一阶段：规划"));
-        out.println("🧑‍💼 规划者正在分析任务...\n");
+            AgentMessage planMessage = AgentMessage.task("orchestrator",
+                    "请为以下任务制定执行计划：\n" + userInput);
+            AgentMessage planResult = planner.execute(planMessage, out);
+            planner.clearHistory();
+            if (CancellationContext.isCancelled()) {
+                finalResultForSummary = "⏹️ 已取消当前多 Agent 任务。";
+                return finalResultForSummary;
+            }
 
-        AgentMessage planMessage = AgentMessage.task("orchestrator",
-                "请为以下任务制定执行计划：\n" + userInput);
-        AgentMessage planResult = planner.execute(planMessage, out);
-        planner.clearHistory();
-        if (CancellationContext.isCancelled()) {
-            return "⏹️ 已取消当前多 Agent 任务。";
+            if (planResult.type() == AgentMessage.Type.ERROR) {
+                finalResultForSummary = "❌ 规划阶段失败，规划者 LLM 调用出错：" + planResult.content();
+                return finalResultForSummary;
+            }
+            if (planResult.content() == null || planResult.content().isBlank()) {
+                finalResultForSummary = "❌ 规划失败：规划者未能生成有效计划";
+                return finalResultForSummary;
+            }
+
+            // 2. 解析计划（parsePlan 内部已做超步数粗化）
+            List<ExecutionStep> steps = parsePlan(planResult.content());
+            if (steps.isEmpty()) {
+                finalResultForSummary = "❌ 规划失败：无法解析执行计划\n原始输出:\n" + planResult.content();
+                return finalResultForSummary;
+            }
+            steps = appendFinalIntegrationStep(steps);
+            checkpoint = new AgentCheckpoint(
+                    "orch-" + UUID.randomUUID().toString().substring(0, 8),
+                    currentUserTask);
+            checkpoint.setPlanSteps(toPlanSteps(steps));
+            checkpoint.setAcceptanceCriteria(toCriterionRecords(currentAcceptanceCriteria));
+            checkpoint.save();
+
+            out.println(AnsiStyle.heading("📋 执行计划"));
+            out.println(summarizeSteps(steps) + "\n");
+
+            finalResultForSummary = executeSteps(steps, traceContext);
+            return finalResultForSummary;
+        } finally {
+            scheduleSessionPreSummaryMaintenance(userInput, finalResultForSummary);
         }
+    }
 
-        if (planResult.type() == AgentMessage.Type.ERROR) {
-            return "❌ 规划阶段失败，规划者 LLM 调用出错：" + planResult.content();
+    private void scheduleSessionPreSummaryMaintenance(String userInput, String result) {
+        List<LlmClient.Message> turnHistory = new ArrayList<>();
+        turnHistory.add(LlmClient.Message.system("TEAM_TURN"));
+        turnHistory.add(LlmClient.Message.user(userInput == null ? "" : userInput));
+        if (result != null && !result.isBlank()) {
+            turnHistory.add(LlmClient.Message.assistant(result));
         }
-        if (planResult.content() == null || planResult.content().isBlank()) {
-            return "❌ 规划失败：规划者未能生成有效计划";
-        }
-
-        // 2. 解析计划（parsePlan 内部已做超步数粗化）
-        List<ExecutionStep> steps = parsePlan(planResult.content());
-        if (steps.isEmpty()) {
-            return "❌ 规划失败：无法解析执行计划\n原始输出:\n" + planResult.content();
-        }
-        steps = appendFinalIntegrationStep(steps);
-        checkpoint = new AgentCheckpoint(
-                "orch-" + UUID.randomUUID().toString().substring(0, 8),
-                currentUserTask);
-        checkpoint.setPlanSteps(toPlanSteps(steps));
-        checkpoint.setAcceptanceCriteria(toCriterionRecords(currentAcceptanceCriteria));
-        checkpoint.save();
-
-        out.println(AnsiStyle.heading("📋 执行计划"));
-        out.println(summarizeSteps(steps) + "\n");
-
-        return executeSteps(steps, traceContext);
+        memoryManager.maintainSessionPreSummaryAfterTurnAsync(turnHistory, 0, 0);
     }
 
     /**

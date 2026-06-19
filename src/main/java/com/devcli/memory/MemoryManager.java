@@ -13,6 +13,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Memory 管理器 —— Memory 系统的门面类。
@@ -46,6 +49,7 @@ public class MemoryManager implements AutoCloseable {
     private final SessionMemory sessionMemory;
     private final LongTermMemory longTermMemory;
     private final MemoryRetriever retriever;
+    private final ExecutorService sessionPreSummaryExecutor;
     // Bug #12 修复：使用 ConcurrentHashMap 支持 Multi-Agent 并发调用
     private final Map<String, Integer> memoryCandidateOccurrences = new java.util.concurrent.ConcurrentHashMap<>();
     /** recurrence 候选计数器的容量上限，防止长会话下无界增长。 */
@@ -79,6 +83,11 @@ public class MemoryManager implements AutoCloseable {
         this.longTermMemory = longTermMemory != null ? longTermMemory : new LongTermMemory();
         this.retriever = new MemoryRetriever(this.longTermMemory);
         this.tokenBudget = new TokenBudget(contextProfile.maxContextWindow());
+        this.sessionPreSummaryExecutor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "devcli-session-pre-summary");
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     public void setLlmClient(LlmClient llmClient) {
@@ -428,6 +437,16 @@ public class MemoryManager implements AutoCloseable {
         }
     }
 
+    public CompletableFuture<SessionPreSummaryMaintenanceResult> maintainSessionPreSummaryAfterTurnAsync(
+            List<LlmClient.Message> history,
+            int turnToolCalls,
+            int largestToolResultChars) {
+        List<LlmClient.Message> snapshot = history == null ? List.of() : List.copyOf(history);
+        return CompletableFuture.supplyAsync(
+                () -> maintainSessionPreSummaryAfterTurn(snapshot, turnToolCalls, largestToolResultChars),
+                sessionPreSummaryExecutor);
+    }
+
     private static String renderMessagesForPreSummary(List<LlmClient.Message> messages) {
         StringBuilder sb = new StringBuilder();
         for (LlmClient.Message message : messages) {
@@ -550,6 +569,7 @@ public class MemoryManager implements AutoCloseable {
      */
     @Override
     public void close() {
+        sessionPreSummaryExecutor.shutdownNow();
         if (longTermMemory != null) {
             longTermMemory.close();
         }

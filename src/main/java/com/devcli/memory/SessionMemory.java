@@ -5,6 +5,9 @@ import com.devcli.llm.LlmClient;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
@@ -13,7 +16,21 @@ import java.util.Optional;
  * 当前进程内的会话预摘要缓存。
  */
 public class SessionMemory {
+    static final Duration DEFAULT_PRE_SUMMARY_TTL = Duration.ofMinutes(30);
+    private final Clock clock;
+    private final Duration preSummaryTtl;
     private PreSummary preSummary;
+
+    public SessionMemory() {
+        this(Clock.systemUTC(), DEFAULT_PRE_SUMMARY_TTL);
+    }
+
+    SessionMemory(Clock clock, Duration preSummaryTtl) {
+        this.clock = clock == null ? Clock.systemUTC() : clock;
+        this.preSummaryTtl = preSummaryTtl == null || preSummaryTtl.isNegative() || preSummaryTtl.isZero()
+                ? DEFAULT_PRE_SUMMARY_TTL
+                : preSummaryTtl;
+    }
 
     public synchronized void recordPreSummary(List<LlmClient.Message> coveredMessages, String summary) {
         if (coveredMessages == null || coveredMessages.isEmpty() || summary == null || summary.isBlank()) {
@@ -23,11 +40,16 @@ public class SessionMemory {
                 summary.trim(),
                 coveredMessages.size(),
                 TokenBudget.estimateMessagesTokens(coveredMessages),
-                fingerprint(coveredMessages));
+                fingerprint(coveredMessages),
+                clock.instant());
     }
 
     public synchronized Optional<PreSummary> findReusablePreSummary(List<LlmClient.Message> messages) {
         if (preSummary == null || messages == null || messages.isEmpty()) {
+            return Optional.empty();
+        }
+        if (isExpired(preSummary)) {
+            preSummary = null;
             return Optional.empty();
         }
         if (preSummary.messageCount != messages.size()) {
@@ -41,11 +63,21 @@ public class SessionMemory {
     }
 
     public synchronized Optional<PreSummary> currentPreSummary() {
+        if (preSummary != null && isExpired(preSummary)) {
+            preSummary = null;
+        }
         return Optional.ofNullable(preSummary);
     }
 
     public synchronized void clearPreSummary() {
         this.preSummary = null;
+    }
+
+    private boolean isExpired(PreSummary summary) {
+        if (summary == null || summary.createdAt == null) {
+            return true;
+        }
+        return summary.createdAt.plus(preSummaryTtl).isBefore(clock.instant());
     }
 
     private static String fingerprint(List<LlmClient.Message> messages) {
@@ -84,6 +116,7 @@ public class SessionMemory {
         digest.update(bytes);
     }
 
-    public record PreSummary(String summary, int messageCount, int tokenEstimate, String fingerprint) {
+    public record PreSummary(String summary, int messageCount, int tokenEstimate,
+                             String fingerprint, Instant createdAt) {
     }
 }

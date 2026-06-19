@@ -39,9 +39,9 @@
 ### 阶段 2：Session Memory 前置摘要
 
 - 状态：部分实现（2026-06-19）
-- 已实现：新增 `SessionMemory` 会话预摘要缓存，按待压缩消息指纹判断预摘要是否覆盖旧消息；`ConversationHistoryCompactor` 首次全量压缩时优先复用匹配的预摘要，避免重复调用 LLM 摘要；`MemoryManager` 持有当前会话的 `SessionMemory`，ReAct 与 Plan 路径的压缩器共享该实例；ReAct turn 结束后会按 token 增量、工具调用次数和大工具结果阈值维护会话预摘要，当前只写入进程内 `SessionMemory`，不写长期记忆
-- 未实现：Plan / Multi-Agent turn 结束后的自动预摘要维护、预摘要过期策略和后台异步调度尚未接入
-- 影响范围：`SessionMemory`、`ConversationHistoryCompactor`、`MemoryManager`、`Agent`、`PlanExecuteAgent`、相关 memory / agent 测试
+- 已实现：新增 `SessionMemory` 会话预摘要缓存，按待压缩消息指纹判断预摘要是否覆盖旧消息；`ConversationHistoryCompactor` 首次全量压缩时优先复用匹配的预摘要，避免重复调用 LLM 摘要；`MemoryManager` 持有当前会话的 `SessionMemory`，ReAct 与 Plan 路径的压缩器共享该实例；ReAct turn 结束后会按 token 增量、工具调用次数和大工具结果阈值维护会话预摘要，当前只写入进程内 `SessionMemory`，不写长期记忆；Plan / Multi-Agent turn 结束后会提交后台预摘要维护任务；预摘要默认 30 分钟过期，过期后不再复用；后台维护使用 `MemoryManager` 内部单线程 daemon executor，关闭 `MemoryManager` 时同步关闭
+- 未实现：阶段 2 当前无剩余核心项；后续可评估跨进程持久化预摘要和持久化后台任务队列
+- 影响范围：`SessionMemory`、`ConversationHistoryCompactor`、`MemoryManager`、`Agent`、`PlanExecuteAgent`、`AgentOrchestrator`、相关 memory / agent 测试
 - 目标：在普通对话过程中按 token 增量和工具调用次数后台维护会话摘要；自动压缩时优先使用已维护摘要，缺失或过期时再调用现有 LLM 摘要压缩
 - 参考点：cc 的 Session Memory extraction hook 与 `trySessionMemoryCompaction`
 - 验证建议：新增 session memory 阈值判断、摘要更新时间、压缩复用路径测试

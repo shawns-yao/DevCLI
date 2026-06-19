@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -408,6 +409,38 @@ class AgentOrchestratorTest {
                     "worker context should include the original user task");
             assertTrue(reviewerInputs.get(0).contains(fullRequirement),
                     "reviewer context should include the original user task");
+        }
+    }
+
+    @Test
+    void shouldScheduleSessionPreSummaryMaintenanceAfterMultiAgentTurn(@TempDir Path tempDir) {
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                return response("""
+                        {
+                          "summary": "单步分析",
+                          "steps": [
+                            {"id": "s1", "description": "分析模块", "type": "ANALYSIS", "dependencies": []}
+                          ]
+                        }
+                        """);
+            }
+            if (body.contains("原始任务")) {
+                return response(approvedReviewJson());
+            }
+            if (body.contains("分析模块")) {
+                return response("worker result");
+            }
+            return response("fallback");
+        };
+
+        DispatchingStubGLMClient llmClient = new DispatchingStubGLMClient(dispatcher);
+        try (CountingMemoryManager mm = new CountingMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(llmClient, isolatedToolRegistry(tempDir), mm);
+
+            orchestrator.run("测试 Multi-Agent 会话预摘要维护");
+
+            assertEquals(1, mm.asyncMaintenanceCalls.get());
         }
     }
 
@@ -1262,6 +1295,23 @@ class AgentOrchestratorTest {
     private static final class NoOpMemoryManager extends MemoryManager {
         private NoOpMemoryManager(File storageDir) {
             super(new GLMClient("test-key"), 32768, 200000, new LongTermMemory(storageDir));
+        }
+    }
+
+    private static final class CountingMemoryManager extends MemoryManager {
+        private final AtomicInteger asyncMaintenanceCalls = new AtomicInteger();
+
+        private CountingMemoryManager(File storageDir) {
+            super(new GLMClient("test-key"), 32768, 200000, new LongTermMemory(storageDir));
+        }
+
+        @Override
+        public CompletableFuture<SessionPreSummaryMaintenanceResult> maintainSessionPreSummaryAfterTurnAsync(
+                List<LlmClient.Message> history,
+                int turnToolCalls,
+                int largestToolResultChars) {
+            asyncMaintenanceCalls.incrementAndGet();
+            return CompletableFuture.completedFuture(SessionPreSummaryMaintenanceResult.SKIPPED_BELOW_THRESHOLD);
         }
     }
 
