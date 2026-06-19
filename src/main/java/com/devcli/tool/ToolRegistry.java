@@ -616,9 +616,9 @@ public class ToolRegistry {
     private void registerToolSearchTools() {
         tools.put("search_tools", new Tool(
                 "search_tools",
-                "Search currently available tools by name and description. Use this when the exact MCP or built-in tool name is unknown.",
+                "Search currently available tools by name, description and parameter schema. Use this when the exact MCP or built-in tool name is unknown.",
                 createParameters(
-                        new Param("query", "string", "keywords to search in tool name and description", true),
+                        new Param("query", "string", "keywords to search in tool name, description and parameter schema", true),
                         new Param("limit", "string", "maximum number of matches to return, default 10", false)
                 ),
                 args -> searchTools(args.get("query"), args.get("limit"))
@@ -870,12 +870,16 @@ public class ToolRegistry {
     private static int scoreTool(Tool tool, List<String> terms) {
         String name = tool.name() == null ? "" : tool.name().toLowerCase(Locale.ROOT);
         String description = tool.description() == null ? "" : tool.description().toLowerCase(Locale.ROOT);
+        String schema = tool.parameters() == null ? "" : tool.parameters().toString().toLowerCase(Locale.ROOT);
         int score = 0;
         for (String term : terms) {
             if (name.contains(term)) {
                 score += 3;
             }
             if (description.contains(term)) {
+                score += 1;
+            }
+            if (schema.contains(term)) {
                 score += 1;
             }
         }

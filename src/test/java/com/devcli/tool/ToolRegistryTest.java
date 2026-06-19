@@ -39,6 +39,15 @@ class ToolRegistryTest {
     }
 
     @Test
+    void searchToolsMatchesParameterSchemaText() {
+        ToolRegistry registry = new ToolRegistry();
+
+        String result = registry.executeTool("search_tools", "{\"query\":\"python\"}");
+
+        assertTrue(result.contains("create_project"), result);
+    }
+
+    @Test
     void shouldRunCommandInProjectDirectory(@TempDir Path tempDir) {
         ToolRegistry registry = new ToolRegistry();
         registry.setProjectPath(tempDir.toString());
