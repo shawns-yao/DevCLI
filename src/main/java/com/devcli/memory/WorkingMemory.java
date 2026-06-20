@@ -314,14 +314,23 @@ public class WorkingMemory {
      * 压缩后恢复 messages 的结构化短上下文。
      *
      * <p>这里不复用完整 {@link #renderForPrompt()}，避免把大段工具输出再次写回
-     * conversationHistory。恢复段只保留可定位实体：文件路径、未完成任务、短工具引用和 RAG epoch。
+     * conversationHistory。恢复段只保留可定位实体：文件路径、未完成子任务、短工具引用和 RAG epoch。
      */
     public synchronized String renderForPostCompactRestore() {
+        return renderForPostCompactRestore(View.FULL);
+    }
+
+    public synchronized String renderForPostCompactRestore(View view) {
+        View effectiveView = view == null ? View.FULL : view;
         StringBuilder sb = new StringBuilder();
-        appendRecentFileSection(sb);
+        if (shouldRenderToolEvidence(effectiveView)) {
+            appendRecentFileSection(sb);
+        }
         appendOpenTaskSection(sb);
-        appendKeyToolReferenceSection(sb);
-        appendRagEpochSection(sb);
+        if (shouldRenderToolEvidence(effectiveView)) {
+            appendKeyToolReferenceSection(sb);
+            appendRagEpochSection(sb);
+        }
         return sb.toString().trim();
     }
 
@@ -351,12 +360,12 @@ public class WorkingMemory {
     }
 
     private void appendOpenTaskSection(StringBuilder sb) {
-        String ledger = taskLedger.render();
+        String ledger = taskLedger.renderPostCompactRestore();
         if (taskState.isEmpty() && ledger.isBlank()) {
             return;
         }
         appendSectionBreak(sb);
-        sb.append("### 未完成任务\n\n");
+        sb.append("### 未完成子任务状态\n\n");
         if (!ledger.isBlank()) {
             sb.append(ledger).append('\n');
         }

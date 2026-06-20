@@ -165,8 +165,9 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 ### Post-Compact Restore
 
 - ConversationHistoryCompactor 压缩成功后会在摘要确认消息之后、保留尾部之前插入 `[压缩后恢复上下文]`
-- WorkingMemory 的恢复段不复用完整 system prompt 视图，而是按最近读写文件、未完成任务、关键工具结果引用、RAG 证据 epoch 输出短结构化上下文
-- Agent / PlanExecuteAgent / SubAgent 会在恢复段追加本地 SkillContextBuffer 的已加载 Skill 与 allowedTools 状态
+- WorkingMemory 的恢复段不复用完整 system prompt 视图，而是按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 输出短结构化上下文
+- Agent / PlanExecuteAgent / SubAgent 会在恢复段追加 MCP 工具状态和本地 SkillContextBuffer 的已加载 Skill 与 allowedTools 状态
+- 恢复段通过 `PostCompactRestoreContext` 做统一预算控制和行级去重；SubAgent 恢复区使用 Planner / Worker / Reviewer 角色视图裁剪，Planner 不携带工具证据，Reviewer 不携带会话临时事件
 
 ### TUI (v16.1 Renderer Architecture)
 

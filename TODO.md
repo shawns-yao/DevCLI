@@ -49,9 +49,9 @@
 
 ### 阶段 3：压缩后上下文恢复
 
-- 状态：部分实现（2026-06-19）
-- 已实现：`ConversationHistoryCompactor` 支持压缩成功后插入 `[压缩后恢复上下文]` 消息；恢复内容位于摘要确认消息之后、保留尾部之前，并保持后续保留区仍从 user 消息边界开始；ReAct、Plan、SubAgent 路径已接入压缩恢复 supplier；`MemoryManager` 会输出结构化恢复段，拆分为最近读写文件、未完成任务、关键工具结果引用和 RAG 证据 epoch；`SkillContextBuffer` 会在压缩后恢复已加载 Skill 及其允许工具
-- 未实现：MCP 工具状态、未完成子任务状态的专用恢复格式尚未拆分；恢复内容仍需进一步做预算去重和按角色裁剪
+- 状态：部分实现（2026-06-20）
+- 已实现：`ConversationHistoryCompactor` 支持压缩成功后插入 `[压缩后恢复上下文]` 消息；恢复内容位于摘要确认消息之后、保留尾部之前，并保持后续保留区仍从 user 消息边界开始；ReAct、Plan、SubAgent 路径已接入压缩恢复 supplier；`MemoryManager` 会输出结构化恢复段，拆分为最近读写文件、未完成子任务状态、关键工具结果引用和 RAG 证据 epoch；`TaskLedger` 提供未完成子任务专用恢复格式，只展开 running / failed / pending 并保留 completed_count；Agent / Plan / SubAgent 会追加 MCP 工具状态专用恢复段；恢复内容通过 `PostCompactRestoreContext` 做统一预算控制和行级去重；SubAgent 压缩恢复按 Planner / Worker / Reviewer 角色裁剪，Planner 不携带工具证据，Reviewer 不携带会话临时事件；`SkillContextBuffer` 会在压缩后恢复已加载 Skill 及其允许工具
+- 未实现：阶段 3 当前无剩余核心项；后续可继续把恢复预算从字符级升级为 token 级，并按路径或 toolCallId 做更细粒度语义去重
 - 影响范围：`ConversationHistoryCompactor`、`MemoryManager`、`WorkingMemory`、`SkillContextBuffer`、`Agent`、`PlanExecuteAgent`、`SubAgent`、相关 memory / skill / agent 测试
 - 目标：压缩后重新注入最近读取文件摘要、任务账本、已调用 Skill、MCP 工具状态、未完成子任务状态和关键 RAG 证据，减少模型压缩后重复读文件或丢失执行状态
 - 参考点：cc 的 post-compact file attachments、invoked skills attachment、plan mode attachment、MCP instructions delta

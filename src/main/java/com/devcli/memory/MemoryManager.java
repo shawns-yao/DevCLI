@@ -376,6 +376,10 @@ public class MemoryManager implements AutoCloseable {
         return workingMemory.renderForPostCompactRestore();
     }
 
+    public String buildPostCompactRestoreSectionForAgent(String agentType) {
+        return workingMemory.renderForPostCompactRestore(viewForAgent(agentType));
+    }
+
     public String currentRagEpochSnapshot() {
         LinkedHashSet<String> epochs = new LinkedHashSet<>();
         for (WorkingMemory.RagEvidence evidence : workingMemory.getRagEvidenceMemory()) {

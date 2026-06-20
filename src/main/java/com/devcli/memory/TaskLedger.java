@@ -154,6 +154,49 @@ public class TaskLedger {
         return sb.toString().trim();
     }
 
+    /**
+     * 压缩后恢复使用的未完成子任务视图。只展开运行中、待执行和失败项，避免把已完成列表重复写回恢复区。
+     */
+    public synchronized String renderPostCompactRestore() {
+        if (steps.isEmpty()) return "";
+        List<String> running = new ArrayList<>();
+        List<String> pending = new ArrayList<>();
+        List<String> failed = new ArrayList<>();
+        int doneCount = 0;
+        for (Entry e : steps.values()) {
+            switch (e.status) {
+                case RUNNING -> running.add(e.stepId + " " + compact(e.description));
+                case FAILED -> failed.add(e.stepId + (e.lastError.isBlank() ? "" : " (" + compact(e.lastError) + ")"));
+                case PENDING -> pending.add(e.stepId + " " + compact(e.description));
+                case DONE -> doneCount++;
+                case SKIPPED -> { /* 恢复区不展开跳过项 */ }
+            }
+        }
+        if (running.isEmpty() && pending.isEmpty() && failed.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        if (!planId.isBlank()) {
+            sb.append("- plan_id: ").append(compact(planId)).append('\n');
+        }
+        if (!goal.isBlank()) {
+            sb.append("- goal: ").append(compact(goal)).append('\n');
+        }
+        if (doneCount > 0) {
+            sb.append("- completed_count: ").append(doneCount).append('\n');
+        }
+        if (!running.isEmpty()) {
+            sb.append("- running: ").append(String.join("; ", running)).append('\n');
+        }
+        if (!failed.isEmpty()) {
+            sb.append("- failed: ").append(String.join("; ", failed)).append('\n');
+        }
+        if (!pending.isEmpty()) {
+            sb.append("- pending: ").append(String.join("; ", pending)).append('\n');
+        }
+        return sb.toString().trim();
+    }
+
     private static String compact(String s) {
         if (s == null) return "";
         String oneLine = s.replaceAll("\\s+", " ").trim();

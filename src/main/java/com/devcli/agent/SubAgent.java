@@ -7,6 +7,7 @@ import com.devcli.llm.LlmTraceLogger;
 import com.devcli.lsp.LspDiagnosticReport;
 import com.devcli.memory.CompactBoundaryRuntimeState;
 import com.devcli.memory.ConversationHistoryCompactor;
+import com.devcli.memory.PostCompactRestoreContext;
 import com.devcli.context.ContextProfile;
 import com.devcli.prompt.PromptAssembler;
 import com.devcli.prompt.PromptContext;
@@ -78,6 +79,7 @@ public class SubAgent {
     private Supplier<String> stickyMemorySupplier = () -> "";
     private Supplier<String> memoryContextSupplier = () -> "";
     private Supplier<String> workingMemorySupplier = () -> "";
+    private Supplier<String> postCompactRestoreSupplier = () -> "";
     private TriConsumer<String, String, String> toolResultConsumer = (name, args, result) -> {};
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
@@ -120,6 +122,10 @@ public class SubAgent {
     public void setWorkingMemorySupplier(Supplier<String> workingMemorySupplier) {
         this.workingMemorySupplier = workingMemorySupplier == null ? () -> "" : workingMemorySupplier;
         refreshSystemPrompt();
+    }
+
+    public void setPostCompactRestoreSupplier(Supplier<String> postCompactRestoreSupplier) {
+        this.postCompactRestoreSupplier = postCompactRestoreSupplier == null ? () -> "" : postCompactRestoreSupplier;
     }
 
     public void setToolResultConsumer(TriConsumer<String, String, String> toolResultConsumer) {
@@ -169,18 +175,40 @@ public class SubAgent {
     }
 
     private String buildPostCompactRestoreSection() {
-        List<String> sections = new ArrayList<>();
-        String workingMemory = buildWorkingMemory();
+        List<PostCompactRestoreContext.Section> sections = new ArrayList<>();
+        String workingMemory = buildPostCompactRestoreMemory();
         if (!workingMemory.isBlank()) {
-            sections.add(workingMemory);
+            sections.add(new PostCompactRestoreContext.Section("工作记忆恢复", workingMemory));
+        }
+        String mcpTools = buildMcpPostCompactRestoreSection();
+        if (!mcpTools.isBlank()) {
+            sections.add(new PostCompactRestoreContext.Section("MCP 工具状态", mcpTools));
         }
         if (skillContextBuffer != null) {
             String skills = skillContextBuffer.renderPostCompactRestoreSection();
             if (!skills.isBlank()) {
-                sections.add(skills);
+                sections.add(new PostCompactRestoreContext.Section("已调用 Skill 恢复", skills));
             }
         }
-        return String.join("\n\n", sections);
+        return PostCompactRestoreContext.render(sections.toArray(PostCompactRestoreContext.Section[]::new));
+    }
+
+    private String buildPostCompactRestoreMemory() {
+        try {
+            String memory = postCompactRestoreSupplier.get();
+            return memory == null ? "" : memory.trim();
+        } catch (Exception e) {
+            log.warn("Failed to render post-compact restore memory in SubAgent {}", name, e);
+            return "";
+        }
+    }
+
+    private String buildMcpPostCompactRestoreSection() {
+        String snapshot = toolRegistry.mcpToolSnapshot();
+        if (snapshot == null || snapshot.isBlank() || "none".equalsIgnoreCase(snapshot.trim())) {
+            return "";
+        }
+        return "- snapshot: " + snapshot.trim();
     }
 
     private CompactBoundaryRuntimeState buildCompactBoundaryRuntimeState() {

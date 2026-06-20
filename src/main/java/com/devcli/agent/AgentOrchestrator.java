@@ -259,6 +259,8 @@ public class AgentOrchestrator {
                 memoryManager.getContextProfile().memoryContextTokens()));
         agent.setWorkingMemorySupplier(() -> memoryManager.buildWorkingMemorySectionForAgent(
                 agent.getRole().name().toLowerCase(Locale.ROOT)));
+        agent.setPostCompactRestoreSupplier(() -> memoryManager.buildPostCompactRestoreSectionForAgent(
+                agent.getRole().name().toLowerCase(Locale.ROOT)));
         agent.setToolResultConsumer(memoryManager::addToolResult);
         agent.setSkillRegistry(skillRegistry);
         agent.setSkillContextBuffer(skillContextBuffer == null ? null : skillContextBuffer.copy());

@@ -9,6 +9,7 @@ import com.devcli.memory.CompactBoundaryRuntimeState;
 import com.devcli.memory.ConversationHistoryCompactor;
 import com.devcli.memory.ExplicitMemoryHints;
 import com.devcli.memory.MemoryManager;
+import com.devcli.memory.PostCompactRestoreContext;
 import com.devcli.prompt.PromptAssembler;
 import com.devcli.prompt.PromptContext;
 import com.devcli.prompt.PromptMode;
@@ -426,18 +427,30 @@ public class Agent implements AutoCloseable {
     }
 
     private String buildPostCompactRestoreSection() {
-        List<String> sections = new ArrayList<>();
+        List<PostCompactRestoreContext.Section> sections = new ArrayList<>();
         String workingMemory = memoryManager.buildPostCompactRestoreSection();
         if (workingMemory != null && !workingMemory.isBlank()) {
-            sections.add(workingMemory.trim());
+            sections.add(new PostCompactRestoreContext.Section("工作记忆恢复", workingMemory.trim()));
+        }
+        String mcpTools = buildMcpPostCompactRestoreSection();
+        if (!mcpTools.isBlank()) {
+            sections.add(new PostCompactRestoreContext.Section("MCP 工具状态", mcpTools));
         }
         if (skillContextBuffer != null) {
             String skills = skillContextBuffer.renderPostCompactRestoreSection();
             if (!skills.isBlank()) {
-                sections.add(skills);
+                sections.add(new PostCompactRestoreContext.Section("已调用 Skill 恢复", skills));
             }
         }
-        return String.join("\n\n", sections);
+        return PostCompactRestoreContext.render(sections.toArray(PostCompactRestoreContext.Section[]::new));
+    }
+
+    private String buildMcpPostCompactRestoreSection() {
+        String snapshot = toolRegistry.mcpToolSnapshot();
+        if (snapshot == null || snapshot.isBlank() || "none".equalsIgnoreCase(snapshot.trim())) {
+            return "";
+        }
+        return "- snapshot: " + snapshot.trim();
     }
 
     private CompactBoundaryRuntimeState buildCompactBoundaryRuntimeState() {

@@ -13,6 +13,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayDeque;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -421,13 +422,66 @@ class MemoryManagerTest {
 
             assertTrue(section.contains("### 最近读写文件"), section);
             assertTrue(section.contains("src/Main.java"), section);
-            assertTrue(section.contains("### 未完成任务"), section);
+            assertTrue(section.contains("### 未完成子任务状态"), section);
             assertTrue(section.contains("plan_task"), section);
             assertTrue(section.contains("### 关键工具结果引用"), section);
             assertTrue(section.contains("write_file"), section);
             assertTrue(section.contains("### RAG 证据 epoch"), section);
             assertTrue(section.contains("indexEpoch=idx-1"), section);
         }
+    }
+
+    @Test
+    void buildPostCompactRestoreSectionShouldRenderOpenSubTasksOnly() {
+        try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {
+            memoryManager.setTaskLedgerPlan("plan-42", "实现阶段 3", Map.of(
+                    "step_done", "已完成步骤",
+                    "step_running", "运行中步骤",
+                    "step_pending", "待执行步骤"));
+            memoryManager.completeTaskStep("step_done");
+            memoryManager.startTaskStep("step_running");
+
+            String section = memoryManager.buildPostCompactRestoreSection();
+
+            assertTrue(section.contains("### 未完成子任务状态"), section);
+            assertTrue(section.contains("plan_id: plan-42"), section);
+            assertTrue(section.contains("running: step_running"), section);
+            assertTrue(section.contains("pending: step_pending"), section);
+            assertTrue(section.contains("completed_count: 1"), section);
+            assertFalse(section.contains("已完成步骤"), section);
+        }
+    }
+
+    @Test
+    void buildPostCompactRestoreSectionForAgentShouldApplyRoleScopedCropping() {
+        try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {
+            memoryManager.setTaskState("plan_task", "step_1");
+            memoryManager.addToolResult("read_file", "{\"path\":\"Secret.java\"}", "secret tool evidence");
+
+            String planner = memoryManager.buildPostCompactRestoreSectionForAgent("planner");
+            assertTrue(planner.contains("plan_task"), planner);
+            assertFalse(planner.contains("Secret.java"), planner);
+            assertFalse(planner.contains("关键工具结果引用"), planner);
+
+            String reviewer = memoryManager.buildPostCompactRestoreSectionForAgent("reviewer");
+            assertTrue(reviewer.contains("plan_task"), reviewer);
+            assertTrue(reviewer.contains("Secret.java"), reviewer);
+            assertTrue(reviewer.contains("关键工具结果引用"), reviewer);
+        }
+    }
+
+    @Test
+    void postCompactRestoreContextShouldDeduplicateAndRespectBudget() {
+        String repeated = "- same line";
+        String section = PostCompactRestoreContext.render(90,
+                new PostCompactRestoreContext.Section("第一段", repeated + "\n- unique one"),
+                new PostCompactRestoreContext.Section("第二段", repeated + "\n- unique two with long long long long long text"));
+
+        assertEquals(section.indexOf(repeated), section.lastIndexOf(repeated), section);
+        assertTrue(section.length() <= 120, section);
+        assertTrue(section.contains("恢复上下文已截断") || section.contains("unique two"), section);
     }
 
     @Test
