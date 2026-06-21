@@ -33,6 +33,12 @@ public class InMemoryTransport implements McpTransport {
         return List.copyOf(sent);
     }
 
+    public void emit(JsonNode message) {
+        for (Consumer<JsonNode> listener : listeners) {
+            listener.accept(message);
+        }
+    }
+
     @Override
     public synchronized void send(JsonNode message) throws IOException {
         if (closed) throw new IOException("closed");

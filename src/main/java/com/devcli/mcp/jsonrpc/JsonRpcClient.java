@@ -88,6 +88,12 @@ public class JsonRpcClient implements AutoCloseable {
         }
     }
 
+    public void removeNotificationListener(Consumer<JsonNode> listener) {
+        if (listener != null) {
+            notificationListeners.remove(listener);
+        }
+    }
+
     private void handleMessage(JsonNode message) {
         JsonNode idNode = message.get("id");
         if (idNode == null || idNode.isNull()) {

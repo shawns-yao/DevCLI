@@ -145,6 +145,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - McpServerManager 记录本进程连接事件：STARTING / READY / ERROR / DISABLED / RECONNECTING / TOOLS_CHANGED，事件携带 server、状态、生命周期版本、工具数量和消息
 - 启动失败的 MCP server 会后台自动重连，默认最多 3 次；成功后重新注册工具并刷新 lifecycleVersion / 工具发现缓存
 - 工具发现缓存记录 server、生命周期版本、工具数量、工具名、schema 指纹和发现时间；disable 只移除运行时注册工具，不清除上一轮发现元数据
+- MCP `tools/call` 请求会携带 `_meta.progressToken`；同 token 的 `notifications/progress` 会按最近 5 条追加到工具结果文本
 - MCP 工具结果被尺寸治理截断或落盘预览时会在返回文本末尾标记折叠分类：`INLINE_TRUNCATED` 或 `PERSISTED_PREVIEW`
 - notifications 路由：tools/list_changed → 工具全量替换，resources 变化 → cache 失效
 

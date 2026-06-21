@@ -8,6 +8,7 @@ import com.devcli.mcp.resources.McpResourceDescriptor;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -135,6 +136,40 @@ class McpClientTest {
         assertEquals(1, output.imageParts().size());
         assertEquals("image_base64", output.imageParts().get(0).type());
         assertEquals("aGVsbG8=", output.imageParts().get(0).imageBase64());
+        client.close();
+    }
+
+    @Test
+    void callToolOutputSendsProgressTokenAndAppendsProgressSummary() throws Exception {
+        InMemoryTransport[] holder = new InMemoryTransport[1];
+        AtomicReference<String> progressToken = new AtomicReference<>();
+        InMemoryTransport transport = new InMemoryTransport()
+                .handle("initialize", p -> MAPPER.createObjectNode())
+                .handle("tools/call", p -> {
+                    String token = p.path("_meta").path("progressToken").asText("");
+                    progressToken.set(token);
+                    holder[0].emit(readJson("""
+                            {"jsonrpc":"2.0","method":"notifications/progress","params":{
+                              "progressToken":"%s",
+                              "progress":2,
+                              "total":5,
+                              "message":"indexing"
+                            }}
+                            """.formatted(token)));
+                    return readJson("""
+                            {"content": [{"type": "text", "text": "done"}], "isError": false}
+                            """);
+                });
+        holder[0] = transport;
+        McpClient client = new McpClient("demo", transport);
+        client.initialize();
+
+        var output = client.callToolOutput("long_task", "{}");
+
+        assertFalse(progressToken.get().isBlank(), "tools/call 应携带 progressToken");
+        assertTrue(output.text().contains("done"));
+        assertTrue(output.text().contains("MCP 工具进度"), output.text());
+        assertTrue(output.text().contains("2/5 indexing"), output.text());
         client.close();
     }
 

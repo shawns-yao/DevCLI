@@ -19,6 +19,9 @@ import com.devcli.tool.ToolOutput;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 
 public class McpClient implements AutoCloseable {
@@ -117,13 +120,88 @@ public class McpClient implements AutoCloseable {
             args = MAPPER.readTree(argumentsJson);
         }
         ObjectNode params = McpCallToolRequest.toJson(toolName, args);
-        JsonNode result = rpc.request("tools/call", params, 60);
-        McpCallToolResult callResult = MAPPER.treeToValue(result, McpCallToolResult.class);
-        ToolOutput output = callResult.toToolOutput();
-        if (callResult.isError()) {
-            return new ToolOutput("MCP 工具返回错误: " + output.text(), output.imageParts());
+        String progressToken = serverName + ":" + toolName + ":" + UUID.randomUUID();
+        params.putObject("_meta").put("progressToken", progressToken);
+        List<McpProgressEvent> progressEvents = new CopyOnWriteArrayList<>();
+        Consumer<JsonNode> progressListener = message ->
+                captureProgress(progressEvents, progressToken, message);
+        rpc.onNotification(progressListener);
+        try {
+            JsonNode result = rpc.request("tools/call", params, 60);
+            McpCallToolResult callResult = MAPPER.treeToValue(result, McpCallToolResult.class);
+            ToolOutput output = appendProgress(callResult.toToolOutput(), progressEvents);
+            if (callResult.isError()) {
+                return new ToolOutput("MCP 工具返回错误: " + output.text(), output.imageParts());
+            }
+            return output;
+        } finally {
+            rpc.removeNotificationListener(progressListener);
         }
-        return output;
+    }
+
+    private static void captureProgress(List<McpProgressEvent> events, String progressToken, JsonNode message) {
+        if (message == null || !"notifications/progress".equals(message.path("method").asText())) {
+            return;
+        }
+        JsonNode params = message.path("params");
+        if (!progressToken.equals(params.path("progressToken").asText())) {
+            return;
+        }
+        events.add(new McpProgressEvent(
+                formatProgressNumber(params.path("progress")),
+                formatProgressNumber(params.path("total")),
+                params.path("message").asText("")
+        ));
+    }
+
+    private static ToolOutput appendProgress(ToolOutput output, List<McpProgressEvent> events) {
+        if (events == null || events.isEmpty()) {
+            return output;
+        }
+        StringBuilder text = new StringBuilder(output.text());
+        if (!text.isEmpty()) {
+            text.append("\n\n");
+        }
+        text.append("[MCP 工具进度]");
+        int from = Math.max(0, events.size() - 5);
+        for (int i = from; i < events.size(); i++) {
+            text.append("\n- ").append(events.get(i).format());
+        }
+        return new ToolOutput(text.toString(), output.imageParts());
+    }
+
+    private static String formatProgressNumber(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return "";
+        }
+        if (node.isIntegralNumber()) {
+            return node.asText();
+        }
+        if (node.isNumber()) {
+            return String.format(Locale.ROOT, "%.2f", node.asDouble())
+                    .replaceAll("0+$", "")
+                    .replaceAll("\\.$", "");
+        }
+        return node.asText("");
+    }
+
+    private record McpProgressEvent(String progress, String total, String message) {
+        String format() {
+            StringBuilder sb = new StringBuilder();
+            if (progress != null && !progress.isBlank()) {
+                sb.append(progress);
+                if (total != null && !total.isBlank()) {
+                    sb.append('/').append(total);
+                }
+            }
+            if (message != null && !message.isBlank()) {
+                if (!sb.isEmpty()) {
+                    sb.append(' ');
+                }
+                sb.append(message);
+            }
+            return sb.isEmpty() ? "progress updated" : sb.toString();
+        }
     }
 
     public List<McpResourceDescriptor> listResources() throws IOException {
