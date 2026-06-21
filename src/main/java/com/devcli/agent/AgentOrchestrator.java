@@ -278,6 +278,7 @@ public class AgentOrchestrator {
         ));
         memoryManager.addUserMessage(userInput);
         currentUserTask = userInput == null ? "" : userInput;
+        toolRegistry.prefetchToolDefinitionsForInput(currentUserTask);
         restoredFailedArtifacts.clear();
         currentAcceptanceCriteria = List.of();
         // 回收上一轮崩溃残留的超时租约，避免历史租约阻塞本轮写入

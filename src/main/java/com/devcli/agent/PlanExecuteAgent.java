@@ -279,6 +279,7 @@ public class PlanExecuteAgent {
      */
     public String run(String userInput) {
         log.info("Plan run started: inputLength={}", userInput == null ? 0 : userInput.length());
+        toolRegistry.prefetchToolDefinitionsForInput(userInput);
         memoryManager.addUserMessage(userInput);
         StreamState streamState = new StreamState();
         String resultForSummary = "";

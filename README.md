@@ -439,7 +439,7 @@ Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 做实现
 
 同一轮模型返回多个工具调用时，DevCLI 会并行执行可并行的工具，并按原始顺序把结果回灌给模型。
 
-工具调用可靠性：工具定义以 JSON Schema 约束参数类型、必填项、枚举值和未知字段；`ToolRegistry` 在真实执行前通过 `json-schema-validator` + 本地兜底校验内置工具与 MCP 工具参数，非法 JSON、类型错误、空必填、非法枚举、pattern/minimum 等 schema 约束失败会以 `工具参数校验失败` 回传给模型修正。默认工具定义只注入内置核心工具和已激活 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具注册、卸载或替换后自动失效重建，命中的 MCP 工具会激活到后续工具定义。未知工具调用会返回 `search_tools` 引导和 query 示例，便于模型在工具集合变化或 MCP 工具未命中时重新检索可用工具。危险工具仍走 HITL 审批、策略拦截和 AuditLog；工具错误会回灌给模型继续纠偏，最终答复必须基于工具证据。
+工具调用可靠性：工具定义以 JSON Schema 约束参数类型、必填项、枚举值和未知字段；`ToolRegistry` 在真实执行前通过 `json-schema-validator` + 本地兜底校验内置工具与 MCP 工具参数，非法 JSON、类型错误、空必填、非法枚举、pattern/minimum 等 schema 约束失败会以 `工具参数校验失败` 回传给模型修正。默认工具定义只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具注册、卸载或替换后自动失效重建，命中的 MCP 工具会激活到后续工具定义。未知工具调用会返回 `search_tools` 引导和 query 示例，便于模型在工具集合变化或 MCP 工具未命中时重新检索可用工具。危险工具仍走 HITL 审批、策略拦截和 AuditLog；工具错误会回灌给模型继续纠偏，最终答复必须基于工具证据。
 
 工具边界：
 

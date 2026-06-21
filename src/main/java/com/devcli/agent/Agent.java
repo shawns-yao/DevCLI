@@ -164,6 +164,7 @@ public class Agent implements AutoCloseable {
     public String run(String userInput) {
         log.info("ReAct run started: inputLength={}", userInput == null ? 0 : userInput.length());
         currentSkillActivationText = userInput == null ? "" : userInput;
+        toolRegistry.prefetchToolDefinitionsForInput(currentSkillActivationText);
         pruneHistoricalImagePayloads();
         // 写入当前会话工作记忆；真实 messages 由 conversationHistory 维护。
         memoryManager.addUserMessage(userInput);

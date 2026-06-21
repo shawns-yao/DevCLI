@@ -95,6 +95,23 @@ class ToolRegistryTest {
     }
 
     @Test
+    void prefetchToolDefinitionsForInputActivatesMatchingMcpTools() {
+        ToolRegistry registry = new ToolRegistry();
+        registry.registerMcpTool(new McpToolDescriptor(
+                "github",
+                "list_issues",
+                McpToolDescriptor.namespaced("github", "list_issues"),
+                "List GitHub issues",
+                JsonNodeFactory.instance.objectNode()
+        ), args -> "ok");
+
+        registry.prefetchToolDefinitionsForInput("帮我查看 github issues");
+
+        assertTrue(registry.getToolDefinitions().stream()
+                .anyMatch(tool -> "mcp__github__list_issues".equals(tool.name())));
+    }
+
+    @Test
     void unknownToolGuidesModelToSearchTools() {
         ToolRegistry registry = new ToolRegistry();
 

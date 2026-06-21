@@ -869,6 +869,36 @@ public class ToolRegistry {
         return sb.toString().stripTrailing();
     }
 
+    public int prefetchToolDefinitionsForInput(String input) {
+        String normalized = input == null ? "" : input.trim().toLowerCase(Locale.ROOT);
+        if (normalized.isBlank() || mcpTools.isEmpty()) {
+            return 0;
+        }
+        List<String> terms = Arrays.stream(normalized.split("\\s+"))
+                .filter(s -> !s.isBlank())
+                .toList();
+        if (terms.isEmpty()) {
+            return 0;
+        }
+        int activated = 0;
+        List<ToolSearchMatch> matches = toolSearchEntries().stream()
+                .filter(entry -> mcpTools.containsKey(entry.name()))
+                .map(entry -> new ToolSearchMatch(entry, scoreTool(entry, terms)))
+                .filter(match -> match.score() > 0)
+                .sorted(Comparator
+                        .comparingInt(ToolSearchMatch::score).reversed()
+                        .thenComparing(match -> match.entry().name()))
+                .limit(5)
+                .toList();
+        for (ToolSearchMatch match : matches) {
+            String name = match.entry().name();
+            if (activatedMcpToolDefinitions.add(name)) {
+                activated++;
+            }
+        }
+        return activated;
+    }
+
     private List<ToolSearchEntry> toolSearchEntries() {
         long version = toolCatalogVersion.get();
         ToolSearchIndex snapshot = toolSearchIndex;
