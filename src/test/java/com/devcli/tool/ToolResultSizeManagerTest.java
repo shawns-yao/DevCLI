@@ -99,6 +99,24 @@ class ToolResultSizeManagerTest {
     }
 
     @Test
+    void mediumMcpResultIncludesCollapseClassification() {
+        String medium = "m".repeat(20_000);
+        String out = ToolResultSizeManager.process(
+                "mcp__github__list_issues", "call_mcp_medium", tempDir.toString(), false, medium);
+
+        assertTrue(out.contains("工具结果折叠分类: INLINE_TRUNCATED"), out);
+    }
+
+    @Test
+    void largeMcpResultIncludesCollapseClassification() {
+        String large = "m".repeat(70_000);
+        String out = ToolResultSizeManager.process(
+                "mcp__github__list_issues", "call_mcp_large", tempDir.toString(), false, large);
+
+        assertTrue(out.contains("工具结果折叠分类: PERSISTED_PREVIEW"), out);
+    }
+
+    @Test
     void exactlyAtInlineThresholdPassesThrough() {
         // 5000 字符正好等于 INLINE_THRESHOLD_CHARS：边界 case，不截断
         String boundary = "c".repeat(ToolResultSizeManager.INLINE_THRESHOLD_CHARS);

@@ -83,6 +83,14 @@ public final class ToolResultSizeManager {
 
     private ToolResultSizeManager() {}
 
+    public enum CollapseClassification {
+        INLINE,
+        PASSTHROUGH,
+        IMAGE_PASSTHROUGH,
+        INLINE_TRUNCATED,
+        PERSISTED_PREVIEW
+    }
+
     /**
      * 处理工具执行结果，按尺寸分级。返回值是给 LLM 看的最终 result 文本。
      *
@@ -96,19 +104,49 @@ public final class ToolResultSizeManager {
     public static String process(String toolName, String toolUseId, String projectPath,
                                  boolean hasImages, String result) {
         if (result == null) return "";
-        if (hasImages) return result;
-        if (PASSTHROUGH_TOOLS.contains(toolName)) return result;
+        CollapseClassification classification = classify(toolName, hasImages, result);
+        if (classification == CollapseClassification.IMAGE_PASSTHROUGH
+                || classification == CollapseClassification.PASSTHROUGH
+                || classification == CollapseClassification.INLINE) {
+            return result;
+        }
         // 防御 MCP 工具默认全部进入 size 治理（mcp__server__tool 命名）
         // 已经在 PASSTHROUGH 之外，自动接管
 
+        if (classification == CollapseClassification.INLINE_TRUNCATED) {
+            return appendMcpClassification(toolName, truncateInline(result), classification);
+        }
+        return appendMcpClassification(toolName,
+                persistAndPreview(toolName, toolUseId, projectPath, result),
+                classification);
+    }
+
+    public static CollapseClassification classify(String toolName, boolean hasImages, String result) {
+        if (result == null) {
+            return CollapseClassification.INLINE;
+        }
+        if (hasImages) {
+            return CollapseClassification.IMAGE_PASSTHROUGH;
+        }
+        if (PASSTHROUGH_TOOLS.contains(toolName)) {
+            return CollapseClassification.PASSTHROUGH;
+        }
         int len = result.length();
         if (len <= INLINE_THRESHOLD_CHARS) {
-            return result;
+            return CollapseClassification.INLINE;
         }
         if (len <= PERSIST_THRESHOLD_CHARS) {
-            return truncateInline(result);
+            return CollapseClassification.INLINE_TRUNCATED;
         }
-        return persistAndPreview(toolName, toolUseId, projectPath, result);
+        return CollapseClassification.PERSISTED_PREVIEW;
+    }
+
+    private static String appendMcpClassification(String toolName, String managedResult,
+                                                  CollapseClassification classification) {
+        if (toolName == null || !toolName.startsWith("mcp__")) {
+            return managedResult;
+        }
+        return managedResult + "\n[工具结果折叠分类: " + classification + "]";
     }
 
     /**

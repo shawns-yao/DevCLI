@@ -448,6 +448,7 @@ Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 做实现
 - `web_fetch` 适合已知 URL；遇到 SPA 或防爬限制时再切浏览器/MCP。
 - `create_project` 只创建基础模板，不替代完整脚手架。
 - MCP 工具名统一暴露为 `mcp__{server}__{tool}`，resource 读取暴露为虚拟工具；带 destructive/openWorld annotations 的 MCP 工具会强制逐次 HITL 审批，不复用全部放行缓存。
+- MCP 工具结果进入尺寸治理后会附带折叠分类；中等输出标记 `INLINE_TRUNCATED`，超大输出落盘预览标记 `PERSISTED_PREVIEW`。
 
 ## Memory
 
@@ -542,6 +543,7 @@ MCP server 启动后会动态刷新工具和 resources：
 - MCP 工具快照按 server 记录工具数量、schema 指纹和生命周期版本；server 启动成功或 tools/list_changed 刷新会推进生命周期版本。
 - MCP 连接事件在进程内记录 STARTING / READY / ERROR / DISABLED / TOOLS_CHANGED，便于 CLI 和 Runtime 后续消费。
 - MCP 工具发现缓存会保留 server、生命周期版本、工具数量、工具名、schema 指纹和发现时间；server 禁用后仍保留上一轮发现元数据。
+- MCP 工具输出被截断或落盘预览时会在返回给模型的文本中标记折叠分类，便于后续工具搜索和错误引导识别结果形态。
 - `/mcp` 可以查看状态，`/mcp logs <name>` 可以查看 stderr，`/mcp restart <name>` 可以重启指定 server。
 
 MCP 安全边界：
