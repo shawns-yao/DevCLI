@@ -139,7 +139,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - stdio + Streamable HTTP 双 transport
 - 工具注册为 `mcp__{server}__{tool}`
 - McpSchemaSanitizer 清洗 inputSchema
-- 所有 mcp__ 工具默认走 HITL + AuditLog
+- 所有 mcp__ 工具默认走 HITL + AuditLog；带 destructive/openWorld annotations 的 MCP 工具强制逐次审批，不复用 tool/server 级全部放行缓存
 - resources 双轨：虚拟工具 + @-mention 输入层
 - CLI 首屏默认只等待 MCP 启动 8 秒，慢 server 后台继续初始化并保持 `starting`，用 `/mcp` / `/mcp logs <name>` 追踪
 - notifications 路由：tools/list_changed → 工具全量替换，resources 变化 → cache 失效

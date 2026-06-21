@@ -447,7 +447,7 @@ Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 做实现
 - `execute_command` 面向短时命令，不适合托管长期后台服务。
 - `web_fetch` 适合已知 URL；遇到 SPA 或防爬限制时再切浏览器/MCP。
 - `create_project` 只创建基础模板，不替代完整脚手架。
-- MCP 工具名统一暴露为 `mcp__{server}__{tool}`，resource 读取暴露为虚拟工具。
+- MCP 工具名统一暴露为 `mcp__{server}__{tool}`，resource 读取暴露为虚拟工具；带 destructive/openWorld annotations 的 MCP 工具会强制逐次 HITL 审批，不复用全部放行缓存。
 
 ## Memory
 

@@ -166,6 +166,21 @@ class HitlToolRegistryTest {
     }
 
     @Test
+    void destructiveMcpAnnotationForcesApprovalDespiteServerCache() {
+        StubHandler stub = new StubHandler(req -> ApprovalResult.approve());
+        stub.approveServer("filesystem");
+        HitlToolRegistry registry = new HitlToolRegistry(stub);
+        registerMcpTool(registry, "filesystem", "delete_file",
+                new McpToolDescriptor.Annotations(false, true, false),
+                args -> "deleted");
+
+        String result = registry.executeTool("mcp__filesystem__delete_file", "{\"path\":\"a.txt\"}");
+
+        assertEquals("deleted", result);
+        assertEquals(1, stub.requestCount());
+    }
+
+    @Test
     void sensitiveBrowserToolBypassesApprovedAllByServerCache(@TempDir Path tempDir) throws Exception {
         Path rules = tempDir.resolve("sensitive_patterns.txt");
         Files.writeString(rules, "*://example.com/admin/*\n");
@@ -254,12 +269,19 @@ class HitlToolRegistryTest {
 
     private static void registerMcpTool(HitlToolRegistry registry, String serverName, String toolName,
                                         Function<String, String> invoker) {
+        registerMcpTool(registry, serverName, toolName, null, invoker);
+    }
+
+    private static void registerMcpTool(HitlToolRegistry registry, String serverName, String toolName,
+                                        McpToolDescriptor.Annotations annotations,
+                                        Function<String, String> invoker) {
         registry.registerMcpTool(new McpToolDescriptor(
                 serverName,
                 toolName,
                 McpToolDescriptor.namespaced(serverName, toolName),
                 "test tool",
-                JsonNodeFactory.instance.objectNode()
+                JsonNodeFactory.instance.objectNode(),
+                annotations
         ), invoker);
     }
 }

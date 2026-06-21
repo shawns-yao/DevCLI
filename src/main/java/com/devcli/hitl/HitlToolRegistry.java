@@ -54,11 +54,14 @@ public class HitlToolRegistry extends ToolRegistry {
             return executeAfterExplicitApproval(name, argumentsJson, browserCheck.sensitiveNotice());
         }
         String mcpServer = ApprovalPolicy.mcpServerName(name);
-        if (hitlHandler.isApprovedAllByTool(name) || hitlHandler.isApprovedAllByServer(mcpServer)) {
+        boolean forcePerCallApproval = mcpToolRequiresPerCallApproval(name);
+        if (!forcePerCallApproval
+                && (hitlHandler.isApprovedAllByTool(name) || hitlHandler.isApprovedAllByServer(mcpServer))) {
             return super.doExecuteTool(name, argumentsJson);
         }
 
-        return executeAfterExplicitApproval(name, argumentsJson, null);
+        return executeAfterExplicitApproval(name, argumentsJson,
+                forcePerCallApproval ? mcpToolApprovalNotice(name) : null);
     }
 
     private ToolOutput executeAfterExplicitApproval(String name, String argumentsJson, String sensitiveNotice) {

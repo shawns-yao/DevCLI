@@ -976,6 +976,31 @@ public class ToolRegistry {
         tools.remove(toolName);
     }
 
+    protected synchronized boolean mcpToolRequiresPerCallApproval(String toolName) {
+        McpRegisteredTool registered = mcpTools.get(toolName);
+        if (registered == null || registered.descriptor().annotations() == null) {
+            return false;
+        }
+        McpToolDescriptor.Annotations annotations = registered.descriptor().annotations();
+        return annotations.destructive() || annotations.openWorld();
+    }
+
+    protected synchronized String mcpToolApprovalNotice(String toolName) {
+        McpRegisteredTool registered = mcpTools.get(toolName);
+        if (registered == null || registered.descriptor().annotations() == null) {
+            return null;
+        }
+        McpToolDescriptor.Annotations annotations = registered.descriptor().annotations();
+        List<String> risks = new ArrayList<>();
+        if (annotations.destructive()) {
+            risks.add("destructive");
+        }
+        if (annotations.openWorld()) {
+            risks.add("openWorld");
+        }
+        return risks.isEmpty() ? null : "MCP annotations require per-call approval: " + String.join(", ", risks);
+    }
+
     public synchronized String mcpToolSnapshot() {
         if (mcpTools.isEmpty()) {
             return "none";
