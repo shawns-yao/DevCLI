@@ -42,6 +42,7 @@ public class McpServerManager implements AutoCloseable {
     private final McpConfigLoader configLoader;
     private final Map<String, McpServer> servers = new ConcurrentHashMap<>();
     private final McpResourceCache resourceCache = new McpResourceCache();
+    private final List<McpConnectionEvent> connectionEvents = java.util.Collections.synchronizedList(new ArrayList<>());
 
     public McpServerManager(ToolRegistry toolRegistry, Path projectDir) {
         this(toolRegistry, projectDir, new McpConfigLoader(projectDir));
@@ -187,6 +188,12 @@ public class McpServerManager implements AutoCloseable {
         return server.status() == McpServerStatus.READY
                 ? "✅ MCP server 已重启: " + name
                 : "❌ MCP server 重启失败: " + name + " - " + server.errorMessage();
+    }
+
+    public List<McpConnectionEvent> connectionEvents() {
+        synchronized (connectionEvents) {
+            return List.copyOf(connectionEvents);
+        }
     }
 
     public synchronized String restartWithArgs(String name, List<String> args) {
@@ -403,10 +410,12 @@ public class McpServerManager implements AutoCloseable {
         server.close();
         if (server.config().isDisabled()) {
             server.status(McpServerStatus.DISABLED);
+            recordConnectionEvent(server, McpConnectionEvent.Type.DISABLED, "server disabled");
             return;
         }
         server.status(McpServerStatus.STARTING);
         server.errorMessage(null);
+        recordConnectionEvent(server, McpConnectionEvent.Type.STARTING, "starting");
         try {
             // 在单 server 启动路径里展开 ${VAR} 与校验 transport，
             // 单个失败仅标 ERROR，不会阻塞其他 server。
@@ -421,10 +430,12 @@ public class McpServerManager implements AutoCloseable {
             replaceTools(server, client, tools);
             server.tools(tools);
             server.status(McpServerStatus.READY);
+            recordConnectionEvent(server, McpConnectionEvent.Type.READY, "ready");
         } catch (Exception e) {
             server.close();
             server.errorMessage(e.getMessage());
             server.status(McpServerStatus.ERROR);
+            recordConnectionEvent(server, McpConnectionEvent.Type.ERROR, e.getMessage());
         }
     }
 
@@ -460,8 +471,10 @@ public class McpServerManager implements AutoCloseable {
                 server.markToolsChanged();
                 replaceTools(server, client, tools);
                 server.tools(tools);
+                recordConnectionEvent(server, McpConnectionEvent.Type.TOOLS_CHANGED, "tools/list_changed");
             } catch (Exception e) {
                 server.errorMessage("tools/list_changed 处理失败: " + e.getMessage());
+                recordConnectionEvent(server, McpConnectionEvent.Type.ERROR, server.errorMessage());
             }
         });
         router.on("notifications/resources/list_changed", ignored -> resourceCache.invalidateServer(server.name()));
@@ -481,6 +494,10 @@ public class McpServerManager implements AutoCloseable {
                 .toList();
         resourceCache.put(server.name(), resources);
         return resources;
+    }
+
+    private void recordConnectionEvent(McpServer server, McpConnectionEvent.Type type, String message) {
+        connectionEvents.add(McpConnectionEvent.of(server, type, message));
     }
 
     /**

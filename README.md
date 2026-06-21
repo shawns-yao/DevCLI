@@ -540,6 +540,7 @@ MCP server 启动后会动态刷新工具和 resources：
 - `streamable_http` server 通过远程 HTTP 地址连接。
 - server 启动默认不阻塞首屏超过配置的等待时间；超时 server 会保持 `STARTING` 并在后台继续初始化。
 - MCP 工具快照按 server 记录工具数量、schema 指纹和生命周期版本；server 启动成功或 tools/list_changed 刷新会推进生命周期版本。
+- MCP 连接事件在进程内记录 STARTING / READY / ERROR / DISABLED / TOOLS_CHANGED，便于 CLI 和 Runtime 后续消费。
 - `/mcp` 可以查看状态，`/mcp logs <name>` 可以查看 stderr，`/mcp restart <name>` 可以重启指定 server。
 
 MCP 安全边界：

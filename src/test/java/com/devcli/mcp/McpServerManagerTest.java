@@ -63,6 +63,18 @@ class McpServerManagerTest {
         assertEquals(McpServerStatus.READY, server.status(), "状态应为 READY，错误: " + server.errorMessage());
         assertEquals(1, server.tools().size());
         assertTrue(registry.hasTool("mcp__demo__echo"));
+
+        List<McpConnectionEvent> events = manager.connectionEvents();
+        assertTrue(events.stream().anyMatch(event ->
+                event.serverName().equals("demo")
+                        && event.type() == McpConnectionEvent.Type.STARTING
+                        && event.status() == McpServerStatus.STARTING));
+        assertTrue(events.stream().anyMatch(event ->
+                event.serverName().equals("demo")
+                        && event.type() == McpConnectionEvent.Type.READY
+                        && event.status() == McpServerStatus.READY
+                        && event.toolCount() == 1
+                        && event.lifecycleVersion() == server.lifecycleVersion()));
     }
 
     @Test
@@ -107,6 +119,11 @@ class McpServerManagerTest {
                 "bad 应标 ERROR");
         assertNotNull(byName.get("bad").errorMessage());
         assertTrue(registry.hasTool("mcp__good__ok"));
+        assertTrue(manager.connectionEvents().stream().anyMatch(event ->
+                event.serverName().equals("bad")
+                        && event.type() == McpConnectionEvent.Type.ERROR
+                        && event.status() == McpServerStatus.ERROR
+                        && event.message().contains("UNSET_DEMO_VAR_FOR_TEST")));
     }
 
     @Test
