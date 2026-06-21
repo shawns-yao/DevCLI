@@ -12,8 +12,10 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.function.Supplier;
 
 /**
@@ -79,6 +81,8 @@ public class ConversationHistoryCompactor {
     private static final int MICRO_COMPACT_LAST_HEAD_CHARS = 6_000;
     /** 最后一条消息截断后保留的尾部字符数（更宽松）。 */
     private static final int MICRO_COMPACT_LAST_TAIL_CHARS = 3_000;
+    /** 按轮次清理旧工具结果时保留最近多少个 user round 不动。 */
+    private static final int MICRO_COMPACT_RETAIN_RECENT_TOOL_ROUNDS = 2;
 
     /** 单片送 LLM 的字符上限。控制单次摘要请求不会撑爆 LLM window。 */
     private static final int MAP_CHUNK_CHARS = 60_000;
@@ -511,7 +515,7 @@ public class ConversationHistoryCompactor {
     boolean microcompactOversizeMessages(List<LlmClient.Message> history) {
         if (history == null || history.isEmpty()) return false;
         int lastIdx = history.size() - 1;
-        boolean changed = false;
+        boolean changed = microcompactOldToolResultsByRound(history);
         for (int i = 0; i < history.size(); i++) {
             LlmClient.Message msg = history.get(i);
             if (msg.hasContentParts()) continue; // 跳过多模态消息
@@ -538,9 +542,83 @@ public class ConversationHistoryCompactor {
         return changed;
     }
 
+    private boolean microcompactOldToolResultsByRound(List<LlmClient.Message> history) {
+        if (microcompactOutputRoot == null || history == null || history.isEmpty()) {
+            return false;
+        }
+        List<Integer> userRoundStarts = new ArrayList<>();
+        for (int i = 0; i < history.size(); i++) {
+            if ("user".equals(history.get(i).role())) {
+                userRoundStarts.add(i);
+            }
+        }
+        if (userRoundStarts.size() <= MICRO_COMPACT_RETAIN_RECENT_TOOL_ROUNDS) {
+            return false;
+        }
+        int retainStart = userRoundStarts.get(userRoundStarts.size() - MICRO_COMPACT_RETAIN_RECENT_TOOL_ROUNDS);
+        Set<String> oldToolCallIds = new LinkedHashSet<>();
+        for (int i = 0; i < retainStart; i++) {
+            LlmClient.Message msg = history.get(i);
+            if (msg.toolCalls() == null) {
+                continue;
+            }
+            for (LlmClient.ToolCall toolCall : msg.toolCalls()) {
+                if (toolCall.id() != null && !toolCall.id().isBlank()) {
+                    oldToolCallIds.add(toolCall.id());
+                }
+            }
+        }
+        if (oldToolCallIds.isEmpty()) {
+            return false;
+        }
+        boolean changed = false;
+        for (int i = 0; i < retainStart; i++) {
+            LlmClient.Message msg = history.get(i);
+            String content = msg.content();
+            if (!"tool".equals(msg.role())
+                    || msg.toolCallId() == null
+                    || !oldToolCallIds.contains(msg.toolCallId())
+                    || content == null
+                    || content.contains("<microcompact_boundary>")) {
+                continue;
+            }
+            String compacted = collapseOldToolResultContent(msg.toolCallId(), content);
+            if (!compacted.equals(content)) {
+                history.set(i, new LlmClient.Message(
+                        msg.role(), compacted, msg.reasoningContent(), msg.toolCalls(), msg.toolCallId()));
+                changed = true;
+                log.info("microcompact cleared old tool_result[{}] toolCallId={} by round: {} -> {} chars",
+                        i, msg.toolCallId(), content.length(), compacted.length());
+            }
+        }
+        return changed;
+    }
+
     private String compactOversizeToolContent(String toolCallId, String content, int headChars, int tailChars) {
+        Path outputFile = persistMicrocompactToolOutput(toolCallId, content);
+        if (outputFile != null) {
+            return compactOversizeContent(
+                    content,
+                    headChars,
+                    tailChars,
+                    "\n\n" + renderMicrocompactBoundary(toolCallId, content.length(), outputFile)
+                            + "[完整工具结果已落盘；可用 read_file 读取 storedPath。]");
+        }
+        return compactOversizeContent(content, headChars, tailChars);
+    }
+
+    private String collapseOldToolResultContent(String toolCallId, String content) {
+        Path outputFile = persistMicrocompactToolOutput(toolCallId, content);
+        if (outputFile == null) {
+            return content;
+        }
+        return renderMicrocompactBoundary(toolCallId, content.length(), outputFile)
+                + "[旧工具结果已按轮次折叠；可用 read_file 读取 storedPath。]";
+    }
+
+    private Path persistMicrocompactToolOutput(String toolCallId, String content) {
         if (microcompactOutputRoot == null) {
-            return compactOversizeContent(content, headChars, tailChars);
+            return null;
         }
         try {
             Path outputDir = microcompactOutputRoot
@@ -551,25 +629,24 @@ public class ConversationHistoryCompactor {
                     .toAbsolutePath()
                     .normalize();
             if (!outputFile.startsWith(microcompactOutputRoot)) {
-                return compactOversizeContent(content, headChars, tailChars);
+                return null;
             }
             Files.writeString(outputFile, content, StandardCharsets.UTF_8);
-            return compactOversizeContent(
-                    content,
-                    headChars,
-                    tailChars,
-                    "\n\n<microcompact_boundary>\n"
-                            + "type=tool_result\n"
-                            + "toolCallId=" + toolCallId + "\n"
-                            + "originalChars=" + content.length() + "\n"
-                            + "storedPath=" + outputFile + "\n"
-                            + "</microcompact_boundary>\n"
-                            + "[完整工具结果已落盘；可用 read_file 读取 storedPath。]");
+            return outputFile;
         } catch (IOException | RuntimeException e) {
-            log.warn("failed to persist microcompact tool output for {}; fallback to inline truncation",
+            log.warn("failed to persist microcompact tool output for {}; fallback to inline content",
                     toolCallId, e);
-            return compactOversizeContent(content, headChars, tailChars);
+            return null;
         }
+    }
+
+    private static String renderMicrocompactBoundary(String toolCallId, int originalChars, Path outputFile) {
+        return "<microcompact_boundary>\n"
+                + "type=tool_result\n"
+                + "toolCallId=" + toolCallId + "\n"
+                + "originalChars=" + originalChars + "\n"
+                + "storedPath=" + outputFile + "\n"
+                + "</microcompact_boundary>\n";
     }
 
     /**

@@ -2,8 +2,11 @@ package com.devcli.memory;
 
 import com.devcli.llm.LlmClient;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -78,6 +81,39 @@ class ConversationHistoryCompactorTest {
         // 保留尾部至少包含最后一对 user/assistant
         assertEquals("assistant", history.get(history.size() - 1).role());
         assertTrue(history.get(history.size() - 1).content().startsWith("A5"));
+    }
+
+    @Test
+    void microcompactClearsOldToolResultsByToolCallIdAndKeepsRecentRounds(@TempDir Path tempDir) throws IOException {
+        StubCompactor c = new StubCompactor("SUMMARY", 3_000, true);
+        c.setMicrocompactOutputRoot(tempDir);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("S"));
+        history.add(LlmClient.Message.user("OldQ"));
+        history.add(LlmClient.Message.assistant(null, null, List.of(
+                new LlmClient.ToolCall("old-1", new LlmClient.ToolCall.Function("read_file", "{\"path\":\"a\"}")),
+                new LlmClient.ToolCall("old-2", new LlmClient.ToolCall.Function("list_dir", "{\"path\":\".\"}")))));
+        history.add(new LlmClient.Message("tool", "old result body 1", null, null, "old-1"));
+        history.add(new LlmClient.Message("tool", "old result body 2", null, null, "old-2"));
+        history.add(LlmClient.Message.assistant("old done"));
+        history.add(LlmClient.Message.user("RecentQ1"));
+        history.add(LlmClient.Message.assistant(null, null, List.of(
+                new LlmClient.ToolCall("recent-1", new LlmClient.ToolCall.Function("read_file", "{\"path\":\"b\"}")))));
+        history.add(new LlmClient.Message("tool", "recent result body", null, null, "recent-1"));
+        history.add(LlmClient.Message.user("RecentQ2"));
+        history.add(LlmClient.Message.assistant("recent answer"));
+
+        boolean changed = c.microcompactOversizeMessages(history);
+
+        assertTrue(changed);
+        assertTrue(history.get(3).content().contains("<microcompact_boundary>"), history.get(3).content());
+        assertTrue(history.get(3).content().contains("toolCallId=old-1"), history.get(3).content());
+        assertFalse(history.get(3).content().contains("old result body 1"), history.get(3).content());
+        assertTrue(history.get(4).content().contains("toolCallId=old-2"), history.get(4).content());
+        assertEquals("recent result body", history.get(8).content());
+        assertTrue(Files.exists(tempDir.resolve(ConversationHistoryCompactor.MICROCOMPACT_OUTPUTS_DIR)
+                .resolve(ConversationHistoryCompactor.microcompactSessionId())
+                .resolve("old-1.txt")));
     }
 
     @Test

@@ -7,6 +7,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
@@ -72,6 +73,9 @@ public class WorkingMemory {
     /** 从 negativeFact 行提取被失效的旧 symbolVersion，用于即时清理对应的过期 RAG 证据。 */
     private static final Pattern NEGATIVE_FACT_OLD_SYMBOL_VERSION = Pattern.compile("oldSymbolVersion=([^,\\s]+)");
     private static final Pattern PATH_ARG = Pattern.compile("\"path\"\\s*:\\s*\"([^\"]+)\"");
+    private static final Pattern MICROCOMPACT_TOOL_CALL_ID = Pattern.compile("(?m)^toolCallId=(.+)$");
+    private static final Pattern MICROCOMPACT_ORIGINAL_CHARS = Pattern.compile("(?m)^originalChars=(.+)$");
+    private static final Pattern MICROCOMPACT_STORED_PATH = Pattern.compile("(?m)^storedPath=(.+)$");
 
     private final int maxToolResults;
     private final int maxVolatileFacts;
@@ -382,22 +386,67 @@ public class WorkingMemory {
         sb.append("### 关键工具结果引用\n\n");
         List<ToolEvidence> reversed = new ArrayList<>(recentToolResults);
         Collections.reverse(reversed);
+        LinkedHashSet<String> renderedMicrocompactReferences = new LinkedHashSet<>();
         int count = 0;
         for (ToolEvidence ev : reversed) {
             if (count >= 5) {
                 break;
             }
+            String microcompactKey = microcompactReferenceKey(ev.result);
+            if (!microcompactKey.isBlank() && !renderedMicrocompactReferences.add(microcompactKey)) {
+                continue;
+            }
             sb.append("- **").append(ev.toolName).append("**");
             if (!ev.argsJson.isBlank()) {
                 sb.append(" args: `").append(truncate(ev.argsJson, 120)).append('`');
             }
-            String result = truncate(ev.result, 240).replaceAll("\\s+", " ").trim();
+            String result = renderToolResultReference(ev.result);
             if (!result.isBlank()) {
                 sb.append(" -> ").append(result);
             }
             sb.append('\n');
             count++;
         }
+    }
+
+    private static String renderToolResultReference(String result) {
+        if (result == null || result.isBlank()) {
+            return "";
+        }
+        if (!result.contains("<microcompact_boundary>")) {
+            return truncate(result, 240).replaceAll("\\s+", " ").trim();
+        }
+        String toolCallId = extractMicrocompactValue(MICROCOMPACT_TOOL_CALL_ID, result);
+        String originalChars = extractMicrocompactValue(MICROCOMPACT_ORIGINAL_CHARS, result);
+        String storedPath = extractMicrocompactValue(MICROCOMPACT_STORED_PATH, result);
+        StringBuilder sb = new StringBuilder("microcompact tool_result");
+        if (!toolCallId.isBlank()) {
+            sb.append(" toolCallId=").append(toolCallId);
+        }
+        if (!originalChars.isBlank()) {
+            sb.append(" originalChars=").append(originalChars);
+        }
+        if (!storedPath.isBlank()) {
+            sb.append(" storedPath=").append(storedPath);
+        }
+        return sb.toString();
+    }
+
+    private static String microcompactReferenceKey(String result) {
+        if (result == null || !result.contains("<microcompact_boundary>")) {
+            return "";
+        }
+        String storedPath = extractMicrocompactValue(MICROCOMPACT_STORED_PATH, result);
+        if (!storedPath.isBlank()) {
+            return "storedPath=" + storedPath;
+        }
+        String toolCallId = extractMicrocompactValue(MICROCOMPACT_TOOL_CALL_ID, result);
+        return toolCallId.isBlank() ? "" : "toolCallId=" + toolCallId;
+    }
+
+    private static String extractMicrocompactValue(Pattern pattern, String result) {
+        Matcher matcher = pattern.matcher(result);
+        return matcher.find() ? matcher.group(1).trim() : "";
     }
 
     private void appendRagEpochSection(StringBuilder sb) {

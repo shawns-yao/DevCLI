@@ -60,9 +60,9 @@
 
 ### 阶段 4：MicroCompact 按工具结果治理
 
-- 状态：部分实现（2026-06-19）
-- 已实现：`ConversationHistoryCompactor` 的 microcompact 对旧的超大 tool 消息支持完整原文落盘，消息中写入 `<microcompact_boundary>`、toolCallId、原始字符数和 storedPath；落盘路径位于项目根 `.devcli/microcompact_tool_outputs/<session>/`，文件名做安全化；ReAct、Plan、SubAgent 路径会在压缩前刷新当前项目根
-- 未实现：按时间或轮次清理旧 tool_result、按工具调用 ID 成批清空旧结果、与 WorkingMemory 的恢复引用去重尚未实现
+- 状态：部分实现（2026-06-21）
+- 已实现：`ConversationHistoryCompactor` 的 microcompact 对旧的超大 tool 消息支持完整原文落盘，消息中写入 `<microcompact_boundary>`、toolCallId、原始字符数和 storedPath；落盘路径位于项目根 `.devcli/microcompact_tool_outputs/<session>/`，文件名做安全化；ReAct、Plan、SubAgent 路径会在压缩前刷新当前项目根；microcompact 会保留最近 2 个 user round 的工具结果，对更旧轮次中的 `tool_result` 按 toolCallId 成批落盘并替换为 boundary 引用，保持 tool_call / tool_result 消息配对；`WorkingMemory` 压缩后恢复区会将 microcompact 工具引用渲染为 toolCallId / originalChars / storedPath，并按 storedPath 或 toolCallId 去重
+- 未实现：阶段 4 当前无剩余核心项；后续可把“最近 2 个 user round”做成 ContextProfile 参数，并补充基于真实时间戳的保留策略
 - 影响范围：`ConversationHistoryCompactor`、`Agent`、`PlanExecuteAgent`、`SubAgent`、相关 microcompact / tool result 测试
 - 目标：从单条消息头尾截断升级为按工具调用 ID 清理旧工具结果；原始结果落盘保留，messages 中只保留引用、摘要和可恢复路径
 - 参考点：cc 的 time-based microcompact 和 tool_result content clear

@@ -473,6 +473,31 @@ class MemoryManagerTest {
     }
 
     @Test
+    void buildPostCompactRestoreSectionShouldDeduplicateMicrocompactToolReferences() {
+        try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {
+            String boundary = """
+                    <microcompact_boundary>
+                    type=tool_result
+                    toolCallId=call-1
+                    originalChars=42000
+                    storedPath=C:/tmp/tool-result/call-1.txt
+                    </microcompact_boundary>
+                    [完整工具结果已落盘；可用 read_file 读取 storedPath。]
+                    """;
+            memoryManager.addToolResult("read_file", "{\"path\":\"src/Main.java\"}", boundary);
+            memoryManager.addToolResult("read_file", "{\"path\":\"src/Main.java\"}", boundary);
+
+            String section = memoryManager.buildPostCompactRestoreSection();
+
+            assertEquals(section.indexOf("storedPath=C:/tmp/tool-result/call-1.txt"),
+                    section.lastIndexOf("storedPath=C:/tmp/tool-result/call-1.txt"), section);
+            assertEquals(section.indexOf("toolCallId=call-1"),
+                    section.lastIndexOf("toolCallId=call-1"), section);
+        }
+    }
+
+    @Test
     void postCompactRestoreContextShouldDeduplicateAndRespectBudget() {
         String repeated = "- same line";
         String section = PostCompactRestoreContext.render(90,

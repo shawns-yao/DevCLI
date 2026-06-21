@@ -60,7 +60,7 @@ Main
 
 关键边界：
 
-- `ConversationHistoryCompactor（对话历史压缩器）` 是治理 LLM messages 窗口的唯一压缩点；压缩分两层：第 0 层 `microcompact` 先把单条超大消息（多为大工具结果）头尾截断（不调 LLM、不删消息、保 tool_call 配对），扛不住再走 LLM 摘要（Map-Reduce / 增量）。摘要为固定九段结构化（对标 Claude Code `/compact` 模板），超长时先程序化 GC（按段裁剪、不调 LLM），不够再 LLM 兜底。
+- `ConversationHistoryCompactor（对话历史压缩器）` 是治理 LLM messages 窗口的唯一压缩点；压缩分两层：第 0 层 `microcompact` 先把单条超大消息（多为大工具结果）头尾截断，并把最近 2 个 user round 之前的旧 `tool_result` 按 `toolCallId` 成批落盘为 `<microcompact_boundary>` 引用（不调 LLM、不删消息、保 tool_call 配对），扛不住再走 LLM 摘要（Map-Reduce / 增量）。摘要为固定九段结构化（对标 Claude Code `/compact` 模板），超长时先程序化 GC（按段裁剪、不调 LLM），不够再 LLM 兜底。
 - `WorkingMemory（工作记忆）` 只保存当前会话派生状态，不承担压缩职责。`RagEvidenceMemory（RAG 证据记忆）` 会记录检索证据的 `IndexEpoch（索引版本）`、`SymbolVersion（符号版本）` 和 `ClasspathEpoch（类路径版本）`。
 - `LongTermMemory（长期记忆）` 只保存跨会话稳定事实，默认不把临时任务请求写入长期层。`SymbolInvalidation（符号失效）` 会在索引替换时记录旧/新符号版本差异，并通过 `NegativeFact（负向事实）` 告诉模型哪些旧事实不可用。
 - `PathGuard（路径围栏）` 负责限制文件访问不逃逸项目根。
@@ -452,7 +452,7 @@ Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 做实现
 DevCLI 的上下文分为四层：
 
 - `ConversationHistory（对话历史）`：真实 LLM messages，由压缩器治理窗口。
-- `WorkingMemory（工作记忆）`：当前会话工具证据、任务状态和临时事实，不跨会话持久化。其中 `TaskLedger（任务账本）` 结构化记录计划执行进度（当前 step / 已完成 / 待执行 / 失败），不进对话历史、压缩不触碰它，让长 plan 压缩后仍能看到进度；当前由 `/plan`（PlanExecuteAgent）维护。压缩后恢复上下文会按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 和 MCP 工具状态分节注入，并做预算控制与行级去重；Multi-Agent 会按 Planner / Worker / Reviewer 裁剪恢复内容，避免恢复段重复携带完整工具输出。压缩边界会同时记录全局 RAG 索引版本和当前会话 RAG 证据版本。
+- `WorkingMemory（工作记忆）`：当前会话工具证据、任务状态和临时事实，不跨会话持久化。其中 `TaskLedger（任务账本）` 结构化记录计划执行进度（当前 step / 已完成 / 待执行 / 失败），不进对话历史、压缩不触碰它，让长 plan 压缩后仍能看到进度；当前由 `/plan`（PlanExecuteAgent）维护。压缩后恢复上下文会按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 和 MCP 工具状态分节注入，并做预算控制与行级去重；microcompact 工具引用会按 storedPath / toolCallId 去重；Multi-Agent 会按 Planner / Worker / Reviewer 裁剪恢复内容，避免恢复段重复携带完整工具输出。压缩边界会同时记录全局 RAG 索引版本和当前会话 RAG 证据版本。
 - `SessionMemory（会话预摘要）`：当前进程内缓存压缩前置摘要，覆盖同一消息指纹且未过期时可被压缩器复用；默认 30 分钟过期。Plan / Multi-Agent turn 结束后会后台维护预摘要，避免主流程等待摘要 LLM 调用。
 - `LongTermMemory（长期记忆）`：跨会话稳定事实，SQLite 持久化，支持检索注入；写入前经过 `LongTermMemoryPolicy` 规则化分流，显式低敏偏好/项目事实、稳定个人属性和多次重复出现的稳定事实可保存，敏感或模糊新事实要求确认，临时闲聊和低复用信息跳过。命中 `subject（主题键）` 的事实写入时，同主题旧事实自动标记为 `superseded（已取代）`，检索只返回 `active（有效）` 条目（如 Fastjson → Jackson 选型切换）。
 - `StickyMemory（强约束记忆）`：通过 `/save --pin` 保存，每轮全量注入 system prompt。
