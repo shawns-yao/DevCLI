@@ -16,6 +16,7 @@ public record McpConnectionEvent(
         READY,
         ERROR,
         DISABLED,
+        RECONNECTING,
         TOOLS_CHANGED
     }
 

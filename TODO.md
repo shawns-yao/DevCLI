@@ -84,9 +84,9 @@
 
 - 状态：部分实现（2026-06-21）
 - 已实现：`McpToolDescriptor` 支持工具 `annotations` 元数据；`McpClient.tools/list` 会解析 `readOnlyHint`、`destructiveHint`、`openWorldHint`；MCP 工具注册到 `ToolRegistry` 后，工具描述会携带 `readOnly`、`destructive`、`openWorld` / `closedWorld` 标签，便于模型和 HITL 层识别风险语义；`HitlToolRegistry` 已将 `destructive` / `openWorld` annotations 接入逐次强制审批策略，这类 MCP 工具不会复用 tool/server 级全部放行缓存；`McpServerManager` 已记录本进程内连接事件，覆盖 STARTING / READY / ERROR / DISABLED / TOOLS_CHANGED，并携带 server、状态、生命周期版本、工具数量和消息；MCP 工具发现结果已进入本进程缓存，记录 server、生命周期版本、工具数量、工具名、schema 指纹和发现时间，server 禁用后仍保留上一轮发现元数据，供后续 Deferred Tool / 工具搜索复用
-- 已实现补充：MCP 工具结果进入尺寸治理后会标记折叠分类，截断输出标记 `INLINE_TRUNCATED`，落盘预览标记 `PERSISTED_PREVIEW`
+- 已实现补充：MCP 工具结果进入尺寸治理后会标记折叠分类，截断输出标记 `INLINE_TRUNCATED`，落盘预览标记 `PERSISTED_PREVIEW`；MCP server 启动失败后会进入后台自动重连，默认最多 3 次，并记录 `RECONNECTING` 连接事件，成功后重新注册工具
 - 不纳入当前阶段：OAuth 基础流程当前不做；个人使用场景没有真实登录计划，先保留 Bearer / 自定义 header 配置能力
-- 未实现：自动重连和长运行进度尚未实现
+- 未实现：长运行进度尚未实现
 - 影响范围：`McpToolDescriptor`、`McpClient`、`McpServerManager`、`McpConnectionEvent`、`McpToolDiscoveryEntry`、`ToolRegistry`、`ToolResultSizeManager`、`HitlToolRegistry`、MCP / HITL / tool 注册测试
 - 目标：补充 MCP 工具发现缓存、连接事件、重连、工具注解映射（readOnly/destructive/openWorld）、长运行进度和结果折叠分类
 - 参考点：cc 的 MCP manager、tool discovery cache、MCPTool collapse classification

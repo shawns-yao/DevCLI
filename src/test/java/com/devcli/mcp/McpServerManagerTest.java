@@ -199,6 +199,43 @@ class McpServerManagerTest {
     }
 
     @Test
+    void failedServerAutomaticallyReconnectsAndRegistersTools() throws Exception {
+        String previousMaxAttempts = System.getProperty("devcli.mcp.reconnect.maxAttempts");
+        String previousInitialDelay = System.getProperty("devcli.mcp.reconnect.initialDelayMillis");
+        System.setProperty("devcli.mcp.reconnect.maxAttempts", "1");
+        System.setProperty("devcli.mcp.reconnect.initialDelayMillis", "10");
+        try {
+            webServer.enqueue(new MockResponse().setResponseCode(401));
+
+            loadServersFromMap(Map.of("demo", httpConfig(webServer)));
+            manager.startAll();
+
+            McpServer server = manager.server("demo");
+            assertEquals(McpServerStatus.ERROR, server.status());
+            assertFalse(registry.hasTool("mcp__demo__echo"));
+
+            enqueueInitialize();
+            enqueueToolsList(toolJson("echo", "Echo"));
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (System.nanoTime() < deadline
+                    && (server.status() != McpServerStatus.READY
+                    || !registry.hasTool("mcp__demo__echo"))) {
+                TimeUnit.MILLISECONDS.sleep(20);
+            }
+
+            assertEquals(McpServerStatus.READY, server.status(), "自动重连后应 READY: " + server.errorMessage());
+            assertTrue(registry.hasTool("mcp__demo__echo"));
+            assertTrue(manager.connectionEvents().stream().anyMatch(event ->
+                    event.serverName().equals("demo")
+                            && event.type() == McpConnectionEvent.Type.RECONNECTING));
+        } finally {
+            restoreProperty("devcli.mcp.reconnect.maxAttempts", previousMaxAttempts);
+            restoreProperty("devcli.mcp.reconnect.initialDelayMillis", previousInitialDelay);
+        }
+    }
+
+    @Test
     void restartWithArgsUpdatesServerConfig() {
         McpServerConfig config = new McpServerConfig();
         config.setCommand("definitely-missing-devcli-test-command");
@@ -291,6 +328,14 @@ class McpServerManagerTest {
             configs.forEach((name, cfg) -> map.put(name, new McpServer(name, cfg)));
         } catch (Exception e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    private static void restoreProperty(String key, String value) {
+        if (value == null) {
+            System.clearProperty(key);
+        } else {
+            System.setProperty(key, value);
         }
     }
 }

@@ -26,16 +26,21 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class McpServerManager implements AutoCloseable {
     private static final Duration STARTUP_PROGRESS_INTERVAL = Duration.ofSeconds(5);
+    private static final int DEFAULT_RECONNECT_MAX_ATTEMPTS = 3;
+    private static final long DEFAULT_RECONNECT_INITIAL_DELAY_MILLIS = 1_000;
+    private static final long DEFAULT_RECONNECT_MAX_DELAY_MILLIS = 30_000;
 
     private final ToolRegistry toolRegistry;
     private final Path projectDir;
@@ -44,6 +49,13 @@ public class McpServerManager implements AutoCloseable {
     private final McpResourceCache resourceCache = new McpResourceCache();
     private final List<McpConnectionEvent> connectionEvents = java.util.Collections.synchronizedList(new ArrayList<>());
     private final Map<String, McpToolDiscoveryEntry> toolDiscoveryCache = new ConcurrentHashMap<>();
+    private final Map<String, AtomicInteger> reconnectAttempts = new ConcurrentHashMap<>();
+    private final Set<String> reconnectScheduled = ConcurrentHashMap.newKeySet();
+    private final ScheduledExecutorService reconnectExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "devcli-mcp-reconnect");
+        t.setDaemon(true);
+        return t;
+    });
 
     public McpServerManager(ToolRegistry toolRegistry, Path projectDir) {
         this(toolRegistry, projectDir, new McpConfigLoader(projectDir));
@@ -185,6 +197,7 @@ public class McpServerManager implements AutoCloseable {
         unregisterTools(server);
         server.close();
         server.config().setDisabled(false);
+        reconnectAttempts.remove(name);
         start(server);
         return server.status() == McpServerStatus.READY
                 ? "✅ MCP server 已重启: " + name
@@ -226,6 +239,8 @@ public class McpServerManager implements AutoCloseable {
         server.config().setDisabled(true);
         server.status(McpServerStatus.DISABLED);
         server.errorMessage(null);
+        reconnectScheduled.remove(name);
+        reconnectAttempts.remove(name);
         return "⏸️ MCP server 已禁用: " + name;
     }
 
@@ -235,6 +250,7 @@ public class McpServerManager implements AutoCloseable {
             return "未找到 MCP server: " + name;
         }
         server.config().setDisabled(false);
+        reconnectAttempts.remove(name);
         start(server);
         return server.status() == McpServerStatus.READY
                 ? "▶️ MCP server 已启用: " + name
@@ -438,12 +454,95 @@ public class McpServerManager implements AutoCloseable {
             server.tools(tools);
             cacheToolDiscovery(server, tools);
             server.status(McpServerStatus.READY);
+            reconnectAttempts.remove(server.name());
             recordConnectionEvent(server, McpConnectionEvent.Type.READY, "ready");
         } catch (Exception e) {
             server.close();
             server.errorMessage(e.getMessage());
             server.status(McpServerStatus.ERROR);
             recordConnectionEvent(server, McpConnectionEvent.Type.ERROR, e.getMessage());
+            scheduleReconnect(server, e.getMessage());
+        }
+    }
+
+    private void scheduleReconnect(McpServer server, String cause) {
+        if (server == null || server.config().isDisabled() || reconnectExecutor.isShutdown()) {
+            return;
+        }
+        if (!reconnectScheduled.add(server.name())) {
+            return;
+        }
+        int maxAttempts = reconnectMaxAttempts();
+        if (maxAttempts <= 0) {
+            reconnectScheduled.remove(server.name());
+            return;
+        }
+        AtomicInteger counter = reconnectAttempts.computeIfAbsent(server.name(), ignored -> new AtomicInteger());
+        int attempt = counter.incrementAndGet();
+        if (attempt > maxAttempts) {
+            reconnectScheduled.remove(server.name());
+            return;
+        }
+        long delayMillis = reconnectDelayMillis(attempt);
+        recordConnectionEvent(server, McpConnectionEvent.Type.RECONNECTING,
+                "auto reconnect attempt " + attempt + "/" + maxAttempts
+                        + " after " + delayMillis + "ms: " + (cause == null ? "" : cause));
+        reconnectExecutor.schedule(() -> {
+            reconnectScheduled.remove(server.name());
+            if (server.config().isDisabled()
+                    || server.status() == McpServerStatus.READY
+                    || reconnectExecutor.isShutdown()) {
+                return;
+            }
+            start(server);
+        }, delayMillis, TimeUnit.MILLISECONDS);
+    }
+
+    private static int reconnectMaxAttempts() {
+        return intProperty("devcli.mcp.reconnect.maxAttempts",
+                "DEVCLI_MCP_RECONNECT_MAX_ATTEMPTS",
+                DEFAULT_RECONNECT_MAX_ATTEMPTS);
+    }
+
+    private static long reconnectDelayMillis(int attempt) {
+        long initial = longProperty("devcli.mcp.reconnect.initialDelayMillis",
+                "DEVCLI_MCP_RECONNECT_INITIAL_DELAY_MILLIS",
+                DEFAULT_RECONNECT_INITIAL_DELAY_MILLIS);
+        long max = longProperty("devcli.mcp.reconnect.maxDelayMillis",
+                "DEVCLI_MCP_RECONNECT_MAX_DELAY_MILLIS",
+                DEFAULT_RECONNECT_MAX_DELAY_MILLIS);
+        long multiplier = 1L << Math.min(Math.max(0, attempt - 1), 10);
+        long delay = Math.max(1, initial) * multiplier;
+        return Math.min(Math.max(1, max), delay);
+    }
+
+    private static int intProperty(String property, String env, int defaultValue) {
+        String value = System.getProperty(property);
+        if (value == null || value.isBlank()) {
+            value = System.getenv(env);
+        }
+        if (value == null || value.isBlank()) {
+            return defaultValue;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException ignored) {
+            return defaultValue;
+        }
+    }
+
+    private static long longProperty(String property, String env, long defaultValue) {
+        String value = System.getProperty(property);
+        if (value == null || value.isBlank()) {
+            value = System.getenv(env);
+        }
+        if (value == null || value.isBlank()) {
+            return defaultValue;
+        }
+        try {
+            return Long.parseLong(value.trim());
+        } catch (NumberFormatException ignored) {
+            return defaultValue;
         }
     }
 
@@ -593,6 +692,9 @@ public class McpServerManager implements AutoCloseable {
 
     @Override
     public void close() {
+        reconnectExecutor.shutdownNow();
+        reconnectScheduled.clear();
+        reconnectAttempts.clear();
         for (McpServer server : servers.values()) {
             unregisterTools(server);
             server.close();
