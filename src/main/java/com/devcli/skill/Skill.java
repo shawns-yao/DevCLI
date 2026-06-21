@@ -18,6 +18,8 @@ public record Skill(
         String author,
         List<String> tags,
         List<String> allowedTools,
+        Context context,
+        List<String> paths,
         Source source,
         String body,
         Path skillMdPath,
@@ -26,6 +28,35 @@ public record Skill(
 
     public enum Source {
         BUILTIN, USER, PROJECT
+    }
+
+    public enum Context {
+        INLINE, FORK;
+
+        public static Context from(String value) {
+            if (value == null || value.isBlank()) {
+                return INLINE;
+            }
+            return "fork".equalsIgnoreCase(value.trim()) ? FORK : INLINE;
+        }
+
+        public String wireName() {
+            return name().toLowerCase(java.util.Locale.ROOT);
+        }
+    }
+
+    public Skill(String name,
+                 String description,
+                 String version,
+                 String author,
+                 List<String> tags,
+                 List<String> allowedTools,
+                 Source source,
+                 String body,
+                 Path skillMdPath,
+                 Path referencesDir) {
+        this(name, description, version, author, tags, allowedTools, Context.INLINE, List.of(),
+                source, body, skillMdPath, referencesDir);
     }
 
     public Skill {
@@ -44,6 +75,14 @@ public record Skill(
             allowedTools = List.of();
         } else {
             allowedTools = List.copyOf(allowedTools);
+        }
+        if (context == null) {
+            context = Context.INLINE;
+        }
+        if (paths == null) {
+            paths = List.of();
+        } else {
+            paths = List.copyOf(paths);
         }
         if (body == null) {
             body = "";

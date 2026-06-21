@@ -216,10 +216,12 @@ public class PlanExecuteAgent {
         }
     }
 
-    private String buildSkillIndex() {
+    private String buildSkillIndex(String activationText) {
         if (skillRegistry == null) return "";
         try {
-            return SkillIndexFormatter.format(skillRegistry.enabledSkills());
+            return SkillIndexFormatter.format(skillRegistry.enabledSkillsForText(
+                    activationText,
+                    toolRegistry.getProjectPath()));
         } catch (Exception e) {
             log.warn("Failed to build skill index", e);
             return "";
@@ -570,7 +572,7 @@ public class PlanExecuteAgent {
         taskInput = prependSkillBodies(taskInput);
 
         List<LlmClient.Message> messages = new ArrayList<>(Arrays.asList(
-                LlmClient.Message.system(buildTaskSystemPrompt(task)),
+                LlmClient.Message.system(buildTaskSystemPrompt(task, taskInput)),
                 ImageReferenceParser.userMessage(
                         taskInput,
                         Path.of(toolRegistry.getProjectPath()))
@@ -605,7 +607,7 @@ public class PlanExecuteAgent {
             budget.beginIteration();
 
             // 调 LLM 前刷新 Working Memory 等易变 system prompt 段，再评估是否需要压缩 messages。
-            messages.set(0, LlmClient.Message.system(buildTaskSystemPrompt(task)));
+            messages.set(0, LlmClient.Message.system(buildTaskSystemPrompt(task, taskInput)));
             injectPendingLspDiagnostics(messages, out);
             maybeCompactHistory(messages, out);
 
@@ -698,14 +700,14 @@ public class PlanExecuteAgent {
         return TaskRunResult.of(fallbackResult, streamRenderer.hasStreamedOutput());
     }
 
-    private String buildTaskSystemPrompt(Task task) {
+    private String buildTaskSystemPrompt(Task task, String activationText) {
         return promptAssembler.assemble(PromptMode.PLAN, PromptContext.builder()
                 .variable("taskType", task.getType())
                 .variable("taskDescription", task.getDescription())
                 .externalContext(buildExternalContext())
                 .stickyMemory(buildStickyMemory())
                 .workingMemory(memoryManager.buildWorkingMemorySection())
-                .skillIndex(buildSkillIndex())
+                .skillIndex(buildSkillIndex(activationText))
                 .build());
     }
 

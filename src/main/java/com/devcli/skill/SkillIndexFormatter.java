@@ -7,7 +7,7 @@ import java.util.List;
  *
  * 预算约束（命中即截断 + stderr 警告）：
  * - 单条 description ≤ 500 codepoint
- * - 启用 skill 数 ≤ 20（按 name 字典序保留前 20）
+ * - 启用 skill 数 ≤ 20（保留调用方给出的前 20 个）
  * - 总段大小 ≤ 4096 字符
  *
  * 注入位置：每个 Agent / SubAgent 的 system prompt 末尾，独立段。
@@ -29,11 +29,10 @@ public final class SkillIndexFormatter {
         List<Skill> effective = enabled;
         if (enabled.size() > MAX_ENABLED_SKILLS) {
             effective = enabled.stream()
-                    .sorted((a, b) -> a.name().compareTo(b.name()))
                     .limit(MAX_ENABLED_SKILLS)
                     .toList();
             System.err.println("⚠️ 已检测到 " + enabled.size()
-                    + " 个 skill，仅前 " + MAX_ENABLED_SKILLS + " 个进入 system prompt 索引");
+                    + " 个 skill，仅按当前排序取前 " + MAX_ENABLED_SKILLS + " 个进入 system prompt 索引");
         }
 
         StringBuilder sb = new StringBuilder();

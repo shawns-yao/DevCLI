@@ -85,6 +85,7 @@ public class SubAgent {
     private SkillContextBuffer skillContextBuffer;
     private final ConversationHistoryCompactor historyCompactor;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
+    private String currentSkillActivationText = "";
 
     public SubAgent(String name, AgentRole role, LlmClient llmClient, ToolRegistry toolRegistry) {
         this.name = name;
@@ -281,7 +282,9 @@ public class SubAgent {
     private String buildSkillIndex() {
         if (skillRegistry == null) return "";
         try {
-            return SkillIndexFormatter.format(skillRegistry.enabledSkills());
+            return SkillIndexFormatter.format(skillRegistry.enabledSkillsForText(
+                    currentSkillActivationText,
+                    toolRegistry.getProjectPath()));
         } catch (Exception e) {
             log.warn("[{}] failed to build skill index", name, e);
             return "";
@@ -346,12 +349,14 @@ public class SubAgent {
      */
     public AgentMessage execute(AgentMessage task, PrintStream out) {
         log.info("[{}] executing task from {}: type={}", name, task.fromAgent(), task.type());
+        currentSkillActivationText = task == null || task.content() == null ? "" : task.content();
         pruneHistoricalImagePayloads();
         refreshSystemPrompt();
         return executeWithHistory(task, out, conversationHistory);
     }
 
     public AgentMessage executeForked(AgentMessage task, ForkContext forkContext, PrintStream out) {
+        currentSkillActivationText = task == null || task.content() == null ? "" : task.content();
         ForkContext context = forkContext == null ? createForkContext() : forkContext;
         List<LlmClient.Message> forkedHistory = new ArrayList<>(context.sharedPrefix());
         return executeWithHistory(task, out, forkedHistory, context);

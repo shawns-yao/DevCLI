@@ -58,6 +58,24 @@ class SkillFrontmatterParserTest {
     }
 
     @Test
+    void parsesContextAndPathsFields() {
+        String input = """
+                ---
+                name: java-review
+                context: fork
+                paths: [src/**/*.java, pom.xml]
+                ---
+                body
+                """;
+        SkillFrontmatterParser.ParseResult r = SkillFrontmatterParser.parse(input);
+
+        assertEquals("fork", r.frontmatter().get("context"));
+        @SuppressWarnings("unchecked")
+        List<String> paths = (List<String>) r.frontmatter().get("paths");
+        assertEquals(List.of("src/**/*.java", "pom.xml"), paths);
+    }
+
+    @Test
     void warnsOnMissingClosingMarker() {
         String input = """
                 ---

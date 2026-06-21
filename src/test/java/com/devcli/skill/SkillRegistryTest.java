@@ -109,6 +109,54 @@ class SkillRegistryTest {
     }
 
     @Test
+    void parsesContextAndPathActivationFromFrontmatter(@TempDir Path tempDir) throws IOException {
+        Path user = tempDir.resolve("user");
+        Path skillDir = user.resolve("java-review");
+        Files.createDirectories(skillDir);
+        Files.writeString(skillDir.resolve("SKILL.md"),
+                "---\n"
+                        + "name: java-review\n"
+                        + "description: desc\n"
+                        + "context: fork\n"
+                        + "paths: [src/**/*.java, pom.xml]\n"
+                        + "---\n"
+                        + "body\n");
+        SkillRegistry registry = new SkillRegistry(null, user, null,
+                new SkillStateStore(tempDir.resolve("skills.json")));
+        registry.reload();
+
+        Skill skill = registry.findSkill("java-review");
+
+        assertNotNull(skill);
+        assertEquals(Skill.Context.FORK, skill.context());
+        assertEquals(List.of("src/**/*.java", "pom.xml"), skill.paths());
+        assertTrue(registry.enabledSkillsForPath("src/main/java/App.java").stream()
+                .anyMatch(s -> s.name().equals("java-review")));
+        assertTrue(registry.enabledSkillsForPath("pom.xml").stream()
+                .anyMatch(s -> s.name().equals("java-review")));
+        assertFalse(registry.enabledSkillsForPath("README.md").stream()
+                .anyMatch(s -> s.name().equals("java-review")));
+    }
+
+    @Test
+    void enabledSkillsSortsByUsageFrequencyThenName(@TempDir Path tempDir) throws IOException {
+        Path user = tempDir.resolve("user");
+        writeSkill(user, "alpha", "desc", "v0");
+        writeSkill(user, "beta", "desc", "v0");
+        writeSkill(user, "gamma", "desc", "v0");
+        SkillRegistry registry = new SkillRegistry(null, user, null,
+                new SkillStateStore(tempDir.resolve("skills.json")));
+        registry.reload();
+
+        registry.recordUsage("gamma");
+        registry.recordUsage("gamma");
+        registry.recordUsage("beta");
+
+        List<String> names = registry.enabledSkills().stream().map(Skill::name).toList();
+        assertEquals(List.of("gamma", "beta", "alpha"), names);
+    }
+
+    @Test
     void skipsFileWithMalformedFrontmatterButContinues(@TempDir Path tempDir) throws IOException {
         Path user = tempDir.resolve("user");
         Files.createDirectories(user.resolve("good"));

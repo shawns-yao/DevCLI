@@ -30,12 +30,18 @@ public final class SkillContextBuffer {
     private final Map<String, String> entries = new LinkedHashMap<>();
     private final LinkedHashSet<String> activeSkillNames = new LinkedHashSet<>();
     private final Map<String, List<String>> activeAllowedToolsBySkill = new LinkedHashMap<>();
+    private final Map<String, Skill.Context> activeContextBySkill = new LinkedHashMap<>();
+    private final Map<String, String> activeBodyBySkill = new LinkedHashMap<>();
 
     public synchronized void push(String skillName, String body) {
         push(skillName, body, List.of());
     }
 
     public synchronized void push(String skillName, String body, List<String> allowedTools) {
+        push(skillName, body, allowedTools, Skill.Context.INLINE);
+    }
+
+    public synchronized void push(String skillName, String body, List<String> allowedTools, Skill.Context context) {
         if (skillName == null || skillName.isBlank() || body == null) {
             return;
         }
@@ -43,6 +49,8 @@ public final class SkillContextBuffer {
         entries.put(skillName, body);
         activeSkillNames.remove(skillName);
         activeSkillNames.add(skillName);
+        activeContextBySkill.put(skillName, context == null ? Skill.Context.INLINE : context);
+        activeBodyBySkill.put(skillName, body);
         List<String> normalizedAllowedTools = normalizeAllowedTools(allowedTools);
         if (normalizedAllowedTools.isEmpty()) {
             activeAllowedToolsBySkill.remove(skillName);
@@ -53,12 +61,16 @@ public final class SkillContextBuffer {
             String oldest = entries.keySet().iterator().next();
             entries.remove(oldest);
             activeAllowedToolsBySkill.remove(oldest);
+            activeContextBySkill.remove(oldest);
+            activeBodyBySkill.remove(oldest);
             activeSkillNames.remove(oldest);
         }
         while (activeSkillNames.size() > MAX_SKILLS) {
             String oldest = activeSkillNames.iterator().next();
             activeSkillNames.remove(oldest);
             activeAllowedToolsBySkill.remove(oldest);
+            activeContextBySkill.remove(oldest);
+            activeBodyBySkill.remove(oldest);
         }
         while (activeAllowedToolsBySkill.size() > MAX_SKILLS) {
             String oldest = activeAllowedToolsBySkill.keySet().iterator().next();
@@ -129,11 +141,17 @@ public final class SkillContextBuffer {
         StringBuilder sb = new StringBuilder("### 已加载 Skill\n\n");
         for (String skillName : activeSkillNames) {
             sb.append("- ").append(skillName);
+            Skill.Context context = activeContextBySkill.getOrDefault(skillName, Skill.Context.INLINE);
+            sb.append(" | context: ").append(context.wireName());
             List<String> allowedTools = activeAllowedToolsBySkill.get(skillName);
             if (allowedTools == null || allowedTools.isEmpty()) {
                 sb.append(" | 允许工具: 不限制");
             } else {
                 sb.append(" | 允许工具: ").append(String.join(", ", allowedTools));
+            }
+            String body = activeBodyBySkill.get(skillName);
+            if (body != null && !body.isBlank()) {
+                sb.append(" | 内容摘要: ").append(compactBody(body));
             }
             sb.append('\n');
         }
@@ -144,6 +162,8 @@ public final class SkillContextBuffer {
         entries.clear();
         activeSkillNames.clear();
         activeAllowedToolsBySkill.clear();
+        activeContextBySkill.clear();
+        activeBodyBySkill.clear();
     }
 
     public synchronized SkillContextBuffer copy() {
@@ -151,6 +171,8 @@ public final class SkillContextBuffer {
         copy.entries.putAll(this.entries);
         copy.activeSkillNames.addAll(this.activeSkillNames);
         copy.activeAllowedToolsBySkill.putAll(this.activeAllowedToolsBySkill);
+        copy.activeContextBySkill.putAll(this.activeContextBySkill);
+        copy.activeBodyBySkill.putAll(this.activeBodyBySkill);
         return copy;
     }
 
@@ -165,5 +187,10 @@ public final class SkillContextBuffer {
             }
         }
         return List.copyOf(normalized);
+    }
+
+    private static String compactBody(String body) {
+        String compacted = body.replaceAll("\\s+", " ").trim();
+        return compacted.length() > 240 ? compacted.substring(0, 237) + "..." : compacted;
     }
 }

@@ -71,10 +71,10 @@
 
 ### 阶段 5：Skill 受控执行增强
 
-- 状态：部分实现（2026-06-19）
-- 已实现：Skill frontmatter 支持 `allowedTools: [tool_a, tool_b]`；`SkillRegistry` 会将允许工具列表写入 `Skill` 元数据；`load_skill` 返回结果会提示该 Skill 的允许工具范围；声明了 `allowedTools` 的已加载 Skill 会在运行时强制限制后续工具调用，白名单状态随 `SkillContextBuffer` 隔离并在 `/clear` 时清空
-- 未实现：`context: fork`、`paths` 条件激活、Skill 使用频率排序、压缩后已调用 Skill 内容专用恢复尚未实现
-- 影响范围：`Skill`、`SkillRegistry`、`SkillContextBuffer`、`ToolRegistry.load_skill`、`HitlToolRegistry`、Skill / CLI 补全相关测试
+- 状态：已实现（2026-06-21）
+- 已实现：Skill frontmatter 支持 `allowedTools: [tool_a, tool_b]`、`context: inline|fork` 和 `paths`；`SkillRegistry` 会将允许工具、上下文偏好和路径条件写入 `Skill` 元数据；ReAct、Plan、SubAgent 的 Skill 索引会根据当前用户输入或任务文本中的项目相对路径筛选 path-scoped Skill；启用 Skill 按本进程内使用频率优先、名称次序兜底排序；`load_skill` 返回结果会提示允许工具范围和 context，并记录使用次数；声明了 `allowedTools` 的已加载 Skill 会在运行时强制限制后续工具调用，白名单状态随 `SkillContextBuffer` 隔离并在 `/clear` 时清空；压缩后恢复会保留已调用 Skill 的 context、allowedTools 和内容摘要
+- 未实现：阶段 5 当前无剩余核心项；后续可继续把 `context: fork` 从提示性上下文偏好升级为独立 fork 执行通道
+- 影响范围：`Skill`、`SkillRegistry`、`SkillPathMatcher`、`SkillContextBuffer`、`SkillIndexFormatter`、`ToolRegistry.load_skill`、`HitlToolRegistry`、`Agent`、`PlanExecuteAgent`、`SubAgent`、Skill / Agent 相关测试
 - 目标：支持 `allowedTools`、`context: fork`、`paths` 条件激活、Skill 使用频率排序，并在压缩后恢复已调用 Skill 内容
 - 参考点：cc 的 Skill inline / fork 双路径、Safe Properties 权限白名单、条件激活和 invoked skills 恢复
 - 验证建议：扩展 `SkillRegistryTest`、`SkillFrontmatterParserTest`、`LoadSkillToolTest`、新增 fork skill 行为测试

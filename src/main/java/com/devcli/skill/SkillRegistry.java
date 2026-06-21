@@ -5,6 +5,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +30,7 @@ public final class SkillRegistry {
     private final SkillStateStore stateStore;
 
     private final Map<String, Skill> skillsByName = new LinkedHashMap<>();
+    private final Map<String, Integer> usageCounts = new LinkedHashMap<>();
     private final List<String> warnings = new ArrayList<>();
 
     public SkillRegistry(Path builtinCacheRoot, Path userSkillsDir, Path projectSkillsDir, SkillStateStore stateStore) {
@@ -57,7 +59,41 @@ public final class SkillRegistry {
         Set<String> disabled = stateStore == null ? Set.of() : stateStore.disabled();
         return allSkills().stream()
                 .filter(s -> !disabled.contains(s.name()))
+                .sorted(usageThenNameComparator())
                 .toList();
+    }
+
+    public synchronized List<Skill> enabledSkillsForPath(String path) {
+        String normalizedPath = normalizePath(path);
+        return enabledSkills().stream()
+                .filter(skill -> skill.paths().isEmpty()
+                        || skill.paths().stream().anyMatch(pattern -> matchesPath(pattern, normalizedPath)))
+                .toList();
+    }
+
+    public synchronized List<Skill> enabledSkillsForText(String text, String projectRoot) {
+        List<String> paths = SkillPathMatcher.extractPaths(text, projectRoot);
+        if (paths.isEmpty()) {
+            return enabledSkills().stream()
+                    .filter(skill -> skill.paths().isEmpty())
+                    .toList();
+        }
+        return enabledSkills().stream()
+                .filter(skill -> skill.paths().isEmpty()
+                        || paths.stream().anyMatch(path ->
+                        skill.paths().stream().anyMatch(pattern -> matchesPath(pattern, path))))
+                .toList();
+    }
+
+    public synchronized void recordUsage(String name) {
+        if (name == null || name.isBlank()) {
+            return;
+        }
+        usageCounts.merge(name, 1, Integer::sum);
+    }
+
+    public synchronized int usageCount(String name) {
+        return usageCounts.getOrDefault(name, 0);
     }
 
     public synchronized Skill findSkill(String name) {
@@ -134,6 +170,8 @@ public final class SkillRegistry {
         String author = stringField(fm, "author");
         List<String> tags = listField(fm, "tags");
         List<String> allowedTools = listField(fm, "allowedTools");
+        Skill.Context context = Skill.Context.from(stringField(fm, "context"));
+        List<String> paths = listField(fm, "paths");
 
         Path referencesDir = skillDir.resolve("references");
         if (!Files.isDirectory(referencesDir)) {
@@ -147,6 +185,8 @@ public final class SkillRegistry {
                 author,
                 tags,
                 allowedTools,
+                context,
+                paths,
                 source,
                 parsed.body(),
                 skillMd,
@@ -166,5 +206,59 @@ public final class SkillRegistry {
             return list.stream().filter(x -> x instanceof String).map(x -> (String) x).toList();
         }
         return Collections.emptyList();
+    }
+
+    private Comparator<Skill> usageThenNameComparator() {
+        return Comparator
+                .<Skill>comparingInt(skill -> usageCounts.getOrDefault(skill.name(), 0))
+                .reversed()
+                .thenComparing(Skill::name);
+    }
+
+    private static boolean matchesPath(String pattern, String path) {
+        if (pattern == null || pattern.isBlank() || path == null || path.isBlank()) {
+            return false;
+        }
+        String normalizedPattern = normalizePath(pattern);
+        String regex = globToRegex(normalizedPattern);
+        return path.matches(regex);
+    }
+
+    private static String normalizePath(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.trim().replace('\\', '/').replaceAll("^/+", "");
+    }
+
+    private static String globToRegex(String glob) {
+        StringBuilder regex = new StringBuilder("^");
+        for (int i = 0; i < glob.length(); i++) {
+            char c = glob.charAt(i);
+            if (c == '*') {
+                boolean doublestar = i + 1 < glob.length() && glob.charAt(i + 1) == '*';
+                if (doublestar) {
+                    boolean slashAfter = i + 2 < glob.length() && glob.charAt(i + 2) == '/';
+                    if (slashAfter) {
+                        regex.append("(?:.*/)?");
+                        i += 2;
+                    } else {
+                        regex.append(".*");
+                        i++;
+                    }
+                } else {
+                    regex.append("[^/]*");
+                }
+            } else if (c == '?') {
+                regex.append("[^/]");
+            } else {
+                if ("\\.[]{}()+-^$|".indexOf(c) >= 0) {
+                    regex.append('\\');
+                }
+                regex.append(c);
+            }
+        }
+        regex.append('$');
+        return regex.toString();
     }
 }

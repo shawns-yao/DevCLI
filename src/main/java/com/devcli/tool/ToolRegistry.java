@@ -604,13 +604,18 @@ public class ToolRegistry {
                     }
                     SkillContextBuffer targetBuffer = activeSkillContextBuffer();
                     if (targetBuffer != null) {
-                        targetBuffer.push(name, injected, skill.allowedTools());
+                        targetBuffer.push(name, injected, skill.allowedTools(), skill.context());
                     }
+                    skillRegistry.recordUsage(name);
                     String allowedTools = skill.allowedTools().isEmpty()
                             ? ""
                             : "允许工具: " + String.join(", ", skill.allowedTools()) + "。";
+                    String context = skill.context() == Skill.Context.FORK
+                            ? "context: fork。建议在子任务/fork 上下文中使用，避免污染主上下文。"
+                            : "context: inline。";
                     return "已加载 skill '" + name + "' 的完整指引（" + originalLen
                             + " bytes），" + allowedTools
+                            + context
                             + "将在下一轮上下文中以 \"## 已加载 Skill：" + name + "\" 段出现。";
                 }
         ));

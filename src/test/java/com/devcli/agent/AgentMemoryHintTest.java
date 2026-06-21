@@ -3,11 +3,15 @@ package com.devcli.agent;
 import com.devcli.llm.GLMClient;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.MemoryEntry;
+import com.devcli.skill.SkillContextBuffer;
+import com.devcli.skill.SkillRegistry;
+import com.devcli.skill.SkillStateStore;
 import com.devcli.tool.ToolRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -15,6 +19,7 @@ import java.util.List;
 import java.util.Queue;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AgentMemoryHintTest {
@@ -133,6 +138,63 @@ class AgentMemoryHintTest {
                 System.setProperty("devcli.memory.dir", oldMemoryDir);
             }
         }
+    }
+
+    @Test
+    void pathScopedSkillsAreIndexedOnlyWhenCurrentInputMentionsMatchingPath(@TempDir Path tempDir) throws IOException {
+        Path skillsRoot = tempDir.resolve("skills");
+        writeSkill(skillsRoot, "java-review", "Java review", "src/**/*.java");
+        writeSkill(skillsRoot, "docs-review", "Docs review", "docs/**/*.md");
+        writeSkill(skillsRoot, "global-skill", "Always visible", null);
+
+        SkillRegistry registry = new SkillRegistry(null, skillsRoot, null,
+                new SkillStateStore(tempDir.resolve("skills.json")));
+        registry.reload();
+
+        String oldMemoryDir = System.getProperty("devcli.memory.dir");
+        System.setProperty("devcli.memory.dir", tempDir.resolve("memory").toString());
+        Agent agent = null;
+        try {
+            RecordingStubGLMClient llmClient = new RecordingStubGLMClient(List.of(
+                    new LlmClient.ChatResponse("assistant", "done", null, 20, 10)
+            ));
+            ToolRegistry tools = new ToolRegistry();
+            tools.setProjectPath(tempDir.toString());
+            tools.setSkillRegistry(registry);
+            tools.setSkillContextBuffer(new SkillContextBuffer());
+            agent = new Agent(llmClient, tools);
+            agent.setSkillRegistry(registry);
+            agent.setSkillContextBuffer(new SkillContextBuffer());
+
+            agent.run("请检查 src/main/java/App.java");
+
+            String systemPrompt = llmClient.messagesByCall.get(0).get(0).content();
+            assertTrue(systemPrompt.contains("java-review"), systemPrompt);
+            assertTrue(systemPrompt.contains("global-skill"), systemPrompt);
+            assertFalse(systemPrompt.contains("docs-review"), systemPrompt);
+        } finally {
+            if (agent != null) {
+                agent.close();
+            }
+            if (oldMemoryDir == null) {
+                System.clearProperty("devcli.memory.dir");
+            } else {
+                System.setProperty("devcli.memory.dir", oldMemoryDir);
+            }
+        }
+    }
+
+    private static void writeSkill(Path root, String name, String description, String pathPattern) throws IOException {
+        Path skillDir = root.resolve(name);
+        Files.createDirectories(skillDir);
+        String paths = pathPattern == null ? "" : "paths: [" + pathPattern + "]\n";
+        Files.writeString(skillDir.resolve("SKILL.md"),
+                "---\n"
+                        + "name: " + name + "\n"
+                        + "description: " + description + "\n"
+                        + paths
+                        + "---\n"
+                        + "body\n");
     }
 
     private static final class StubGLMClient extends GLMClient {

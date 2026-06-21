@@ -42,15 +42,16 @@ class SkillIndexFormatterTest {
     }
 
     @Test
-    void capsAtTwentySkills() {
+    void capsAtTwentySkillsPreservingRegistryOrder() {
         List<Skill> many = new ArrayList<>();
         for (int i = 0; i < 25; i++) {
             many.add(mockSkill(String.format("skill-%02d", i), "desc " + i, Skill.Source.USER));
         }
+        many.add(0, mockSkill("zz-hot", "hot", Skill.Source.USER));
         String out = SkillIndexFormatter.format(many);
-        assertTrue(out.contains("skill-00"));
-        assertTrue(out.contains("skill-19"));
-        assertFalse(out.contains("skill-20"), "超过 20 个时按字典序前 20 应被保留");
+        assertTrue(out.contains("zz-hot"));
+        assertTrue(out.contains("skill-18"));
+        assertFalse(out.contains("skill-19"), "超过 20 个时应保留 Registry 给出的前 20 个");
     }
 
     @Test

@@ -72,6 +72,18 @@ class SkillContextBufferTest {
     }
 
     @Test
+    void postCompactRestoreIncludesContextAndBodySummaryAfterDrain() {
+        SkillContextBuffer buffer = new SkillContextBuffer();
+        buffer.push("forked", "第一行\n第二行\n第三行", java.util.List.of("read_file"), Skill.Context.FORK);
+        buffer.drain();
+
+        String restore = buffer.renderPostCompactRestoreSection();
+
+        assertTrue(restore.contains("context: fork"), restore);
+        assertTrue(restore.contains("第一行 第二行 第三行"), restore);
+    }
+
+    @Test
     void preservesInsertionOrder() {
         SkillContextBuffer buffer = new SkillContextBuffer();
         buffer.push("alpha", "A");

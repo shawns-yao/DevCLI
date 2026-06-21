@@ -60,6 +60,7 @@ public class Agent implements AutoCloseable {
     private final TraceRecorder traceRecorder = new TraceRecorder();
     private Supplier<Boolean> hitlEnabledSupplier = () -> false;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
+    private String currentSkillActivationText = "";
 
     public Agent(LlmClient llmClient) {
         this(llmClient, new ToolRegistry());
@@ -162,6 +163,7 @@ public class Agent implements AutoCloseable {
      */
     public String run(String userInput) {
         log.info("ReAct run started: inputLength={}", userInput == null ? 0 : userInput.length());
+        currentSkillActivationText = userInput == null ? "" : userInput;
         pruneHistoricalImagePayloads();
         // 写入当前会话工作记忆；真实 messages 由 conversationHistory 维护。
         memoryManager.addUserMessage(userInput);
@@ -410,7 +412,9 @@ public class Agent implements AutoCloseable {
     private String buildSkillIndex() {
         if (skillRegistry == null) return "";
         try {
-            return SkillIndexFormatter.format(skillRegistry.enabledSkills());
+            return SkillIndexFormatter.format(skillRegistry.enabledSkillsForText(
+                    currentSkillActivationText,
+                    toolRegistry.getProjectPath()));
         } catch (Exception e) {
             log.warn("Failed to build skill index", e);
             return "";

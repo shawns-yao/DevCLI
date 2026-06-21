@@ -107,6 +107,30 @@ class LoadSkillToolTest {
     }
 
     @Test
+    void loadSkillReportsForkContextAndRecordsUsage(@TempDir Path tempDir) throws IOException {
+        Path userRoot = tempDir.resolve("user-skills");
+        Path alpha = userRoot.resolve("alpha");
+        Path forked = userRoot.resolve("forked");
+        Files.createDirectories(alpha);
+        Files.createDirectories(forked);
+        Files.writeString(alpha.resolve("SKILL.md"),
+                "---\nname: alpha\ndescription: desc\n---\nbody\n");
+        Files.writeString(forked.resolve("SKILL.md"),
+                "---\nname: forked\ndescription: desc\ncontext: fork\n---\nbody\n");
+        SkillRegistry registry = new SkillRegistry(null, userRoot, null,
+                new SkillStateStore(tempDir.resolve("skills.json")));
+        registry.reload();
+        ToolRegistry tools = new ToolRegistry();
+        tools.setSkillRegistry(registry);
+        tools.setSkillContextBuffer(new SkillContextBuffer());
+
+        String result = tools.executeTool("load_skill", "{\"name\":\"forked\"}");
+
+        assertTrue(result.contains("context: fork"), result);
+        assertEquals("forked", registry.enabledSkills().get(0).name());
+    }
+
+    @Test
     void loadedSkillAllowedToolsBlocksOtherTools(@TempDir Path tempDir) throws IOException {
         Path userRoot = tempDir.resolve("user-skills");
         Path skillDir = userRoot.resolve("controlled");
