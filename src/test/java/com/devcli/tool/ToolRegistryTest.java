@@ -50,6 +50,28 @@ class ToolRegistryTest {
     }
 
     @Test
+    void searchToolsReusesCachedIndexUntilToolCatalogChanges() {
+        ToolRegistry registry = new ToolRegistry();
+
+        registry.executeTool("search_tools", "{\"query\":\"python\"}");
+        registry.executeTool("search_tools", "{\"query\":\"shell command\"}");
+        assertEquals(1, registry.toolSearchIndexBuildCount());
+
+        registry.registerMcpTool(new McpToolDescriptor(
+                "github",
+                "list_issues",
+                McpToolDescriptor.namespaced("github", "list_issues"),
+                "List GitHub issues",
+                JsonNodeFactory.instance.objectNode()
+        ), args -> "ok");
+
+        String mcp = registry.executeTool("search_tools", "{\"query\":\"github issues\"}");
+
+        assertTrue(mcp.contains("mcp__github__list_issues"), mcp);
+        assertEquals(2, registry.toolSearchIndexBuildCount());
+    }
+
+    @Test
     void unknownToolGuidesModelToSearchTools() {
         ToolRegistry registry = new ToolRegistry();
 

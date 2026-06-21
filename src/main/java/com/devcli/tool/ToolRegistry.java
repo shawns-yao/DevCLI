@@ -45,6 +45,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 
 /**
@@ -64,6 +65,9 @@ public class ToolRegistry {
     private final Map<String, Tool> tools = new ConcurrentHashMap<>();
     private final Map<String, McpRegisteredTool> mcpTools = new ConcurrentHashMap<>();
     private final Map<String, Long> mcpServerLifecycleVersions = new ConcurrentHashMap<>();
+    private final AtomicLong toolCatalogVersion = new AtomicLong();
+    private final AtomicLong toolSearchIndexBuildCount = new AtomicLong();
+    private volatile ToolSearchIndex toolSearchIndex;
     private final long commandTimeoutSeconds;
     private final long toolBatchTimeoutSeconds;
     private static final int DEFAULT_FETCH_MAX_CHARS = 8_000;
@@ -843,13 +847,12 @@ public class ToolRegistry {
         List<String> terms = Arrays.stream(normalized.split("\\s+"))
                 .filter(s -> !s.isBlank())
                 .toList();
-        List<ToolSearchMatch> matches = tools.values().stream()
-                .filter(tool -> !"search_tools".equals(tool.name()))
-                .map(tool -> new ToolSearchMatch(tool, scoreTool(tool, terms)))
+        List<ToolSearchMatch> matches = toolSearchEntries().stream()
+                .map(entry -> new ToolSearchMatch(entry, scoreTool(entry, terms)))
                 .filter(match -> match.score() > 0)
                 .sorted(Comparator
                         .comparingInt(ToolSearchMatch::score).reversed()
-                        .thenComparing(match -> match.tool().name()))
+                        .thenComparing(match -> match.entry().name()))
                 .limit(limit)
                 .toList();
         if (matches.isEmpty()) {
@@ -857,11 +860,42 @@ public class ToolRegistry {
         }
         StringBuilder sb = new StringBuilder("匹配工具:\n");
         for (ToolSearchMatch match : matches) {
-            Tool tool = match.tool();
-            sb.append("- ").append(tool.name()).append(": ")
-                    .append(oneLine(tool.description())).append('\n');
+            ToolSearchEntry entry = match.entry();
+            sb.append("- ").append(entry.name()).append(": ")
+                    .append(oneLine(entry.description())).append('\n');
         }
         return sb.toString().stripTrailing();
+    }
+
+    private List<ToolSearchEntry> toolSearchEntries() {
+        long version = toolCatalogVersion.get();
+        ToolSearchIndex snapshot = toolSearchIndex;
+        if (snapshot != null && snapshot.version() == version) {
+            return snapshot.entries();
+        }
+        synchronized (this) {
+            snapshot = toolSearchIndex;
+            version = toolCatalogVersion.get();
+            if (snapshot != null && snapshot.version() == version) {
+                return snapshot.entries();
+            }
+            List<ToolSearchEntry> entries = tools.values().stream()
+                    .filter(tool -> !"search_tools".equals(tool.name()))
+                    .map(ToolSearchEntry::from)
+                    .toList();
+            toolSearchIndex = new ToolSearchIndex(version, entries);
+            toolSearchIndexBuildCount.incrementAndGet();
+            return entries;
+        }
+    }
+
+    long toolSearchIndexBuildCount() {
+        return toolSearchIndexBuildCount.get();
+    }
+
+    private void invalidateToolSearchIndex() {
+        toolCatalogVersion.incrementAndGet();
+        toolSearchIndex = null;
     }
 
     private static int parseSearchToolLimit(String value) {
@@ -875,19 +909,16 @@ public class ToolRegistry {
         }
     }
 
-    private static int scoreTool(Tool tool, List<String> terms) {
-        String name = tool.name() == null ? "" : tool.name().toLowerCase(Locale.ROOT);
-        String description = tool.description() == null ? "" : tool.description().toLowerCase(Locale.ROOT);
-        String schema = tool.parameters() == null ? "" : tool.parameters().toString().toLowerCase(Locale.ROOT);
+    private static int scoreTool(ToolSearchEntry entry, List<String> terms) {
         int score = 0;
         for (String term : terms) {
-            if (name.contains(term)) {
+            if (entry.searchName().contains(term)) {
                 score += 3;
             }
-            if (description.contains(term)) {
+            if (entry.searchDescription().contains(term)) {
                 score += 1;
             }
-            if (schema.contains(term)) {
+            if (entry.searchSchema().contains(term)) {
                 score += 1;
             }
         }
@@ -966,14 +997,18 @@ public class ToolRegistry {
                 descriptor.inputSchema(),
                 args -> "MCP 工具不应通过 Map<String,String> 入口执行"
         ));
+        invalidateToolSearchIndex();
     }
 
     public synchronized void unregisterMcpTool(String toolName) {
         if (toolName == null || toolName.isBlank()) {
             return;
         }
-        mcpTools.remove(toolName);
-        tools.remove(toolName);
+        boolean removed = mcpTools.remove(toolName) != null;
+        removed = tools.remove(toolName) != null || removed;
+        if (removed) {
+            invalidateToolSearchIndex();
+        }
     }
 
     protected synchronized boolean mcpToolRequiresPerCallApproval(String toolName) {
@@ -1097,6 +1132,9 @@ public class ToolRegistry {
         for (String toolName : existing) {
             mcpTools.remove(toolName);
             tools.remove(toolName);
+        }
+        if (!existing.isEmpty()) {
+            invalidateToolSearchIndex();
         }
         for (McpToolDescriptor descriptor : newTools) {
             registerMcpToolOutput(descriptor, invokerFactory.apply(descriptor));
@@ -1556,7 +1594,29 @@ public class ToolRegistry {
         }
     }
 
-    private record ToolSearchMatch(Tool tool, int score) {}
+    private record ToolSearchIndex(long version, List<ToolSearchEntry> entries) {
+        private ToolSearchIndex {
+            entries = entries == null ? List.of() : List.copyOf(entries);
+        }
+    }
+
+    private record ToolSearchEntry(String name, String description, String searchName,
+                                   String searchDescription, String searchSchema) {
+        static ToolSearchEntry from(Tool tool) {
+            String name = tool.name() == null ? "" : tool.name();
+            String description = tool.description() == null ? "" : tool.description();
+            String schema = tool.parameters() == null ? "" : tool.parameters().toString();
+            return new ToolSearchEntry(
+                    name,
+                    description,
+                    name.toLowerCase(Locale.ROOT),
+                    description.toLowerCase(Locale.ROOT),
+                    schema.toLowerCase(Locale.ROOT)
+            );
+        }
+    }
+
+    private record ToolSearchMatch(ToolSearchEntry entry, int score) {}
 
     public record Tool(String name, String description, JsonNode parameters, ToolExecutor executor) {}
 
