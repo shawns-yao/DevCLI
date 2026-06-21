@@ -50,6 +50,17 @@ class ToolRegistryTest {
     }
 
     @Test
+    void unknownToolGuidesModelToSearchTools() {
+        ToolRegistry registry = new ToolRegistry();
+
+        String result = registry.executeTool("mcp__github__create_issue", "{}");
+
+        assertTrue(result.contains("未知工具: mcp__github__create_issue"), result);
+        assertTrue(result.contains("search_tools"), result);
+        assertTrue(result.contains("query"), result);
+    }
+
+    @Test
     void mcpToolSnapshotIncludesSchemaFingerprint() {
         ToolRegistry registry = new ToolRegistry();
         var issueSchema = JsonNodeFactory.instance.objectNode();

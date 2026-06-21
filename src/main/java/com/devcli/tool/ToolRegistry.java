@@ -1135,7 +1135,7 @@ public class ToolRegistry {
         }
         Tool tool = tools.get(name);
         if (tool == null) {
-            return ToolOutput.text("未知工具: " + name);
+            return ToolOutput.text(unknownToolGuidance(name));
         }
         ToolOutput skillPermissionError = validateSkillToolAllowed(name);
         if (skillPermissionError != null) {
@@ -1194,6 +1194,25 @@ public class ToolRegistry {
             }
             return ToolOutput.text("工具执行失败: " + e.getMessage());
         }
+    }
+
+    private static String unknownToolGuidance(String name) {
+        String toolName = name == null || name.isBlank() ? "(empty)" : name;
+        String query = toolName
+                .replace("mcp__", "")
+                .replace("__", " ")
+                .replace('_', ' ')
+                .trim();
+        if (query.isBlank()) {
+            query = toolName;
+        }
+        return "未知工具: " + toolName
+                + "\n可先调用 search_tools 查找可用工具，例如: {\"query\":\""
+                + escapeJson(query) + "\"}";
+    }
+
+    private static String escapeJson(String value) {
+        return value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     protected ToolOutput validateSkillToolAllowed(String name) {
