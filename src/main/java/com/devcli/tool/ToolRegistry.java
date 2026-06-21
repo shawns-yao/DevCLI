@@ -65,6 +65,7 @@ public class ToolRegistry {
     private final Map<String, Tool> tools = new ConcurrentHashMap<>();
     private final Map<String, McpRegisteredTool> mcpTools = new ConcurrentHashMap<>();
     private final Map<String, Long> mcpServerLifecycleVersions = new ConcurrentHashMap<>();
+    private final Set<String> activatedMcpToolDefinitions = ConcurrentHashMap.newKeySet();
     private final AtomicLong toolCatalogVersion = new AtomicLong();
     private final AtomicLong toolSearchIndexBuildCount = new AtomicLong();
     private volatile ToolSearchIndex toolSearchIndex;
@@ -861,6 +862,7 @@ public class ToolRegistry {
         StringBuilder sb = new StringBuilder("匹配工具:\n");
         for (ToolSearchMatch match : matches) {
             ToolSearchEntry entry = match.entry();
+            activateMcpToolDefinition(entry.name());
             sb.append("- ").append(entry.name()).append(": ")
                     .append(oneLine(entry.description())).append('\n');
         }
@@ -968,8 +970,19 @@ public class ToolRegistry {
      */
     public List<com.devcli.llm.LlmClient.Tool> getToolDefinitions() {
         return tools.values().stream()
+                .filter(tool -> isToolDefinitionVisible(tool.name()))
                 .map(t -> new com.devcli.llm.LlmClient.Tool(t.name(), t.description(), t.parameters()))
                 .toList();
+    }
+
+    private boolean isToolDefinitionVisible(String toolName) {
+        return !mcpTools.containsKey(toolName) || activatedMcpToolDefinitions.contains(toolName);
+    }
+
+    private void activateMcpToolDefinition(String toolName) {
+        if (toolName != null && mcpTools.containsKey(toolName)) {
+            activatedMcpToolDefinitions.add(toolName);
+        }
     }
 
     /**
@@ -1006,6 +1019,7 @@ public class ToolRegistry {
         }
         boolean removed = mcpTools.remove(toolName) != null;
         removed = tools.remove(toolName) != null || removed;
+        activatedMcpToolDefinitions.remove(toolName);
         if (removed) {
             invalidateToolSearchIndex();
         }
@@ -1132,6 +1146,7 @@ public class ToolRegistry {
         for (String toolName : existing) {
             mcpTools.remove(toolName);
             tools.remove(toolName);
+            activatedMcpToolDefinitions.remove(toolName);
         }
         if (!existing.isEmpty()) {
             invalidateToolSearchIndex();

@@ -17,6 +17,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ToolRegistryTest {
@@ -69,6 +70,28 @@ class ToolRegistryTest {
 
         assertTrue(mcp.contains("mcp__github__list_issues"), mcp);
         assertEquals(2, registry.toolSearchIndexBuildCount());
+    }
+
+    @Test
+    void mcpToolsAreDeferredFromDefinitionsUntilSearchActivatesThem() {
+        ToolRegistry registry = new ToolRegistry();
+        registry.registerMcpTool(new McpToolDescriptor(
+                "github",
+                "list_issues",
+                McpToolDescriptor.namespaced("github", "list_issues"),
+                "List GitHub issues",
+                JsonNodeFactory.instance.objectNode()
+        ), args -> "ok");
+
+        assertTrue(registry.getToolDefinitions().stream()
+                .anyMatch(tool -> "search_tools".equals(tool.name())));
+        assertFalse(registry.getToolDefinitions().stream()
+                .anyMatch(tool -> "mcp__github__list_issues".equals(tool.name())));
+
+        registry.executeTool("search_tools", "{\"query\":\"github issues\"}");
+
+        assertTrue(registry.getToolDefinitions().stream()
+                .anyMatch(tool -> "mcp__github__list_issues".equals(tool.name())));
     }
 
     @Test

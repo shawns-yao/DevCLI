@@ -30,6 +30,9 @@ class McpToolRegistrationTest {
             registry.registerMcpTool(descriptor, args -> "echo:" + args);
 
             assertTrue(registry.hasTool("mcp__demo__echo"));
+            assertTrue(registry.getToolDefinitions().stream().noneMatch(t -> t.name().equals("mcp__demo__echo")));
+            assertTrue(registry.executeTool("search_tools", "{\"query\":\"demo echo\"}")
+                    .contains("mcp__demo__echo"));
             assertTrue(registry.getToolDefinitions().stream().anyMatch(t -> t.name().equals("mcp__demo__echo")));
             assertEquals("echo:{\"text\":\"hi\"}", registry.executeTool("mcp__demo__echo", "{\"text\":\"hi\"}"));
         });
@@ -48,6 +51,8 @@ class McpToolRegistrationTest {
                     new McpToolDescriptor.Annotations(true, false, false)
             );
             registry.registerMcpTool(descriptor, args -> "ok");
+            assertTrue(registry.executeTool("search_tools", "{\"query\":\"inspect project\"}")
+                    .contains("mcp__demo__inspect"));
 
             LlmClient.Tool tool = registry.getToolDefinitions().stream()
                     .filter(t -> t.name().equals("mcp__demo__inspect"))

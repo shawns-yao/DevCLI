@@ -96,8 +96,8 @@
 ### 阶段 7：Deferred Tool / 工具搜索
 
 - 状态：部分实现（2026-06-19）
-- 已实现：新增内置 `search_tools` 工具，可按工具名、描述和参数 schema 检索当前已注册工具；检索范围包含内置工具和运行时注册的 MCP 动态工具；结果返回工具名和一行描述，为后续延迟加载工具集提供入口；未知工具调用会提示先调用 `search_tools` 并给出基于原工具名的 query 示例；`search_tools` 使用工具索引缓存，工具目录未变化时复用索引，MCP 工具注册、卸载或替换后自动失效重建
-- 未实现：默认只注入核心工具、MCP 工具延迟加载和 inter-turn prefetch 尚未实现
+- 已实现：新增内置 `search_tools` 工具，可按工具名、描述和参数 schema 检索当前已注册工具；检索范围包含内置工具和运行时注册的 MCP 动态工具；结果返回工具名和一行描述，为后续延迟加载工具集提供入口；未知工具调用会提示先调用 `search_tools` 并给出基于原工具名的 query 示例；`search_tools` 使用工具索引缓存，工具目录未变化时复用索引，MCP 工具注册、卸载或替换后自动失效重建；`getToolDefinitions()` 默认只注入内置核心工具和已激活 MCP 工具，`search_tools` 命中的 MCP 工具会激活到后续 LLM 工具定义
+- 未实现：inter-turn prefetch 尚未实现
 - 影响范围：`ToolRegistry`、MCP 动态工具注册视图、工具注册测试
 - 目标：当 MCP 工具数量较多时默认只注入核心工具和少量高频工具，提供 `search_tools` 或类似入口按工具名、描述、schema 检索并延迟加载
 - 参考点：cc 的 `SearchExtraToolsTool`、TF-IDF 工具索引和 inter-turn prefetch
