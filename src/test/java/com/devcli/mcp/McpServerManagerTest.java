@@ -156,6 +156,14 @@ class McpServerManagerTest {
         loadServersFromMap(Map.of("demo", httpConfig(webServer)));
         manager.startAll();
         assertTrue(registry.hasTool("mcp__demo__echo"));
+        McpToolDiscoveryEntry discovered = manager.toolDiscoveryCache().stream()
+                .filter(entry -> entry.serverName().equals("demo"))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(List.of("echo"), discovered.toolNames());
+        assertEquals(1, discovered.toolCount());
+        assertFalse(discovered.schemaFingerprint().isBlank());
+        assertEquals(manager.server("demo").lifecycleVersion(), discovered.lifecycleVersion());
 
         String result = manager.disable("demo");
         assertTrue(result.contains("已禁用"));
@@ -163,6 +171,10 @@ class McpServerManagerTest {
                 "disable 后 ToolRegistry 应不再持有该工具");
         McpServer server = manager.servers().iterator().next();
         assertEquals(McpServerStatus.DISABLED, server.status());
+        assertTrue(manager.toolDiscoveryCache().stream().anyMatch(entry ->
+                entry.serverName().equals("demo")
+                        && entry.toolNames().equals(List.of("echo"))
+                        && entry.lifecycleVersion() == discovered.lifecycleVersion()));
     }
 
     @Test

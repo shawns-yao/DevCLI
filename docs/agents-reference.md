@@ -143,6 +143,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - resources 双轨：虚拟工具 + @-mention 输入层
 - CLI 首屏默认只等待 MCP 启动 8 秒，慢 server 后台继续初始化并保持 `starting`，用 `/mcp` / `/mcp logs <name>` 追踪
 - McpServerManager 记录本进程连接事件：STARTING / READY / ERROR / DISABLED / TOOLS_CHANGED，事件携带 server、状态、生命周期版本、工具数量和消息
+- 工具发现缓存记录 server、生命周期版本、工具数量、工具名、schema 指纹和发现时间；disable 只移除运行时注册工具，不清除上一轮发现元数据
 - notifications 路由：tools/list_changed → 工具全量替换，resources 变化 → cache 失效
 
 ### Chrome DevTools MCP

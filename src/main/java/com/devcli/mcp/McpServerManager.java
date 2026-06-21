@@ -43,6 +43,7 @@ public class McpServerManager implements AutoCloseable {
     private final Map<String, McpServer> servers = new ConcurrentHashMap<>();
     private final McpResourceCache resourceCache = new McpResourceCache();
     private final List<McpConnectionEvent> connectionEvents = java.util.Collections.synchronizedList(new ArrayList<>());
+    private final Map<String, McpToolDiscoveryEntry> toolDiscoveryCache = new ConcurrentHashMap<>();
 
     public McpServerManager(ToolRegistry toolRegistry, Path projectDir) {
         this(toolRegistry, projectDir, new McpConfigLoader(projectDir));
@@ -194,6 +195,12 @@ public class McpServerManager implements AutoCloseable {
         synchronized (connectionEvents) {
             return List.copyOf(connectionEvents);
         }
+    }
+
+    public List<McpToolDiscoveryEntry> toolDiscoveryCache() {
+        return toolDiscoveryCache.values().stream()
+                .sorted(Comparator.comparing(McpToolDiscoveryEntry::serverName))
+                .toList();
     }
 
     public synchronized String restartWithArgs(String name, List<String> args) {
@@ -429,6 +436,7 @@ public class McpServerManager implements AutoCloseable {
             server.markStarted();
             replaceTools(server, client, tools);
             server.tools(tools);
+            cacheToolDiscovery(server, tools);
             server.status(McpServerStatus.READY);
             recordConnectionEvent(server, McpConnectionEvent.Type.READY, "ready");
         } catch (Exception e) {
@@ -471,6 +479,7 @@ public class McpServerManager implements AutoCloseable {
                 server.markToolsChanged();
                 replaceTools(server, client, tools);
                 server.tools(tools);
+                cacheToolDiscovery(server, tools);
                 recordConnectionEvent(server, McpConnectionEvent.Type.TOOLS_CHANGED, "tools/list_changed");
             } catch (Exception e) {
                 server.errorMessage("tools/list_changed 处理失败: " + e.getMessage());
@@ -498,6 +507,11 @@ public class McpServerManager implements AutoCloseable {
 
     private void recordConnectionEvent(McpServer server, McpConnectionEvent.Type type, String message) {
         connectionEvents.add(McpConnectionEvent.of(server, type, message));
+    }
+
+    private void cacheToolDiscovery(McpServer server, List<McpToolDescriptor> tools) {
+        toolDiscoveryCache.put(server.name(),
+                McpToolDiscoveryEntry.from(server.name(), server.lifecycleVersion(), tools));
     }
 
     /**
