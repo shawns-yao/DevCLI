@@ -13,7 +13,7 @@ class ExplicitMemoryHintsTest {
     void extractsYuqueLoginChromePreferenceFromExplicitRememberRequest() {
         String fact = ExplicitMemoryHints.browserLoginFact(
                 "你可以直接复用我已经登录的Chrome，记一下",
-                List.of("请打开 https://www.yuque.com/itwanger/gykdzg 这个语雀文档")
+                List.of("请打开 https://www.yuque.com/example/docs 这个语雀文档")
         );
 
         assertEquals("访问 yuque.com（语雀）时优先复用用户已登录的 Chrome 登录态。", fact);
@@ -23,7 +23,7 @@ class ExplicitMemoryHintsTest {
     void ignoresBrowserPreferenceWithoutExplicitRememberIntent() {
         String fact = ExplicitMemoryHints.browserLoginFact(
                 "你可以直接复用我已经登录的Chrome",
-                List.of("https://www.yuque.com/itwanger/gykdzg")
+                List.of("https://www.yuque.com/example/docs")
         );
 
         assertNull(fact);

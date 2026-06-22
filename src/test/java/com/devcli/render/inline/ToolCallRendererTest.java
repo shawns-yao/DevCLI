@@ -39,12 +39,12 @@ class ToolCallRendererTest {
     @Test
     void singleWebFetchCollapsedHeaderShowsUrl() {
         var grouped = ToolCallRenderer.group(List.of(
-                tc("web_fetch", "{\"url\":\"https://www.itwanger.com/about\"}")));
+                tc("web_fetch", "{\"url\":\"https://www.example.com/about\"}")));
 
         String header = ToolCallRenderer.collapsedHeader(grouped);
 
         assertTrue(header.contains("WebFetch"), header);
-        assertTrue(header.contains("www.itwanger.com/about"), header);
+        assertTrue(header.contains("www.example.com/about"), header);
     }
 
     @Test

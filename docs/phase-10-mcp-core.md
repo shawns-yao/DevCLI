@@ -416,7 +416,7 @@ audit 写入前对 args 做脱敏，避免 token / 凭证泄漏：
 - [ ] §8 手测清单 10 条全部跑过且 OK
 - [ ] §4 所有文档联动完成
 - [ ] Banner 升 v10.0.0
-- [ ] commit message 清楚交代「这是第 10 期 MCP 协议核心」+ 「测试统计」+ Co-Authored-By
+- [ ] commit message 清楚交代「这是第 10 期 MCP 协议核心」+ 「测试统计」
 
 ---
 
@@ -426,12 +426,6 @@ audit 写入前对 args 做脱敏，避免 token / 凭证泄漏：
 - 一次性 commit，message 用 heredoc 格式（参考 AGENTS.md 与最近的 commit `f90d9f5`）
 - commit 前 `git status` 确认无误改动 / 无敏感信息
 - commit message 标题 ≤ 70 字符，正文按层次列改动 + 测试统计
-- 末尾加：
-
-```
-Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
-```
-
 ---
 
 ## 13. Pre-flight 决策（已替你决定，不要再讨论）

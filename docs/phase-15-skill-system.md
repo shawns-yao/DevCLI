@@ -805,7 +805,7 @@ body
 - [ ] §9 Day 5 手测 10 条全部跑过，结果写入 commit message
 - [ ] §5.3 所有文档联动完成
 - [ ] Banner 升 v15.0.0
-- [ ] commit message 格式 + Co-Authored-By
+- [ ] commit message 格式
 
 ---
 
@@ -814,12 +814,6 @@ body
 - **不要**自行 `git push`
 - 一次性 commit，message 用 heredoc
 - commit 前 `git status` 确认无误改动 / 无敏感信息
-- 末尾加：
-
-```
-Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
-```
-
 ---
 
 ## 15. Pre-flight 决策（已替你决定，不要再讨论）

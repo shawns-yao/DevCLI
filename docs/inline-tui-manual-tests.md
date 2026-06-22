@@ -9,7 +9,7 @@
 ## 0. 启动前置
 
 ```bash
-cd /Users/itwanger/Documents/GitHub/devcli
+cd /Users/devuser/Documents/GitHub/devcli
 mvn -q clean package -DskipTests
 ```
 

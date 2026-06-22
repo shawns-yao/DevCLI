@@ -39,7 +39,7 @@ class AgentMemoryHintTest {
             ));
             agent = new Agent(llmClient);
 
-            agent.run("打开 https://www.yuque.com/itwanger/gykdzg 这个语雀文档");
+            agent.run("打开 https://www.yuque.com/example/docs 这个语雀文档");
             assertEquals(0, agent.getMemoryManager().getLongTermMemory().size());
 
             agent.run("你可以直接复用我已经登录的Chrome，记一下");

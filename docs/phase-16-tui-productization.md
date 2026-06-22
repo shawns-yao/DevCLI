@@ -1018,12 +1018,6 @@ DEVCLI_TUI=true NO_TUI=true java -jar target/devcli-1.0-SNAPSHOT.jar
 - **不要**自行 `git push`
 - 一次性 commit，message 用 heredoc
 - commit 前 `git status` 确认无误改动 / 无敏感信息
-- 末尾加：
-
-```
-Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
-```
-
 ---
 
 ## 15. Pre-flight 决策（已替你决定，不要再讨论）
