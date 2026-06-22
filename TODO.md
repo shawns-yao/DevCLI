@@ -1,5 +1,23 @@
 # TODO
 
+## 2026-06-22 RAG 索引批量 embedding 降级
+
+- 状态：已实现
+- 来源：参考 `worenbudaoni/rag-study-helper` 的文档入库流程，选择迁移批量 embedding 与失败逐条降级策略，不引入其 Spring Boot / LangChain4j 技术栈
+- 影响范围：`src/main/java/com/devcli/rag/EmbeddingClient.java`、`src/main/java/com/devcli/rag/CodeIndex.java`、`src/test/java/com/devcli/rag/CodeIndexTest.java`、`README.md`、`AGENTS.md`、`docs/agents-reference.md`
+- 已实现：`EmbeddingClient` 增加 `embedAll`；OpenAI / Zhipu 兼容接口使用 `input` 数组批量请求，Ollama 保持逐条兼容；`CodeIndex` 按文件批量生成 chunk embedding，批量失败或返回数量异常时逐条降级，保留成功 chunk 并跳过单个失败 chunk
+- 验证建议：`mvn -q -DskipTests=false "-Dtest=CodeIndexTest,EmbeddingClientTest" test`
+- 风险：Ollama 仍没有真正批量请求能力；远程 OpenAI-compatible provider 若不支持 `input` 数组，会触发逐条降级，功能正确但性能收益降低
+
+## 2026-06-22 Multi-Agent / RAG / Memory 上下文可信度修复
+
+- 状态：已实现
+- 来源：用户指出 `stepModifiedFiles` 未进入后续步骤上下文、RAG 证据解析依赖展示文本、长期记忆英文策略和跨层去重存在缺口
+- 影响范围：`src/main/java/com/devcli/agent/`、`src/main/java/com/devcli/rag/`、`src/main/java/com/devcli/memory/`、`src/main/java/com/devcli/tool/`、`AGENTS.md`、`README.md`、`docs/agents-reference.md`
+- 已实现：Multi-Agent 步骤终态把 `stepModifiedFiles` 同步到运行态 `ExecutionStep`、checkpoint 和 WorkingMemory；依赖步骤上下文和 `/team resume` 恢复 completed artifact 时保留修改文件清单；`search_code` 增加结构化 `RAG_EVIDENCE_JSON` 载荷，WorkingMemory 优先读取结构化证据并兼容旧文本；`ToolRegistry` 按项目路径复用 `CodeRetriever` / SQLite 连接；RAG 与 Memory 向量余弦相似度统一；`LongTermMemoryPolicy` 补充英文显式记忆、临时信息、个人属性和新状态规则；长期记忆注入抑制与 WorkingMemory 临时事实语义重复的条目
+- 验证建议：`mvn -q -DskipTests=false "-Dtest=AgentOrchestratorTest,MemoryManagerTest,LongTermMemoryPolicyTest,SearchResultFormatterTest,VectorStoreTest,ToolRegistryTest" test`
+- 风险：结构化 RAG 载荷仍嵌入工具文本返回；如后续工具执行框架支持 typed result，应迁移为真正的 side-channel 结果对象
+
 ## 2026-06-16 公开数据集评测框架
 
 - 状态：未实现

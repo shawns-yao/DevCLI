@@ -86,10 +86,7 @@ public class CodeIndex {
                 List<CodeChunk> chunks = chunker.chunkFile(file);
 
                 // 2. 生成 Embedding 并组装条目
-                for (CodeChunk chunk : chunks) {
-                    float[] embedding = embeddingClient.embed(chunk.toEmbeddingText());
-                    entries.add(new VectorStore.CodeChunkEntry(chunk, embedding));
-                }
+                addChunkEmbeddings(file, chunks, entries);
 
                 // 3. 分析关系（仅 Java 文件）
                 if (file.toString().endsWith(".java")) {
@@ -125,6 +122,54 @@ public class CodeIndex {
 
     private void emit(String message) {
         progressListener.onProgress(message);
+    }
+
+    private void addChunkEmbeddings(Path file,
+                                    List<CodeChunk> chunks,
+                                    List<VectorStore.CodeChunkEntry> entries) throws IOException {
+        if (chunks.isEmpty()) {
+            return;
+        }
+        try {
+            List<String> embeddingTexts = chunks.stream()
+                    .map(CodeChunk::toEmbeddingText)
+                    .toList();
+            List<float[]> embeddings = embeddingClient.embedAll(embeddingTexts);
+            if (embeddings.size() != chunks.size()) {
+                throw new IOException("批量 embedding 数量不匹配: chunks="
+                        + chunks.size() + ", embeddings=" + embeddings.size());
+            }
+            for (int i = 0; i < chunks.size(); i++) {
+                entries.add(new VectorStore.CodeChunkEntry(chunks.get(i), embeddings.get(i)));
+            }
+        } catch (Exception e) {
+            String message = "   ⚠️ 批量 embedding 失败，降级逐条处理: " + file + " - " + e.getMessage();
+            emit(message);
+            log.warn("batch embedding failed for file {}, falling back to single chunks", file, e);
+            addChunkEmbeddingsOneByOne(file, chunks, entries);
+        }
+    }
+
+    private void addChunkEmbeddingsOneByOne(Path file,
+                                            List<CodeChunk> chunks,
+                                            List<VectorStore.CodeChunkEntry> entries) throws IOException {
+        boolean hasSuccess = false;
+        IOException lastFailure = null;
+        for (CodeChunk chunk : chunks) {
+            try {
+                float[] embedding = embeddingClient.embed(chunk.toEmbeddingText());
+                entries.add(new VectorStore.CodeChunkEntry(chunk, embedding));
+                hasSuccess = true;
+            } catch (IOException e) {
+                lastFailure = e;
+                String message = "   ⚠️ 跳过 embedding 失败的代码块: " + file + " - " + e.getMessage();
+                emit(message);
+                log.warn("single chunk embedding failed for file {}", file, e);
+            }
+        }
+        if (!hasSuccess && lastFailure != null) {
+            throw lastFailure;
+        }
     }
 
     /**

@@ -10,6 +10,8 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -89,19 +91,40 @@ public class EmbeddingClient {
      * 拒绝，让上层（如 {@code MemoryVectorStore.upsert}）捕获并显式跳过。
      */
     public float[] embed(String text) throws IOException {
-        if (text == null || text.isBlank()) {
-            throw new IOException("EmbeddingClient.embed: 输入文本为空");
-        }
-
-        // 截断过长文本，防止 API 报错。阈值由构造期 maxInputChars 决定（默认 6000，可通过 EMBEDDING_MAX_INPUT_CHARS 覆盖）。
-        String input = text.length() > maxInputChars
-                ? text.substring(0, maxInputChars)
-                : text;
+        String input = normalizeInput(text);
 
         return switch (provider) {
             // provider 已经过 normalizeProvider 归一化为小写、glm→zhipu
             case "ollama" -> embedOllama(input);
             case "openai", "zhipu" -> embedOpenAICompatible(input);
+            default -> throw new IOException("BUG: provider 未在归一化列表中: " + provider);
+        };
+    }
+
+    /**
+     * 批量获取文本向量。
+     *
+     * <p>OpenAI 兼容接口使用单次请求提交 input 数组；Ollama 当前走逐条兼容路径。
+     * 调用方仍应在批量失败时逐条降级，避免一个批次失败导致整个文件索引丢失。
+     */
+    public List<float[]> embedAll(List<String> texts) throws IOException {
+        if (texts == null || texts.isEmpty()) {
+            return List.of();
+        }
+        List<String> inputs = new ArrayList<>(texts.size());
+        for (String text : texts) {
+            inputs.add(normalizeInput(text));
+        }
+
+        return switch (provider) {
+            case "ollama" -> {
+                List<float[]> embeddings = new ArrayList<>(inputs.size());
+                for (String input : inputs) {
+                    embeddings.add(embedOllama(input));
+                }
+                yield embeddings;
+            }
+            case "openai", "zhipu" -> embedOpenAICompatibleBatch(inputs);
             default -> throw new IOException("BUG: provider 未在归一化列表中: " + provider);
         };
     }
@@ -128,6 +151,34 @@ public class EmbeddingClient {
         return embedding;
     }
 
+    private List<float[]> embedOpenAICompatibleBatch(List<String> texts) throws IOException {
+        String url = baseUrl + "/embeddings";
+
+        ObjectNode requestBody = mapper.createObjectNode();
+        requestBody.put("model", model);
+        requestBody.putArray("input").addAll(texts.stream()
+                .map(mapper.getNodeFactory()::textNode)
+                .toList());
+
+        String responseBody = postJson(url, requestBody.toString(), true);
+        JsonNode root = mapper.readTree(responseBody);
+        JsonNode data = root.path("data");
+
+        if (!data.isArray() || data.size() != texts.size()) {
+            throw new IOException("API 返回的批量 embedding 数量不正确: " + responseBody);
+        }
+
+        List<float[]> embeddings = new ArrayList<>(data.size());
+        for (JsonNode item : data) {
+            JsonNode embeddingNode = item.path("embedding");
+            if (!embeddingNode.isArray()) {
+                throw new IOException("API 返回的 embedding 格式不正确: " + responseBody);
+            }
+            embeddings.add(toFloatArray(embeddingNode));
+        }
+        return embeddings;
+    }
+
     private float[] embedOpenAICompatible(String text) throws IOException {
         String url = baseUrl + "/embeddings";
 
@@ -144,6 +195,13 @@ public class EmbeddingClient {
         }
 
         JsonNode embeddingNode = data.get(0).path("embedding");
+        if (!embeddingNode.isArray()) {
+            throw new IOException("API 返回的 embedding 格式不正确: " + responseBody);
+        }
+        return toFloatArray(embeddingNode);
+    }
+
+    private float[] toFloatArray(JsonNode embeddingNode) {
         float[] embedding = new float[embeddingNode.size()];
         for (int i = 0; i < embeddingNode.size(); i++) {
             embedding[i] = (float) embeddingNode.get(i).asDouble();
@@ -194,6 +252,15 @@ public class EmbeddingClient {
         } catch (NumberFormatException e) {
             return defaultValue;
         }
+    }
+
+    private String normalizeInput(String text) throws IOException {
+        if (text == null || text.isBlank()) {
+            throw new IOException("EmbeddingClient.embed: 输入文本为空");
+        }
+        return text.length() > maxInputChars
+                ? text.substring(0, maxInputChars)
+                : text;
     }
 
     private static String getEnv(String key, String defaultValue) {
