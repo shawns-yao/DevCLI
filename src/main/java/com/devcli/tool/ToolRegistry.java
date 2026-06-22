@@ -15,7 +15,9 @@ import com.devcli.lsp.LspManager;
 import com.devcli.mcp.protocol.McpSchemaValidator;
 import com.devcli.mcp.protocol.McpToolDescriptor;
 import com.devcli.rag.CodeRetriever;
+import com.devcli.rag.RagEvidencePayload;
 import com.devcli.rag.SearchResultFormatter;
+import com.devcli.rag.SymbolInvalidation;
 import com.devcli.rag.VectorStore;
 import com.devcli.policy.AuditLog;
 import com.devcli.policy.CommandGuard;
@@ -51,7 +53,7 @@ import java.util.function.Function;
 /**
  * 工具注册表 - 管理所有可用工具
  */
-public class ToolRegistry {
+public class ToolRegistry implements AutoCloseable {
     private static final ObjectMapper mapper = new ObjectMapper();
     private static final int DEFAULT_COMMAND_TIMEOUT_SECONDS = 60;
     private static final int DEFAULT_TOOL_BATCH_TIMEOUT_SECONDS = 90;
@@ -97,6 +99,8 @@ public class ToolRegistry {
     private LspManager lspManager = new LspManager(projectPath);
     private SnapshotService snapshotService = SnapshotService.forProject(Path.of(projectPath));
     private boolean customSnapshotService;
+    private CodeRetriever cachedCodeRetriever;
+    private String cachedCodeRetrieverProjectPath = "";
 
     public ToolRegistry() {
         this(DEFAULT_COMMAND_TIMEOUT_SECONDS, DEFAULT_TOOL_BATCH_TIMEOUT_SECONDS);
@@ -126,6 +130,7 @@ public class ToolRegistry {
      * 设置代码检索的项目路径
      */
     public void setProjectPath(String projectPath) {
+        closeCachedCodeRetriever();
         this.projectPath = projectPath;
         this.pathGuard = new PathGuard(projectPath);
         this.lspManager.setProjectPath(projectPath);
@@ -135,6 +140,36 @@ public class ToolRegistry {
             this.snapshotService.close();
             this.snapshotService = SnapshotService.forProject(Path.of(projectPath));
         }
+    }
+
+    private synchronized CodeRetriever getCodeRetriever() throws Exception {
+        String normalizedProjectPath = Path.of(projectPath).toAbsolutePath().normalize().toString();
+        if (cachedCodeRetriever == null || !normalizedProjectPath.equals(cachedCodeRetrieverProjectPath)) {
+            closeCachedCodeRetriever();
+            cachedCodeRetriever = new CodeRetriever(normalizedProjectPath);
+            cachedCodeRetrieverProjectPath = normalizedProjectPath;
+        }
+        return cachedCodeRetriever;
+    }
+
+    private synchronized void closeCachedCodeRetriever() {
+        if (cachedCodeRetriever == null) {
+            cachedCodeRetrieverProjectPath = "";
+            return;
+        }
+        try {
+            cachedCodeRetriever.close();
+        } catch (Exception ignored) {
+        } finally {
+            cachedCodeRetriever = null;
+            cachedCodeRetrieverProjectPath = "";
+        }
+    }
+
+    @Override
+    public void close() {
+        closeCachedCodeRetriever();
+        snapshotService.close();
     }
 
     /**
@@ -497,27 +532,40 @@ public class ToolRegistry {
                     } catch (NumberFormatException ignored) {
                     }
 
-                    try (CodeRetriever retriever = new CodeRetriever(projectPath)) {
-                        var stats = retriever.getStats();
-                        if (stats.chunkCount() == 0) {
-                            return "代码库尚未索引，请先使用 /index 命令索引当前项目。";
-                        }
+                    try {
+                        CodeRetriever retriever = getCodeRetriever();
+                        synchronized (retriever) {
+                            var stats = retriever.getStats();
+                            if (stats.chunkCount() == 0) {
+                                return "代码库尚未索引，请先使用 /index 命令索引当前项目。";
+                            }
 
-                        List<VectorStore.SearchResult> results = retriever.search(query, topK, args.get("mode"), graphDepth);
-                        if (results.isEmpty()) {
-                            results = retriever.search(query, topK, "general", 1);
-                        }
-                        if (results.isEmpty()) {
-                            return "未找到与查询相关的代码。";
-                        }
+                            List<VectorStore.SearchResult> results = retriever.search(query, topK, args.get("mode"), graphDepth);
+                            if (results.isEmpty()) {
+                                results = retriever.search(query, topK, "general", 1);
+                            }
+                            List<SymbolInvalidation> invalidations =
+                                    retriever.relevantInvalidations(query, Math.min(topK, 10));
+                            String invalidationFacts = SearchResultFormatter.formatInvalidations(invalidations);
+                            if (results.isEmpty()) {
+                                if (!invalidationFacts.isBlank()) {
+                                    return RagEvidencePayload.appendTo(invalidationFacts, query, results, invalidations);
+                                }
+                                return "未找到与查询相关的代码。";
+                            }
 
-                        String formatted = SearchResultFormatter.formatForTool(query, results);
-                        if (retriever.lastSemanticDegraded()) {
-                            formatted = "（注意：语义检索服务不可用，本次已降级为关键词+结构化检索，结果可能不完整）\n\n"
-                                    + formatted;
+                            String formatted = SearchResultFormatter.formatForTool(query, results);
+                            if (!invalidationFacts.isBlank()) {
+                                formatted = formatted + "\n\n" + invalidationFacts;
+                            }
+                            if (retriever.lastSemanticDegraded()) {
+                                formatted = "（注意：语义检索服务不可用，本次已降级为关键词+结构化检索，结果可能不完整）\n\n"
+                                        + formatted;
+                            }
+                            return RagEvidencePayload.appendTo(formatted, query, results, invalidations);
                         }
-                        return formatted;
                     } catch (Exception e) {
+                        closeCachedCodeRetriever();
                         return "代码检索失败: " + e.getMessage();
                     }
                 }

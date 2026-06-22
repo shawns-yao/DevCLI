@@ -2,6 +2,9 @@ package com.devcli.memory;
 
 import com.devcli.llm.GLMClient;
 import com.devcli.llm.LlmClient;
+import com.devcli.rag.RagEvidencePayload;
+import com.devcli.rag.SymbolInvalidation;
+import com.devcli.rag.VectorStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -284,6 +287,45 @@ class MemoryManagerTest {
     }
 
     @Test
+    void searchCodeToolResultShouldPreferStructuredRagEvidencePayload() {
+        try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {
+            SymbolInvalidation invalidation = new SymbolInvalidation(
+                    "CodeRetriever.java#method#CodeRetriever.search",
+                    "src/main/java/com/devcli/rag/CodeRetriever.java",
+                    "method",
+                    "CodeRetriever.search",
+                    "sv_old",
+                    "sv_new",
+                    "idx_old",
+                    "idx_new",
+                    "cp-1",
+                    "Do not rely on CodeRetriever.search from symbolVersion sv_old.");
+            VectorStore.SearchResult searchResult = new VectorStore.SearchResult(
+                    "src/main/java/com/devcli/rag/CodeRetriever.java",
+                    "method",
+                    "CodeRetriever.search",
+                    "content",
+                    0.91,
+                    "sv_new",
+                    "cp-1",
+                    "idx_new",
+                    List.of(invalidation));
+            String result = RagEvidencePayload.appendTo("formatter text can change",
+                    "CodeRetriever search", List.of(searchResult), List.of());
+
+            memoryManager.addToolResult("search_code", "{\"query\":\"ignored legacy query\"}", result);
+
+            String section = memoryManager.buildWorkingMemorySection();
+            assertEquals(1, memoryManager.getWorkingMemory().getRagEvidenceMemory().size());
+            assertTrue(section.contains("symbolVersion=sv_new"));
+            assertTrue(section.contains("indexEpoch=idx_new"));
+            assertTrue(section.contains("query=CodeRetriever search"));
+            assertTrue(section.contains("NegativeFact（负向事实）"));
+        }
+    }
+
+    @Test
     void storeFactWithPolicyShouldSkipLowValueTemporaryFacts() {
         try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
              MemoryManager memoryManager = new MemoryManager(
@@ -326,6 +368,21 @@ class MemoryManagerTest {
 
             assertTrue(result.stored(), result.message());
             assertEquals("explicit", longTermMemory.getAll().get(0).getMetadata().get("source"));
+        }
+    }
+
+    @Test
+    void buildContextForQueryShouldSuppressFactsAlreadyInWorkingMemory() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+            String fact = "请记住：我默认使用 Java 17 开发";
+            memoryManager.storeFactWithPolicy(fact);
+            memoryManager.addVolatileFact("用户最新输入: " + fact);
+
+            String context = memoryManager.buildContextForQuery("Java 17", 512);
+
+            assertFalse(context.contains(fact), context);
         }
     }
 

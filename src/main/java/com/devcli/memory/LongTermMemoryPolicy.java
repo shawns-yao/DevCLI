@@ -96,6 +96,7 @@ public final class LongTermMemoryPolicy {
     }
 
     private static boolean hasExplicitRememberIntent(String text) {
+        String lower = text.toLowerCase(Locale.ROOT);
         return text.contains("记住")
                 || text.contains("记一下")
                 || text.contains("记下来")
@@ -103,10 +104,20 @@ public final class LongTermMemoryPolicy {
                 || text.contains("下次记得")
                 || text.contains("以后默认")
                 || text.contains("保存到长期记忆")
-                || text.contains("保存这个偏好");
+                || text.contains("保存这个偏好")
+                || lower.startsWith("remember ")
+                || lower.startsWith("remember:")
+                || lower.contains(" remember that ")
+                || lower.contains("please remember")
+                || lower.contains("save this preference")
+                || lower.contains("store this in long-term memory")
+                || lower.contains("add this to long-term memory")
+                || lower.contains("for future sessions")
+                || lower.contains("next time remember");
     }
 
     private static String sensitivity(String text) {
+        String lower = text.toLowerCase(Locale.ROOT);
         if (ID_CARD.matcher(text).find() || TOKEN.matcher(text).find()) {
             return "high";
         }
@@ -119,7 +130,13 @@ public final class LongTermMemoryPolicy {
                 || text.contains("手机号")
                 || text.contains("电话")
                 || text.contains("病历")
-                || text.contains("诊断")) {
+                || text.contains("诊断")
+                || lower.contains("password")
+                || lower.contains("phone number")
+                || lower.contains("home address")
+                || lower.contains("shipping address")
+                || lower.contains("medical record")
+                || lower.contains("diagnosis")) {
             return "medium";
         }
         return "low";
@@ -127,38 +144,57 @@ public final class LongTermMemoryPolicy {
 
     private static String memoryType(String text) {
         String lower = text.toLowerCase(Locale.ROOT);
-        if (text.contains("项目") || lower.contains("mvn ") || lower.contains("gradle ")
-                || lower.contains("npm ") || lower.contains("pnpm ") || lower.contains("pytest")) {
+        if (text.contains("项目") || lower.contains("project") || lower.contains("repo")
+                || lower.contains("repository") || lower.contains("mvn ") || lower.contains("maven")
+                || lower.contains("gradle ") || lower.contains("npm ") || lower.contains("pnpm ")
+                || lower.contains("pytest")) {
             return "project";
         }
         if (text.contains("偏好") || text.contains("默认") || text.contains("喜欢")
                 || text.contains("习惯") || text.contains("用中文") || text.contains("短句")
-                || text.contains("优先")) {
+                || text.contains("优先")
+                || lower.contains("preference") || lower.contains("prefer ")
+                || lower.contains("default") || lower.contains("always use")
+                || lower.contains("answer in") || lower.contains("short sentences")
+                || lower.contains("priority")) {
             return "preference";
         }
+        boolean profileSelfReference = text.contains("我是") || text.contains("我在") || text.contains("我的")
+                || lower.contains("i am ") || lower.contains("i'm ") || lower.contains("my role is ")
+                || lower.contains("i work as ") || lower.contains("my job is ");
         if (isPersonalAttribute(text) || isNovelProfileFact(text)
-                || (text.contains("我是") || text.contains("我在") || text.contains("我的"))
-                && !isLowReuseThirdPartyFact(text)) {
+                || (profileSelfReference && !isLowReuseThirdPartyFact(text))) {
             return "profile";
         }
         return "fact";
     }
 
     private static boolean isTemporary(String text) {
-        return containsAny(text, "今天", "刚才", "刚刚", "这次", "临时", "暂时", "现在先", "先不用管");
+        String lower = text.toLowerCase(Locale.ROOT);
+        return containsAny(text, "今天", "刚才", "刚刚", "这次", "临时", "暂时", "现在先", "先不用管")
+                || containsAny(lower, "today", "just now", "this time", "temporary", "temporarily",
+                "for now", "right now", "current task");
     }
 
     private static boolean isPersonalAttribute(String text) {
-        return text.matches(".*(我是|我是一名|我的职业是|我从事|我在做|我负责).{0,24}(医生|老师|教师|律师|学生|工程师|程序员|开发|产品经理|设计师|运维|测试|研究员).*");
+        String lower = text.toLowerCase(Locale.ROOT);
+        return text.matches(".*(我是|我是一名|我的职业是|我从事|我在做|我负责).{0,24}(医生|老师|教师|律师|学生|工程师|程序员|开发|产品经理|设计师|运维|测试|研究员).*")
+                || lower.matches(".*(i am|i'm|my role is|i work as|my job is).{0,32}(doctor|teacher|lawyer|student|engineer|developer|programmer|product manager|designer|devops|tester|researcher).*");
     }
 
     private static boolean isNovelProfileFact(String text) {
-        return containsAny(text, "搬到", "迁到", "入职", "离职", "转行", "换工作", "换城市", "定居")
-                && containsAny(text, "我", "我的");
+        String lower = text.toLowerCase(Locale.ROOT);
+        return (containsAny(text, "搬到", "迁到", "入职", "离职", "转行", "换工作", "换城市", "定居")
+                && containsAny(text, "我", "我的"))
+                || (containsAny(lower, "moved to", "relocated to", "joined ", "left ", "changed jobs",
+                "switched careers", "settled in")
+                && containsAny(lower, "i ", "my ", "i'm "));
     }
 
     private static boolean isLowReuseThirdPartyFact(String text) {
-        return containsAny(text, "朋友", "同学", "同事", "孩子", "高考");
+        String lower = text.toLowerCase(Locale.ROOT);
+        return containsAny(text, "朋友", "同学", "同事", "孩子", "高考")
+                || containsAny(lower, "friend", "classmate", "colleague", "coworker", "child", "exam");
     }
 
     private static boolean isCoreMemoryType(String memoryType) {
@@ -166,8 +202,11 @@ public final class LongTermMemoryPolicy {
     }
 
     private static boolean isSpecific(String text) {
+        String lower = text.toLowerCase(Locale.ROOT);
         return text.length() >= 6
-                && containsAny(text, "默认", "使用", "命令", "路径", "偏好", "语言", "测试", "优先", "版本");
+                && (containsAny(text, "默认", "使用", "命令", "路径", "偏好", "语言", "测试", "优先", "版本")
+                || containsAny(lower, "default", "use ", "command", "path", "preference",
+                "language", "test", "priority", "version"));
     }
 
     private static boolean containsAny(String text, String... needles) {

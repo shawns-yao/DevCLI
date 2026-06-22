@@ -4,6 +4,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -105,6 +106,10 @@ public class MemoryRetriever {
      * 构建上下文：将相关长期记忆组装成文本，用于注入到 LLM 的 system prompt 中。
      */
     public String buildContextForQuery(String query, int maxTokens) {
+        return buildContextForQuery(query, maxTokens, List.of());
+    }
+
+    public String buildContextForQuery(String query, int maxTokens, Collection<String> suppressedFacts) {
         List<MemoryEntry> relevant = retrieveLongTerm(query, 10);
         if (relevant.isEmpty()) return "";
 
@@ -112,14 +117,22 @@ public class MemoryRetriever {
         context.append("## 相关长期记忆\n\n");
 
         int usedTokens = 0;
+        int appended = 0;
         for (MemoryEntry entry : relevant) {
+            if (MemoryFactDeduper.duplicatesAny(entry.getContent(), suppressedFacts)) {
+                continue;
+            }
             if (usedTokens + entry.getTokenCount() > maxTokens) break;
 
             context.append("- [").append(entry.getType()).append("] ")
                     .append(entry.getContent()).append("\n");
             usedTokens += entry.getTokenCount();
+            appended++;
         }
 
+        if (appended == 0) {
+            return "";
+        }
         context.append("\n");
         return context.toString();
     }

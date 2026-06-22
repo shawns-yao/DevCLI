@@ -312,18 +312,20 @@ public class MemoryManager implements AutoCloseable {
      */
     public String buildContextForQuery(String query, int maxTokens) {
         int safeBudget = Math.max(64, maxTokens);
-        String inventory = buildLongTermMemoryInventorySnapshot(5, Math.min(256, safeBudget));
+        List<String> volatileFacts = workingMemory.getVolatileFacts();
+        String inventory = buildLongTermMemoryInventorySnapshot(5, Math.min(256, safeBudget), volatileFacts);
         int relevantBudget = Math.max(0, safeBudget - MemoryEntry.estimateTokens(inventory));
-        String relevant = relevantBudget == 0 ? "" : retriever.buildContextForQuery(query, relevantBudget);
+        String relevant = relevantBudget == 0 ? "" : retriever.buildContextForQuery(query, relevantBudget, volatileFacts);
         if (relevant.isBlank()) {
             return inventory;
         }
         return inventory + "\n\n" + relevant.trim();
     }
 
-    private String buildLongTermMemoryInventorySnapshot(int limit, int maxTokens) {
+    private String buildLongTermMemoryInventorySnapshot(int limit, int maxTokens, List<String> suppressedFacts) {
         List<MemoryEntry> activeEntries = longTermMemory.getAll().stream()
                 .filter(MemoryEntry::isActive)
+                .filter(entry -> !MemoryFactDeduper.duplicatesAny(entry.getContent(), suppressedFacts))
                 .sorted(java.util.Comparator.comparing(MemoryEntry::getTimestamp).reversed())
                 .toList();
         int total = activeEntries.size();

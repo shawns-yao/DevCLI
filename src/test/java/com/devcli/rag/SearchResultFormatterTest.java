@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class SearchResultFormatterTest {
 
@@ -79,5 +80,42 @@ class SearchResultFormatterTest {
 
         assertTrue(output.contains("negativeFact: Do not rely on CodeRetriever.search from symbolVersion sv_old."));
         assertTrue(output.contains("oldSymbolVersion=sv_old"));
+    }
+
+    @Test
+    void ragEvidencePayloadRoundTripsStructuredEvidenceAndInvalidations() {
+        SymbolInvalidation invalidation = new SymbolInvalidation(
+                "CodeRetriever.java#method#CodeRetriever.search",
+                "src/main/java/com/devcli/rag/CodeRetriever.java",
+                "method",
+                "CodeRetriever.search",
+                "sv_old",
+                "sv_new",
+                "idx_old",
+                "idx_new",
+                "cp-1",
+                "Do not rely on CodeRetriever.search from symbolVersion sv_old.");
+        List<VectorStore.SearchResult> results = List.of(
+                new VectorStore.SearchResult(
+                        "src/main/java/com/devcli/rag/CodeRetriever.java",
+                        "method",
+                        "CodeRetriever.search",
+                        "content",
+                        0.91,
+                        "sv_new",
+                        "cp-1",
+                        "idx_new",
+                        List.of(invalidation)
+                )
+        );
+
+        String output = RagEvidencePayload.appendTo("visible", "CodeRetriever search", results, List.of());
+        RagEvidencePayload.Payload payload = RagEvidencePayload.extract(output);
+
+        assertEquals(1, payload.evidence().size());
+        assertEquals("CodeRetriever.search", payload.evidence().get(0).symbolName());
+        assertEquals("idx_new", payload.evidence().get(0).indexEpoch());
+        assertEquals(1, payload.negativeFacts().size());
+        assertEquals("sv_old", payload.negativeFacts().get(0).oldSymbolVersion());
     }
 }

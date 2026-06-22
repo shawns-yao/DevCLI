@@ -380,6 +380,10 @@ public class CodeRetriever implements AutoCloseable {
         return vectorStore.getStats();
     }
 
+    public List<SymbolInvalidation> relevantInvalidations(String query, int limit) throws SQLException {
+        return vectorStore.getRelevantInvalidations(query, limit);
+    }
+
     @Override
     public void close() throws Exception {
         vectorStore.close();

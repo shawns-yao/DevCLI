@@ -1,5 +1,6 @@
 package com.devcli.rag;
 
+import com.devcli.util.VectorMath;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -10,6 +11,7 @@ import java.sql.*;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -161,7 +163,7 @@ public class VectorStore implements AutoCloseable {
             clearChunksAndRelations();
             insertChunks(entries, indexEpoch);
             insertRelations(relations);
-            List<SymbolInvalidation> invalidations = diffInvalidations(oldSnapshots, getSymbolSnapshots());
+            List<SymbolInvalidation> invalidations = diffInvalidations(oldSnapshots, getSymbolSnapshots(), safeIndexEpoch(indexEpoch));
             insertInvalidations(invalidations);
             connection.commit();
         } catch (SQLException e) {
@@ -215,13 +217,19 @@ public class VectorStore implements AutoCloseable {
     }
 
     private List<SymbolInvalidation> diffInvalidations(Map<String, SymbolSnapshot> oldSnapshots,
-                                                       Map<String, SymbolSnapshot> newSnapshots) {
+                                                       Map<String, SymbolSnapshot> newSnapshots,
+                                                       String newIndexEpoch) {
         List<SymbolInvalidation> invalidations = new ArrayList<>();
         for (Map.Entry<String, SymbolSnapshot> entry : newSnapshots.entrySet()) {
             SymbolSnapshot oldSnapshot = oldSnapshots.get(entry.getKey());
             SymbolSnapshot newSnapshot = entry.getValue();
             if (oldSnapshot != null && !oldSnapshot.symbolVersion().equals(newSnapshot.symbolVersion())) {
                 invalidations.add(SymbolInvalidation.from(oldSnapshot, newSnapshot));
+            }
+        }
+        for (Map.Entry<String, SymbolSnapshot> entry : oldSnapshots.entrySet()) {
+            if (!newSnapshots.containsKey(entry.getKey())) {
+                invalidations.add(SymbolInvalidation.deleted(entry.getValue(), newIndexEpoch));
             }
         }
         return invalidations;
@@ -238,7 +246,10 @@ public class VectorStore implements AutoCloseable {
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
         boolean autoCommit = connection.getAutoCommit();
-        connection.setAutoCommit(false);
+        boolean manageTransaction = autoCommit;
+        if (manageTransaction) {
+            connection.setAutoCommit(false);
+        }
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             for (SymbolInvalidation invalidation : invalidations) {
                 ps.setString(1, projectPath);
@@ -255,13 +266,57 @@ public class VectorStore implements AutoCloseable {
                 ps.addBatch();
             }
             ps.executeBatch();
-            connection.commit();
+            if (manageTransaction) {
+                connection.commit();
+            }
         } catch (SQLException e) {
-            connection.rollback();
+            if (manageTransaction) {
+                connection.rollback();
+            }
             throw e;
         } finally {
-            connection.setAutoCommit(autoCommit);
+            if (manageTransaction) {
+                connection.setAutoCommit(autoCommit);
+            }
         }
+    }
+
+    public List<SymbolInvalidation> getRelevantInvalidations(String query, int limit) throws SQLException {
+        if (query == null || query.isBlank() || limit <= 0) {
+            return List.of();
+        }
+        String normalizedQuery = normalizeForMatch(query);
+        return getRecentInvalidations(Math.max(limit * 5, limit)).stream()
+                .filter(invalidation -> matchesInvalidationQuery(invalidation, normalizedQuery))
+                .limit(limit)
+                .toList();
+    }
+
+    private boolean matchesInvalidationQuery(SymbolInvalidation invalidation, String normalizedQuery) {
+        if (invalidation == null || normalizedQuery.isBlank()) {
+            return false;
+        }
+        String haystack = normalizeForMatch(String.join(" ",
+                invalidation.symbolKey(),
+                invalidation.filePath(),
+                invalidation.chunkType(),
+                invalidation.name(),
+                invalidation.negativeFact()));
+        for (String token : normalizedQuery.split("\\s+")) {
+            if (!token.isBlank() && haystack.contains(token)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String normalizeForMatch(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.toLowerCase(Locale.ROOT)
+                .replaceAll("[^\\p{IsAlphabetic}\\p{IsDigit}]+", " ")
+                .trim();
     }
 
     public List<SymbolInvalidation> getInvalidationsForSymbol(String symbolKey, int limit) throws SQLException {
@@ -644,21 +699,7 @@ public class VectorStore implements AutoCloseable {
     }
 
     private double cosineSimilarity(float[] a, float[] b) {
-        if (a.length != b.length) {
-            return 0.0;
-        }
-        double dot = 0.0;
-        double normA = 0.0;
-        double normB = 0.0;
-        for (int i = 0; i < a.length; i++) {
-            dot += a[i] * b[i];
-            normA += a[i] * a[i];
-            normB += b[i] * b[i];
-        }
-        if (normA == 0.0 || normB == 0.0) {
-            return 0.0;
-        }
-        return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+        return VectorMath.cosineSimilarity(a, b);
     }
 
     private String embeddingToJson(float[] embedding) {

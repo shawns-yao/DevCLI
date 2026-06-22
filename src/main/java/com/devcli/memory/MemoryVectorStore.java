@@ -1,5 +1,6 @@
 package com.devcli.memory;
 
+import com.devcli.util.VectorMath;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -237,15 +238,7 @@ public class MemoryVectorStore implements AutoCloseable {
     }
 
     private static double cosineSimilarity(float[] a, float[] b) {
-        double dot = 0, na = 0, nb = 0;
-        int n = Math.min(a.length, b.length);
-        for (int i = 0; i < n; i++) {
-            dot += a[i] * b[i];
-            na += a[i] * a[i];
-            nb += b[i] * b[i];
-        }
-        if (na == 0 || nb == 0) return 0;
-        return dot / (Math.sqrt(na) * Math.sqrt(nb));
+        return VectorMath.cosineSimilarity(a, b);
     }
 
     public record SearchResult(String factId, String content, double similarity) {

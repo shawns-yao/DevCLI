@@ -98,6 +98,27 @@ class VectorStoreTest {
     }
 
     @Test
+    void replaceProjectIndexRecordsSymbolInvalidationWhenSymbolIsDeleted() throws Exception {
+        CodeChunk oldChunk = CodeChunk.methodChunk("UserService.java", "UserService.findUser",
+                "public User findUser(Long id) { return null; }", 1, 3);
+
+        store.replaceProjectIndex(
+                List.of(new VectorStore.CodeChunkEntry(oldChunk, new float[]{1.0f, 0.0f})),
+                List.of(),
+                "idx-old");
+        store.replaceProjectIndex(List.of(), List.of(), "idx-new");
+
+        List<SymbolInvalidation> invalidations = store.getRecentInvalidations(10);
+        assertEquals(1, invalidations.size());
+        SymbolInvalidation invalidation = invalidations.get(0);
+        assertEquals("idx-old", invalidation.oldIndexEpoch());
+        assertEquals("idx-new", invalidation.newIndexEpoch());
+        assertEquals("deleted", invalidation.newSymbolVersion());
+        assertTrue(invalidation.negativeFact().contains("Do not rely on UserService.findUser"));
+        assertTrue(invalidation.negativeFact().contains("removed from current index"));
+    }
+
+    @Test
     void currentIndexEpochTracksLatestProjectIndex() throws Exception {
         CodeChunk oldChunk = CodeChunk.fileChunk("old.md", "old content");
         CodeChunk newChunk = CodeChunk.fileChunk("new.md", "new content");

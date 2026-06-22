@@ -29,4 +29,21 @@ public record SymbolInvalidation(String symbolKey,
                 newSnapshot.classpathEpoch(),
                 negativeFact);
     }
+
+    public static SymbolInvalidation deleted(SymbolSnapshot oldSnapshot, String newIndexEpoch) {
+        String negativeFact = "Do not rely on " + oldSnapshot.name()
+                + " from symbolVersion " + oldSnapshot.symbolVersion()
+                + ". This symbol was removed from current index; refresh surrounding code before editing related paths.";
+        return new SymbolInvalidation(
+                oldSnapshot.symbolKey(),
+                oldSnapshot.filePath(),
+                oldSnapshot.chunkType(),
+                oldSnapshot.name(),
+                oldSnapshot.symbolVersion(),
+                "deleted",
+                oldSnapshot.indexEpoch(),
+                newIndexEpoch == null || newIndexEpoch.isBlank() ? "none" : newIndexEpoch,
+                oldSnapshot.classpathEpoch(),
+                negativeFact);
+    }
 }

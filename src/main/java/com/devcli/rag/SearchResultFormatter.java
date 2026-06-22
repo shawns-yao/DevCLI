@@ -66,6 +66,22 @@ public final class SearchResultFormatter {
         return sb.toString().trim();
     }
 
+    public static String formatInvalidations(List<SymbolInvalidation> invalidations) {
+        if (invalidations == null || invalidations.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder("相关失效事实:\n");
+        for (SymbolInvalidation invalidation : invalidations) {
+            sb.append("- negativeFact: ").append(invalidation.negativeFact())
+                    .append(" oldSymbolVersion=").append(invalidation.oldSymbolVersion())
+                    .append(", newSymbolVersion=").append(invalidation.newSymbolVersion())
+                    .append(", oldIndexEpoch=").append(invalidation.oldIndexEpoch())
+                    .append(", newIndexEpoch=").append(invalidation.newIndexEpoch())
+                    .append('\n');
+        }
+        return sb.toString().trim();
+    }
+
     static String buildSummary(String query, List<VectorStore.SearchResult> results) {
         if (results.isEmpty()) {
             return "搜索摘要:\n- 没有命中可用代码块。";

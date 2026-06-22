@@ -21,6 +21,16 @@ class LongTermMemoryPolicyTest {
     }
 
     @Test
+    void englishExplicitRememberPreferenceShouldBeSavedAutomatically() {
+        LongTermMemoryPolicy.Decision decision =
+                LongTermMemoryPolicy.evaluate("Please remember: I prefer short English answers", 0);
+
+        assertEquals(LongTermMemoryPolicy.Action.SAVE, decision.action());
+        assertEquals("preference", decision.metadata().get("memory_type"));
+        assertEquals("explicit", decision.metadata().get("source"));
+    }
+
+    @Test
     void explicitLowRiskRememberInstructionShouldWinOverLowReuseHeuristics() {
         LongTermMemoryPolicy.Decision decision =
                 LongTermMemoryPolicy.evaluate("请记住：我朋友的孩子今天高考", 0);
@@ -34,6 +44,15 @@ class LongTermMemoryPolicyTest {
     void casualTemporaryMessageShouldStayShortTermOnly() {
         LongTermMemoryPolicy.Decision decision =
                 LongTermMemoryPolicy.evaluate("今天地铁好挤，天气也不错", 0);
+
+        assertEquals(LongTermMemoryPolicy.Action.SKIP, decision.action());
+        assertEquals("TEMPORARY_LOW_VALUE", decision.metadata().get("reason_code"));
+    }
+
+    @Test
+    void englishTemporaryMessageShouldStayShortTermOnly() {
+        LongTermMemoryPolicy.Decision decision =
+                LongTermMemoryPolicy.evaluate("Today I am temporarily using a different branch", 0);
 
         assertEquals(LongTermMemoryPolicy.Action.SKIP, decision.action());
         assertEquals("TEMPORARY_LOW_VALUE", decision.metadata().get("reason_code"));
@@ -71,9 +90,29 @@ class LongTermMemoryPolicyTest {
     }
 
     @Test
+    void englishPersonalProfileAttributeShouldBeSavedAsNewStableFact() {
+        LongTermMemoryPolicy.Decision decision =
+                LongTermMemoryPolicy.evaluate("I am a backend engineer", 0);
+
+        assertEquals(LongTermMemoryPolicy.Action.SAVE, decision.action());
+        assertEquals("profile", decision.metadata().get("memory_type"));
+        assertEquals("PROFILE_ATTRIBUTE", decision.metadata().get("reason_code"));
+    }
+
+    @Test
     void novelPersonalLifeEventShouldRequireConfirmationInsteadOfAutomaticSave() {
         LongTermMemoryPolicy.Decision decision =
                 LongTermMemoryPolicy.evaluate("我刚刚搬到北京", 0);
+
+        assertEquals(LongTermMemoryPolicy.Action.CONFIRM, decision.action());
+        assertEquals("profile", decision.metadata().get("memory_type"));
+        assertEquals("NOVEL_PROFILE_FACT_REQUIRES_CONFIRMATION", decision.metadata().get("reason_code"));
+    }
+
+    @Test
+    void englishNovelProfileFactShouldRequireConfirmation() {
+        LongTermMemoryPolicy.Decision decision =
+                LongTermMemoryPolicy.evaluate("I moved to Berlin", 0);
 
         assertEquals(LongTermMemoryPolicy.Action.CONFIRM, decision.action());
         assertEquals("profile", decision.metadata().get("memory_type"));

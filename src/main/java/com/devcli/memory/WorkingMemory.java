@@ -1,5 +1,6 @@
 package com.devcli.memory;
 
+import com.devcli.rag.RagEvidencePayload;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -546,6 +547,31 @@ public class WorkingMemory {
         if (!"search_code".equals(toolName) || result == null || result.isBlank()) {
             return;
         }
+        RagEvidencePayload.Payload payload = RagEvidencePayload.extract(result);
+        if (!payload.evidence().isEmpty() || !payload.negativeFacts().isEmpty()) {
+            for (RagEvidencePayload.Evidence evidence : payload.evidence()) {
+                addRagEvidence(new RagEvidence(
+                        evidence.filePath(),
+                        evidence.symbolName(),
+                        evidence.chunkType(),
+                        evidence.symbolVersion(),
+                        evidence.classpathEpoch(),
+                        evidence.indexEpoch(),
+                        evidence.query(),
+                        evidence.similarity(),
+                        Instant.now()));
+            }
+            for (RagEvidencePayload.NegativeFact negativeFact : payload.negativeFacts()) {
+                String rendered = negativeFact.renderForMemory();
+                addVolatileFact("NegativeFact（负向事实）: " + rendered);
+                pruneEvidenceForOldSymbolVersion(negativeFact.oldSymbolVersion());
+            }
+            return;
+        }
+        recordLegacyRagEvidenceIfPresent(argsJson, result);
+    }
+
+    private void recordLegacyRagEvidenceIfPresent(String argsJson, String result) {
         String query = extractQuery(argsJson);
         String[] lines = result.split("\\R");
         PendingRagEvidence pending = null;
@@ -597,15 +623,23 @@ public class WorkingMemory {
             return;
         }
         String oldSymbolVersion = matcher.group(1).trim();
-        if (oldSymbolVersion.isEmpty() || "none".equals(oldSymbolVersion)) {
+        pruneEvidenceForOldSymbolVersion(oldSymbolVersion);
+    }
+
+    private void pruneEvidenceForOldSymbolVersion(String oldSymbolVersion) {
+        if (oldSymbolVersion == null) {
+            return;
+        }
+        String version = oldSymbolVersion.trim();
+        if (version.isEmpty() || "none".equals(version)) {
             return;
         }
         int sizeBefore = ragEvidenceMemory.size();
-        ragEvidenceMemory.removeIf(evidence -> oldSymbolVersion.equals(evidence.symbolVersion()));
+        ragEvidenceMemory.removeIf(evidence -> version.equals(evidence.symbolVersion()));
         int removed = sizeBefore - ragEvidenceMemory.size();
         if (removed > 0) {
             log.info("pruneEvidenceForNegativeFact: removed {} stale RAG evidence with symbolVersion={}",
-                    removed, oldSymbolVersion);
+                    removed, version);
         }
     }
 
