@@ -97,26 +97,35 @@ public class AgentOrchestrator {
     // 执行步骤的数据结构（package-private 供测试访问）
     record ExecutionStep(String id, String description, String type,
                                   List<String> dependencies, String result,
-                                  StepStatus status) {
+                                  StepStatus status, List<String> modifiedFiles) {
+        ExecutionStep {
+            dependencies = dependencies == null ? List.of() : List.copyOf(dependencies);
+            modifiedFiles = modifiedFiles == null ? List.of() : List.copyOf(modifiedFiles);
+        }
+
         static ExecutionStep pending(String id, String description, String type, List<String> dependencies) {
-            return new ExecutionStep(id, description, type, dependencies, null, StepStatus.PENDING);
+            return new ExecutionStep(id, description, type, dependencies, null, StepStatus.PENDING, List.of());
         }
 
         ExecutionStep withResult(String result) {
-            return new ExecutionStep(id, description, type, dependencies, result, StepStatus.COMPLETED);
+            return new ExecutionStep(id, description, type, dependencies, result, StepStatus.COMPLETED, modifiedFiles);
         }
 
         ExecutionStep withFailed(String result) {
-            return new ExecutionStep(id, description, type, dependencies, result, StepStatus.FAILED);
+            return new ExecutionStep(id, description, type, dependencies, result, StepStatus.FAILED, modifiedFiles);
         }
 
         ExecutionStep started() {
-            return new ExecutionStep(id, description, type, dependencies, result, StepStatus.RUNNING);
+            return new ExecutionStep(id, description, type, dependencies, result, StepStatus.RUNNING, modifiedFiles);
         }
 
         /** 失败步骤在位重做：重置为 PENDING，清空上轮 result（失败原因另存于 lastFailureForRedo）。 */
         ExecutionStep withRedoPending() {
-            return new ExecutionStep(id, description, type, dependencies, null, StepStatus.PENDING);
+            return new ExecutionStep(id, description, type, dependencies, null, StepStatus.PENDING, List.of());
+        }
+
+        ExecutionStep withModifiedFiles(List<String> modifiedFiles) {
+            return new ExecutionStep(id, description, type, dependencies, result, status, modifiedFiles);
         }
     }
 
@@ -134,7 +143,7 @@ public class AgentOrchestrator {
         }
     }
 
-    record AcceptanceCriterion(String id, String category, String description, String testSignal) {
+    record AcceptanceCriterion(String id, String category, String description, String testSignal, String severity) {
         boolean isValid() {
             return !id.isBlank() && !description.isBlank();
         }
@@ -144,6 +153,9 @@ public class AgentOrchestrator {
             sb.append("- ").append(id);
             if (!category.isBlank()) {
                 sb.append(" [").append(category).append("]");
+            }
+            if (!severity.isBlank()) {
+                sb.append(" severity=").append(severity);
             }
             sb.append(": ").append(description);
             if (!testSignal.isBlank()) {
@@ -384,6 +396,7 @@ public class AgentOrchestrator {
         }
 
         List<ExecutionStep> steps = rebuildStepsFromCheckpoint(loaded);
+        restoreCheckpointArtifactsIntoWorkingMemory(loaded);
         checkpoint = loaded; // 复用同一 checkpoint：id 不变，进度续写
 
         out.println(AnsiStyle.heading("🔁 恢复执行 checkpoint [" + loaded.getOrchestrationId() + "]"
@@ -402,7 +415,8 @@ public class AgentOrchestrator {
                 AgentCheckpoint.StepArtifact artifact = loaded.getArtifacts().get(planStep.id());
                 String result = artifact == null || artifact.summary() == null ? "" : artifact.summary();
                 steps.add(new ExecutionStep(planStep.id(), planStep.description(), planStep.type(),
-                        deps, result, StepStatus.COMPLETED));
+                        deps, result, StepStatus.COMPLETED,
+                        artifact == null ? List.of() : artifact.modifiedFiles()));
             } else {
                 // 未完成步骤（含上次失败的、被阻塞的、以及旧 checkpoint 里曾标记 superseded 的）
                 // 一律重置为 PENDING 重新执行——在位重做模型下不再有 SUPERSEDED 接管语义。
@@ -411,6 +425,18 @@ public class AgentOrchestrator {
             }
         }
         return steps;
+    }
+
+    private void restoreCheckpointArtifactsIntoWorkingMemory(AgentCheckpoint loaded) {
+        if (loaded == null) {
+            return;
+        }
+        for (Map.Entry<String, AgentCheckpoint.StepArtifact> entry : loaded.getArtifacts().entrySet()) {
+            addStepModifiedFilesFact(entry.getKey(), entry.getValue().modifiedFiles(), "checkpoint 已完成步骤");
+        }
+        for (Map.Entry<String, AgentCheckpoint.StepArtifact> entry : restoredFailedArtifacts.entrySet()) {
+            addStepModifiedFilesFact(entry.getKey(), entry.getValue().modifiedFiles(), "checkpoint 失败步骤");
+        }
     }
 
     private String formatNoCheckpointMessage(String requestedId) {
@@ -444,7 +470,7 @@ public class AgentOrchestrator {
     private List<AgentCheckpoint.CriterionRecord> toCriterionRecords(List<AcceptanceCriterion> criteria) {
         return criteria.stream()
                 .map(c -> new AgentCheckpoint.CriterionRecord(
-                        c.id(), c.category(), c.description(), c.testSignal()))
+                        c.id(), c.category(), c.description(), c.testSignal(), c.severity()))
                 .toList();
     }
 
@@ -457,7 +483,8 @@ public class AgentOrchestrator {
                         r.id() == null ? "" : r.id(),
                         r.category() == null ? "" : r.category(),
                         r.description() == null ? "" : r.description(),
-                        r.testSignal() == null ? "" : r.testSignal()))
+                        r.testSignal() == null ? "" : r.testSignal(),
+                        r.severity() == null || r.severity().isBlank() ? "high" : r.severity()))
                 .filter(AcceptanceCriterion::isValid)
                 .toList();
     }
@@ -605,7 +632,7 @@ public class AgentOrchestrator {
                     if (idx >= 0 && idx < steps.size()) {
                         ExecutionStep old = steps.get(idx);
                         steps.set(idx, new ExecutionStep(old.id(), old.description(), old.type(),
-                                deps, old.result(), old.status()));
+                                deps, old.result(), old.status(), old.modifiedFiles()));
                     }
                 }
             }
@@ -632,7 +659,8 @@ public class AgentOrchestrator {
             String category = node.path("category").asText("");
             String description = node.path("description").asText("");
             String testSignal = firstPresent(node, "test_signal", "testSignal", "testsignal").asText("");
-            AcceptanceCriterion criterion = new AcceptanceCriterion(id, category, description, testSignal);
+            String severity = node.path("severity").asText("high");
+            AcceptanceCriterion criterion = new AcceptanceCriterion(id, category, description, testSignal, severity);
             if (criterion.isValid()) {
                 criteria.add(criterion);
                 index++;
@@ -873,21 +901,8 @@ public class AgentOrchestrator {
             }
             return true;
         } catch (Exception e) {
-            // 无法解析 JSON：必须同时不含否定语义且含有肯定关键词，才视为通过
-            String lower = reviewContent.toLowerCase();
-            boolean hasNegativeKeyword = NEGATIVE_REVIEW_PATTERN.matcher(lower).find()
-                    || lower.contains("不合格") || lower.contains("有问题")
-                    || lower.contains("\"approved\": false") || lower.contains("\"approved\":false");
-            boolean hasPositiveKeyword = lower.contains("通过") || lower.contains("合格")
-                    || lower.contains("\"approved\": true") || lower.contains("\"approved\":true");
-            if (hasNegativeKeyword) {
-                return false;
-            }
-            if (!hasPositiveKeyword) {
-                log.warn("Reviewer output unparseable and contains no explicit approval, defaulting to rejected");
-                return false;
-            }
-            return true;
+            log.warn("Reviewer output is not valid JSON, defaulting to rejected");
+            return false;
         }
     }
 
@@ -897,12 +912,34 @@ public class AgentOrchestrator {
         }
         for (JsonNode result : criteriaResultsNode) {
             boolean passed = result.path("passed").asBoolean(false);
+            String id = result.path("id").asText("");
             String severity = result.path("severity").asText("").toLowerCase(Locale.ROOT);
-            if (!passed && (severity.equals("critical") || severity.equals("high"))) {
+            if (!passed && (isBlockingSeverity(severity) || isBlockingSeverity(plannedSeverityFor(id)))) {
                 return true;
             }
         }
         return false;
+    }
+
+    private String plannedSeverityFor(String criterionId) {
+        if (criterionId == null || criterionId.isBlank()
+                || currentAcceptanceCriteria == null || currentAcceptanceCriteria.isEmpty()) {
+            return "";
+        }
+        for (AcceptanceCriterion criterion : currentAcceptanceCriteria) {
+            if (criterion.id().equals(criterionId)) {
+                return criterion.severity();
+            }
+        }
+        return "";
+    }
+
+    private static boolean isBlockingSeverity(String severity) {
+        if (severity == null) {
+            return false;
+        }
+        String normalized = severity.trim().toLowerCase(Locale.ROOT);
+        return normalized.equals("critical") || normalized.equals("high");
     }
 
     private boolean hasMissingAcceptanceCriteriaCoverage(JsonNode criteriaResultsNode) {
@@ -1049,11 +1086,31 @@ public class AgentOrchestrator {
     private synchronized void updateStep(List<ExecutionStep> steps, String stepId, ExecutionStep updated) {
         for (int i = 0; i < steps.size(); i++) {
             if (steps.get(i).id().equals(stepId)) {
-                steps.set(i, updated);
-                recordStepToCheckpoint(stepId, updated);
+                ExecutionStep effective = attachModifiedFiles(stepId, updated);
+                steps.set(i, effective);
+                recordStepToCheckpoint(stepId, effective);
                 return;
             }
         }
+    }
+
+    private ExecutionStep attachModifiedFiles(String stepId, ExecutionStep updated) {
+        if (updated.status() != StepStatus.COMPLETED && updated.status() != StepStatus.FAILED) {
+            return updated;
+        }
+        List<String> consumed = toolRegistry.consumeStepModifiedFiles(stepId);
+        List<String> modifiedFiles = consumed.isEmpty() ? updated.modifiedFiles() : consumed;
+        addStepModifiedFilesFact(stepId, modifiedFiles, updated.status() == StepStatus.COMPLETED
+                ? "Multi-Agent 步骤完成"
+                : "Multi-Agent 步骤失败");
+        return updated.withModifiedFiles(modifiedFiles);
+    }
+
+    private void addStepModifiedFilesFact(String stepId, List<String> modifiedFiles, String source) {
+        if (modifiedFiles == null || modifiedFiles.isEmpty()) {
+            return;
+        }
+        memoryManager.addVolatileFact(source + " [" + stepId + "] 修改文件: " + String.join(", ", modifiedFiles));
     }
 
     /** 步骤终态写入 checkpoint（updateStep 已同步，无并发问题）。 */
@@ -1065,7 +1122,7 @@ public class AgentOrchestrator {
             // 完整 result 落盘（上限见 AgentCheckpoint.MAX_SUMMARY_LENGTH）：
             // resume 后 buildStepContext 要用它给后续步骤当依赖上下文
             checkpoint.addCompletedStep(stepId,
-                    toolRegistry.consumeStepModifiedFiles(stepId),
+                    updated.modifiedFiles(),
                     updated.result());
             checkpoint.save();
         } else if (updated.status() == StepStatus.FAILED) {
@@ -1073,7 +1130,7 @@ public class AgentOrchestrator {
             // resume 后注入重做上下文，让 Worker 知道上次失败已留下哪些文件。
             // addFailedStep 内部已调 recordFailure，此处不再单独调用以免 failedSteps 重复计数。
             checkpoint.addFailedStep(stepId,
-                    toolRegistry.consumeStepModifiedFiles(stepId),
+                    updated.modifiedFiles(),
                     updated.result());
             checkpoint.save();
         }
@@ -1608,6 +1665,9 @@ public class AgentOrchestrator {
                                 .append(step.result(), 0, Math.min(step.result().length(), 800))
                                 .append("\n");
                     }
+                    if (!step.modifiedFiles().isEmpty()) {
+                        context.append("修改文件：").append(String.join(", ", step.modifiedFiles())).append("\n");
+                    }
                 }
             }
             context.append("\n");
@@ -1617,6 +1677,13 @@ public class AgentOrchestrator {
             if (step.status() == StepStatus.COMPLETED && currentStep.dependencies().contains(step.id())) {
                 context.append("已完成的依赖步骤 [").append(step.id()).append("]: ")
                         .append(step.description()).append("\n");
+                if (!step.modifiedFiles().isEmpty()) {
+                    context.append("修改文件：\n");
+                    for (String file : step.modifiedFiles()) {
+                        context.append("- ").append(file).append('\n');
+                    }
+                    context.append("继续前请优先读取这些文件的当前内容，基于真实落盘状态衔接实现。\n");
+                }
                 if (step.result() != null && !step.result().isBlank()) {
                     context.append("结果：").append(previewDependencyResult(step.result())).append("\n");
                 }

@@ -40,7 +40,7 @@ class AgentCheckpointTest {
                 new AgentCheckpoint.PlanStep("step-1", "拆分校验逻辑", "code", List.of()),
                 new AgentCheckpoint.PlanStep("step-2", "补充单元测试", "test", List.of("step-1"))));
         checkpoint.setAcceptanceCriteria(List.of(
-                new AgentCheckpoint.CriterionRecord("ac-1", "critical", "编译通过", "mvn compile")));
+                new AgentCheckpoint.CriterionRecord("ac-1", "critical", "编译通过", "mvn compile", "critical")));
         checkpoint.addCompletedStep("step-1", List.of("src/Order.java"), "校验逻辑已下沉");
         checkpoint.setSupersededSteps(List.of("step-x"));
         checkpoint.save();

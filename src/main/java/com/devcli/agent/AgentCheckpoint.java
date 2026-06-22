@@ -62,7 +62,7 @@ public class AgentCheckpoint {
     public record PlanStep(String id, String description, String type, List<String> dependencies) {}
 
     /** 计划层验收点快照，与 AgentOrchestrator.AcceptanceCriterion 字段一一对应。 */
-    public record CriterionRecord(String id, String category, String description, String testSignal) {}
+    public record CriterionRecord(String id, String category, String description, String testSignal, String severity) {}
 
     public AgentCheckpoint() {
         this.completedSteps = new ArrayList<>();

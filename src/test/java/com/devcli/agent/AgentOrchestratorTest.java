@@ -14,6 +14,7 @@ import com.devcli.tool.ToolRegistry;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -546,8 +547,8 @@ class AgentOrchestratorTest {
         assertFalse(orchestrator.parseReviewApproval("集成验证没有通过"));
         assertFalse(orchestrator.parseReviewApproval("编译检查未能通过"));
 
-        // 含肯定关键词的非 JSON 文本
-        assertTrue(orchestrator.parseReviewApproval("审查通过，代码质量良好"));
+        // 非 JSON 文本不能绕过 scores / criteria_results 硬约束
+        assertFalse(orchestrator.parseReviewApproval("审查通过，代码质量良好"));
 
         // 既无肯定关键词也无 JSON：保守判为不通过
         assertFalse(orchestrator.parseReviewApproval("hmm"));
@@ -574,6 +575,46 @@ class AgentOrchestratorTest {
                       "passed": false,
                       "evidence": "代码直接校验 args.length < 4 返回错误，未走默认逻辑",
                       "severity": "critical"
+                    }
+                  ],
+                  "issues": []
+                }
+                """));
+    }
+
+    @Test
+    void shouldRejectFailedAcceptanceCriteriaUsingPlannerSeverity() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        orchestrator.parsePlan("""
+                {
+                  "acceptance_criteria": [
+                    {
+                      "id": "AC-01",
+                      "category": "default_param",
+                      "severity": "critical",
+                      "description": "缺省参数必须走默认逻辑",
+                      "test_signal": "省略参数仍成功"
+                    }
+                  ],
+                  "steps": [
+                    {"id": "s1", "description": "实现功能", "type": "ANALYSIS", "dependencies": []}
+                  ]
+                }
+                """);
+
+        assertFalse(orchestrator.parseReviewApproval("""
+                {
+                  "approved": true,
+                  "scores": {
+                    "functional_correctness": 1.0,
+                    "integration_completeness": 1.0,
+                    "code_quality": 1.0
+                  },
+                  "criteria_results": [
+                    {
+                      "id": "AC-01",
+                      "passed": false,
+                      "evidence": "默认参数路径仍然失败"
                     }
                   ],
                   "issues": []
@@ -1207,12 +1248,68 @@ class AgentOrchestratorTest {
         return toolRegistry;
     }
 
+    @SuppressWarnings("unchecked")
+    private static List<AgentOrchestrator.ExecutionStep> invokeRebuildStepsFromCheckpoint(
+            AgentOrchestrator orchestrator, AgentCheckpoint checkpoint) throws Exception {
+        Method method = AgentOrchestrator.class.getDeclaredMethod("rebuildStepsFromCheckpoint", AgentCheckpoint.class);
+        method.setAccessible(true);
+        return (List<AgentOrchestrator.ExecutionStep>) method.invoke(orchestrator, checkpoint);
+    }
+
+    private static String invokeBuildStepContext(AgentOrchestrator orchestrator,
+                                                 List<AgentOrchestrator.ExecutionStep> steps,
+                                                 AgentOrchestrator.ExecutionStep current) throws Exception {
+        Method method = AgentOrchestrator.class.getDeclaredMethod("buildStepContext", List.class,
+                AgentOrchestrator.ExecutionStep.class);
+        method.setAccessible(true);
+        return (String) method.invoke(orchestrator, steps, current);
+    }
+
     private static String findSystemByLastUser(List<List<LlmClient.Message>> calls, String userNeedle) {
         return calls.stream()
                 .filter(messages -> DispatchingStubGLMClient.findLastUser(messages).contains(userNeedle))
                 .findFirst()
                 .map(messages -> messages.isEmpty() ? "" : messages.get(0).content())
                 .orElseThrow(() -> new AssertionError("未找到 user 包含: " + userNeedle));
+    }
+
+    @Test
+    void dependencyStepContextShouldIncludeCompletedStepModifiedFiles(@TempDir File memoryDir) throws Exception {
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(memoryDir)) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    new GLMClient("test-key"), new ToolRegistry(), mm);
+            AgentOrchestrator.ExecutionStep dependency = new AgentOrchestrator.ExecutionStep(
+                    "step-1", "改实现", "code", List.of(), "代码已改",
+                    AgentOrchestrator.StepStatus.COMPLETED, List.of("src/main/java/App.java"));
+            AgentOrchestrator.ExecutionStep current = AgentOrchestrator.ExecutionStep.pending(
+                    "step-2", "补测试", "test", List.of("step-1"));
+
+            String context = invokeBuildStepContext(orchestrator, List.of(dependency, current), current);
+
+            assertTrue(context.contains("修改文件"));
+            assertTrue(context.contains("src/main/java/App.java"));
+            assertTrue(context.contains("基于真实落盘状态衔接实现"));
+        }
+    }
+
+    @Test
+    void rebuildStepsFromCheckpointShouldRestoreCompletedModifiedFiles(@TempDir File memoryDir) throws Exception {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-modified-files", "目标");
+        checkpoint.setPlanSteps(List.of(
+                new AgentCheckpoint.PlanStep("step-1", "改实现", "code", List.of()),
+                new AgentCheckpoint.PlanStep("step-2", "补测试", "test", List.of("step-1"))));
+        checkpoint.addCompletedStep("step-1", List.of("src/main/java/App.java"), "代码已改");
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(memoryDir)) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    new GLMClient("test-key"), new ToolRegistry(), mm);
+
+            List<AgentOrchestrator.ExecutionStep> steps = invokeRebuildStepsFromCheckpoint(orchestrator, checkpoint);
+
+            assertEquals(List.of("src/main/java/App.java"), steps.get(0).modifiedFiles());
+        } finally {
+            checkpoint.delete();
+        }
     }
 
     @Test
