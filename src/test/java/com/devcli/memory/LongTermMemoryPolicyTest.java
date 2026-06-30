@@ -80,6 +80,24 @@ class LongTermMemoryPolicyTest {
     }
 
     @Test
+    void explicitPreferenceContainingRunWordShouldNotBeTreatedAsCodeStructure() {
+        LongTermMemoryPolicy.Decision decision =
+                LongTermMemoryPolicy.evaluate("请记住：我偏好先运行最小编译命令", 0);
+
+        assertEquals(LongTermMemoryPolicy.Action.SAVE, decision.action());
+        assertEquals("EXPLICIT_STABLE_MEMORY", decision.metadata().get("reason_code"));
+    }
+
+    @Test
+    void concreteSourceLineReferenceShouldBeSkippedAsCodeStructure() {
+        LongTermMemoryPolicy.Decision decision =
+                LongTermMemoryPolicy.evaluate("Agent.java 第 120 行处理工具调用", 0);
+
+        assertEquals(LongTermMemoryPolicy.Action.SKIP, decision.action());
+        assertEquals("CODE_STRUCTURE_SKIP", decision.metadata().get("reason_code"));
+    }
+
+    @Test
     void personalProfileAttributeShouldBeSavedAsNewStableFact() {
         LongTermMemoryPolicy.Decision decision =
                 LongTermMemoryPolicy.evaluate("我是医生", 0);

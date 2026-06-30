@@ -16,6 +16,8 @@ public final class LongTermMemoryPolicy {
     private static final Pattern ID_CARD = Pattern.compile("\\b\\d{17}[0-9Xx]\\b");
     private static final Pattern BANK_CARD = Pattern.compile("\\b\\d{13,19}\\b");
     private static final Pattern TOKEN = Pattern.compile("(?i)(api[_-]?key|token|secret|password|bearer)\\s*[:=]");
+    private static final Pattern CHINESE_LINE_REFERENCE = Pattern.compile(".*(第\\s*\\d+\\s*行|\\d+\\s*行|行号).*");
+    private static final Pattern ENGLISH_LINE_REFERENCE = Pattern.compile(".*\\b(line|line number)\\s*#?\\s*\\d+.*");
 
     private LongTermMemoryPolicy() {
     }
@@ -45,6 +47,12 @@ public final class LongTermMemoryPolicy {
                     "SENSITIVE_REQUIRES_CONFIRMATION", "HIGH");
         }
 
+        // 代码结构信息可从项目文件直接推导，不存长期记忆
+        if (isCodeStructureFact(text)) {
+            return Decision.skip("代码结构信息可从项目文件直接推导，不进入长期记忆",
+                    "CODE_STRUCTURE_SKIP", memoryType, sensitivity, "LOW");
+        }
+
         if (explicit) {
             return Decision.save("explicit", memoryType, sensitivity,
                     "EXPLICIT_STABLE_MEMORY", "HIGH");
@@ -70,6 +78,11 @@ public final class LongTermMemoryPolicy {
         if (recurrenceCount >= 3 && isCoreMemoryType(memoryType)) {
             return Decision.save("recurrence", memoryType, sensitivity,
                     "REPEATED_STABLE_MEMORY", "HIGH");
+        }
+        // 反馈类事实（正面/负面）一次提及即有价值，不需要 recurrence >= 3
+        if ("feedback".equals(memoryType) && recurrenceCount >= 1) {
+            return Decision.save("recurrence", memoryType, sensitivity,
+                    "FEEDBACK_CONFIRMATION", "MEDIUM");
         }
         if (isCoreMemoryType(memoryType) && isSpecific(text)) {
             return Decision.confirm("项目或偏好事实较具体，但缺少显式保存意图",
@@ -144,6 +157,13 @@ public final class LongTermMemoryPolicy {
 
     private static String memoryType(String text) {
         String lower = text.toLowerCase(Locale.ROOT);
+        // 反馈类记忆（cc 的 feedback 类型）：用户对行为的纠正或确认
+        if (containsAny(lower, "不要", "别", "别再", "我说过", "错误做法", "正确做法", "这样不对",
+                "对，就是这样", "是的，就是这样", "这个做法不错", "保持这样")
+                || lower.matches(".*(don't|stop|cancel).*")
+                || lower.matches(".*(correct|right|yes|that's right|good approach|keep doing this).*")) {
+            return "feedback";
+        }
         if (text.contains("项目") || lower.contains("project") || lower.contains("repo")
                 || lower.contains("repository") || lower.contains("mvn ") || lower.contains("maven")
                 || lower.contains("gradle ") || lower.contains("npm ") || lower.contains("pnpm ")
@@ -198,7 +218,7 @@ public final class LongTermMemoryPolicy {
     }
 
     private static boolean isCoreMemoryType(String memoryType) {
-        return "preference".equals(memoryType) || "project".equals(memoryType);
+        return "preference".equals(memoryType) || "project".equals(memoryType) || "feedback".equals(memoryType);
     }
 
     private static boolean isSpecific(String text) {
@@ -207,6 +227,16 @@ public final class LongTermMemoryPolicy {
                 && (containsAny(text, "默认", "使用", "命令", "路径", "偏好", "语言", "测试", "优先", "版本")
                 || containsAny(lower, "default", "use ", "command", "path", "preference",
                 "language", "test", "priority", "version"));
+    }
+
+    /** 代码结构信息的剔除规则：文件路径、类名、函数名等可从项目代码推导的信息不进入长期记忆。 */
+    private static boolean isCodeStructureFact(String text) {
+        String lower = text.toLowerCase(Locale.ROOT);
+        return lower.matches(".*\\.(java|kt|ts|tsx|js|jsx|py|go|rs|rb|cpp|c|h|cs|swift|php|scala)\\b.*") // 文件扩展名
+                || lower.matches(".*\\w+\\.[a-zA-Z]\\w*#\\w+.*")   // 类#方法引用
+                || lower.matches(".*\\w+\\.\\w+\\.\\w+.*")          // 包名引用（含多级）
+                || CHINESE_LINE_REFERENCE.matcher(text).matches()
+                || ENGLISH_LINE_REFERENCE.matcher(lower).matches();
     }
 
     private static boolean containsAny(String text, String... needles) {

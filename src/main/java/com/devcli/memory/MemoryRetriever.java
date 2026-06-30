@@ -115,8 +115,12 @@ public class MemoryRetriever {
 
         StringBuilder context = new StringBuilder();
         context.append("## 相关长期记忆\n\n");
+        context.append("注意：记忆是过去某个时间点的记录，可能已过期。")
+                .append("如果记忆提到了具体的文件路径、函数名或配置项，请先验证当前状态（读文件 / grep 确认），不要仅仅依赖记忆内容。")
+                .append("如果记忆内容与当前观察冲突，以当前观察为准，并更新或删除过期记忆。\n\n");
 
-        int usedTokens = 0;
+        int preambleTokens = MemoryEntry.estimateTokens(context.toString());
+        int usedTokens = preambleTokens;
         int appended = 0;
         for (MemoryEntry entry : relevant) {
             if (MemoryFactDeduper.duplicatesAny(entry.getContent(), suppressedFacts)) {

@@ -367,7 +367,6 @@ public class ConversationHistoryCompactor {
             return truncated;
         }
         int currentTokens = TokenBudget.estimateMessagesTokens(history);
-        if (currentTokens < triggerTokens) return false;
 
         int systemEnd = "system".equals(history.get(0).role()) ? 1 : 0;
 

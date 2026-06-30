@@ -24,7 +24,8 @@ public class MemoryEntry {
         CONVERSATION,  // 对话记忆
         FACT,          // 事实记忆（用户偏好、项目信息等）
         SUMMARY,       // 摘要记忆
-        TOOL_RESULT    // 工具执行结果
+        TOOL_RESULT,    // 工具执行结果
+        FEEDBACK       // 用户反馈（正面 / 负面确认）
     }
 
     public MemoryEntry(String id, String content, MemoryType type, Map<String, String> metadata, int tokenCount) {

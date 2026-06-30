@@ -57,6 +57,8 @@ public class MemoryManager implements AutoCloseable {
     private LlmClient llmClient;
     private TokenBudget tokenBudget;
     private ContextProfile contextProfile;
+    /** 当前会话显式忽略记忆 flag。用户说"忘记记忆"/"别管记忆"时设为 true。 */
+    private volatile boolean memoryIgnored = false;
 
     public MemoryManager(LlmClient llmClient) {
         this(llmClient, ContextProfile.from(llmClient), null);
@@ -311,10 +313,22 @@ public class MemoryManager implements AutoCloseable {
         return retriever.retrieveLongTerm(query, limit);
     }
 
+    public void setMemoryIgnored(boolean ignored) {
+        this.memoryIgnored = ignored;
+    }
+
+    public boolean isMemoryIgnored() {
+        return memoryIgnored;
+    }
+
     /**
      * 构建用于 LLM 的长期记忆上下文（按 query 检索 top-k）。
+     * 当用户显式忽略记忆时返回空字符串。
      */
     public String buildContextForQuery(String query, int maxTokens) {
+        if (memoryIgnored) {
+            return "";
+        }
         int safeBudget = Math.max(64, maxTokens);
         List<String> volatileFacts = workingMemory.getVolatileFacts();
         String inventory = buildLongTermMemoryInventorySnapshot(5, Math.min(256, safeBudget), volatileFacts);
@@ -372,6 +386,9 @@ public class MemoryManager implements AutoCloseable {
      * Agent / PlanExecuteAgent / SubAgent 通过这条路径把工作记忆注入给 LLM。
      */
     public String buildWorkingMemorySection() {
+        if (memoryIgnored) {
+            return "";
+        }
         return workingMemory.renderForPrompt();
     }
 
