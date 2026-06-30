@@ -841,7 +841,7 @@ public class AgentOrchestrator {
             if (!redoTracker.canRedo(step.id())) {
                 continue;
             }
-            int attempt = redoTracker.recordRedo(step.id(), step.result());
+            int attempt = redoTracker.markRedo(step.id(), step.result());
             out.println(AnsiStyle.heading("🔁 步骤 [" + step.id() + "] 失败，在原位换思路重做（第 "
                     + attempt + "/" + redoTracker.maxRedoPerStep() + " 次）"));
             steps.set(i, step.withRedoPending());

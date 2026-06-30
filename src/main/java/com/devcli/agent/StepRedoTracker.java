@@ -29,11 +29,11 @@ final class StepRedoTracker {
     }
 
     /**
-     * 记录一次重做：计数 +1，存本次失败原因供下轮注入"换思路"提示。
+     * 记录一次重做决定：计数 +1，存本次失败原因供下轮注入"换思路"提示。
      *
      * @return 这是该步骤第几次重做（从 1 开始）
      */
-    int recordRedo(String stepId, String failureReason) {
+    int markRedo(String stepId, String failureReason) {
         int n = redoCount.getOrDefault(stepId, 0) + 1;
         redoCount.put(stepId, n);
         lastFailure.put(stepId, failureReason == null ? "" : failureReason);

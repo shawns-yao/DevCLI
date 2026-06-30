@@ -113,6 +113,13 @@ public class ToolRegistry implements AutoCloseable {
     ToolRegistry(long commandTimeoutSeconds, long toolBatchTimeoutSeconds) {
         this.commandTimeoutSeconds = commandTimeoutSeconds;
         this.toolBatchTimeoutSeconds = toolBatchTimeoutSeconds;
+        // 租约抢占（空闲超时回收他人租约）接入审计链：被回收的慢步骤可事后排查
+        resourceLeaseManager.setPreemptionListener((path, evictedStepId, newStepId, heldMs) ->
+                auditLog.record(AuditLog.AuditEntry.error(
+                        "resource_lease_preempt",
+                        "path=" + path + ", evicted=" + evictedStepId + ", next=" + newStepId,
+                        "租约空闲超时被回收，空闲 " + heldMs + "ms",
+                        heldMs)));
         // 注册内置工具
         registerFileTools();
         registerShellTools();
