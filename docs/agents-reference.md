@@ -107,6 +107,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - SubAgent IOException 返回 ERROR 类型
 - 所有子代理共享 ToolRegistry 和 MemoryManager
 - `ToolRegistry.write_file` 会按 step 记录 `stepModifiedFiles`；步骤终态写入运行态 `ExecutionStep`、checkpoint `StepArtifact.modifiedFiles` 和 WorkingMemory。后续依赖步骤与 `/team resume` 都会看到上游修改文件清单。
+- `/plan` 的 `Task` 也会在任务完成或失败时消费同一份 `stepModifiedFiles`，并保存短 `resultSummary`。`Planner.replan()` 不是 Agent 循环，没有工具调用权，因此失败后重规划只读取这些结构化产物事实，不读取完整任务 result 作为主要依据。
 
 ### HITL System
 

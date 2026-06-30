@@ -152,20 +152,65 @@ public class Planner {
 
         StringBuilder context = new StringBuilder();
         context.append("原任务: ").append(failedPlan.getGoal()).append("\n");
-        context.append("失败原因: ").append(failureReason).append("\n");
-        context.append("已完成的任务:\n");
+        context.append("失败原因: ").append(failureReason).append("\n\n");
 
-        for (Task task : failedPlan.getAllTasks()) {
-            if (task.getStatus() == Task.TaskStatus.COMPLETED) {
-                context.append("- ").append(task.getId())
-                        .append(": ").append(task.getDescription())
-                        .append("\n");
-            }
-        }
+        appendReplanTaskSection(context,
+                "已完成的任务（请勿重复执行，这些任务的结果已落盘）",
+                failedPlan.getAllTasks().stream()
+                        .filter(task -> task.getStatus() == Task.TaskStatus.COMPLETED)
+                        .toList());
+        context.append("\n");
+        appendReplanTaskSection(context,
+                "失败或未完成的任务（新计划只覆盖这些任务，且必须考虑其已产生的部分副作用）",
+                failedPlan.getAllTasks().stream()
+                        .filter(task -> task.getStatus() != Task.TaskStatus.COMPLETED)
+                        .toList());
 
-        context.append("\n请制定新的执行计划，避开之前的问题。");
+        context.append("\n请制定新的执行计划，仅覆盖未完成或失败的任务。");
+        context.append("新计划不得包含已完成的任务；如果需要再次触达已修改文件，必须说明是基于当前落盘内容继续处理。");
+        context.append("\n失败原因: ").append(failureReason);
 
         return createPlan(context.toString());
+    }
+
+    private static void appendReplanTaskSection(StringBuilder context, String title, List<Task> tasks) {
+        context.append(title).append("：\n");
+        if (tasks == null || tasks.isEmpty()) {
+            context.append("- 无\n");
+            return;
+        }
+        for (Task task : tasks) {
+            context.append("- ").append(task.getId())
+                    .append(": ").append(task.getDescription())
+                    .append(" / 状态=").append(task.getStatus())
+                    .append("\n");
+            if (!task.getModifiedFiles().isEmpty()) {
+                context.append("  修改文件: ").append(String.join(", ", task.getModifiedFiles())).append("\n");
+            }
+            String summary = task.getResultSummary();
+            if (summary == null || summary.isBlank()) {
+                summary = compactForReplan(task.getResult(), 300);
+            }
+            if (summary != null && !summary.isBlank()) {
+                context.append("  结论: ").append(summary).append("\n");
+            }
+            if (task.getError() != null && !task.getError().isBlank()) {
+                context.append("  错误: ").append(compactForReplan(task.getError(), 240)).append("\n");
+            }
+        }
+    }
+
+    private static String compactForReplan(String value, int maxLength) {
+        if (value == null || value.isBlank()) {
+            return "";
+        }
+        String normalized = value.replace("\r\n", " ").replace('\r', ' ').replace('\n', ' ')
+                .replaceAll("\\s+", " ")
+                .trim();
+        if (normalized.length() <= maxLength) {
+            return normalized;
+        }
+        return normalized.substring(0, Math.max(0, maxLength - 3)) + "...";
     }
 
     private boolean isSimpleGoal(String goal) {

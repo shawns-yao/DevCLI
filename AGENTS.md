@@ -148,7 +148,7 @@ Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔�
 - MCP 工具结果进入尺寸治理后会标记折叠分类：截断输出为 `INLINE_TRUNCATED`，落盘预览为 `PERSISTED_PREVIEW`
 - 滚动摘要超过字符上限时触发"摘要的摘要"再压缩，失败则保留超长摘要并打日志（宁可贵不丢事实）
 - `search_code` 结果中的结构化 negativeFact 携带 `oldSymbolVersion` 时，WorkingMemory 即时清理对应的失效 RAG 证据；旧文本格式保留兼容解析
-- `TaskLedger`（计划执行进度投影）挂在 `WorkingMemory`、不进 conversationHistory，压缩不触碰它；当前仅 `PlanExecuteAgent` 接入（task 开始/完成/失败时更新），经 working memory 段注入，让长 plan 压缩后仍能看到当前 step / 已完成 / 待执行 / 失败
+- `TaskLedger`（计划执行进度投影）挂在 `WorkingMemory`、不进 conversationHistory，压缩不触碰它；当前仅 `PlanExecuteAgent` 接入（task 开始/完成/失败时更新），经 working memory 段注入，让长 plan 压缩后仍能看到当前 step / 已完成 / 待执行 / 失败。`/plan` task 完成或失败时会记录结构化 `modifiedFiles` 和短 `resultSummary`；失败后 replan 是无工具的 Planner LLM 调用，只读取这些最小产物事实生成后续计划，不依赖完整 result 文本。
 - prompt cache（各模型自动前缀缓存）：system prompt 每轮刷新易变段（memory / workingMemory）以让 LLM 看最新状态，代价是自动前缀缓存只命中固定头部（base/personality/mode/approval）；`PromptAssembler` 把稳定段（Sticky）前置、易变段后置以尽量延长可缓存前缀，`PromptAssemblerTest` 锁定"固定头部不被动态内容污染"契约。进一步延长命中（动态段全后移 / 移出 system 到尾部 message）需 prompt 评估 + 真实 API 命中率 A/B，未做
 
 ### HITL + 策略层

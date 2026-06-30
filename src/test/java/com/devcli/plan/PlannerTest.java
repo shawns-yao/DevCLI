@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PlannerTest {
@@ -54,6 +55,47 @@ class PlannerTest {
         assertTrue(plan.getTask("task_2").getDependencies().contains("task_1"));
     }
 
+    @Test
+    void replanIncludesStructuredTaskArtifacts() throws Exception {
+        StubGLMClient client = new StubGLMClient("""
+                {
+                  "summary": "重规划",
+                  "tasks": [
+                    {
+                      "id": "task_a",
+                      "description": "基于当前文件继续修复启动流程",
+                      "type": "FILE_WRITE",
+                      "dependencies": []
+                    }
+                  ]
+                }
+                """);
+        Planner planner = new Planner(client);
+        ExecutionPlan failedPlan = new ExecutionPlan("plan_test", "实现配置加载并接入启动");
+        Task completed = new Task("task_1", "实现配置加载", Task.TaskType.FILE_WRITE);
+        completed.setModifiedFiles(List.of("src/main/java/com/devcli/ConfigLoader.java"));
+        completed.setResultSummary("已实现配置加载并补充基础校验");
+        completed.markCompleted("SHOULD_NOT_APPEAR_IN_REPLAN_PROMPT");
+        failedPlan.addTask(completed);
+
+        Task failed = new Task("task_2", "接入启动流程", Task.TaskType.FILE_WRITE, List.of("task_1"));
+        failed.setModifiedFiles(List.of("src/main/java/com/devcli/Main.java"));
+        failed.setResultSummary("启动流程已部分修改，后续需基于当前文件继续");
+        failed.markFailed("编译失败，缺少构造参数");
+        failedPlan.addTask(failed);
+        assertTrue(failedPlan.computeExecutionOrder());
+
+        planner.replan(failedPlan, "计划执行中有任务失败");
+
+        String prompt = client.lastUserPrompt();
+        assertTrue(prompt.contains("修改文件: src/main/java/com/devcli/ConfigLoader.java"));
+        assertTrue(prompt.contains("结论: 已实现配置加载并补充基础校验"));
+        assertTrue(prompt.contains("修改文件: src/main/java/com/devcli/Main.java"));
+        assertTrue(prompt.contains("错误: 编译失败，缺少构造参数"));
+        assertTrue(prompt.contains("新计划不得包含已完成的任务"));
+        assertFalse(prompt.contains("SHOULD_NOT_APPEAR_IN_REPLAN_PROMPT"));
+    }
+
     private static final class FailingGLMClient extends GLMClient {
         private FailingGLMClient() {
             super("test-key");
@@ -67,6 +109,7 @@ class PlannerTest {
 
     private static final class StubGLMClient extends GLMClient {
         private final String content;
+        private List<Message> lastMessages = List.of();
 
         private StubGLMClient(String content) {
             super("test-key");
@@ -75,7 +118,16 @@ class PlannerTest {
 
         @Override
         public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) {
+            this.lastMessages = List.copyOf(messages);
             return new ChatResponse("assistant", content, null, 100, 20);
+        }
+
+        private String lastUserPrompt() {
+            return lastMessages.stream()
+                    .filter(message -> "user".equals(message.role()))
+                    .reduce((first, second) -> second)
+                    .map(Message::content)
+                    .orElse("");
         }
     }
 }

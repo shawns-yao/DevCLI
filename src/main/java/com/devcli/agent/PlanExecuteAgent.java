@@ -66,13 +66,23 @@ public class PlanExecuteAgent {
         }
     }
 
-    private record TaskExecutionResult(Task task, String result, boolean streamedOutput, Exception error) {
-        static TaskExecutionResult success(Task task, TaskRunResult taskRunResult) {
-            return new TaskExecutionResult(task, taskRunResult.result(), taskRunResult.streamedOutput(), null);
+    private record TaskExecutionResult(Task task, String result, boolean streamedOutput,
+                                       List<String> modifiedFiles, String resultSummary, Exception error) {
+        private TaskExecutionResult {
+            modifiedFiles = modifiedFiles == null ? List.of() : List.copyOf(modifiedFiles);
+            resultSummary = resultSummary == null ? "" : resultSummary.trim();
         }
 
-        static TaskExecutionResult failure(Task task, Exception error) {
-            return new TaskExecutionResult(task, null, false, error);
+        static TaskExecutionResult success(Task task, TaskRunResult taskRunResult, List<String> modifiedFiles) {
+            String result = taskRunResult == null ? "" : taskRunResult.result();
+            boolean streamedOutput = taskRunResult != null && taskRunResult.streamedOutput();
+            return new TaskExecutionResult(task, result, streamedOutput, modifiedFiles,
+                    summarizeTaskResult(result, modifiedFiles, null), null);
+        }
+
+        static TaskExecutionResult failure(Task task, Exception error, List<String> modifiedFiles) {
+            return new TaskExecutionResult(task, null, false, modifiedFiles,
+                    summarizeTaskResult(null, modifiedFiles, error), error);
         }
 
         boolean failed() {
@@ -330,11 +340,14 @@ public class PlanExecuteAgent {
         return reviewAndExecutePlan(plan, streamState);
     }
 
+    private static final int MAX_REPLAN_ATTEMPTS = 2;
+
     private PlanRunOutcome reviewAndExecutePlan(ExecutionPlan plan, StreamState streamState) throws IOException {
+        // Phase 1: 用户审阅循环（可补充重规划）
         while (true) {
             PlanReviewDecision decision = reviewHandler.review(plan.getGoal(), plan);
             if (decision == null || decision.action() == PlanReviewAction.EXECUTE) {
-                return PlanRunOutcome.executed(executePlan(plan, streamState));
+                break;
             }
 
             if (decision.action() == PlanReviewAction.CANCEL) {
@@ -343,11 +356,21 @@ public class PlanExecuteAgent {
 
             String feedback = decision.feedback() == null ? "" : decision.feedback().trim();
             if (feedback.isEmpty()) {
-                return PlanRunOutcome.executed(executePlan(plan, streamState));
+                break;
             }
 
             out.println("📝 已收到补充要求，正在重新规划...\n");
             plan = planner.createPlan(plan.getGoal() + "\n补充要求：" + feedback);
+        }
+
+        // Phase 2: 执行 + 有界 replan（非递归），最多 MAX_REPLAN_ATTEMPTS 次重新规划
+        for (int replanAttempt = 0; ; replanAttempt++) {
+            String result = executePlan(plan, streamState);
+            if (replanAttempt >= MAX_REPLAN_ATTEMPTS || !plan.hasFailed() || result.contains("⏹️")) {
+                return PlanRunOutcome.executed(result);
+            }
+            out.println("🔄 计划执行出现失败，尝试重新规划（第 " + (replanAttempt + 1) + "/" + MAX_REPLAN_ATTEMPTS + " 次）...\n");
+            plan = planner.replan(plan, "计划执行中有任务失败，请重新规划仅未完成或失败的部分");
         }
     }
 
@@ -378,6 +401,8 @@ public class PlanExecuteAgent {
                 Task task = batchResult.task();
 
                 if (!batchResult.failed()) {
+                    task.setModifiedFiles(batchResult.modifiedFiles());
+                    task.setResultSummary(batchResult.resultSummary());
                     task.markCompleted(batchResult.result());
                     memoryManager.completeTaskStep(task.getId());
                     streamedTaskOutputs.put(task.getId(), batchResult.streamedOutput());
@@ -393,16 +418,12 @@ public class PlanExecuteAgent {
                 }
 
                 Exception error = batchResult.error();
+                task.setModifiedFiles(batchResult.modifiedFiles());
+                task.setResultSummary(batchResult.resultSummary());
                 task.markFailed(error.getMessage());
                 memoryManager.failTaskStep(task.getId(), error.getMessage());
                 log.warn("Task failed: {} error={}", task.getId(), error.getMessage());
                 out.println("❌ 失败 [" + task.getId() + "]: " + error.getMessage() + "\n");
-
-                if (plan.getProgress() < 0.5) {
-                    out.println("🔄 尝试重新规划...\n");
-                    ExecutionPlan replanned = planner.replan(plan, error.getMessage());
-                    return reviewAndExecutePlan(replanned, streamState).result();
-                }
 
                 if (!finalResult.isEmpty()) {
                     finalResult.append("\n");
@@ -472,14 +493,7 @@ public class PlanExecuteAgent {
             task.markStarted();
             memoryManager.startTaskStep(task.getId());
 
-            try {
-                return List.of(TaskExecutionResult.success(task, toolRegistry.runWithResourceLease(task.getId(),
-                        () -> executeTaskUnchecked(plan.getGoal(), plan, task, streamState, out))));
-            } catch (Exception e) {
-                return List.of(TaskExecutionResult.failure(task, e));
-            } finally {
-                toolRegistry.releaseResourceLeases(task.getId());
-            }
+            return List.of(executeTaskWithArtifact(plan, task, streamState, out));
         }
 
         String parallelTaskIds = executableTasks.stream()
@@ -503,16 +517,7 @@ public class PlanExecuteAgent {
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
                 buffers.put(task.getId(), baos);
                 PrintStream taskOut = new PrintStream(baos, true, StandardCharsets.UTF_8);
-                futures.add(executor.submit(() -> {
-                    try {
-                        return TaskExecutionResult.success(task, toolRegistry.runWithResourceLease(task.getId(),
-                                () -> executeTaskUnchecked(plan.getGoal(), plan, task, streamState, taskOut)));
-                    } catch (Exception e) {
-                        return TaskExecutionResult.failure(task, e);
-                    } finally {
-                        toolRegistry.releaseResourceLeases(task.getId());
-                    }
-                }));
+                futures.add(executor.submit(() -> executeTaskWithArtifact(plan, task, streamState, taskOut)));
             }
 
             List<TaskExecutionResult> results = new ArrayList<>();
@@ -521,13 +526,15 @@ public class PlanExecuteAgent {
                     results.add(future.get());
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    results.add(TaskExecutionResult.failure(executableTasks.get(results.size()), e));
+                    Task task = executableTasks.get(results.size());
+                    results.add(TaskExecutionResult.failure(task, e, consumeTaskModifiedFiles(task.getId())));
                 } catch (ExecutionException e) {
                     Throwable cause = e.getCause();
                     Exception error = cause instanceof Exception exception
                             ? exception
                             : new RuntimeException(cause);
-                    results.add(TaskExecutionResult.failure(executableTasks.get(results.size()), error));
+                    Task task = executableTasks.get(results.size());
+                    results.add(TaskExecutionResult.failure(task, error, consumeTaskModifiedFiles(task.getId())));
                 }
             }
 
@@ -544,6 +551,23 @@ public class PlanExecuteAgent {
         } finally {
             executor.shutdownNow();
         }
+    }
+
+    private TaskExecutionResult executeTaskWithArtifact(ExecutionPlan plan, Task task,
+                                                        StreamState streamState, PrintStream out) {
+        try {
+            TaskRunResult taskRunResult = toolRegistry.runWithResourceLease(task.getId(),
+                    () -> executeTaskUnchecked(plan.getGoal(), plan, task, streamState, out));
+            return TaskExecutionResult.success(task, taskRunResult, consumeTaskModifiedFiles(task.getId()));
+        } catch (Exception e) {
+            return TaskExecutionResult.failure(task, e, consumeTaskModifiedFiles(task.getId()));
+        } finally {
+            toolRegistry.releaseResourceLeases(task.getId());
+        }
+    }
+
+    private List<String> consumeTaskModifiedFiles(String taskId) {
+        return toolRegistry.consumeStepModifiedFiles(taskId);
     }
 
     private static final int MAX_TASK_ITERATIONS = 5;
@@ -754,6 +778,78 @@ public class PlanExecuteAgent {
             return normalized;
         }
         return normalized.substring(0, maxLength) + "...";
+    }
+
+    private static String summarizeTaskResult(String result, List<String> modifiedFiles, Exception error) {
+        List<String> files = modifiedFiles == null ? List.of() : modifiedFiles;
+        if (error != null) {
+            String errorMessage = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
+            if (!files.isEmpty()) {
+                return compactText("任务失败，已产生部分文件修改：" + joinLimitedFiles(files)
+                        + "；错误：" + errorMessage, 300);
+            }
+            return compactText("任务失败：" + errorMessage, 300);
+        }
+
+        String conclusion = extractTaskConclusion(result);
+        if (!conclusion.isBlank()) {
+            return compactText(conclusion, 300);
+        }
+        if (!files.isEmpty()) {
+            return compactText("任务已完成，修改文件：" + joinLimitedFiles(files), 300);
+        }
+        return "任务已完成，未返回文本结论";
+    }
+
+    private static String extractTaskConclusion(String result) {
+        if (result == null || result.isBlank()) {
+            return "";
+        }
+        String normalized = result.replace("\r\n", "\n").replace('\r', '\n')
+                .replaceAll("(?s)```.*?```", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
+        if (normalized.isBlank()) {
+            return "";
+        }
+        String[] parts = normalized.split("(?<=[。！？.!?])\\s+");
+        List<String> sentences = new ArrayList<>();
+        for (String part : parts) {
+            String sentence = part.trim();
+            if (!sentence.isBlank()) {
+                sentences.add(sentence);
+            }
+        }
+        if (sentences.isEmpty()) {
+            return normalized;
+        }
+        int start = Math.max(0, sentences.size() - 2);
+        return String.join(" ", sentences.subList(start, sentences.size())).trim();
+    }
+
+    private static String joinLimitedFiles(List<String> files) {
+        if (files == null || files.isEmpty()) {
+            return "";
+        }
+        int limit = Math.min(files.size(), 6);
+        String joined = String.join(", ", files.subList(0, limit));
+        if (files.size() > limit) {
+            joined += " 等 " + files.size() + " 个文件";
+        }
+        return joined;
+    }
+
+    private static String compactText(String value, int maxLength) {
+        if (value == null) {
+            return "";
+        }
+        String normalized = value.replace("\r\n", " ").replace('\r', ' ').replace('\n', ' ')
+                .replaceAll("\\s+", " ")
+                .trim();
+        if (normalized.length() <= maxLength) {
+            return normalized;
+        }
+        return normalized.substring(0, Math.max(0, maxLength - 3)) + "...";
     }
 
     private List<ToolExecutionResult> executeToolCalls(String taskId, List<LlmClient.ToolCall> toolCalls) {
@@ -1040,6 +1136,12 @@ public class PlanExecuteAgent {
                         .append(" / ").append(dep.getDescription())
                         .append(" / 状态=").append(dep.getStatus())
                         .append("\n");
+                if (dep.getResultSummary() != null && !dep.getResultSummary().isBlank()) {
+                    context.append("  结论: ").append(dep.getResultSummary()).append("\n");
+                }
+                if (!dep.getModifiedFiles().isEmpty()) {
+                    context.append("  修改文件: ").append(String.join(", ", dep.getModifiedFiles())).append("\n");
+                }
                 if (dep.getResult() != null && !dep.getResult().isBlank()) {
                     context.append(dep.getResult()).append("\n");
                 }
