@@ -582,17 +582,31 @@ public class AgentOrchestrator {
      */
     List<ExecutionStep> parsePlan(String planJson) {
         try {
+            log.debug("Parsing plan JSON, input length={}", planJson == null ? 0 : planJson.length());
+            if (log.isDebugEnabled() && planJson != null && planJson.length() < 2000) {
+                log.debug("Plan JSON full content:\n{}", planJson);
+            } else if (log.isDebugEnabled() && planJson != null) {
+                log.debug("Plan JSON first 500 chars:\n{}", planJson.substring(0, Math.min(500, planJson.length())));
+                log.debug("Plan JSON last 500 chars:\n{}", planJson.substring(Math.max(0, planJson.length() - 500)));
+            }
+
             String cleaned = planJson.replaceAll("```json\\s*", "")
                     .replaceAll("```\\s*", "")
                     .trim();
 
+            log.debug("After cleaning, JSON length={}", cleaned.length());
+            if (!cleaned.startsWith("{")) {
+                log.warn("Cleaned JSON does NOT start with '{{', first 100 chars:\n{}",
+                        cleaned.substring(0, Math.min(100, cleaned.length())));
+            }
+
             JsonNode root = mapper.readTree(cleaned);
             currentAcceptanceCriteria = parseAcceptanceCriteria(firstPresent(root,
                     "acceptance_criteria", "acceptanceCriteria", "acceptancecriteria"));
-            JsonNode stepsNode = root.path("steps");
+            log.debug("Parsed acceptance criteria: {} items", currentAcceptanceCriteria.size());
 
+            JsonNode stepsNode = root.path("steps");
             if (!stepsNode.isArray() || stepsNode.isEmpty()) {
-                // 尝试 "tasks" 字段（兼容 Plan-and-Execute 的格式）
                 stepsNode = root.path("tasks");
             }
 
@@ -600,6 +614,8 @@ public class AgentOrchestrator {
                 log.warn("Plan JSON has no 'steps' or 'tasks' array");
                 return List.of();
             }
+
+            log.debug("Found {} steps in plan", stepsNode.size());
 
             List<ExecutionStep> steps = new ArrayList<>();
             Map<String, String> idMapping = new HashMap<>();
@@ -613,6 +629,8 @@ public class AgentOrchestrator {
 
                 String description = stepNode.path("description").asText();
                 String type = stepNode.path("type").asText("COMMAND");
+                log.debug("Step {}: id={}, type={}, description={}", stepIndex - 1, newId, type,
+                        description.length() > 100 ? description.substring(0, 100) + "..." : description);
                 steps.add(ExecutionStep.pending(newId, description, type, new ArrayList<>()));
             }
 
@@ -637,6 +655,7 @@ public class AgentOrchestrator {
                 }
             }
 
+            log.debug("Final plan after coarsen check: {} steps", steps.size());
             return coarsenPlanIfNeeded(steps);
         } catch (Exception e) {
             log.error("Failed to parse plan JSON", e);
@@ -1702,12 +1721,55 @@ public class AgentOrchestrator {
         final int maxChars = 2_000;
         final int headChars = 1_500;
         final int tailChars = 400;
-        if (result.length() <= maxChars) {
+        if (result == null || result.length() <= maxChars) {
+            return result == null ? "" : result;
+        }
+        // 提取验收标准部分，完整保留不截断
+        String criteria = extractAcceptanceCriteria(result);
+        String nonCriteria = result.replace(criteria, "");
+        if (nonCriteria.length() <= maxChars) {
             return result;
         }
-        return result.substring(0, headChars)
+        // 普通内容部分做截断，验收标准放在最后完整保留
+        String preview = nonCriteria.substring(0, headChars)
                 + "\n...<中间内容已截断>...\n"
-                + result.substring(result.length() - tailChars);
+                + nonCriteria.substring(nonCriteria.length() - tailChars);
+        if (!criteria.isEmpty()) {
+            preview += "\n\n验收标准（完整保留）：\n" + criteria;
+        }
+        return preview;
+    }
+
+    private static String extractAcceptanceCriteria(String text) {
+        if (text == null || text.isEmpty()) {
+            return "";
+        }
+        // 匹配验收标准格式块
+        int start = text.indexOf("acceptance_criteria");
+        if (start < 0) {
+            start = text.indexOf("验收标准");
+        }
+        if (start < 0) {
+            return "";
+        }
+        // 从起始位置提取，最多保留 500 字符（验收标准本身很短）
+        int end = Math.min(start + 500, text.length());
+        // 找到下一个 JSON 结构边界或空行
+        int actualEnd = findSectionEnd(text, start, end);
+        return text.substring(start, actualEnd).trim();
+    }
+
+    private static int findSectionEnd(String text, int start, int fallback) {
+        int jsonEnd = text.indexOf("]", start);
+        int doubleNewline = text.indexOf("\n\n", start);
+        int[] candidates = {jsonEnd, doubleNewline, fallback};
+        int best = fallback;
+        for (int candidate : candidates) {
+            if (candidate > start && candidate < best) {
+                best = candidate;
+            }
+        }
+        return Math.min(best + 1, text.length());
     }
 
     private boolean isVerificationStepWithPreReview(ExecutionStep step) {
@@ -1728,12 +1790,15 @@ public class AgentOrchestrator {
         if (currentUserTask != null && !currentUserTask.isBlank()) {
             task.append("原始用户任务：\n").append(currentUserTask).append("\n\n");
         }
-        appendAcceptanceCriteriaSection(task, "逐条验证以下验收点");
+        appendAcceptanceCriteriaSection(task, "逐条验证以下验收点，每条必须单独检查并输出证据");
         task.append("当前步骤：").append(step.description());
         if (requiresConcreteVerification(step)) {
-            task.append("\n\n审查要求：必须调用工具检查真实产物。")
-                    .append("至少确认相关文件/入口/API 是否存在；如果步骤涉及代码，运行可行的最小编译或自检命令。")
-                    .append("仅凭执行者文字说明不得批准。");
+            task.append("\n\n审查要求：")
+                    .append("\n1. 必须调用工具检查真实产物，至少确认相关文件/入口/API 是否存在")
+                    .append("\n2. 如果步骤涉及代码，运行可行的最小编译或自检命令")
+                    .append("\n3. 仅凭执行者文字说明不得批准")
+                    .append("\n4. 每条验收标准必须逐条核对，不能只抽查")
+                    .append("\n5. 输出 JSON 时 criteria_results 必须包含所有验收标准，不能遗漏");
         }
         return task.toString();
     }
@@ -1742,7 +1807,7 @@ public class AgentOrchestrator {
         if (currentAcceptanceCriteria == null || currentAcceptanceCriteria.isEmpty()) {
             return;
         }
-        sb.append("⚠️ ").append(title).append("：\n");
+        sb.append("⚠️ [关键上下文，不可压缩或省略] ").append(title).append("：\n");
         for (AcceptanceCriterion criterion : currentAcceptanceCriteria) {
             sb.append(criterion.formatForPrompt()).append("\n");
         }

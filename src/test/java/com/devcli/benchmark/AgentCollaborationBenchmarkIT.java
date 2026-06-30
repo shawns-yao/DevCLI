@@ -46,7 +46,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class AgentCollaborationBenchmarkIT {
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final int HIDDEN_TEST_TOTAL = 10;
     private static final int DEFAULT_MAX_LLM_ATTEMPTS = 3;
     private static final Set<String> ALLOWED_TOOLS = Set.of(
             "read_file", "write_file", "list_dir", "execute_command"
@@ -95,7 +94,7 @@ class AgentCollaborationBenchmarkIT {
                     }
                 }
                 """, StandardCharsets.UTF_8);
-        CompiledWorkspace compiled = compileWorkspace(workspace);
+        CompiledWorkspace compiled = compileWorkspace(workspace, "logops");
         assertTrue(compiled.failures().isEmpty(), String.join("\n", compiled.failures()));
 
         try (URLClassLoader loader = new URLClassLoader(new URL[]{compiled.classes().toUri().toURL()})) {
@@ -192,7 +191,7 @@ class AgentCollaborationBenchmarkIT {
     }
 
     private static List<BenchmarkTask> benchmarkTasks() {
-        return List.of(logOpsTask(), salesOpsTask(), incidentOpsTask());
+        return List.of(logOpsTask(), salesOpsTask(), incidentOpsTask(), orderMvcTask(), bankingSystemTask());
     }
 
     private static List<BenchmarkTask> selectedBenchmarkTasks() {
@@ -364,34 +363,215 @@ class AgentCollaborationBenchmarkIT {
                 """);
     }
 
+    private static BenchmarkTask orderMvcTask() {
+        return new BenchmarkTask("ordermvc", "implement MVC three-tier e-commerce order system", """
+                Implement a bounded Java benchmark task. Do not edit files outside the current project root.
+                Mode: ${mode}.
+                ** THIS IS A HIGH-COMPLEXITY MVC TASK **
+                You MUST implement a THREE-TIER architecture across MULTIPLE FILES.
+                Single-file implementation will FAIL hidden validation.
+
+                Build an e-commerce Order Management System under src/main/java/bench/order/.
+
+                REQUIRED ARCHITECTURE (MVC THREE TIERS - 4 MINIMUM FILES):
+                1. MODEL LAYER: Order.java - Order entity with state machine
+                   - Fields: orderId, userId, status, totalAmount, items, createdAt, updatedAt
+                   - Status enum: PENDING → PAID → SHIPPED → COMPLETED / CANCELLED / REFUNDED
+                   - State transition validation (e.g., cannot ship a cancelled order)
+
+                2. REPOSITORY LAYER: OrderRepository.java - Data access layer
+                   - CRUD operations: findById, findAll, save, delete
+                   - Status-based queries: findByStatus, findByUserId
+                   - In-memory storage (Map/List), O(1) lookup by orderId required
+
+                3. SERVICE LAYER: OrderService.java - Business logic
+                   - createOrder(userId, items, totalAmount) → PENDING
+                   - payOrder(orderId) → PAID (PENDING only)
+                   - shipOrder(orderId) → SHIPPED (PAID only)
+                   - completeOrder(orderId) → COMPLETED (SHIPPED only)
+                   - cancelOrder(orderId) → CANCELLED (PENDING only)
+                   - refundOrder(orderId) → REFUNDED (PAID/SHIPPED only)
+                   - getOrderStatistics() → counts per status + total revenue
+
+                4. CONTROLLER LAYER: OrderController.java - CLI entrypoint
+                   - Commands: order create, order list, order get <id>, order pay <id>
+                   - order ship <id>, order complete <id>, order cancel <id>, order refund <id>
+                   - order stats, order status <status>
+
+                Testable architecture requirements (CRITICAL - HIDDEN VALIDATION WILL FAIL IF MISSING):
+                - 4 separate Java files minimum (Order.java + OrderRepository.java + OrderService.java + OrderController.java)
+                - OrderService depends on OrderRepository (constructor injection)
+                - OrderController depends on OrderService (constructor injection)
+                - Circular dependencies are NOT allowed
+                - Each layer only calls the next layer down (Controller → Service → Repository)
+                - Controller must NOT access Repository directly (must go through Service)
+                - O(1) order lookup by ID required (use HashMap/LinkedHashMap)
+                - Order status transitions enforce state machine rules (e.g., cannot pay a completed order)
+                - Invalid state transitions return clear error message, not exceptions
+                - All public methods have meaningful Javadoc comments
+
+                Entrypoint: bench.order.OrderSystem with public static String run(String[] args)
+                Keep all production code self-contained under src/main/java/bench/order/.
+                Prefer simple imperative Java loops and mutable local variables.
+                Before final answer, run a local compile check such as javac -encoding UTF-8 -d classes <all generated java files>.
+
+                Order format for CLI output:
+                  ID | USER | STATUS | AMOUNT | CREATED_AT
+                  O-1001 | user123 | PAID | 199.99 | 2026-05-19T10:15:00
+
+                Required self-check before final answer:
+                - compile all 4+ files successfully
+                - create order returns PENDING status
+                - payOrder works only on PENDING orders
+                - shipOrder works only on PAID orders
+                - cancelOrder works only on PENDING orders
+                - completeOrder works only on SHIPPED orders
+                - refundOrder works only on PAID or SHIPPED orders
+                - getOrderStatistics returns correct counts
+                - getOrder by ID returns correct order (O(1) lookup)
+                - controller delegates to service only (no direct repository access)
+                - invalid state transition returns clear error message
+
+                Suggested concerns: state machine, architecture layering, dependency injection,
+                data structure efficiency, error handling, table formatting, CLI dispatch,
+                business rule enforcement, O(1) lookup performance, memory efficiency.
+
+                Planner/Worker/Reviewer mode:
+                  1. PLANNER: Define module interfaces & dependencies first
+                  2. WORKER: Implement each layer separately
+                  3. REVIEWER: Verify architecture compliance, state transitions, and performance constraints
+                """);
+    }
+
+    private static BenchmarkTask bankingSystemTask() {
+        return new BenchmarkTask("banking", "implement enterprise banking system with design patterns", """
+                Implement a bounded Java benchmark task. Do not edit files outside the current project root.
+                Mode: ${mode}.
+
+                Build an enterprise-grade Banking Account Management System under src/main/java/bench/banking/.
+
+                ARCHITECTURE REQUIREMENTS (minimum 7 Java files):
+                1. AccountService INTERFACE (interface layer)
+                   - deposit(String accountId, BigDecimal amount) throws InsufficientFundsException
+                   - withdraw(String accountId, BigDecimal amount) throws InsufficientFundsException
+                   - transfer(String fromAccountId, String toAccountId, BigDecimal amount) throws InsufficientFundsException
+                   - getBalance(String accountId)
+                   - getTransactionHistory(String accountId)
+
+                2. AccountRepository INTERFACE (data access layer)
+                   - findById(String accountId)
+                   - save(Account account)
+                   - update(Account account)
+                   - delete(String accountId)
+
+                3. AccountServiceImpl CLASS (business logic)
+                   - implements AccountService
+                   - thread-safe operations required
+                   - uses AccountRepository dependency injection
+
+                4. InMemoryAccountRepositoryImpl CLASS (in-memory storage)
+                   - implements AccountRepository
+                   - ConcurrentHashMap for thread safety
+                   - O(1) lookup required
+
+                5. TransactionLogger INTERFACE + ConsoleTransactionLogger CLASS (Strategy Pattern)
+                   - log(Transaction transaction)
+                   - must support multiple logger implementations
+
+                6. AccountFactory CLASS (Factory Pattern)
+                   - createSavingsAccount(String id, BigDecimal initialBalance)
+                   - createCheckingAccount(String id, BigDecimal initialBalance)
+                   - createInvestmentAccount(String id, BigDecimal initialBalance)
+
+                7. Account ENTITY CLASS
+                   - id, balance, type, createdDate, transactionCount, version field
+                   - immutable fields after creation (except balance via transactions)
+
+                8. Transaction ENTITY CLASS
+                   - id, fromAccountId, toAccountId, amount, timestamp, type (DEPOSIT/WITHDRAWAL/TRANSFER)
+
+                9. Custom EXCEPTION CLASSES
+                   - InsufficientFundsException extends Exception
+                   - AccountNotFoundException extends Exception
+                   - TransactionFailedException extends Exception
+
+                10. BankingSystemCli CLASS (entry point)
+                    - CLI: deposit, withdraw, transfer, balance, history
+
+                DESIGN PATTERN REQUIREMENTS:
+                - Strategy Pattern for transaction logging (TransactionLogger interface + multiple impls)
+                - Factory Pattern for account creation (AccountFactory)
+                - Repository Pattern for data access
+                - Service Layer pattern for business logic
+
+                THREAD SAFETY REQUIREMENTS:
+                - Deposit/Withdraw/Transfer must be atomic (synchronized or Lock-based)
+                - Concurrent transfers must not cause race conditions or lost updates
+                - Balance must remain consistent under concurrent operations
+
+                BUSINESS RULES:
+                - Minimum balance for Savings: $100.00 (account creation validation)
+                - Overdraft protection: Checking accounts can go negative up to -$500
+                - Investment accounts have no overdraft (minimum balance always $0)
+                - Transfer fee: $0.50 per transaction (deducted from source account)
+                - Daily deposit limit: $10,000 per account per day
+                - Daily withdrawal limit: $5,000 per account per day
+                - Transaction history must preserve full audit trail
+
+                JAVA CODING STANDARDS:
+                - All public methods must have JavaDoc comments
+                - BigDecimal for all currency operations (NO double/float)
+                - BigDecimal scale set to 2 for currency
+                - All compareTo() instead of equals() for BigDecimal comparisons
+                - Constants for all magic numbers
+
+                ENTRY POINT: bench.banking.BankingSystemCli.run(String[] args)
+
+                Suggested concerns: design patterns, thread safety, atomic operations,
+                exception handling, BigDecimal precision, business rule enforcement,
+                concurrent transfer correctness, factory validation, repository encapsulation.
+
+                Planner/Worker/Reviewer mode:
+                  1. PLANNER: Define ALL interfaces first (AccountService, AccountRepository, TransactionLogger)
+                  2. WORKER: Implement entities, exceptions, factory, repository, service, CLI separately
+                  3. REVIEWER: Verify thread safety, design pattern correctness, exception hierarchy, BigDecimal usage
+                """);
+    }
+
     private static String promptFor(String mode, BenchmarkTask task) {
         return task.prompt().replace("${mode}", mode);
     }
 
     private static Evaluation evaluate(Path workspace, BenchmarkTask task) {
         List<String> hiddenFailures = new ArrayList<>();
+        int taskTestTotal = switch (task.id()) {
+            case "ordermvc" -> 15;
+            case "banking" -> 20;
+            default -> 10;
+        };
         try {
             hiddenFailures.addAll(switch (task.id()) {
-                case "logops" -> runLogOpsHiddenChecks(workspace);
-                case "salesops" -> runSalesOpsHiddenChecks(workspace);
-                case "incidentops" -> runIncidentOpsHiddenChecks(workspace);
-                default -> fatalFunctionalFailures("unknown benchmark task: " + task.id());
+                case "logops" -> runLogOpsHiddenChecks(workspace, task.id());
+                case "salesops" -> runSalesOpsHiddenChecks(workspace, task.id());
+                case "incidentops" -> runIncidentOpsHiddenChecks(workspace, task.id());
+                case "ordermvc" -> runOrderMvcHiddenChecks(workspace, task.id());
+                case "banking" -> runBankingSystemHiddenChecks(workspace, task.id());
+                default -> fatalFunctionalFailures(task.id(), "unknown benchmark task: " + task.id());
             });
         } catch (Exception e) {
-            hiddenFailures.addAll(fatalFunctionalFailures("hidden validation crashed: " + e.getMessage()));
+            hiddenFailures.addAll(fatalFunctionalFailures(task.id(), "hidden validation crashed: " + e.getMessage()));
         }
-        return new Evaluation(hiddenFailures.size(),
-                uniqueBugCount(hiddenFailures), List.copyOf(hiddenFailures));
+        return new Evaluation(hiddenFailures.size(), uniqueBugCount(hiddenFailures), List.copyOf(hiddenFailures), taskTestTotal);
     }
 
-    private static List<String> runLogOpsHiddenChecks(Path workspace) throws Exception {
+    private static List<String> runLogOpsHiddenChecks(Path workspace, String taskId) throws Exception {
         Path sourceRoot = workspace.resolve("src/main/java");
-        if (!Files.exists(sourceRoot)) return fatalFunctionalFailures("compile failed: no Java source files");
+        if (!Files.exists(sourceRoot)) return fatalFunctionalFailures(taskId, "compile failed: no Java source files");
         List<Path> sources;
         try (Stream<Path> stream = Files.walk(sourceRoot)) {
             sources = stream.filter(path -> path.toString().endsWith(".java")).toList();
         }
-        if (sources.isEmpty()) return fatalFunctionalFailures("compile failed: no Java source files");
+        if (sources.isEmpty()) return fatalFunctionalFailures(taskId, "compile failed: no Java source files");
 
         Path classes = workspace.resolve("classes");
         Files.createDirectories(classes);
@@ -402,7 +582,7 @@ class AgentCollaborationBenchmarkIT {
                     List.of("-encoding", "UTF-8", "-d", classes.toString()), null,
                     manager.getJavaFileObjectsFromFiles(sources.stream().map(Path::toFile).toList())).call();
             if (!Boolean.TRUE.equals(ok)) {
-                return fatalFunctionalFailures("compile failed: " + summarizeDiagnostics(diagnostics));
+                return fatalFunctionalFailures(taskId, "compile failed: " + summarizeDiagnostics(diagnostics));
             }
         }
 
@@ -479,8 +659,8 @@ class AgentCollaborationBenchmarkIT {
         return failures;
     }
 
-    private static List<String> runSalesOpsHiddenChecks(Path workspace) throws Exception {
-        CompiledWorkspace compiled = compileWorkspace(workspace);
+    private static List<String> runSalesOpsHiddenChecks(Path workspace, String taskId) throws Exception {
+        CompiledWorkspace compiled = compileWorkspace(workspace, taskId);
         if (!compiled.failures().isEmpty()) return compiled.failures();
 
         Path dataDir = workspace.resolve("hidden-sales");
@@ -555,8 +735,8 @@ class AgentCollaborationBenchmarkIT {
         return failures;
     }
 
-    private static List<String> runIncidentOpsHiddenChecks(Path workspace) throws Exception {
-        CompiledWorkspace compiled = compileWorkspace(workspace);
+    private static List<String> runIncidentOpsHiddenChecks(Path workspace, String taskId) throws Exception {
+        CompiledWorkspace compiled = compileWorkspace(workspace, taskId);
         if (!compiled.failures().isEmpty()) return compiled.failures();
 
         Path dataDir = workspace.resolve("hidden-incidents");
@@ -634,16 +814,16 @@ class AgentCollaborationBenchmarkIT {
         return failures;
     }
 
-    private static CompiledWorkspace compileWorkspace(Path workspace) throws Exception {
+    private static CompiledWorkspace compileWorkspace(Path workspace, String taskId) throws Exception {
         Path sourceRoot = workspace.resolve("src/main/java");
         if (!Files.exists(sourceRoot)) return new CompiledWorkspace(workspace.resolve("classes"),
-                fatalFunctionalFailures("compile failed: no Java source files"));
+                fatalFunctionalFailures(taskId, "compile failed: no Java source files"));
         List<Path> sources;
         try (Stream<Path> stream = Files.walk(sourceRoot)) {
             sources = stream.filter(path -> path.toString().endsWith(".java")).toList();
         }
         if (sources.isEmpty()) return new CompiledWorkspace(workspace.resolve("classes"),
-                fatalFunctionalFailures("compile failed: no Java source files"));
+                fatalFunctionalFailures(taskId, "compile failed: no Java source files"));
 
         Path classes = workspace.resolve("classes");
         Files.createDirectories(classes);
@@ -655,25 +835,540 @@ class AgentCollaborationBenchmarkIT {
                     manager.getJavaFileObjectsFromFiles(sources.stream().map(Path::toFile).toList())).call();
             if (!Boolean.TRUE.equals(ok)) {
                 return new CompiledWorkspace(classes,
-                        fatalFunctionalFailures("compile failed: " + summarizeDiagnostics(diagnostics)));
+                        fatalFunctionalFailures(taskId, "compile failed: " + summarizeDiagnostics(diagnostics)));
             }
         }
         return new CompiledWorkspace(classes, List.of());
     }
 
-    private static List<String> fatalFunctionalFailures(String reason) {
-        return List.of(
-                "time query unavailable: " + reason,
-                "level query default unavailable: " + reason,
-                "level query interactive unavailable: " + reason,
-                "stat error unavailable: " + reason,
-                "error export unavailable: " + reason,
-                "clean shard explicit unavailable: " + reason,
-                "invalid command unavailable: " + reason,
-                "root command required unavailable: " + reason,
-                "table header unavailable: " + reason,
-                "clean default unavailable: " + reason
-        );
+    private static List<String> runOrderMvcHiddenChecks(Path workspace, String taskId) throws Exception {
+        Path sourceRoot = workspace.resolve("src/main/java");
+        if (!Files.exists(sourceRoot)) return fatalFunctionalFailures(taskId, "no Java source files");
+        List<Path> sources;
+        try (Stream<Path> stream = Files.walk(sourceRoot)) {
+            sources = stream.filter(path -> path.toString().endsWith(".java")).toList();
+        }
+
+        if (sources.isEmpty()) return fatalFunctionalFailures(taskId, "no Java source files");
+
+        List<String> failures = new ArrayList<>();
+
+        // 架构检查：至少 4 个独立文件
+        hiddenCheck(failures, "4+ separate files", () -> {
+            long fileCount = sources.size();
+            check(failures, true, fileCount >= 4, "MVC requires at least 4 separate files, found " + fileCount);
+        });
+
+        // 架构检查：各层存在
+        hiddenCheck(failures, "Order.java model exists", () -> {
+            boolean found = sources.stream().anyMatch(p -> p.getFileName().toString().equals("Order.java"));
+            check(failures, true, found, "Order.java model file required");
+        });
+
+        hiddenCheck(failures, "OrderRepository.java exists", () -> {
+            boolean found = sources.stream().anyMatch(p -> p.getFileName().toString().equals("OrderRepository.java"));
+            check(failures, true, found, "OrderRepository.java repository file required");
+        });
+
+        hiddenCheck(failures, "OrderService.java exists", () -> {
+            boolean found = sources.stream().anyMatch(p -> p.getFileName().toString().equals("OrderService.java"));
+            check(failures, true, found, "OrderService.java service file required");
+        });
+
+        hiddenCheck(failures, "OrderController.java exists", () -> {
+            boolean found = sources.stream().anyMatch(p -> p.getFileName().toString().equals("OrderController.java"));
+            check(failures, true, found, "OrderController.java controller file required");
+        });
+
+        // 编译
+        Path classes = workspace.resolve("classes");
+        Files.createDirectories(classes);
+        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+        DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
+        try (StandardJavaFileManager manager = compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8)) {
+            Boolean ok = compiler.getTask(null, manager, diagnostics,
+                    List.of("-encoding", "UTF-8", "-d", classes.toString()), null,
+                    manager.getJavaFileObjectsFromFiles(sources.stream().map(Path::toFile).toList())).call();
+            if (!Boolean.TRUE.equals(ok)) {
+                failures.add("compile failed: " + summarizeDiagnostics(diagnostics));
+                for (int i = 0; i < 9; i++) failures.add("remaining checks skipped due to compile failure");
+                return failures;
+            }
+        }
+
+        // 架构深度检查：通过反射验证依赖关系
+        try (URLClassLoader loader = new URLClassLoader(new URL[]{classes.toUri().toURL()})) {
+            // 验证依赖注入
+            hiddenCheck(failures, "Service depends on Repository", () -> {
+                Class<?> serviceClass = Class.forName("bench.order.OrderService", true, loader);
+                boolean hasRepoConstructor = false;
+                for (java.lang.reflect.Constructor<?> ctor : serviceClass.getConstructors()) {
+                    for (Class<?> param : ctor.getParameterTypes()) {
+                        if (param.getName().contains("OrderRepository")) {
+                            hasRepoConstructor = true;
+                            break;
+                        }
+                    }
+                }
+                check(failures, true, hasRepoConstructor, "OrderService must have constructor accepting OrderRepository");
+            });
+
+            hiddenCheck(failures, "Controller depends on Service", () -> {
+                Class<?> controllerClass = Class.forName("bench.order.OrderController", true, loader);
+                boolean hasServiceConstructor = false;
+                for (java.lang.reflect.Constructor<?> ctor : controllerClass.getConstructors()) {
+                    for (Class<?> param : ctor.getParameterTypes()) {
+                        if (param.getName().contains("OrderService")) {
+                            hasServiceConstructor = true;
+                            break;
+                        }
+                    }
+                }
+                check(failures, true, hasServiceConstructor, "OrderController must have constructor accepting OrderService");
+            });
+
+            // 验证层隔离：Controller 不能直接依赖 Repository
+            hiddenCheck(failures, "Controller layer isolation", () -> {
+                Class<?> controllerClass = Class.forName("bench.order.OrderController", true, loader);
+                boolean hasDirectRepoDependency = false;
+                for (java.lang.reflect.Constructor<?> ctor : controllerClass.getConstructors()) {
+                    for (Class<?> param : ctor.getParameterTypes()) {
+                        if (param.getName().contains("OrderRepository")) {
+                            hasDirectRepoDependency = true;
+                            break;
+                        }
+                    }
+                }
+                for (java.lang.reflect.Field f : controllerClass.getDeclaredFields()) {
+                    if (f.getType().getName().contains("OrderRepository")) {
+                        hasDirectRepoDependency = true;
+                        break;
+                    }
+                }
+                check(failures, false, hasDirectRepoDependency, "Controller must NOT access Repository directly - must go through Service");
+            });
+
+            // 验证状态机存在
+            hiddenCheck(failures, "Status enum exists", () -> {
+                boolean foundStatusEnum = false;
+                for (Class<?> inner : Class.forName("bench.order.Order", true, loader).getDeclaredClasses()) {
+                    if (inner.isEnum() && inner.getSimpleName().contains("Status")) {
+                        foundStatusEnum = true;
+                        break;
+                    }
+                }
+                // 也可能是顶级 enum
+                try {
+                    Class.forName("bench.order.OrderStatus", true, loader);
+                    foundStatusEnum = true;
+                } catch (ClassNotFoundException ignored) {}
+                check(failures, true, foundStatusEnum, "OrderStatus enum must exist for state machine");
+            });
+
+            // 验证 O(1) 查找：Repository 使用 HashMap
+            hiddenCheck(failures, "Repository uses HashMap for O(1) lookup", () -> {
+                Path repoPath = null;
+                for (Path p : sources) {
+                    if (p.getFileName().toString().equals("OrderRepository.java")) {
+                        repoPath = p;
+                        break;
+                    }
+                }
+                if (repoPath != null) {
+                    String content = Files.readString(repoPath);
+                    boolean hasHashMap = content.contains("HashMap") || content.contains("LinkedHashMap");
+                    check(failures, true, hasHashMap, "OrderRepository must use HashMap/LinkedHashMap for O(1) order lookup");
+                }
+            });
+
+            // 验证入口点存在
+            hiddenCheck(failures, "OrderSystem entrypoint exists", () -> {
+                try {
+                    Class.forName("bench.order.OrderSystem", true, loader);
+                } catch (ClassNotFoundException e) {
+                    failures.add("OrderSystem entrypoint class not found: bench.order.OrderSystem");
+                }
+            });
+
+            // 状态转换验证：通过 OrderService 方法
+            hiddenCheck(failures, "Service has state transition methods", () -> {
+                Class<?> serviceClass = Class.forName("bench.order.OrderService", true, loader);
+                List<String> methodNames = new ArrayList<>();
+                for (java.lang.reflect.Method m : serviceClass.getMethods()) {
+                    methodNames.add(m.getName());
+                }
+                check(failures, true, methodNames.contains("createOrder"), "OrderService must have createOrder method");
+                check(failures, true, methodNames.contains("payOrder"), "OrderService must have payOrder method");
+                check(failures, true, methodNames.contains("shipOrder"), "OrderService must have shipOrder method");
+                check(failures, true, methodNames.contains("cancelOrder"), "OrderService must have cancelOrder method");
+                check(failures, true, methodNames.contains("completeOrder"), "OrderService must have completeOrder method");
+                check(failures, true, methodNames.contains("refundOrder"), "OrderService must have refundOrder method");
+                check(failures, true, methodNames.contains("getOrderStatistics"), "OrderService must have getOrderStatistics method");
+            });
+
+            // 验证 Order 有状态字段
+            hiddenCheck(failures, "Order has status field", () -> {
+                Class<?> orderClass = Class.forName("bench.order.Order", true, loader);
+                boolean hasStatus = false;
+                for (java.lang.reflect.Field f : orderClass.getDeclaredFields()) {
+                    if (f.getName().toLowerCase().contains("status")) {
+                        hasStatus = true;
+                        break;
+                    }
+                }
+                check(failures, true, hasStatus, "Order must have a status field for state machine");
+            });
+
+            // 验证 Repository 有 findById
+            hiddenCheck(failures, "Repository has findById", () -> {
+                Class<?> repoClass = Class.forName("bench.order.OrderRepository", true, loader);
+                boolean hasFindById = false;
+                for (java.lang.reflect.Method m : repoClass.getMethods()) {
+                    if (m.getName().equals("findById") || m.getName().equals("getById")) {
+                        hasFindById = true;
+                        break;
+                    }
+                }
+                check(failures, true, hasFindById, "OrderRepository must have findById method for O(1) lookup");
+            });
+
+            // 内存检查：验证没有使用过多内存（粗略检查）
+            hiddenCheck(failures, "Repository O(1) memory structure", () -> {
+                Path repoPath = null;
+                for (Path p : sources) {
+                    if (p.getFileName().toString().equals("OrderRepository.java")) {
+                        repoPath = p;
+                        break;
+                    }
+                }
+                if (repoPath != null) {
+                    String content = Files.readString(repoPath);
+                    boolean usesMap = content.contains("Map<") || content.contains("HashMap") || content.contains("LinkedHashMap");
+                    check(failures, true, usesMap, "OrderRepository should use Map for O(1) lookup");
+                }
+            });
+        }
+
+        return failures;
+    }
+
+    private static List<String> runBankingSystemHiddenChecks(Path workspace, String taskId) throws Exception {
+        Path sourceRoot = workspace.resolve("src/main/java");
+        if (!Files.exists(sourceRoot)) return fatalFunctionalFailures(taskId, "no Java source files");
+        List<Path> sources;
+        try (Stream<Path> stream = Files.walk(sourceRoot)) {
+            sources = stream.filter(path -> path.toString().endsWith(".java")).toList();
+        }
+
+        if (sources.isEmpty()) return fatalFunctionalFailures(taskId, "no Java source files");
+
+        List<String> failures = new ArrayList<>();
+
+        // 架构检查：至少 7 个独立文件
+        hiddenCheck(failures, "7+ separate Java files", () -> {
+            long fileCount = sources.size();
+            check(failures, true, fileCount >= 7, "Banking system requires at least 7 separate Java files, found " + fileCount);
+        });
+
+        // 编译
+        Path classes = workspace.resolve("classes");
+        Files.createDirectories(classes);
+        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+        DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
+        try (StandardJavaFileManager manager = compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8)) {
+            Boolean ok = compiler.getTask(null, manager, diagnostics,
+                    List.of("-encoding", "UTF-8", "-d", classes.toString()), null,
+                    manager.getJavaFileObjectsFromFiles(sources.stream().map(Path::toFile).toList())).call();
+            if (!Boolean.TRUE.equals(ok)) {
+                failures.add("compile failed: " + summarizeDiagnostics(diagnostics));
+                for (int i = 0; i < 19; i++) failures.add("remaining checks skipped due to compile failure");
+                return failures;
+            }
+        }
+
+        // 架构深度检查：通过反射验证设计模式和架构
+        try (URLClassLoader loader = new URLClassLoader(new URL[]{classes.toUri().toURL()})) {
+            // AccountService 接口存在
+            hiddenCheck(failures, "AccountService interface exists", () -> {
+                try {
+                    Class<?> serviceInterface = Class.forName("bench.banking.AccountService", true, loader);
+                    check(failures, true, serviceInterface.isInterface(), "AccountService must be an interface");
+                } catch (ClassNotFoundException e) {
+                    check(failures, true, false, "AccountService interface not found");
+                }
+            });
+
+            // AccountRepository 接口存在
+            hiddenCheck(failures, "AccountRepository interface exists", () -> {
+                try {
+                    Class<?> repoInterface = Class.forName("bench.banking.AccountRepository", true, loader);
+                    check(failures, true, repoInterface.isInterface(), "AccountRepository must be an interface");
+                } catch (ClassNotFoundException e) {
+                    check(failures, true, false, "AccountRepository interface not found");
+                }
+            });
+
+            // TransactionLogger 接口存在（Strategy Pattern）
+            hiddenCheck(failures, "TransactionLogger interface exists", () -> {
+                try {
+                    Class<?> loggerInterface = Class.forName("bench.banking.TransactionLogger", true, loader);
+                    check(failures, true, loggerInterface.isInterface(), "TransactionLogger must be an interface for Strategy Pattern");
+                } catch (ClassNotFoundException e) {
+                    check(failures, true, false, "TransactionLogger interface not found (Strategy Pattern)");
+                }
+            });
+
+            // AccountServiceImpl 实现类存在
+            hiddenCheck(failures, "AccountServiceImpl exists", () -> {
+                try {
+                    Class<?> serviceClass = Class.forName("bench.banking.AccountServiceImpl", true, loader);
+                    boolean implementsService = false;
+                    for (Class<?> iface : serviceClass.getInterfaces()) {
+                        if (iface.getSimpleName().contains("AccountService")) {
+                            implementsService = true;
+                            break;
+                        }
+                    }
+                    check(failures, true, implementsService, "AccountServiceImpl must implement AccountService interface");
+                } catch (ClassNotFoundException e) {
+                    check(failures, true, false, "AccountServiceImpl not found");
+                }
+            });
+
+            // InMemoryAccountRepositoryImpl 存在
+            hiddenCheck(failures, "InMemoryAccountRepositoryImpl exists", () -> {
+                try {
+                    Class<?> repoClass = Class.forName("bench.banking.InMemoryAccountRepositoryImpl", true, loader);
+                    boolean implementsRepo = false;
+                    for (Class<?> iface : repoClass.getInterfaces()) {
+                        if (iface.getSimpleName().contains("AccountRepository")) {
+                            implementsRepo = true;
+                            break;
+                        }
+                    }
+                    check(failures, true, implementsRepo, "InMemoryAccountRepositoryImpl must implement AccountRepository interface");
+                } catch (ClassNotFoundException e) {
+                    check(failures, true, false, "InMemoryAccountRepositoryImpl not found");
+                }
+            });
+
+            // ConsoleTransactionLogger 存在（Strategy Pattern 实现）
+            hiddenCheck(failures, "ConsoleTransactionLogger exists", () -> {
+                try {
+                    Class<?> loggerClass = Class.forName("bench.banking.ConsoleTransactionLogger", true, loader);
+                    boolean implementsLogger = false;
+                    for (Class<?> iface : loggerClass.getInterfaces()) {
+                        if (iface.getSimpleName().contains("TransactionLogger")) {
+                            implementsLogger = true;
+                            break;
+                        }
+                    }
+                    check(failures, true, implementsLogger, "ConsoleTransactionLogger must implement TransactionLogger interface");
+                } catch (ClassNotFoundException e) {
+                    check(failures, true, false, "ConsoleTransactionLogger not found (Strategy Pattern implementation)");
+                }
+            });
+
+            // AccountFactory 存在（Factory Pattern）
+            hiddenCheck(failures, "AccountFactory exists", () -> {
+                try {
+                    Class.forName("bench.banking.AccountFactory", true, loader);
+                } catch (ClassNotFoundException e) {
+                    check(failures, true, false, "AccountFactory not found (Factory Pattern)");
+                }
+            });
+
+            // Account 实体类存在
+            hiddenCheck(failures, "Account entity exists", () -> {
+                try {
+                    Class.forName("bench.banking.Account", true, loader);
+                } catch (ClassNotFoundException e) {
+                    check(failures, true, false, "Account entity class not found");
+                }
+            });
+
+            // Transaction 实体类存在
+            hiddenCheck(failures, "Transaction entity exists", () -> {
+                try {
+                    Class.forName("bench.banking.Transaction", true, loader);
+                } catch (ClassNotFoundException e) {
+                    check(failures, true, false, "Transaction entity class not found");
+                }
+            });
+
+            // 自定义异常存在
+            hiddenCheck(failures, "InsufficientFundsException exists", () -> {
+                try {
+                    Class<?> exClass = Class.forName("bench.banking.InsufficientFundsException", true, loader);
+                    check(failures, true, Exception.class.isAssignableFrom(exClass), "InsufficientFundsException must extend Exception");
+                } catch (ClassNotFoundException e) {
+                    check(failures, true, false, "InsufficientFundsException not found");
+                }
+            });
+
+            hiddenCheck(failures, "AccountNotFoundException exists", () -> {
+                try {
+                    Class<?> exClass = Class.forName("bench.banking.AccountNotFoundException", true, loader);
+                    check(failures, true, Exception.class.isAssignableFrom(exClass), "AccountNotFoundException must extend Exception");
+                } catch (ClassNotFoundException e) {
+                    check(failures, true, false, "AccountNotFoundException not found");
+                }
+            });
+
+            hiddenCheck(failures, "TransactionFailedException exists", () -> {
+                try {
+                    Class<?> exClass = Class.forName("bench.banking.TransactionFailedException", true, loader);
+                    check(failures, true, Exception.class.isAssignableFrom(exClass), "TransactionFailedException must extend Exception");
+                } catch (ClassNotFoundException e) {
+                    check(failures, true, false, "TransactionFailedException not found");
+                }
+            });
+
+            // 线程安全检查：Repository 使用 ConcurrentHashMap
+            hiddenCheck(failures, "Repository uses ConcurrentHashMap", () -> {
+                for (Path p : sources) {
+                    if (p.getFileName().toString().contains("Repository")) {
+                        String content = Files.readString(p);
+                        boolean usesConcurrent = content.contains("ConcurrentHashMap") || content.contains("ConcurrentMap");
+                        check(failures, true, usesConcurrent, "AccountRepository must use ConcurrentHashMap for thread safety");
+                        return;
+                    }
+                }
+            });
+
+            // 使用 BigDecimal 进行货币操作
+            hiddenCheck(failures, "Uses BigDecimal for currency", () -> {
+                for (Path p : sources) {
+                    if (p.getFileName().toString().contains("Account") || p.getFileName().toString().contains("Service")) {
+                        String content = Files.readString(p);
+                        boolean usesBigDecimal = content.contains("BigDecimal");
+                        boolean usesDouble = content.contains("double ") || content.contains("Double");
+                        check(failures, true, usesBigDecimal && !usesDouble, "Must use BigDecimal for currency operations, not double/float");
+                        return;
+                    }
+                }
+            });
+
+            // BigDecimal 精度设置为 2
+            hiddenCheck(failures, "BigDecimal scale = 2 for currency", () -> {
+                for (Path p : sources) {
+                    if (p.getFileName().toString().contains("Account") || p.getFileName().toString().contains("Service")) {
+                        String content = Files.readString(p);
+                        boolean hasSetScale = content.contains("setScale(2)") || content.contains("setScale(2,") || content.contains("BigDecimal.valueOf");
+                        if (hasSetScale) return;
+                    }
+                }
+                check(failures, true, false, "BigDecimal should use scale=2 for currency operations");
+            });
+
+            // 使用 compareTo() 而不是 equals() 比较 BigDecimal
+            hiddenCheck(failures, "Uses compareTo() for BigDecimal comparison", () -> {
+                for (Path p : sources) {
+                    if (p.getFileName().toString().contains("AccountService")) {
+                        String content = Files.readString(p);
+                        boolean usesCompareTo = content.contains(".compareTo(");
+                        if (usesCompareTo) return;
+                    }
+                }
+                check(failures, true, false, "Should use BigDecimal.compareTo() instead of equals() for comparisons");
+            });
+
+            // 魔术数字检查：有常量定义
+            hiddenCheck(failures, "Uses constants for magic numbers", () -> {
+                for (Path p : sources) {
+                    if (p.getFileName().toString().contains("AccountService") || p.getFileName().toString().contains("AccountFactory")) {
+                        String content = Files.readString(p);
+                        boolean hasConstants = content.contains("final ") || content.contains("static final");
+                        if (hasConstants) return;
+                    }
+                }
+                check(failures, true, false, "Should use constants instead of magic numbers");
+            });
+
+            // 入口点存在
+            hiddenCheck(failures, "BankingSystemCli entrypoint exists", () -> {
+                try {
+                    Class.forName("bench.banking.BankingSystemCli", true, loader);
+                } catch (ClassNotFoundException e) {
+                    check(failures, true, false, "BankingSystemCli entrypoint not found");
+                }
+            });
+
+            // AccountService 有正确的方法签名
+            hiddenCheck(failures, "AccountService has business methods", () -> {
+                try {
+                    Class<?> serviceClass = Class.forName("bench.banking.AccountService", true, loader);
+                    java.lang.reflect.Method[] methods = serviceClass.getMethods();
+                    boolean hasDeposit = false, hasWithdraw = false, hasTransfer = false, hasGetBalance = false;
+                    for (java.lang.reflect.Method m : methods) {
+                        if (m.getName().equals("deposit")) hasDeposit = true;
+                        if (m.getName().equals("withdraw")) hasWithdraw = true;
+                        if (m.getName().equals("transfer")) hasTransfer = true;
+                        if (m.getName().equals("getBalance")) hasGetBalance = true;
+                    }
+                    check(failures, true, hasDeposit && hasWithdraw && hasTransfer && hasGetBalance,
+                            "AccountService must have deposit/withdraw/transfer/getBalance methods");
+                } catch (ClassNotFoundException ignored) {}
+            });
+        }
+
+        return failures;
+    }
+
+    private static List<String> fatalFunctionalFailures(String taskId, String reason) {
+        return switch (taskId) {
+            case "ordermvc" -> List.of(
+                    "architecture check failed: " + reason,
+                    "4+ files requirement unavailable: " + reason,
+                    "model layer unavailable: " + reason,
+                    "repository layer unavailable: " + reason,
+                    "service layer unavailable: " + reason,
+                    "controller layer unavailable: " + reason,
+                    "state machine unavailable: " + reason,
+                    "O(1) lookup unavailable: " + reason,
+                    "dependency injection unavailable: " + reason,
+                    "layer isolation unavailable: " + reason,
+                    "entrypoint unavailable: " + reason,
+                    "create order unavailable: " + reason,
+                    "state transition unavailable: " + reason,
+                    "statistics unavailable: " + reason,
+                    "invalid transition error unavailable: " + reason
+            );
+            case "banking" -> List.of(
+                    "7+ files requirement unavailable: " + reason,
+                    "AccountService interface unavailable: " + reason,
+                    "AccountRepository interface unavailable: " + reason,
+                    "TransactionLogger strategy unavailable: " + reason,
+                    "AccountServiceImpl unavailable: " + reason,
+                    "InMemoryAccountRepositoryImpl unavailable: " + reason,
+                    "ConsoleTransactionLogger unavailable: " + reason,
+                    "AccountFactory unavailable: " + reason,
+                    "Account entity unavailable: " + reason,
+                    "Transaction entity unavailable: " + reason,
+                    "InsufficientFundsException unavailable: " + reason,
+                    "AccountNotFoundException unavailable: " + reason,
+                    "TransactionFailedException unavailable: " + reason,
+                    "ConcurrentHashMap repository unavailable: " + reason,
+                    "BigDecimal currency handling unavailable: " + reason,
+                    "BigDecimal scale unavailable: " + reason,
+                    "BigDecimal compareTo unavailable: " + reason,
+                    "magic number constants unavailable: " + reason,
+                    "BankingSystemCli entrypoint unavailable: " + reason,
+                    "AccountService business methods unavailable: " + reason
+            );
+            default -> List.of(
+                    "time query unavailable: " + reason,
+                    "level query default unavailable: " + reason,
+                    "level query interactive unavailable: " + reason,
+                    "stat error unavailable: " + reason,
+                    "error export unavailable: " + reason,
+                    "clean shard explicit unavailable: " + reason,
+                    "invalid command unavailable: " + reason,
+                    "root command required unavailable: " + reason,
+                    "table header unavailable: " + reason,
+                    "clean default unavailable: " + reason
+            );
+        };
     }
 
     private static String invokeRun(Method run, String command, String input, Path logDir, Path exportDir) throws Exception {
@@ -953,32 +1648,50 @@ class AgentCollaborationBenchmarkIT {
         RunResult execute(Path workspace) throws Exception;
     }
 
-    private record Evaluation(int hiddenFailures, int uniqueBugCount, List<String> hiddenFailureDetails) {
+
+    private static final class Evaluation {
+        private final int hiddenFailures;
+        private final int uniqueBugCount;
+        private final List<String> hiddenFailureDetails;
+        private final int hiddenTestTotal;
+
+        Evaluation(int hiddenFailures, int uniqueBugCount, List<String> hiddenFailureDetails, int hiddenTestTotal) {
+            this.hiddenFailures = hiddenFailures;
+            this.uniqueBugCount = uniqueBugCount;
+            this.hiddenFailureDetails = hiddenFailureDetails;
+            this.hiddenTestTotal = hiddenTestTotal;
+        }
+
         double completionRate() {
             int total = completionTotal();
             return total == 0 ? 0.0 : (double) completionPassed() / total;
         }
 
         int completionPassed() {
-            return Math.max(0, HIDDEN_TEST_TOTAL - hiddenFailures);
+            return Math.max(0, hiddenTestTotal - hiddenFailures);
         }
 
         int completionTotal() {
-            return HIDDEN_TEST_TOTAL;
+            return hiddenTestTotal;
         }
 
         double hiddenFailureRate() {
-            return HIDDEN_TEST_TOTAL == 0 ? 0.0 : (double) hiddenFailures / HIDDEN_TEST_TOTAL;
+            return hiddenTestTotal == 0 ? 0.0 : (double) hiddenFailures / hiddenTestTotal;
         }
 
         double uniqueBugRate() {
-            return HIDDEN_TEST_TOTAL == 0 ? 0.0 : (double) uniqueBugCount / HIDDEN_TEST_TOTAL;
+            return hiddenTestTotal == 0 ? 0.0 : (double) uniqueBugCount / hiddenTestTotal;
         }
 
         int hiddenTotal() {
-            return HIDDEN_TEST_TOTAL;
+            return hiddenTestTotal;
         }
+
+        int hiddenFailures() { return hiddenFailures; }
+        int uniqueBugCount() { return uniqueBugCount; }
+        List<String> hiddenFailureDetails() { return hiddenFailureDetails; }
     }
+
 
     private static final class NoOpMemoryManager extends MemoryManager {
         private NoOpMemoryManager(Path storageDir) {
