@@ -12,6 +12,7 @@ import java.time.format.DateTimeFormatter;
 import java.time.ZoneId;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 工具结果尺寸治理 —— DevCLI 的"工具结果落盘 + 分级截断"机制。
@@ -56,7 +57,8 @@ public final class ToolResultSizeManager {
     private static final Set<String> PASSTHROUGH_TOOLS = Set.of(
             "read_file",     // 自身就是文件读取，截断等于破坏功能
             "list_dir",      // 短结构化输出
-            "revert_turn"    // 状态控制
+            "revert_turn",    // 状态控制
+            "search_code"    // 尾部含 RAG 证据 JSON，截断会破坏 WorkingMemory 解析
     );
 
     /** ≤ 此字符数的结果直接原文返回，不做任何处理。 */
@@ -81,6 +83,26 @@ public final class ToolResultSizeManager {
     /** 当前会话的目录名（启动时确定，进程内复用）。 */
     private static final String SESSION_ID = SESSION_ID_FMT.format(Instant.now());
 
+    /** 同轮所有工具结果聚合预算上限：超过此值后继续降低每项截断阈值。 */
+    public static final int AGGREGATE_LIMIT_CHARS = INLINE_THRESHOLD_CHARS * 4;  // 20K
+
+    /** 同轮已消耗的聚合预算；并行工具线程共享同一个计数器。 */
+    private static final InheritableThreadLocal<AtomicInteger> currentTurnUsedBudget =
+            new InheritableThreadLocal<>() {
+                @Override
+                protected AtomicInteger initialValue() {
+                    return new AtomicInteger(0);
+                }
+
+                @Override
+                protected AtomicInteger childValue(AtomicInteger parentValue) {
+                    return parentValue == null ? new AtomicInteger(0) : parentValue;
+                }
+            };
+
+    /** 中间档（5K~50K）在聚合超限后的截断目标长度。 */
+    private static final int TRUNCATE_TARGET_UNDER_PRESSURE = INLINE_THRESHOLD_CHARS / 2; // 2500
+
     private ToolResultSizeManager() {}
 
     public enum CollapseClassification {
@@ -94,31 +116,66 @@ public final class ToolResultSizeManager {
     /**
      * 处理工具执行结果，按尺寸分级。返回值是给 LLM 看的最终 result 文本。
      *
-     * @param toolName    工具名（白名单判断）
+     * @param toolName    工具名（白名单判断，空时注入标记）
      * @param toolUseId   工具调用 ID（落盘文件名）
      * @param projectPath 项目根目录（落盘根路径）
      * @param hasImages   结果是否含图片 part（含图片不治理）
      * @param result      原始工具结果文本
-     * @return 处理后的结果文本（可能是原文 / 截断 / 预览+路径）
+     * @return 处理后的结果文本（可能是原文 / 截断 / 预览+路径 / 空结果标记）
      */
     public static String process(String toolName, String toolUseId, String projectPath,
                                  boolean hasImages, String result) {
-        if (result == null) return "";
+        // 空结果注入：避免 LLM 看到空 tool_result 后断裂对话
+        if (result == null || result.isBlank()) {
+            String label = toolName == null ? "工具" : toolName;
+            return "(" + label + " 执行完毕无输出)";
+        }
         CollapseClassification classification = classify(toolName, hasImages, result);
         if (classification == CollapseClassification.IMAGE_PASSTHROUGH
                 || classification == CollapseClassification.PASSTHROUGH
                 || classification == CollapseClassification.INLINE) {
+            // 低档不治理：直接计入聚合预算但不截断
+            currentBudget().addAndGet(result.length());
             return result;
         }
+
         // 防御 MCP 工具默认全部进入 size 治理（mcp__server__tool 命名）
         // 已经在 PASSTHROUGH 之外，自动接管
 
+        String managed;
         if (classification == CollapseClassification.INLINE_TRUNCATED) {
-            return appendMcpClassification(toolName, truncateInline(result), classification);
+            AtomicInteger budget = currentBudget();
+            int usedBefore = budget.getAndAdd(TRUNCATE_TARGET_CHARS);
+            boolean underPressure = usedBefore >= AGGREGATE_LIMIT_CHARS;
+            managed = underPressure
+                    ? truncateInline(result, TRUNCATE_TARGET_UNDER_PRESSURE)
+                    : truncateInline(result, TRUNCATE_TARGET_CHARS);
+            budget.addAndGet(managed.length() - TRUNCATE_TARGET_CHARS);
+        } else {
+            managed = persistAndPreview(toolName, toolUseId, projectPath, result);
+            // 治理后的结果长度为实际注入长度，而非原始长度
+            currentBudget().addAndGet(managed.length());
         }
-        return appendMcpClassification(toolName,
-                persistAndPreview(toolName, toolUseId, projectPath, result),
-                classification);
+        return appendMcpClassification(toolName, managed, classification);
+    }
+
+    /** 暴露给测试或 Agent：当前轮已消耗的聚合预算。 */
+    public static int turnUsedBudget() {
+        return currentBudget().get();
+    }
+
+    /** Agent 每轮工具执行前调用，重置聚合预算计数器。 */
+    public static void resetTurnBudget() {
+        currentTurnUsedBudget.set(new AtomicInteger(0));
+    }
+
+    private static AtomicInteger currentBudget() {
+        AtomicInteger budget = currentTurnUsedBudget.get();
+        if (budget == null) {
+            budget = new AtomicInteger(0);
+            currentTurnUsedBudget.set(budget);
+        }
+        return budget;
     }
 
     public static CollapseClassification classify(String toolName, boolean hasImages, String result) {
@@ -150,11 +207,11 @@ public final class ToolResultSizeManager {
     }
 
     /**
-     * 中间档：尾部截断到 {@link #TRUNCATE_TARGET_CHARS}，加截断提示。
+     * 中间档：头部截断到 {@code keepChars}，加截断提示。
      */
-    static String truncateInline(String result) {
+    static String truncateInline(String result, int keepChars) {
         int total = result.length();
-        int kept = TRUNCATE_TARGET_CHARS;
+        int kept = Math.min(keepChars, total);
         int dropped = total - kept;
         return result.substring(0, kept)
                 + "\n\n...(已截断 " + dropped + " 字符 / 共 " + total
@@ -175,7 +232,7 @@ public final class ToolResultSizeManager {
         } catch (IOException e) {
             log.warn("Failed to persist tool output for {} ({}): {} — falling back to inline truncation",
                     toolName, toolUseId, e.getMessage());
-            return truncateInline(result);
+            return truncateInline(result, TRUNCATE_TARGET_CHARS);
         }
 
         int total = result.length();

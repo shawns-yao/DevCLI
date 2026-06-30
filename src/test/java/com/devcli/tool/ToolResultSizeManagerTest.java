@@ -1,5 +1,6 @@
 package com.devcli.tool;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -7,6 +8,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -17,6 +20,11 @@ class ToolResultSizeManagerTest {
 
     @TempDir
     Path tempDir;
+
+    @BeforeEach
+    void resetBudgetBetweenTests() {
+        ToolResultSizeManager.resetTurnBudget();
+    }
 
     @Test
     void smallResultPassesThroughUnchanged() {
@@ -154,9 +162,9 @@ class ToolResultSizeManagerTest {
 
     @Test
     void nullResultReturnsEmptyString() {
-        // 防御 null
-        assertEquals("", ToolResultSizeManager.process(
-                "execute_command", "call_9", tempDir.toString(), false, null));
+        String out = ToolResultSizeManager.process(
+                "execute_command", "call_9", tempDir.toString(), false, null);
+        assertTrue(out.contains("执行完毕无输出"), "null 结果应注入空结果标记");
     }
 
     @Test
@@ -176,5 +184,23 @@ class ToolResultSizeManagerTest {
                 "execute_command", "call_11", tempDir.toString(), false, medium);
         assertTrue(out.contains("search_code") || out.contains("grep"),
                 "截断提示应教 LLM 怎么避免再次撞阈值");
+    }
+
+    @Test
+    void aggregateBudgetIsSharedWithParallelToolThreads() throws Exception {
+        String medium = "p".repeat(20_000);
+        for (int i = 0; i < 4; i++) {
+            ToolResultSizeManager.process("execute_command", "call_parent_" + i, tempDir.toString(), false, medium);
+        }
+        assertTrue(ToolResultSizeManager.turnUsedBudget() > ToolResultSizeManager.AGGREGATE_LIMIT_CHARS);
+
+        FutureTask<String> task = new FutureTask<>(() ->
+                ToolResultSizeManager.process("execute_command", "call_child", tempDir.toString(), false, medium));
+        Thread thread = new Thread(task, "tool-result-size-test");
+        thread.start();
+
+        String out = task.get(5, TimeUnit.SECONDS);
+        assertTrue(out.startsWith("p".repeat(2_500)), "并行工具线程应继承同轮聚合预算");
+        assertTrue(out.contains("已截断 17500 字符"), "聚合超限后应降低单项截断长度");
     }
 }

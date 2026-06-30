@@ -1430,6 +1430,7 @@ public class ToolRegistry implements AutoCloseable {
      * 如果某个工具超过批次超时仍未返回，会取消任务并返回超时结果；已完成工具不受影响。
      */
     public List<ToolExecutionResult> executeTools(List<ToolInvocation> invocations) {
+        ToolResultSizeManager.resetTurnBudget();
         if (invocations == null || invocations.isEmpty()) {
             return List.of();
         }
