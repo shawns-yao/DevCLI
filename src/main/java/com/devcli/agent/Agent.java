@@ -290,7 +290,7 @@ public class Agent implements AutoCloseable {
 
                 // 没有工具调用，直接返回结果
                 appendReasoning(reasoningTranscript, response.reasoningContent());
-                conversationHistory.add(LlmClient.Message.assistant(response.content()));
+                conversationHistory.add(LlmClient.Message.assistant(response.reasoningContent(), response.content()));
 
                 // 存入记忆
                 memoryManager.addAssistantMessage(response.content());
@@ -371,7 +371,10 @@ public class Agent implements AutoCloseable {
         if (historyCompactor == null) return;
         int trigger = memoryManager.getContextProfile().compressionTriggerTokens();
         try {
-            historyCompactor.setMicrocompactOutputRoot(Path.of(toolRegistry.getProjectPath()));
+            String projectPath = toolRegistry.getProjectPath();
+            if (projectPath != null) {
+                historyCompactor.setMicrocompactOutputRoot(Path.of(projectPath));
+            }
             boolean compacted = historyCompactor.compactIfNeeded(conversationHistory, trigger);
             if (compacted) {
                 renderer().stream().println("📦 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");

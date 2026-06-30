@@ -193,6 +193,7 @@ GLM_MODEL=glm-5.1
 
 DEEPSEEK_API_KEY=your_api_key_here
 DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_BASE_URL=https://api.deepseek.com
 
 STEP_API_KEY=your_api_key_here
 STEP_MODEL=step-3.5-flash

@@ -3,6 +3,8 @@ package com.devcli.llm;
 import com.devcli.config.DevCliConfig;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import java.util.Locale;
+
 /**
  * OpenAI 兼容 client：对接 OpenAI 官方及任意 OpenAI Chat Completions 兼容端点
  * （vLLM / Ollama OpenAI 模式 / OneAPI / 各类代理网关）。base URL 与 model 由用户经
@@ -15,6 +17,7 @@ public class OpenAiClient extends AbstractOpenAiCompatibleClient {
     private final String apiKey;
     private final String model;
     private final String apiUrl;
+    private final boolean sendReasoningContentInRequestHistory;
 
     public OpenAiClient(String apiKey) {
         this(apiKey, DEFAULT_MODEL, DEFAULT_BASE_URL);
@@ -24,6 +27,7 @@ public class OpenAiClient extends AbstractOpenAiCompatibleClient {
         this.apiKey = apiKey;
         this.model = model != null && !model.isBlank() ? model : DEFAULT_MODEL;
         this.apiUrl = toChatCompletionsUrl(baseUrl);
+        this.sendReasoningContentInRequestHistory = shouldEnableReasoningHistory(this.model, this.apiUrl);
     }
 
     @Override
@@ -44,6 +48,11 @@ public class OpenAiClient extends AbstractOpenAiCompatibleClient {
     @Override
     public String getModelName() {
         return model;
+    }
+
+    @Override
+    protected boolean shouldSendReasoningContentInRequestHistory() {
+        return sendReasoningContentInRequestHistory;
     }
 
     @Override
@@ -88,5 +97,11 @@ public class OpenAiClient extends AbstractOpenAiCompatibleClient {
             return withoutTrailingSlash;
         }
         return withoutTrailingSlash + "/chat/completions";
+    }
+
+    private static boolean shouldEnableReasoningHistory(String model, String apiUrl) {
+        String normalized = ((model == null ? "" : model) + " " + (apiUrl == null ? "" : apiUrl))
+                .toLowerCase(Locale.ROOT);
+        return normalized.contains("deepseek");
     }
 }

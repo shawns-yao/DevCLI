@@ -112,6 +112,23 @@ class LlmClientFactoryTest {
     }
 
     @Test
+    void createsDeepSeekClientWithCustomBaseUrl() {
+        DevCliConfig config = new DevCliConfig();
+        config.setProviders(new LinkedHashMap<>());
+        config.getProviders().put("deepseek",
+                new DevCliConfig.ProviderConfig(
+                        "test-deepseek-key",
+                        "https://deepseek-gateway.example.com/v1",
+                        "deepseek-v4-flash"));
+
+        LlmClient client = LlmClientFactory.create("deepseek", config);
+
+        DeepSeekClient deepSeekClient = assertInstanceOf(DeepSeekClient.class, client);
+        assertEquals("deepseek-v4-flash", deepSeekClient.getModelName());
+        assertEquals("https://deepseek-gateway.example.com/v1/chat/completions", deepSeekClient.getApiUrl());
+    }
+
+    @Test
     void createsAnthropicClientWithMessagesEndpoint() {
         DevCliConfig config = new DevCliConfig();
         config.setProviders(new LinkedHashMap<>());

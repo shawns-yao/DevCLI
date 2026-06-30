@@ -27,7 +27,7 @@ public class LlmClientFactory {
         return switch (normalized) {
             case "anthropic" -> new AnthropicClient(apiKey, model, baseUrl);
             case "glm" -> new GLMClient(apiKey, model);
-            case "deepseek" -> new DeepSeekClient(apiKey, model);
+            case "deepseek" -> new DeepSeekClient(apiKey, model, baseUrl);
             case "step" -> new StepClient(apiKey, model, baseUrl);
             case "kimi" -> new KimiClient(apiKey, model, baseUrl);
             case "openai" -> new OpenAiClient(apiKey, model, baseUrl);

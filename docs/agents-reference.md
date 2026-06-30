@@ -291,6 +291,7 @@ TuiBootstrap / LanternaWindow / TuiSessionController / pane/ / hitl/ / history/ 
 # GLM_MODEL=glm-5v-turbo
 # DEEPSEEK_API_KEY=your_deepseek_api_key_here
 # DEEPSEEK_MODEL=deepseek-v4-flash
+# DEEPSEEK_BASE_URL=https://api.deepseek.com
 # STEP_API_KEY=your_step_api_key_here
 # STEP_MODEL=step-3.5-flash
 # STEP_BASE_URL=https://api.stepfun.com/v1

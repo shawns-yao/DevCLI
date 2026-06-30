@@ -441,7 +441,7 @@ public class SubAgent {
                 }
 
                 // 没有工具调用，返回最终结果
-                history.add(LlmClient.Message.assistant(response.content()));
+                history.add(LlmClient.Message.assistant(response.reasoningContent(), response.content()));
 
                 streamRenderer.finish();
 
