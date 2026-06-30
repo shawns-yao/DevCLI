@@ -202,7 +202,7 @@ public class Main {
         if (llmClient == null) {
             System.err.println("❌ 错误: 未找到可用的 API Key");
             System.err.println("请在 .env 文件中添加 ANTHROPIC_AUTH_TOKEN、OPENAI_API_KEY、GLM_API_KEY、DEEPSEEK_API_KEY、STEP_API_KEY 或 KIMI_API_KEY");
-            System.exit(1);
+            return;
         }
         AtomicReference<LlmClient> llmClientRef = new AtomicReference<>(llmClient);
 
@@ -469,7 +469,7 @@ public class Main {
                             com.devcli.memory.MemoryManager.StoreResult result =
                                     reactAgent.getMemoryManager().storeFactWithPolicy(fact, true);
                             if (result.stored()) {
-                                ui.println("💾 已保存到长期记忆（Retrievable）: " + fact + "\n");
+                                ui.println("💾 " + result.message() + ": " + fact + "\n");
                             } else {
                                 ui.println("⚠️ " + result.message() + "\n");
                             }
@@ -788,7 +788,7 @@ public class Main {
 
         } catch (IOException e) {
             System.err.println("❌ 终端初始化失败: " + e.getMessage());
-            System.exit(1);
+            throw new RuntimeException("终端初始化失败", e);
         }
     }
 
@@ -805,7 +805,7 @@ public class Main {
         if (client == null) {
             System.err.println("❌ 错误: 未找到可用的 API Key");
             System.err.println("请在 .env 文件中添加 ANTHROPIC_AUTH_TOKEN、OPENAI_API_KEY、GLM_API_KEY、DEEPSEEK_API_KEY、STEP_API_KEY 或 KIMI_API_KEY");
-            System.exit(1);
+            throw new IllegalStateException("未找到可用的 API Key");
         }
         int port = parseServePort(args, 8080);
         try {
@@ -827,7 +827,7 @@ public class Main {
             Thread.currentThread().interrupt();
         } catch (Exception e) {
             System.err.println("❌ Runtime API 启动失败: " + e.getMessage());
-            System.exit(1);
+            throw new RuntimeException("Runtime API 启动失败", e);
         }
     }
 

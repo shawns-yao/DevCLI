@@ -284,6 +284,15 @@ public class LongTermMemory implements Memory, AutoCloseable {
         return entries.size();
     }
 
+    /**
+     * 当前长期记忆是否能跨进程持久化。SQLite 初始化失败时底层 store 降级为 no-op，
+     * 此时返回 false——写入仅留在内存，进程退出即丢。调用方据此给出诚实提示，
+     * 不把降级写入伪装成已持久化。
+     */
+    public boolean isPersistent() {
+        return persistentStore;
+    }
+
     /** 按类型筛选记忆 */
     public List<MemoryEntry> getByType(MemoryEntry.MemoryType type) {
         return entries.values().stream()

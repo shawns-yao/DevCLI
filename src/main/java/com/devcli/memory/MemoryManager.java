@@ -206,6 +206,10 @@ public class MemoryManager implements AutoCloseable {
             });
         }
         storeFact(fact, decision.metadata());
+        if (!longTermMemory.isPersistent()) {
+            return new StoreResult(true, decision,
+                    "已存入本会话内存，但未持久化（长期记忆存储不可用，重启后丢失）");
+        }
         return new StoreResult(true, decision, "已保存到长期记忆");
     }
 

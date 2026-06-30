@@ -138,7 +138,7 @@ public final class TuiSessionController implements AutoCloseable {
             } else {
                 com.devcli.memory.MemoryManager.StoreResult result =
                         reactAgent.getMemoryManager().storeFactWithPolicy(fact, true);
-                appendSystem(result.stored() ? "已保存到长期记忆: " + fact : result.message());
+                appendSystem(result.stored() ? result.message() + ": " + fact : result.message());
             }
             return true;
         }

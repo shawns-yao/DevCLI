@@ -692,7 +692,11 @@ public class McpServerManager implements AutoCloseable {
 
     @Override
     public void close() {
-        reconnectExecutor.shutdownNow();
+        try {
+            reconnectExecutor.shutdownNow();
+        } catch (Exception ignored) {
+            // shutdownNow 可能因线程中断或 executor 已终止抛异常，忽略即可
+        }
         reconnectScheduled.clear();
         reconnectAttempts.clear();
         for (McpServer server : servers.values()) {

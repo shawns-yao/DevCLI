@@ -38,7 +38,22 @@ public class VectorStore implements AutoCloseable {
         }
         String dbPath = dir.getAbsolutePath() + "/codebase.db";
         this.connection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+        applyConcurrencyPragmas();
         initTables();
+    }
+
+    /**
+     * 开启 WAL 模式与 busy_timeout，缓解 {@code /index} 写入与 {@code search_code} 读取跨连接并发时
+     * 的 {@code SQLITE_BUSY}：WAL 下读不阻塞写、写不阻塞读，busy_timeout 给偶发锁竞争一个等待窗口
+     * 而非立即抛错。PRAGMA 失败仅告警降级（回退默认 rollback journal），不阻塞存储初始化。
+     */
+    private void applyConcurrencyPragmas() {
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("PRAGMA journal_mode=WAL");
+            stmt.execute("PRAGMA busy_timeout=5000");
+        } catch (SQLException e) {
+            log.warn("启用 WAL/busy_timeout 失败，回退默认 journal 模式: {}", e.getMessage());
+        }
     }
 
     private void initTables() throws SQLException {
