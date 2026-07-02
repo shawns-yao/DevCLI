@@ -39,6 +39,10 @@ public interface ToolProvider {
 
         com.devcli.browser.BrowserConnector browserConnector();
 
+        com.devcli.skill.SkillRegistry skillRegistry();
+
+        com.devcli.skill.SkillContextBuffer activeSkillContextBuffer();
+
         com.devcli.snapshot.SnapshotService snapshotService();
 
         List<ToolRegistry.Tool> searchableTools();

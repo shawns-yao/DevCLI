@@ -14,24 +14,21 @@ import com.devcli.lsp.LspDiagnosticReport;
 import com.devcli.lsp.LspManager;
 import com.devcli.mcp.protocol.McpSchemaValidator;
 import com.devcli.mcp.protocol.McpToolDescriptor;
-import com.devcli.rag.CodeRetriever;
-import com.devcli.rag.RagEvidencePayload;
-import com.devcli.rag.SearchResultFormatter;
-import com.devcli.rag.SymbolInvalidation;
 import com.devcli.rag.VectorStore;
 import com.devcli.policy.AuditLog;
 import com.devcli.policy.PathGuard;
 import com.devcli.policy.PolicyException;
 import com.devcli.runtime.CancellationContext;
 import com.devcli.snapshot.SnapshotService;
-import com.devcli.skill.Skill;
 import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.tool.provider.BrowserToolProvider;
 import com.devcli.tool.provider.FileToolProvider;
 import com.devcli.tool.provider.MemoryToolProvider;
 import com.devcli.tool.provider.ProjectToolProvider;
+import com.devcli.tool.provider.RagToolProvider;
 import com.devcli.tool.provider.ShellToolProvider;
+import com.devcli.tool.provider.SkillToolProvider;
 import com.devcli.tool.provider.SnapshotToolProvider;
 import com.devcli.tool.provider.ToolParameter;
 import com.devcli.tool.provider.ToolProvider;
@@ -66,6 +63,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private final Map<String, Long> mcpServerLifecycleVersions = new ConcurrentHashMap<>();
     private final Set<String> activatedMcpToolDefinitions = ConcurrentHashMap.newKeySet();
     private final AtomicLong toolCatalogVersion = new AtomicLong();
+    private final RagToolProvider ragToolProvider = new RagToolProvider();
     private final ToolSearchProvider toolSearchProvider = new ToolSearchProvider();
     private final long commandTimeoutSeconds;
     private final long toolBatchTimeoutSeconds;
@@ -90,8 +88,6 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private LspManager lspManager = new LspManager(projectPath);
     private SnapshotService snapshotService = SnapshotService.forProject(Path.of(projectPath));
     private boolean customSnapshotService;
-    private CodeRetriever cachedCodeRetriever;
-    private String cachedCodeRetrieverProjectPath = "";
 
     public ToolRegistry() {
         this(DEFAULT_COMMAND_TIMEOUT_SECONDS, DEFAULT_TOOL_BATCH_TIMEOUT_SECONDS);
@@ -114,11 +110,11 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         new FileToolProvider().register(this);
         new ShellToolProvider().register(this);
         new ProjectToolProvider().register(this);
-        registerRagTools();
+        ragToolProvider.register(this);
         new WebToolProvider().register(this);
         new BrowserToolProvider().register(this);
         new MemoryToolProvider().register(this);
-        registerSkillTools();
+        new SkillToolProvider().register(this);
         toolSearchProvider.register(this);
         new SnapshotToolProvider().register(this);
     }
@@ -127,7 +123,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
      * 设置代码检索的项目路径
      */
     public void setProjectPath(String projectPath) {
-        closeCachedCodeRetriever();
+        ragToolProvider.closeCachedCodeRetriever();
         this.projectPath = projectPath;
         this.pathGuard = new PathGuard(projectPath);
         this.lspManager.setProjectPath(projectPath);
@@ -139,33 +135,9 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         }
     }
 
-    private synchronized CodeRetriever getCodeRetriever() throws Exception {
-        String normalizedProjectPath = Path.of(projectPath).toAbsolutePath().normalize().toString();
-        if (cachedCodeRetriever == null || !normalizedProjectPath.equals(cachedCodeRetrieverProjectPath)) {
-            closeCachedCodeRetriever();
-            cachedCodeRetriever = new CodeRetriever(normalizedProjectPath);
-            cachedCodeRetrieverProjectPath = normalizedProjectPath;
-        }
-        return cachedCodeRetriever;
-    }
-
-    private synchronized void closeCachedCodeRetriever() {
-        if (cachedCodeRetriever == null) {
-            cachedCodeRetrieverProjectPath = "";
-            return;
-        }
-        try {
-            cachedCodeRetriever.close();
-        } catch (Exception ignored) {
-        } finally {
-            cachedCodeRetriever = null;
-            cachedCodeRetrieverProjectPath = "";
-        }
-    }
-
     @Override
     public void close() {
-        closeCachedCodeRetriever();
+        ragToolProvider.close();
         snapshotService.close();
     }
 
@@ -254,7 +226,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         }
     }
 
-    private SkillContextBuffer activeSkillContextBuffer() {
+    @Override
+    public SkillContextBuffer activeSkillContextBuffer() {
         SkillContextBuffer override = skillContextBufferOverride.get();
         return override == null ? skillContextBuffer : override;
     }
@@ -353,6 +326,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     @Override
     public BrowserConnector browserConnector() { return browserConnector; }
     @Override
+    public SkillRegistry skillRegistry() { return skillRegistry; }
+    @Override
     public SnapshotService snapshotService() { return snapshotService; }
     @Override
     public List<Tool> searchableTools() { return List.copyOf(tools.values()); }
@@ -389,125 +364,6 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public void setSnapshotService(SnapshotService snapshotService) {
         this.snapshotService = snapshotService == null ? SnapshotService.forProject(Path.of(projectPath)) : snapshotService;
         this.customSnapshotService = snapshotService != null;
-    }
-
-    /**
-     * 注册 RAG 检索工具
-     */
-    private void registerRagTools() {
-        tools.put("search_code", new Tool(
-                "search_code",
-                "检索代码库。mode 可选：auto/general/call_chain/definition/error_trace/config；调用链场景可用 graph_depth 0-3 控制图谱扩展。",
-                createParameters(
-                        new Param("query", "string", "自然语言查询描述，例如'用户登录的实现'", true),
-                        new Param("top_k", "integer", "返回结果数量（默认 5，上限 30）", false),
-                        new Param("mode", "string", "检索意图，可选 auto/general/call_chain/definition/error_trace/config；非法值自动降级", false),
-                        new Param("graph_depth", "integer", "调用链图谱扩展深度，范围 0-3；非调用链模式会自动收窄", false)
-                ),
-                args -> {
-                    String query = args.get("query");
-                    int topK = 5;
-                    try {
-                        if (args.containsKey("top_k")) {
-                            topK = Integer.parseInt(args.get("top_k"));
-                        }
-                    } catch (NumberFormatException ignored) {
-                    }
-                    topK = Math.max(1, Math.min(topK, 30));
-                    Integer graphDepth = null;
-                    try {
-                        if (args.containsKey("graph_depth")) {
-                            graphDepth = Integer.parseInt(args.get("graph_depth"));
-                        }
-                    } catch (NumberFormatException ignored) {
-                    }
-
-                    try {
-                        CodeRetriever retriever = getCodeRetriever();
-                        synchronized (retriever) {
-                            var stats = retriever.getStats();
-                            if (stats.chunkCount() == 0) {
-                                return "代码库尚未索引，请先使用 /index 命令索引当前项目。";
-                            }
-
-                            List<VectorStore.SearchResult> results = retriever.search(query, topK, args.get("mode"), graphDepth);
-                            if (results.isEmpty()) {
-                                results = retriever.search(query, topK, "general", 1);
-                            }
-                            List<SymbolInvalidation> invalidations =
-                                    retriever.relevantInvalidations(query, Math.min(topK, 10));
-                            String invalidationFacts = SearchResultFormatter.formatInvalidations(invalidations);
-                            if (results.isEmpty()) {
-                                if (!invalidationFacts.isBlank()) {
-                                    return RagEvidencePayload.appendTo(invalidationFacts, query, results, invalidations);
-                                }
-                                return "未找到与查询相关的代码。";
-                            }
-
-                            String formatted = SearchResultFormatter.formatForTool(query, results);
-                            if (!invalidationFacts.isBlank()) {
-                                formatted = formatted + "\n\n" + invalidationFacts;
-                            }
-                            if (retriever.lastSemanticDegraded()) {
-                                formatted = "（注意：语义检索服务不可用，本次已降级为关键词+结构化检索，结果可能不完整）\n\n"
-                                        + formatted;
-                            }
-                            return RagEvidencePayload.appendTo(formatted, query, results, invalidations);
-                        }
-                    } catch (Exception e) {
-                        closeCachedCodeRetriever();
-                        return "代码检索失败: " + e.getMessage();
-                    }
-                }
-        ));
-    }
-
-    private void registerSkillTools() {
-        tools.put("load_skill", new Tool(
-                "load_skill",
-                "Load full SKILL.md instructions for a skill the system has indexed (see the \"可用 Skills\" section in this system prompt). Call this when a skill's description matches the current task. Pass the exact kebab-case skill name. The full body will appear at the start of your next user message under \"## 已加载 Skill：<name>\". Don't reload the same skill twice in one session.",
-                createParameters(new Param("name", "string", "the exact kebab-case skill name (e.g. web-access)", true)),
-                args -> {
-                    String name = args.get("name");
-                    if (name == null || name.isBlank()) {
-                        return "load_skill 失败: name 不能为空";
-                    }
-                    if (skillRegistry == null) {
-                        return "load_skill 失败: Skill 系统未初始化";
-                    }
-                    Skill skill = skillRegistry.findSkill(name);
-                    if (skill == null) {
-                        Skill any = skillRegistry.findAnySkill(name);
-                        if (any == null) {
-                            return "Skill '" + name + "' 未找到，可用 /skill list 查看可用 skill";
-                        }
-                        return "Skill '" + name + "' 已被禁用，可用 /skill on " + name + " 启用";
-                    }
-                    String body = skill.body();
-                    int originalLen = body == null ? 0 : body.length();
-                    int max = 5 * 1024;
-                    String injected = body == null ? "" : body;
-                    if (injected.length() > max) {
-                        injected = injected.substring(0, max)
-                                + "\n\n...(skill body truncated, full content via /skill show " + name + ")";
-                    }
-                    SkillContextBuffer targetBuffer = activeSkillContextBuffer();
-                    if (targetBuffer != null) {
-                        targetBuffer.push(name, injected, skill.allowedTools(), skill.context());
-                    }
-                    skillRegistry.recordUsage(name);
-                    String allowedTools = skill.allowedTools().isEmpty()
-                            ? ""
-                            : "允许工具: " + String.join(", ", skill.allowedTools()) + "。";
-                    String context = skill.context() == Skill.Context.FORK
-                            ? "context: fork。建议在子任务/fork 上下文中使用，避免污染主上下文。"
-                            : "context: inline。";
-                    return "已加载 skill '" + name + "' 的完整指引（" + originalLen
-                            + " bytes），" + allowedTools
-                            + context
-                            + "将在下一轮上下文中以 \"## 已加载 Skill：" + name + "\" 段出现。";
-                }
-        ));
     }
 
     private void runPostEditLspHook(String displayPath, Path safePath) {
