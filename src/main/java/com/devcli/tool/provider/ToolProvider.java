@@ -37,6 +37,8 @@ public interface ToolProvider {
 
         ToolRegistry.MemoryListHandler memoryListHandler();
 
+        com.devcli.browser.BrowserConnector browserConnector();
+
         com.devcli.snapshot.SnapshotService snapshotService();
 
         List<ToolRegistry.Tool> searchableTools();

@@ -27,6 +27,7 @@ import com.devcli.snapshot.SnapshotService;
 import com.devcli.skill.Skill;
 import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillRegistry;
+import com.devcli.tool.provider.BrowserToolProvider;
 import com.devcli.tool.provider.FileToolProvider;
 import com.devcli.tool.provider.MemoryToolProvider;
 import com.devcli.tool.provider.ProjectToolProvider;
@@ -115,7 +116,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         new ProjectToolProvider().register(this);
         registerRagTools();
         new WebToolProvider().register(this);
-        registerBrowserTools();
+        new BrowserToolProvider().register(this);
         new MemoryToolProvider().register(this);
         registerSkillTools();
         toolSearchProvider.register(this);
@@ -350,6 +351,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     @Override
     public MemoryListHandler memoryListHandler() { return memoryListHandler; }
     @Override
+    public BrowserConnector browserConnector() { return browserConnector; }
+    @Override
     public SnapshotService snapshotService() { return snapshotService; }
     @Override
     public List<Tool> searchableTools() { return List.copyOf(tools.values()); }
@@ -456,33 +459,6 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                         return "代码检索失败: " + e.getMessage();
                     }
                 }
-        ));
-    }
-
-    private void registerBrowserTools() {
-        tools.put("browser_connect", new Tool(
-                "browser_connect",
-                "当浏览器页面返回登录页、权限不足或明确需要登录态时，自动连接已允许远程调试的本机 Chrome 并复用其登录态；公开页面不要提前调用。",
-                createParameters(),
-                args -> browserConnector == null
-                        ? "浏览器连接器未初始化，无法自动切换 shared 模式"
-                        : browserConnector.connectDefault()
-        ));
-        tools.put("browser_disconnect", new Tool(
-                "browser_disconnect",
-                "完成登录态页面访问后，可切回 isolated 浏览器模式。",
-                createParameters(),
-                args -> browserConnector == null
-                        ? "浏览器连接器未初始化，无法切回 isolated 模式"
-                        : browserConnector.disconnect()
-        ));
-        tools.put("browser_status", new Tool(
-                "browser_status",
-                "查看当前浏览器 MCP 模式、autoConnect 引导和旧式 CDP 端口探活状态。",
-                createParameters(),
-                args -> browserConnector == null
-                        ? "浏览器连接器未初始化，无法查看浏览器状态"
-                        : browserConnector.status()
         ));
     }
 
