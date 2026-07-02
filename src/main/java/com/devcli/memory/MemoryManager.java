@@ -112,6 +112,9 @@ public class MemoryManager implements AutoCloseable {
      */
     public void addUserMessage(String content) {
         if (content == null || content.isBlank()) return;
+        if (hasIgnoreMemoryIntent(content)) {
+            memoryIgnored = true;
+        }
         // 取首 60 字符做 fact，避免 prompt 膨胀
         String preview = content.length() > 60 ? content.substring(0, 60) + "..." : content;
         workingMemory.addVolatileFact("用户最新输入: " + preview);
@@ -253,7 +256,7 @@ public class MemoryManager implements AutoCloseable {
         MemoryEntry entry = new MemoryEntry(
                 "fact-" + UUID.randomUUID().toString().substring(0, 8),
                 fact,
-                MemoryEntry.MemoryType.FACT,
+                memoryEntryType(effectiveMetadata),
                 Instant.now(),
                 effectiveMetadata,
                 MemoryEntry.estimateTokens(fact),
@@ -266,6 +269,14 @@ public class MemoryManager implements AutoCloseable {
         } else {
             longTermMemory.storeWithSubject(entry);    // 同主题旧事实被 supersede
         }
+    }
+
+    private static MemoryEntry.MemoryType memoryEntryType(Map<String, String> metadata) {
+        String type = metadata == null ? "" : metadata.getOrDefault("memory_type", "");
+        if ("feedback".equalsIgnoreCase(type)) {
+            return MemoryEntry.MemoryType.FEEDBACK;
+        }
+        return MemoryEntry.MemoryType.FACT;
     }
 
     public record StoreResult(boolean stored, LongTermMemoryPolicy.Decision decision, String message) {}
@@ -506,7 +517,20 @@ public class MemoryManager implements AutoCloseable {
      * Reviewer 聚焦任务状态和工具证据，避免把会话事件当成验收证据。
      */
     public String buildWorkingMemorySectionForAgent(String agentType) {
+        if (memoryIgnored) {
+            return "";
+        }
         return workingMemory.renderForPrompt(viewForAgent(agentType));
+    }
+
+    private static boolean hasIgnoreMemoryIntent(String content) {
+        String lower = content.toLowerCase(java.util.Locale.ROOT);
+        return content.contains("忘记记忆")
+                || content.contains("别管记忆")
+                || content.contains("不要使用记忆")
+                || content.contains("忽略记忆")
+                || lower.contains("ignore memory")
+                || lower.contains("forget memory");
     }
 
     private static WorkingMemory.View viewForAgent(String agentType) {

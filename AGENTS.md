@@ -137,6 +137,8 @@ Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔�
 
 - 长期记忆主要通过 `/save` 或用户明确要求保存；中英文显式记忆意图、少量稳定个人属性和多次重复出现的稳定项目/偏好事实可由策略自动保存
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；中英文临时表达、敏感信息和模糊新个人状态必须确认或跳过；与 WorkingMemory volatile fact 语义重复的长期记忆在 prompt 注入时会被抑制
+- 用户显式要求忽略记忆（如“别管记忆”“忽略记忆”）时，本会话不注入长期记忆、通用 WorkingMemory 和角色裁剪后的 WorkingMemory
+- 反馈类长期记忆按 `FEEDBACK` 类型落库，不混入普通 `FACT`
 - 命中 `subject（主题键）` 的事实写入走 supersede：同主题旧事实置为 inactive、检索只返回 active（如用户从 Fastjson 改用 Jackson）；抽不到主题退回追加不覆盖
 - `ConversationHistoryCompactor` 是唯一治理 LLM messages 窗口的压缩点；压缩前先走第 0 层 `microcompact`（单条超大消息头尾截断；旧轮次 tool_result 按 toolCallId 成批落盘并替换为 `<microcompact_boundary>` 引用；不删消息、保 tool_call 配对），扛不住再 LLM 摘要（九段结构化、超长走程序化 GC 按段裁剪、不够再 LLM 兜底）；`WorkingMemory` 是当前会话派生视图，不是压缩器，恢复区会按 storedPath/toolCallId 去重 microcompact 工具引用
 - `SessionMemory` 维护当前进程内会话预摘要，自动压缩时优先复用覆盖同一消息指纹且未过期的预摘要；预摘要默认 30 分钟过期，ReAct 可同步维护，Plan / Multi-Agent turn 结束后提交后台单线程维护任务，不写长期记忆

@@ -43,10 +43,14 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class AgentCollaborationBenchmarkIT {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final int DEFAULT_MAX_LLM_ATTEMPTS = 3;
+    private static final int DEFAULT_HIDDEN_TOTAL = 10;
+    private static final int ORDER_MVC_HIDDEN_TOTAL = 15;
+    private static final int BANKING_HIDDEN_TOTAL = 20;
     private static final Set<String> ALLOWED_TOOLS = Set.of(
             "read_file", "write_file", "list_dir", "execute_command"
     );
@@ -103,6 +107,34 @@ class AgentCollaborationBenchmarkIT {
             assertTrue(error.getMessage().contains("bench.logops.LogOpsCli"), error.getMessage());
             assertTrue(error.getMessage().contains("run"), error.getMessage());
         }
+    }
+
+    @Test
+    void compileFailureShouldConsumeAllHiddenChecksForComplexTasks(@TempDir Path workspace) throws Exception {
+        Path orderDir = workspace.resolve("order/src/main/java/bench/order");
+        Files.createDirectories(orderDir);
+        for (String fileName : List.of("Order.java", "OrderRepository.java", "OrderService.java",
+                "OrderController.java")) {
+            Files.writeString(orderDir.resolve(fileName), "package bench.order; public class Broken {",
+                    StandardCharsets.UTF_8);
+        }
+
+        Evaluation order = evaluate(workspace.resolve("order"), orderMvcTask());
+
+        assertEquals(order.hiddenTotal(), order.hiddenFailures());
+
+        Path bankingDir = workspace.resolve("banking/src/main/java/bench/banking");
+        Files.createDirectories(bankingDir);
+        for (String fileName : List.of("AccountService.java", "AccountRepository.java", "TransactionLogger.java",
+                "AccountServiceImpl.java", "InMemoryAccountRepositoryImpl.java", "Account.java",
+                "BankingSystemCli.java")) {
+            Files.writeString(bankingDir.resolve(fileName), "package bench.banking; public class Broken {",
+                    StandardCharsets.UTF_8);
+        }
+
+        Evaluation banking = evaluate(workspace.resolve("banking"), bankingSystemTask());
+
+        assertEquals(banking.hiddenTotal(), banking.hiddenFailures());
     }
 
     private static RunResult runSingleWithRetries(LlmClient llm, BenchmarkTask task, Path workspace) throws Exception {
@@ -544,11 +576,7 @@ class AgentCollaborationBenchmarkIT {
 
     private static Evaluation evaluate(Path workspace, BenchmarkTask task) {
         List<String> hiddenFailures = new ArrayList<>();
-        int taskTestTotal = switch (task.id()) {
-            case "ordermvc" -> 15;
-            case "banking" -> 20;
-            default -> 10;
-        };
+        int taskTestTotal = hiddenTotalForTask(task.id());
         try {
             hiddenFailures.addAll(switch (task.id()) {
                 case "logops" -> runLogOpsHiddenChecks(workspace, task.id());
@@ -562,6 +590,14 @@ class AgentCollaborationBenchmarkIT {
             hiddenFailures.addAll(fatalFunctionalFailures(task.id(), "hidden validation crashed: " + e.getMessage()));
         }
         return new Evaluation(hiddenFailures.size(), uniqueBugCount(hiddenFailures), List.copyOf(hiddenFailures), taskTestTotal);
+    }
+
+    private static int hiddenTotalForTask(String taskId) {
+        return switch (taskId) {
+            case "ordermvc" -> ORDER_MVC_HIDDEN_TOTAL;
+            case "banking" -> BANKING_HIDDEN_TOTAL;
+            default -> DEFAULT_HIDDEN_TOTAL;
+        };
     }
 
     private static List<String> runLogOpsHiddenChecks(Path workspace, String taskId) throws Exception {
@@ -891,7 +927,7 @@ class AgentCollaborationBenchmarkIT {
                     manager.getJavaFileObjectsFromFiles(sources.stream().map(Path::toFile).toList())).call();
             if (!Boolean.TRUE.equals(ok)) {
                 failures.add("compile failed: " + summarizeDiagnostics(diagnostics));
-                for (int i = 0; i < 9; i++) failures.add("remaining checks skipped due to compile failure");
+                completeSkippedFailures(failures, ORDER_MVC_HIDDEN_TOTAL, "compile failure");
                 return failures;
             }
         }
@@ -1081,7 +1117,7 @@ class AgentCollaborationBenchmarkIT {
                     manager.getJavaFileObjectsFromFiles(sources.stream().map(Path::toFile).toList())).call();
             if (!Boolean.TRUE.equals(ok)) {
                 failures.add("compile failed: " + summarizeDiagnostics(diagnostics));
-                for (int i = 0; i < 19; i++) failures.add("remaining checks skipped due to compile failure");
+                completeSkippedFailures(failures, BANKING_HIDDEN_TOTAL, "compile failure");
                 return failures;
             }
         }
@@ -1431,6 +1467,15 @@ class AgentCollaborationBenchmarkIT {
         }
         if (failures.size() > before + 1) {
             failures.subList(before + 1, failures.size()).clear();
+        }
+    }
+
+    private static void completeSkippedFailures(List<String> failures, int total, String reason) {
+        while (failures.size() < total) {
+            failures.add("remaining checks skipped due to " + reason);
+        }
+        if (failures.size() > total) {
+            failures.subList(total, failures.size()).clear();
         }
     }
 

@@ -99,6 +99,8 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 压缩边界 `<compact_boundary>` 记录已加载 Skill、RAG epoch、MCP 工具快照和压缩后恢复入口状态；RAG epoch 合并当前会话已命中证据与当前项目全局索引版本，MCP 工具快照包含 server 工具数量、schema 指纹和生命周期版本
 - 长期记忆主要通过 `/save` 或用户明确要求保存；中英文显式记忆意图、少量稳定个人属性和多次重复出现的稳定项目/偏好事实可由策略自动保存
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；中英文临时表达、敏感信息和模糊新个人状态必须确认或跳过；与 WorkingMemory volatile fact 语义重复的长期记忆在 prompt 注入时会被抑制
+- 用户显式要求忽略记忆（如“别管记忆”“忽略记忆”）时，本会话不注入长期记忆、通用 WorkingMemory 和角色裁剪后的 WorkingMemory
+- 反馈类长期记忆按 `FEEDBACK` 类型落库，不混入普通 `FACT`
 
 ### Multi-Agent
 
@@ -267,9 +269,9 @@ TuiBootstrap / LanternaWindow / TuiSessionController / pane/ / hitl/ / history/ 
 
 ### LLM Clients
 - AnthropicClient：默认 provider，Claude / Anthropic Messages 原生兼容端点
-- OpenAiClient：OpenAI 官方或 Chat Completions 兼容端点
+- OpenAiClient：OpenAI 官方或 Chat Completions 兼容端点；只有模型名包含 `deepseek` 时才回灌 `reasoning_content`，兼容网关 URL 不触发
 - GLMClient：glm-5.1，glm-5v 开头切多模态接口
-- DeepSeekClient：deepseek-v4-flash
+- DeepSeekClient：deepseek-v4-flash，回灌 thinking 历史里的 `reasoning_content`
 - StepClient：step-3.5-flash，可通过 STEP_BASE_URL 切通道
 - KimiClient：kimi-k2.6，thinking + tool calls 带回 reasoning_content
 

@@ -174,6 +174,27 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    void dependencyPreviewShouldKeepFullAcceptanceCriteriaArray() throws Exception {
+        String longCriteria = "A".repeat(900) + "CRITERION_END_SENTINEL";
+        String result = "head\n" + "x".repeat(2_500) + """
+                {
+                  "acceptance_criteria": [
+                    {"id":"c1","description":"
+                """ + longCriteria + """
+                    ","severity":"critical"}
+                  ]
+                }
+                tail
+                """ + "z".repeat(3_000) + """
+                """;
+
+        String preview = invokePreviewDependencyResult(result);
+
+        assertTrue(preview.contains("CRITERION_END_SENTINEL"), preview);
+        assertTrue(preview.contains("\"severity\":\"critical\"") || preview.contains("\"severity\":\"critical\""), preview);
+    }
+
+    @Test
     void shouldParsePlanWithTasksField() {
         // 兼容 "tasks" 字段（Plan-and-Execute 的格式）
         AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
@@ -1263,6 +1284,12 @@ class AgentOrchestratorTest {
                 AgentOrchestrator.ExecutionStep.class);
         method.setAccessible(true);
         return (String) method.invoke(orchestrator, steps, current);
+    }
+
+    private static String invokePreviewDependencyResult(String result) throws Exception {
+        Method method = AgentOrchestrator.class.getDeclaredMethod("previewDependencyResult", String.class);
+        method.setAccessible(true);
+        return (String) method.invoke(null, result);
     }
 
     private static String findSystemByLastUser(List<List<LlmClient.Message>> calls, String userNeedle) {

@@ -372,6 +372,40 @@ class MemoryManagerTest {
     }
 
     @Test
+    void feedbackPolicyMemoryShouldBeStoredAsFeedbackType() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+
+            MemoryManager.StoreResult result = memoryManager.storeFactWithPolicy("不要再自动运行项目", true);
+
+            assertTrue(result.stored(), result.message());
+            MemoryEntry entry = longTermMemory.getAll().get(0);
+            assertEquals(MemoryEntry.MemoryType.FEEDBACK, entry.getType());
+            assertEquals("feedback", entry.getMetadata().get("memory_type"));
+            assertEquals(1, longTermMemory.getByType(MemoryEntry.MemoryType.FEEDBACK).size());
+        }
+    }
+
+    @Test
+    void addUserMessageShouldEnableMemoryIgnoredForAllPromptMemoryViews() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+
+            memoryManager.storeFact("用户默认使用 Java 17");
+            memoryManager.addToolResult("read_file", "{\"path\":\"Secret.java\"}", "secret evidence");
+
+            memoryManager.addUserMessage("这次别管记忆");
+
+            assertTrue(memoryManager.isMemoryIgnored());
+            assertTrue(memoryManager.buildContextForQuery("Java 17", 512).isBlank());
+            assertTrue(memoryManager.buildWorkingMemorySection().isBlank());
+            assertTrue(memoryManager.buildWorkingMemorySectionForAgent("worker").isBlank());
+        }
+    }
+
+    @Test
     void buildContextForQueryShouldSuppressFactsAlreadyInWorkingMemory() {
         try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
              MemoryManager memoryManager = new MemoryManager(

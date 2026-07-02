@@ -38,6 +38,11 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
     }
 
     @Override
+    protected boolean shouldSendReasoningContentInRequestHistory() {
+        return true;
+    }
+
+    @Override
     public String getModelName() {
         return model;
     }

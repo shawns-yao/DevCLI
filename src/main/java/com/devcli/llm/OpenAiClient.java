@@ -27,7 +27,7 @@ public class OpenAiClient extends AbstractOpenAiCompatibleClient {
         this.apiKey = apiKey;
         this.model = model != null && !model.isBlank() ? model : DEFAULT_MODEL;
         this.apiUrl = toChatCompletionsUrl(baseUrl);
-        this.sendReasoningContentInRequestHistory = shouldEnableReasoningHistory(this.model, this.apiUrl);
+        this.sendReasoningContentInRequestHistory = shouldEnableReasoningHistory(this.model);
     }
 
     @Override
@@ -99,9 +99,7 @@ public class OpenAiClient extends AbstractOpenAiCompatibleClient {
         return withoutTrailingSlash + "/chat/completions";
     }
 
-    private static boolean shouldEnableReasoningHistory(String model, String apiUrl) {
-        String normalized = ((model == null ? "" : model) + " " + (apiUrl == null ? "" : apiUrl))
-                .toLowerCase(Locale.ROOT);
-        return normalized.contains("deepseek");
+    private static boolean shouldEnableReasoningHistory(String model) {
+        return model != null && model.toLowerCase(Locale.ROOT).contains("deepseek");
     }
 }

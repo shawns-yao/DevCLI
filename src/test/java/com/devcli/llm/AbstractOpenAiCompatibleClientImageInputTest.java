@@ -152,6 +152,52 @@ class AbstractOpenAiCompatibleClientImageInputTest {
     }
 
     @Test
+    void openAiCompatibleDeepSeekGatewayDoesNotForceReasoningContentForOtherModels() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse()
+                    .setHeader("Content-Type", "text/event-stream")
+                    .setBody("""
+                            data: {"choices":[{"delta":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":12,"completion_tokens":1}}
+
+                            data: [DONE]
+
+                            """));
+            OpenAiClient client = new OpenAiClient("test-key", "gpt-4o",
+                    server.url("/deepseek-gateway/v1").toString());
+
+            client.chat(List.of(LlmClient.Message.assistant("hidden reasoning", "visible answer")), null);
+
+            JsonNode message = MAPPER.readTree(server.takeRequest().getBody().readUtf8())
+                    .path("messages").get(0);
+
+            assertFalse(message.has("reasoning_content"));
+        }
+    }
+
+    @Test
+    void deepSeekClientKeepsReasoningContentForThinkingHistory() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse()
+                    .setHeader("Content-Type", "text/event-stream")
+                    .setBody("""
+                            data: {"choices":[{"delta":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":12,"completion_tokens":1}}
+
+                            data: [DONE]
+
+                            """));
+            DeepSeekClient client = new DeepSeekClient("test-key", "deepseek-v4-flash",
+                    server.url("/v1").toString());
+
+            client.chat(List.of(LlmClient.Message.assistant("hidden reasoning", "visible answer")), null);
+
+            JsonNode message = MAPPER.readTree(server.takeRequest().getBody().readUtf8())
+                    .path("messages").get(0);
+
+            assertEquals("hidden reasoning", message.path("reasoning_content").asText());
+        }
+    }
+
+    @Test
     void kimiClientKeepsReasoningContentForThinkingToolCalls() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(new MockResponse()

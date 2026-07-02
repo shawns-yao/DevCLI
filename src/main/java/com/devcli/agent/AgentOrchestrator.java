@@ -1726,7 +1726,7 @@ public class AgentOrchestrator {
         }
         // 提取验收标准部分，完整保留不截断
         String criteria = extractAcceptanceCriteria(result);
-        String nonCriteria = result.replace(criteria, "");
+        String nonCriteria = removeFirst(result, criteria);
         if (nonCriteria.length() <= maxChars) {
             return result;
         }
@@ -1740,36 +1740,76 @@ public class AgentOrchestrator {
         return preview;
     }
 
+    private static String removeFirst(String text, String target) {
+        if (text == null || text.isEmpty() || target == null || target.isEmpty()) {
+            return text == null ? "" : text;
+        }
+        int start = text.indexOf(target);
+        if (start < 0) {
+            return text;
+        }
+        return text.substring(0, start) + text.substring(start + target.length());
+    }
+
     private static String extractAcceptanceCriteria(String text) {
         if (text == null || text.isEmpty()) {
             return "";
         }
-        // 匹配验收标准格式块
-        int start = text.indexOf("acceptance_criteria");
-        if (start < 0) {
-            start = text.indexOf("验收标准");
+        int start = indexOfAcceptanceCriteriaKey(text);
+        if (start >= 0) {
+            int arrayStart = text.indexOf('[', start);
+            if (arrayStart >= 0) {
+                int arrayEnd = findBalancedJsonArrayEnd(text, arrayStart);
+                if (arrayEnd > arrayStart) {
+                    return text.substring(start, arrayEnd).trim();
+                }
+            }
         }
+        start = text.indexOf("验收标准");
         if (start < 0) {
             return "";
         }
-        // 从起始位置提取，最多保留 500 字符（验收标准本身很短）
-        int end = Math.min(start + 500, text.length());
-        // 找到下一个 JSON 结构边界或空行
-        int actualEnd = findSectionEnd(text, start, end);
-        return text.substring(start, actualEnd).trim();
+        return text.substring(start, findLabeledSectionEnd(text, start)).trim();
     }
 
-    private static int findSectionEnd(String text, int start, int fallback) {
-        int jsonEnd = text.indexOf("]", start);
+    private static int indexOfAcceptanceCriteriaKey(String text) {
+        int quoted = text.indexOf("\"acceptance_criteria\"");
+        return quoted >= 0 ? quoted : text.indexOf("acceptance_criteria");
+    }
+
+    private static int findLabeledSectionEnd(String text, int start) {
         int doubleNewline = text.indexOf("\n\n", start);
-        int[] candidates = {jsonEnd, doubleNewline, fallback};
-        int best = fallback;
-        for (int candidate : candidates) {
-            if (candidate > start && candidate < best) {
-                best = candidate;
+        return doubleNewline > start ? doubleNewline : text.length();
+    }
+
+    private static int findBalancedJsonArrayEnd(String text, int arrayStart) {
+        int depth = 0;
+        boolean inString = false;
+        boolean escaped = false;
+        for (int i = arrayStart; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                } else if (c == '\\') {
+                    escaped = true;
+                } else if (c == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            if (c == '"') {
+                inString = true;
+            } else if (c == '[') {
+                depth++;
+            } else if (c == ']') {
+                depth--;
+                if (depth == 0) {
+                    return i + 1;
+                }
             }
         }
-        return Math.min(best + 1, text.length());
+        return -1;
     }
 
     private boolean isVerificationStepWithPreReview(ExecutionStep step) {
