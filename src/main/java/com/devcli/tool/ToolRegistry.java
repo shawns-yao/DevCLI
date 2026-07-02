@@ -34,6 +34,7 @@ import com.devcli.tool.provider.ShellToolProvider;
 import com.devcli.tool.provider.SnapshotToolProvider;
 import com.devcli.tool.provider.ToolParameter;
 import com.devcli.tool.provider.ToolProvider;
+import com.devcli.tool.provider.ToolSearchProvider;
 import com.devcli.web.FetchResult;
 import com.devcli.web.HtmlExtractor;
 import com.devcli.web.NetworkPolicy;
@@ -70,8 +71,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private final Map<String, Long> mcpServerLifecycleVersions = new ConcurrentHashMap<>();
     private final Set<String> activatedMcpToolDefinitions = ConcurrentHashMap.newKeySet();
     private final AtomicLong toolCatalogVersion = new AtomicLong();
-    private final AtomicLong toolSearchIndexBuildCount = new AtomicLong();
-    private volatile ToolSearchIndex toolSearchIndex;
+    private final ToolSearchProvider toolSearchProvider = new ToolSearchProvider();
     private final long commandTimeoutSeconds;
     private final long toolBatchTimeoutSeconds;
     private static final int DEFAULT_FETCH_MAX_CHARS = 8_000;
@@ -129,7 +129,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         registerBrowserTools();
         new MemoryToolProvider().register(this);
         registerSkillTools();
-        registerToolSearchTools();
+        toolSearchProvider.register(this);
         new SnapshotToolProvider().register(this);
     }
 
@@ -362,6 +362,14 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public MemoryListHandler memoryListHandler() { return memoryListHandler; }
     @Override
     public SnapshotService snapshotService() { return snapshotService; }
+    @Override
+    public List<Tool> searchableTools() { return List.copyOf(tools.values()); }
+    @Override
+    public boolean isMcpTool(String toolName) { return mcpTools.containsKey(toolName); }
+    @Override
+    public boolean activateToolDefinition(String toolName) { return activateMcpToolDefinition(toolName); }
+    @Override
+    public long toolCatalogVersion() { return toolCatalogVersion.get(); }
 
     /**
      * 注册 write_file 写入观察者：参数 (path, [before, after])，
@@ -564,18 +572,6 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         ));
     }
 
-    private void registerToolSearchTools() {
-        tools.put("search_tools", new Tool(
-                "search_tools",
-                "Search currently available tools by name, description and parameter schema. Use this when the exact MCP or built-in tool name is unknown.",
-                createParameters(
-                        new Param("query", "string", "keywords to search in tool name, description and parameter schema", true),
-                        new Param("limit", "string", "maximum number of matches to return, default 10", false)
-                ),
-                args -> searchTools(args.get("query"), args.get("limit"))
-        ));
-    }
-
     private static int parseInt(String value, int fallback) {
         if (value == null || value.isBlank()) return fallback;
         try {
@@ -716,129 +712,16 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         return sb.toString();
     }
 
-    private String searchTools(String query, String limitValue) {
-        String normalized = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
-        if (normalized.isBlank()) {
-            return "search_tools 失败: query 不能为空";
-        }
-        int limit = parseSearchToolLimit(limitValue);
-        List<String> terms = Arrays.stream(normalized.split("\\s+"))
-                .filter(s -> !s.isBlank())
-                .toList();
-        List<ToolSearchMatch> matches = toolSearchEntries().stream()
-                .map(entry -> new ToolSearchMatch(entry, scoreTool(entry, terms)))
-                .filter(match -> match.score() > 0)
-                .sorted(Comparator
-                        .comparingInt(ToolSearchMatch::score).reversed()
-                        .thenComparing(match -> match.entry().name()))
-                .limit(limit)
-                .toList();
-        if (matches.isEmpty()) {
-            return "未找到匹配工具: " + query;
-        }
-        StringBuilder sb = new StringBuilder("匹配工具:\n");
-        for (ToolSearchMatch match : matches) {
-            ToolSearchEntry entry = match.entry();
-            activateMcpToolDefinition(entry.name());
-            sb.append("- ").append(entry.name()).append(": ")
-                    .append(oneLine(entry.description())).append('\n');
-        }
-        return sb.toString().stripTrailing();
-    }
-
     public int prefetchToolDefinitionsForInput(String input) {
-        String normalized = input == null ? "" : input.trim().toLowerCase(Locale.ROOT);
-        if (normalized.isBlank() || mcpTools.isEmpty()) {
-            return 0;
-        }
-        List<String> terms = Arrays.stream(normalized.split("\\s+"))
-                .filter(s -> !s.isBlank())
-                .toList();
-        if (terms.isEmpty()) {
-            return 0;
-        }
-        int activated = 0;
-        List<ToolSearchMatch> matches = toolSearchEntries().stream()
-                .filter(entry -> mcpTools.containsKey(entry.name()))
-                .map(entry -> new ToolSearchMatch(entry, scoreTool(entry, terms)))
-                .filter(match -> match.score() > 0)
-                .sorted(Comparator
-                        .comparingInt(ToolSearchMatch::score).reversed()
-                        .thenComparing(match -> match.entry().name()))
-                .limit(5)
-                .toList();
-        for (ToolSearchMatch match : matches) {
-            String name = match.entry().name();
-            if (activatedMcpToolDefinitions.add(name)) {
-                activated++;
-            }
-        }
-        return activated;
-    }
-
-    private List<ToolSearchEntry> toolSearchEntries() {
-        long version = toolCatalogVersion.get();
-        ToolSearchIndex snapshot = toolSearchIndex;
-        if (snapshot != null && snapshot.version() == version) {
-            return snapshot.entries();
-        }
-        synchronized (this) {
-            snapshot = toolSearchIndex;
-            version = toolCatalogVersion.get();
-            if (snapshot != null && snapshot.version() == version) {
-                return snapshot.entries();
-            }
-            List<ToolSearchEntry> entries = tools.values().stream()
-                    .filter(tool -> !"search_tools".equals(tool.name()))
-                    .map(ToolSearchEntry::from)
-                    .toList();
-            toolSearchIndex = new ToolSearchIndex(version, entries);
-            toolSearchIndexBuildCount.incrementAndGet();
-            return entries;
-        }
+        return mcpTools.isEmpty() ? 0 : toolSearchProvider.prefetchToolDefinitionsForInput(this, input);
     }
 
     long toolSearchIndexBuildCount() {
-        return toolSearchIndexBuildCount.get();
+        return toolSearchProvider.buildCount();
     }
 
     private void invalidateToolSearchIndex() {
         toolCatalogVersion.incrementAndGet();
-        toolSearchIndex = null;
-    }
-
-    private static int parseSearchToolLimit(String value) {
-        if (value == null || value.isBlank()) {
-            return 10;
-        }
-        try {
-            return Math.max(1, Math.min(30, Integer.parseInt(value.trim())));
-        } catch (NumberFormatException e) {
-            return 10;
-        }
-    }
-
-    private static int scoreTool(ToolSearchEntry entry, List<String> terms) {
-        int score = 0;
-        for (String term : terms) {
-            if (entry.searchName().contains(term)) {
-                score += 3;
-            }
-            if (entry.searchDescription().contains(term)) {
-                score += 1;
-            }
-            if (entry.searchSchema().contains(term)) {
-                score += 1;
-            }
-        }
-        return score;
-    }
-
-    private static String oneLine(String value) {
-        if (value == null) {
-            return "";
-        }
-        return value.replace('\n', ' ').replaceAll("\\s+", " ").trim();
     }
 
     /**
@@ -895,10 +778,11 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         return !mcpTools.containsKey(toolName) || activatedMcpToolDefinitions.contains(toolName);
     }
 
-    private void activateMcpToolDefinition(String toolName) {
+    private boolean activateMcpToolDefinition(String toolName) {
         if (toolName != null && mcpTools.containsKey(toolName)) {
-            activatedMcpToolDefinitions.add(toolName);
+            return activatedMcpToolDefinitions.add(toolName);
         }
+        return false;
     }
 
     /**
@@ -1384,30 +1268,6 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                     enumValues == null || enumValues.length == 0 ? List.of() : List.of(enumValues));
         }
     }
-
-    private record ToolSearchIndex(long version, List<ToolSearchEntry> entries) {
-        private ToolSearchIndex {
-            entries = entries == null ? List.of() : List.copyOf(entries);
-        }
-    }
-
-    private record ToolSearchEntry(String name, String description, String searchName,
-                                   String searchDescription, String searchSchema) {
-        static ToolSearchEntry from(Tool tool) {
-            String name = tool.name() == null ? "" : tool.name();
-            String description = tool.description() == null ? "" : tool.description();
-            String schema = tool.parameters() == null ? "" : tool.parameters().toString();
-            return new ToolSearchEntry(
-                    name,
-                    description,
-                    name.toLowerCase(Locale.ROOT),
-                    description.toLowerCase(Locale.ROOT),
-                    schema.toLowerCase(Locale.ROOT)
-            );
-        }
-    }
-
-    private record ToolSearchMatch(ToolSearchEntry entry, int score) {}
 
     public record Tool(String name, String description, JsonNode parameters, ToolExecutor executor) {}
 

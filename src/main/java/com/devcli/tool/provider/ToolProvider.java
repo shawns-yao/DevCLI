@@ -4,6 +4,7 @@ import com.devcli.tool.ToolRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.nio.file.Path;
+import java.util.List;
 import java.util.function.Consumer;
 
 public interface ToolProvider {
@@ -37,5 +38,13 @@ public interface ToolProvider {
         ToolRegistry.MemoryListHandler memoryListHandler();
 
         com.devcli.snapshot.SnapshotService snapshotService();
+
+        List<ToolRegistry.Tool> searchableTools();
+
+        boolean isMcpTool(String toolName);
+
+        boolean activateToolDefinition(String toolName);
+
+        long toolCatalogVersion();
     }
 }
