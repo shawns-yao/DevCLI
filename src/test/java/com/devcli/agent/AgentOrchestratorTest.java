@@ -1084,7 +1084,7 @@ class AgentOrchestratorTest {
         assertTrue(workerSystem.contains("planner-worker-visible-event"), workerSystem);
         assertTrue(workerSystem.contains("reviewer-worker-visible-evidence"), workerSystem);
 
-        String reviewerSystem = findSystemByLastUser(llmClient.calls, "审查要求：必须调用工具检查真实产物");
+        String reviewerSystem = findSystemByLastUser(llmClient.calls, "必须调用工具检查真实产物");
         assertTrue(reviewerSystem.contains("agent_scope"), reviewerSystem);
         assertFalse(reviewerSystem.contains("planner-worker-visible-event"), reviewerSystem);
         assertTrue(reviewerSystem.contains("reviewer-worker-visible-evidence"), reviewerSystem);
@@ -1126,7 +1126,7 @@ class AgentOrchestratorTest {
         List<Integer> reviewerCallIndexes = new ArrayList<>();
         for (int i = 0; i < llmClient.calls.size(); i++) {
             String lastUser = DispatchingStubGLMClient.findLastUser(llmClient.calls.get(i));
-            if (lastUser.contains("审查要求：必须调用工具检查真实产物")) {
+            if (lastUser.contains("必须调用工具检查真实产物")) {
                 reviewerCallIndexes.add(i);
             }
         }
@@ -1183,7 +1183,7 @@ class AgentOrchestratorTest {
 
         boolean reviewerCalled = llmClient.calls.stream()
                 .map(DispatchingStubGLMClient::findLastUser)
-                .anyMatch(body -> body.contains("审查要求：必须调用工具检查真实产物"));
+                .anyMatch(body -> body.contains("必须调用工具检查真实产物"));
         assertFalse(reviewerCalled, "compile failure should be blocked before Reviewer LLM");
     }
 

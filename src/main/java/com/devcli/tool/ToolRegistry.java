@@ -20,15 +20,20 @@ import com.devcli.rag.SearchResultFormatter;
 import com.devcli.rag.SymbolInvalidation;
 import com.devcli.rag.VectorStore;
 import com.devcli.policy.AuditLog;
-import com.devcli.policy.CommandGuard;
 import com.devcli.policy.PathGuard;
 import com.devcli.policy.PolicyException;
 import com.devcli.runtime.CancellationContext;
-import com.devcli.snapshot.RestoreResult;
 import com.devcli.snapshot.SnapshotService;
 import com.devcli.skill.Skill;
 import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillRegistry;
+import com.devcli.tool.provider.FileToolProvider;
+import com.devcli.tool.provider.MemoryToolProvider;
+import com.devcli.tool.provider.ProjectToolProvider;
+import com.devcli.tool.provider.ShellToolProvider;
+import com.devcli.tool.provider.SnapshotToolProvider;
+import com.devcli.tool.provider.ToolParameter;
+import com.devcli.tool.provider.ToolProvider;
 import com.devcli.web.FetchResult;
 import com.devcli.web.HtmlExtractor;
 import com.devcli.web.NetworkPolicy;
@@ -37,9 +42,6 @@ import com.devcli.web.SearchProviderFactory;
 import com.devcli.web.SearchResult;
 import com.devcli.web.WebFetcher;
 
-import java.io.File;
-import java.io.InputStreamReader;
-import java.io.BufferedReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -53,12 +55,11 @@ import java.util.function.Function;
 /**
  * 工具注册表 - 管理所有可用工具
  */
-public class ToolRegistry implements AutoCloseable {
+public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private static final ObjectMapper mapper = new ObjectMapper();
     private static final int DEFAULT_COMMAND_TIMEOUT_SECONDS = 60;
     private static final int DEFAULT_TOOL_BATCH_TIMEOUT_SECONDS = 90;
     private static final int MAX_PARALLEL_TOOLS = 4;
-    private static final int MAX_COMMAND_OUTPUT_CHARS = 8_000;
     // write_file 单次写入字节数上限。LLM 想塞超大内容时通常是误生成（重复粘贴 / hallucinate 大段日志），
     // 5MB 对常规代码生成 / 文档撰写完全够用，超过即拒，避免磁盘灌满与误覆盖。
     private static final int MAX_WRITE_FILE_BYTES = 5 * 1024 * 1024;
@@ -120,17 +121,16 @@ public class ToolRegistry implements AutoCloseable {
                         "path=" + path + ", evicted=" + evictedStepId + ", next=" + newStepId,
                         "租约空闲超时被回收，空闲 " + heldMs + "ms",
                         heldMs)));
-        // 注册内置工具
-        registerFileTools();
-        registerShellTools();
-        registerCodeTools();
+        new FileToolProvider().register(this);
+        new ShellToolProvider().register(this);
+        new ProjectToolProvider().register(this);
         registerRagTools();
         registerWebTools();
         registerBrowserTools();
-        registerMemoryTools();
+        new MemoryToolProvider().register(this);
         registerSkillTools();
         registerToolSearchTools();
-        registerSnapshotTools();
+        new SnapshotToolProvider().register(this);
     }
 
     /**
@@ -315,6 +315,54 @@ public class ToolRegistry implements AutoCloseable {
         return files == null ? java.util.List.of() : java.util.List.copyOf(files);
     }
 
+    @Override
+    public void registerTool(Tool tool) {
+        if (tool == null || tool.name() == null || tool.name().isBlank()) {
+            return;
+        }
+        tools.put(tool.name(), tool);
+        invalidateToolSearchIndex();
+    }
+
+    @Override
+    public Path resolveSafePath(String path) { return pathGuard.resolveSafe(path); }
+    @Override
+    public int maxWriteFileBytes() { return MAX_WRITE_FILE_BYTES; }
+    @Override
+    public String currentResourceLeaseStep() { return resourceLeaseStep.get(); }
+    @Override
+    public void acquireWriteLease(String stepId, Path path) { resourceLeaseManager.acquireWrite(stepId, path); }
+    @Override
+    public boolean isWriteLeaseValid(String stepId, Path path) { return resourceLeaseManager.isLeaseValid(stepId, path); }
+
+    @Override
+    public void recordFileWrite(String displayPath, Path safePath, String before, String content, String stepId) {
+        if (stepId != null && !stepId.isBlank()) {
+            stepModifiedFiles
+                    .computeIfAbsent(stepId, k -> java.util.concurrent.ConcurrentHashMap.newKeySet())
+                    .add(safePath.toString());
+        }
+        try {
+            writeFileObserver.accept(displayPath, new String[]{before, content});
+        } catch (Exception ignored) {
+            // observer 失败不能影响 write_file 主路径
+        }
+        runPostEditLspHook(displayPath, safePath);
+    }
+
+    @Override
+    public String projectPath() { return projectPath; }
+    @Override
+    public long commandTimeoutSeconds() { return commandTimeoutSeconds; }
+    @Override
+    public java.util.function.Consumer<String> memorySaver() { return memorySaver; }
+    @Override
+    public MemorySaver memorySaveHandler() { return memorySaveHandler; }
+    @Override
+    public MemoryListHandler memoryListHandler() { return memoryListHandler; }
+    @Override
+    public SnapshotService snapshotService() { return snapshotService; }
+
     /**
      * 注册 write_file 写入观察者：参数 (path, [before, after])，
      * before == null 表示新建文件或读不出原文。
@@ -341,171 +389,6 @@ public class ToolRegistry implements AutoCloseable {
     public void setSnapshotService(SnapshotService snapshotService) {
         this.snapshotService = snapshotService == null ? SnapshotService.forProject(Path.of(projectPath)) : snapshotService;
         this.customSnapshotService = snapshotService != null;
-    }
-
-    /**
-     * 注册文件操作工具
-     */
-    private void registerFileTools() {
-        // read_file 工具
-        tools.put("read_file", new Tool(
-                "read_file",
-                "读取文件内容（仅限项目根目录之内）",
-                createParameters(new Param("path", "string", "文件路径", true)),
-                args -> {
-                    Path safe = pathGuard.resolveSafe(args.get("path"));
-                    try {
-                        return "文件内容:\n" + Files.readString(safe);
-                    } catch (Exception e) {
-                        return "读取文件失败: " + e.getMessage();
-                    }
-                }
-        ));
-
-        // write_file 工具
-        tools.put("write_file", new Tool(
-                "write_file",
-                "写入文件内容（仅限项目根目录之内，单文件 5MB 上限）",
-                createParameters(
-                        new Param("path", "string", "文件路径", true),
-                        new Param("content", "string", "文件内容", true)
-                ),
-                args -> {
-                    String path = args.get("path");
-                    String content = args.get("content") == null ? "" : args.get("content");
-                    int contentBytes = content.getBytes(StandardCharsets.UTF_8).length;
-                    if (contentBytes > MAX_WRITE_FILE_BYTES) {
-                        throw new PolicyException("写入内容 " + contentBytes + " 字节超过 "
-                                + (MAX_WRITE_FILE_BYTES / 1024 / 1024) + "MB 上限");
-                    }
-                    Path safe = pathGuard.resolveSafe(path);
-                    String activeStep = resourceLeaseStep.get();
-                    if (activeStep != null && !activeStep.isBlank()) {
-                        // 获取租约
-                        resourceLeaseManager.acquireWrite(activeStep, safe);
-                        // 二次校验：防止租约在获取后、写入前超时被回收
-                        if (!resourceLeaseManager.isLeaseValid(activeStep, safe)) {
-                            throw new PolicyException("写入冲突: 租约已失效，文件 " + path
-                                + " 可能正在被其他任务写入");
-                        }
-                    }
-                    String before = null;
-                    try {
-                        if (Files.exists(safe) && Files.isRegularFile(safe)) {
-                            before = Files.readString(safe);
-                        }
-                    } catch (Exception ignored) {
-                        // 二进制 / 大文件 / 编码错读不出来时，前文当 null 处理（diff 退化为长度提示）
-                    }
-                    try {
-                        Path parent = safe.getParent();
-                        if (parent != null) {
-                            Files.createDirectories(parent);
-                        }
-                        Files.writeString(safe, content);
-                        if (activeStep != null && !activeStep.isBlank()) {
-                            stepModifiedFiles
-                                    .computeIfAbsent(activeStep, k -> java.util.concurrent.ConcurrentHashMap.newKeySet())
-                                    .add(safe.toString());
-                        }
-                        try {
-                            writeFileObserver.accept(path, new String[]{before, content});
-                        } catch (Exception ignored) {
-                            // observer 失败不能影响 write_file 主路径
-                        }
-                        runPostEditLspHook(path, safe);
-                        return "文件已写入: " + path;
-                    } catch (Exception e) {
-                        return "写入文件失败: " + e.getMessage();
-                    }
-                }
-        ));
-
-        // list_dir 工具
-        tools.put("list_dir", new Tool(
-                "list_dir",
-                "列出目录内容（仅限项目根目录之内）",
-                createParameters(new Param("path", "string", "目录路径", true)),
-                args -> {
-                    Path safe = pathGuard.resolveSafe(args.get("path"));
-                    try {
-                        File[] files = safe.toFile().listFiles();
-                        if (files == null) {
-                            return "目录为空或不存在";
-                        }
-                        StringBuilder sb = new StringBuilder("目录内容:\n");
-                        for (File f : files) {
-                            sb.append(f.isDirectory() ? "[D] " : "[F] ")
-                              .append(f.getName())
-                              .append("\n");
-                        }
-                        return sb.toString();
-                    } catch (Exception e) {
-                        return "列出目录失败: " + e.getMessage();
-                    }
-                }
-        ));
-    }
-
-    /**
-     * 注册Shell命令工具
-     */
-    private void registerShellTools() {
-        tools.put("execute_command", new Tool(
-                "execute_command",
-                "在当前项目目录中执行短时 Shell 命令（默认 60 秒超时，不允许全盘扫描）",
-                createParameters(new Param("command", "string", "要执行的命令", true)),
-                args -> executeCommand(args.get("command"))
-        ));
-    }
-
-    /**
-     * 注册代码相关工具
-     */
-    private void registerCodeTools() {
-        tools.put("create_project", new Tool(
-                "create_project",
-                "创建新项目结构",
-                createParameters(
-                        new Param("name", "string", "项目名称", true),
-                        new Param("type", "string", "项目类型", true, "java", "python", "node")
-                ),
-                args -> {
-                    String name = args.get("name");
-                    String type = args.get("type");
-                    Path projectRoot = pathGuard.resolveSafe(name);
-                    try {
-                        Files.createDirectories(projectRoot);
-
-                        switch (type.toLowerCase()) {
-                            case "java" -> {
-                                Files.createDirectories(projectRoot.resolve("src/main/java"));
-                                Files.createDirectories(projectRoot.resolve("src/main/resources"));
-                                Files.writeString(projectRoot.resolve("pom.xml"),
-                                        String.format("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
-                                                "<project>\n" +
-                                                "    <modelVersion>4.0.0</modelVersion>\n" +
-                                                "    <groupId>com.example</groupId>\n" +
-                                                "    <artifactId>%s</artifactId>\n" +
-                                                "    <version>1.0</version>\n" +
-                                                "</project>", name));
-                            }
-                            case "python" -> {
-                                Files.createDirectories(projectRoot.resolve(name));
-                                Files.writeString(projectRoot.resolve("main.py"), "# 主程序入口\n");
-                                Files.writeString(projectRoot.resolve("requirements.txt"), "# 依赖列表\n");
-                            }
-                            case "node" -> {
-                                Files.writeString(projectRoot.resolve("package.json"),
-                                        String.format("{\"name\": \"%s\", \"version\": \"1.0.0\"}", name));
-                            }
-                        }
-                        return "项目已创建: " + name + " (类型: " + type + ")";
-                    } catch (Exception e) {
-                        return "创建项目失败: " + e.getMessage();
-                    }
-                }
-        ));
     }
 
     /**
@@ -690,67 +573,6 @@ public class ToolRegistry implements AutoCloseable {
                         new Param("limit", "string", "maximum number of matches to return, default 10", false)
                 ),
                 args -> searchTools(args.get("query"), args.get("limit"))
-        ));
-    }
-
-    private void registerMemoryTools() {
-        tools.put("save_memory", new Tool(
-                "save_memory",
-                "当且仅当用户明确说“记一下”“记住”“以后记得”或要求保存长期偏好/稳定事实时调用，把精炼事实写入长期记忆；不要保存一次性任务请求、临时文件名或模型猜测。",
-                createParameters(new Param("fact", "string", "要长期保存的稳定事实或用户偏好，必须精炼、可跨会话复用", true)),
-                args -> {
-                    String fact = args.get("fact");
-                    if (fact == null || fact.isBlank()) {
-                        return "保存长期记忆失败: fact 不能为空";
-                    }
-                    String normalized = fact.trim();
-                    if (memorySaveHandler != null) {
-                        MemorySaveResult saveResult = memorySaveHandler.save(normalized);
-                        if (saveResult == null) {
-                            return "保存长期记忆失败: 记忆保存器未返回结果";
-                        }
-                        if (!saveResult.stored()) {
-                            return saveResult.message() == null || saveResult.message().isBlank()
-                                    ? "长期记忆策略拒绝保存"
-                                    : saveResult.message();
-                        }
-                        return "💾 已保存到长期记忆: " + normalized;
-                    }
-                    if (memorySaver == null) {
-                        return "保存长期记忆失败: 记忆保存器未初始化";
-                    }
-                    memorySaver.accept(normalized);
-                    return "💾 已保存到长期记忆: " + normalized;
-                }
-        ));
-        tools.put("list_memory", new Tool(
-                "list_memory",
-                "只读查询当前已持久化的长期记忆条目；当用户想查看、核对或审计系统记住了什么时使用。不要用它检索项目代码，代码问题仍使用 search_code。",
-                createParameters(new Param("limit", "integer", "最多返回多少条长期记忆，默认 20", false)),
-                args -> {
-                    if (memoryListHandler == null) {
-                        return "查询长期记忆失败: 记忆查询器未初始化";
-                    }
-                    int limit = parseInt(args.get("limit"), 20);
-                    return memoryListHandler.list(Math.max(1, limit));
-                }
-        ));
-    }
-
-    private void registerSnapshotTools() {
-        tools.put("revert_turn", new Tool(
-                "revert_turn",
-                "恢复到 Side-Git 记录的最近第 N 个 pre-turn 快照。会先记录 pre-restore 快照；属于高危写入操作，必须经 HITL 审批。",
-                createParameters(new Param("offset", "integer", "要恢复的 pre-turn 快照序号，1 表示最近一次任务开始前", false)),
-                args -> {
-                    int offset = parseInt(args.get("offset"), 1);
-                    try {
-                        RestoreResult result = snapshotService.restorePreTurn(Math.max(1, offset));
-                        return result.formatForCli();
-                    } catch (Exception e) {
-                        return "恢复快照失败: " + e.getMessage();
-                    }
-                }
         ));
     }
 
@@ -1022,6 +844,15 @@ public class ToolRegistry implements AutoCloseable {
     /**
      * 创建参数定义
      */
+    @Override
+    public JsonNode createToolParameters(ToolParameter... params) {
+        Param[] converted = Arrays.stream(params == null ? new ToolParameter[0] : params)
+                .map(param -> new Param(param.name(), param.type(), param.description(), param.required(),
+                        param.enumValues() == null ? List.of() : param.enumValues()))
+                .toArray(Param[]::new);
+        return createParameters(converted);
+    }
+
     private JsonNode createParameters(Param... params) {
         ObjectNode parameters = mapper.createObjectNode();
         parameters.put("type", "object");
@@ -1540,147 +1371,6 @@ public class ToolRegistry implements AutoCloseable {
         }
         labels.add(annotations.openWorld() ? "openWorld" : "closedWorld");
         return String.join(", ", labels);
-    }
-
-    private String executeCommand(String command) {
-        String normalized = command == null ? "" : command.trim();
-        if (normalized.isEmpty()) {
-            return "执行命令失败: 命令不能为空";
-        }
-        String denyReason = CommandGuard.check(normalized);
-        if (denyReason != null) {
-            // 抛 PolicyException 让外层 executeTool 统一写 audit 并格式化拒绝消息，
-            // 命令围栏与路径围栏的拒绝路径走同一个出口。
-            throw new PolicyException(denyReason);
-        }
-
-        ExecutorService outputReaderExecutor = Executors.newSingleThreadExecutor(r -> {
-            Thread thread = new Thread(r, "devcli-command-output");
-            thread.setDaemon(true);
-            return thread;
-        });
-
-        Process process = null;
-        try {
-            ProcessBuilder pb = new ProcessBuilder(shellCommand(normalized));
-            pb.directory(new File(projectPath));
-            pb.redirectErrorStream(true);
-            process = pb.start();
-
-            Process runningProcess = process;
-            Future<String> outputFuture = outputReaderExecutor.submit(() -> readProcessOutput(runningProcess));
-
-            boolean finished = process.waitFor(commandTimeoutSeconds, TimeUnit.SECONDS);
-            if (!finished) {
-                terminateProcessTree(process);
-                outputFuture.cancel(true);
-                return "命令执行超时（" + commandTimeoutSeconds + "秒），已强制终止";
-            }
-
-            String output = getCommandOutput(outputFuture);
-            int exitCode = process.exitValue();
-            return String.format("命令执行完成 (exit code: %d)\n%s", exitCode, output);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            if (process != null) {
-                terminateProcessTree(process);
-            }
-            return "用户取消了此次工具调用";
-        } catch (Exception e) {
-            if (process != null) {
-                terminateProcessTree(process);
-            }
-            return "执行命令失败: " + e.getMessage();
-        } finally {
-            outputReaderExecutor.shutdownNow();
-        }
-    }
-
-    private void terminateProcessTree(Process process) {
-        if (process == null) {
-            return;
-        }
-        List<ProcessHandle> descendants = process.toHandle().descendants().toList();
-        for (int i = descendants.size() - 1; i >= 0; i--) {
-            descendants.get(i).destroyForcibly();
-        }
-        process.destroyForcibly();
-        for (ProcessHandle descendant : descendants) {
-            waitForProcessExit(descendant);
-        }
-        waitForProcessExit(process.toHandle());
-        closeProcessStreams(process);
-    }
-
-    private void waitForProcessExit(ProcessHandle handle) {
-        try {
-            handle.onExit().get(3, TimeUnit.SECONDS);
-        } catch (Exception ignored) {
-            // Best-effort cleanup: timeout paths must return even if the OS delays process reaping.
-        }
-    }
-
-    private void closeProcessStreams(Process process) {
-        try {
-            process.getInputStream().close();
-        } catch (Exception ignored) {
-        }
-        try {
-            process.getOutputStream().close();
-        } catch (Exception ignored) {
-        }
-        try {
-            process.getErrorStream().close();
-        } catch (Exception ignored) {
-        }
-    }
-
-    private List<String> shellCommand(String command) {
-        if (isWindows()) {
-            String utf8Command = "[Console]::InputEncoding = [Text.UTF8Encoding]::new($false); "
-                    + "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); "
-                    + command;
-            return List.of("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                    "-Command", utf8Command);
-        }
-        return List.of("bash", "-c", command);
-    }
-
-    private static boolean isWindows() {
-        String os = System.getProperty("os.name", "");
-        return os.toLowerCase(Locale.ROOT).contains("win");
-    }
-
-    private String readProcessOutput(Process process) throws Exception {
-        StringBuilder output = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (output.length() < MAX_COMMAND_OUTPUT_CHARS) {
-                    int remaining = MAX_COMMAND_OUTPUT_CHARS - output.length();
-                    if (line.length() > remaining) {
-                        output.append(line, 0, remaining);
-                    } else {
-                        output.append(line);
-                    }
-                    output.append("\n");
-                }
-            }
-        }
-        if (output.length() >= MAX_COMMAND_OUTPUT_CHARS) {
-            return output.substring(0, MAX_COMMAND_OUTPUT_CHARS) + "\n...(输出已截断)";
-        }
-        return output.toString();
-    }
-
-    private String getCommandOutput(Future<String> outputFuture) throws Exception {
-        try {
-            return outputFuture.get(2, TimeUnit.SECONDS);
-        } catch (TimeoutException e) {
-            outputFuture.cancel(true);
-            return "(命令已结束，但输出读取超时)";
-        }
     }
 
     // 记录定义
