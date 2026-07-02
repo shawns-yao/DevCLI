@@ -5,8 +5,8 @@
 - 状态：部分实现
 - 来源：第一阶段已拆分 File / Shell / Project / Memory / Snapshot Provider，剩余高耦合工具需要单独阶段处理，避免把可审查改动扩大成难定位的大重构
 - 影响范围：`src/main/java/com/devcli/tool/ToolRegistry.java`、`src/main/java/com/devcli/tool/provider/`、RAG / Web / Browser / Skill / ToolSearch 相关测试
-- 已实现：`ToolSearchProvider` 已迁移 `search_tools` 注册、搜索、缓存复用和 MCP 工具激活逻辑；`ToolRegistry` 保留工具目录版本、MCP 动态注册链路和预激活入口
-- 未实现：继续按低风险到高风险顺序拆分 `WebToolProvider`、`BrowserToolProvider`、`RagToolProvider`、`SkillToolProvider`；MCP 动态工具注册链路最后处理或继续保留在 `ToolRegistry`
+- 已实现：`ToolSearchProvider` 已迁移 `search_tools` 注册、搜索、缓存复用和 MCP 工具激活逻辑；`WebToolProvider` 已迁移 `web_search` / `web_fetch` 注册、搜索 provider 懒加载、HTTP 抓取、正文抽取和网络策略检查；`ToolRegistry` 保留工具目录版本、MCP 动态注册链路和预激活入口
+- 未实现：继续按低风险到高风险顺序拆分 `BrowserToolProvider`、`RagToolProvider`、`SkillToolProvider`；MCP 动态工具注册链路最后处理或继续保留在 `ToolRegistry`
 - 约束：继续保留 `ToolRegistry` 作为统一执行入口、审计入口、参数校验入口和状态协调入口；不削弱路径安全、网络策略、浏览器安全策略、RAG 缓存、Skill allowedTools 和 MCP 动态工具可见性控制
 - 建议验证：按拆分对象分别运行 `ToolRegistryTest`、Web / Browser / RAG / Skill 相关针对性测试；不默认运行项目或全量测试
 - 风险：RAG / Web / Browser / Skill 与上下文、缓存、策略和 MCP 工具可见性耦合更深，Provider 上下文接口可能膨胀，需要逐个拆分并审计边界
