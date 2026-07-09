@@ -36,7 +36,7 @@ DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、�
 - `Skill（技能）`：`load_skill` 按需加载完整指引；已加载 Skill 的允许工具白名单会限制后续工具调用，压缩后恢复保留 context、allowedTools 和内容摘要。
 - `MCP（Model Context Protocol）`：支持 stdio / streamable HTTP MCP server，动态加载工具和 resources，并把 MCP server 状态、日志、重启能力暴露给 CLI。
 - `HITL（Human-in-the-Loop）`：危险工具和敏感页面操作进入人工审批；审批前先过策略层，策略拒绝的操作不能靠用户批准绕过。
-- `Snapshot（快照）`：通过 Side-Git 在 turn 前后保存快照，支持回滚最近一轮变更，降低 Agent 自动改文件的风险。
+- `Snapshot（快照）`：通过 Side-Git 在 turn 前后保存快照，支持回滚最近一轮变更，并按 `devcli.snapshot.max` 自动裁剪旧快照，降低 Agent 自动改文件的风险。
 - `Renderer（渲染器）`：默认 inline 模式提供底部状态栏、行内 thinking、工具块和 diff；也保留 plain 和 Lanterna TUI 模式。
 - `Runtime API`：本地 HTTP API 暴露 threads / turns / events，便于外部进程把 DevCLI 当作本地 Agent runtime 调用。
 - `Image Input`：支持 `@image:` 本地路径、file URL 和剪贴板图片，图片会做尺寸、格式和大小处理后进入模型输入。
@@ -66,7 +66,7 @@ Main
 - `WorkingMemory（工作记忆）` 只保存当前会话派生状态，不承担压缩职责。`RagEvidenceMemory（RAG 证据记忆）` 会记录检索证据的 `IndexEpoch（索引版本）`、`SymbolVersion（符号版本）` 和 `ClasspathEpoch（类路径版本）`；`search_code` 通过结构化 `RAG_EVIDENCE_JSON` 载荷传递证据，避免依赖展示文本解析。
 - `LongTermMemory（长期记忆）` 只保存跨会话稳定事实，默认不把临时任务请求写入长期层。`SymbolInvalidation（符号失效）` 会在索引替换时记录变更和删除的旧/新符号版本差异，并通过 `NegativeFact（负向事实）` 告诉模型哪些旧事实不可用；`search_code` 会输出与查询相关的失效事实，供 WorkingMemory 清理旧 RAG 证据。长期记忆注入时会抑制与 WorkingMemory 临时事实语义重复的条目。
 - `PathGuard（路径围栏）` 负责限制文件访问不逃逸项目根。
-- `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 和 `/team` 并行执行时拦截 `write_file`，同一文件只能被一个运行中 task / step 写入，避免运行时新增文件写入目标导致互相覆盖。
+- `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 和 `/team` 并行执行时拦截 `write_file`，同一文件只能被一个运行中 task / step 写入，并在 task / Worker 尝试结束后释放对应租约，避免运行时新增文件写入目标导致互相覆盖或后续步骤被残留租约阻塞。
 - `CommandGuard（命令防线）` 是危险命令快速拒绝层，不替代 HITL 和路径策略。
 - `HitlToolRegistry（审批工具注册表）` 位于真实工具执行前，保证危险操作先经过审批和策略判定。
 
@@ -431,6 +431,7 @@ Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 做实现
 | `execute_command` | 执行短时 shell 命令 |
 | `create_project` | 创建基础项目结构 |
 | `search_code` | 检索代码库 |
+| `grep_code` | 实时精确搜索当前工作区文本 |
 | `web_search` | 搜索互联网 |
 | `web_fetch` | 抓取已知 URL 并提取正文 |
 | `save_memory` | 保存长期记忆 |
@@ -447,6 +448,7 @@ Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 做实现
 
 - `read_file` / `write_file` 必须通过路径策略校验。
 - `execute_command` 面向短时命令，不适合托管长期后台服务。
+- `grep_code` 是实时精确文本搜索，适合类名、方法名、配置键、错误文本和固定字符串片段；`search_code` 保持 keyword + semantic + bounded graph 混合检索，适合自然语言理解、调用链和概念查询。
 - `web_fetch` 适合已知 URL；遇到 SPA 或防爬限制时再切浏览器/MCP。
 - `create_project` 只创建基础模板，不替代完整脚手架。
 - MCP 工具名统一暴露为 `mcp__{server}__{tool}`，resource 读取暴露为虚拟工具；带 destructive/openWorld annotations 的 MCP 工具会强制逐次 HITL 审批，不复用全部放行缓存。
@@ -459,7 +461,7 @@ DevCLI 的上下文分为四层：
 - `ConversationHistory（对话历史）`：真实 LLM messages，由压缩器治理窗口。
 - `WorkingMemory（工作记忆）`：当前会话工具证据、任务状态和临时事实，不跨会话持久化。用户显式要求“别管记忆”“忽略记忆”等时，本会话不注入长期记忆、通用 WorkingMemory 和角色裁剪后的 WorkingMemory。其中 `TaskLedger（任务账本）` 结构化记录计划执行进度（当前 step / 已完成 / 待执行 / 失败），不进对话历史、压缩不触碰它，让长 plan 压缩后仍能看到进度；当前由 `/plan`（PlanExecuteAgent）维护。Multi-Agent 步骤完成或失败时会把 `stepModifiedFiles` 写入运行态、checkpoint 和 WorkingMemory，后续依赖步骤及 `/team resume` 会看到上游修改文件。压缩后恢复上下文会按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 和 MCP 工具状态分节注入，并做预算控制与行级去重；microcompact 工具引用会按 storedPath / toolCallId 去重；Multi-Agent 会按 Planner / Worker / Reviewer 裁剪恢复内容，避免恢复段重复携带完整工具输出。压缩边界会同时记录全局 RAG 索引版本和当前会话 RAG 证据版本。
 - `SessionMemory（会话预摘要）`：当前进程内缓存压缩前置摘要，覆盖同一消息指纹且未过期时可被压缩器复用；默认 30 分钟过期。Plan / Multi-Agent turn 结束后会后台维护预摘要，避免主流程等待摘要 LLM 调用。
-- `LongTermMemory（长期记忆）`：跨会话稳定事实，SQLite 持久化，支持检索注入；写入前经过 `LongTermMemoryPolicy` 规则化分流，中英文显式低敏偏好/项目事实、稳定个人属性和多次重复出现的稳定事实可保存，反馈类事实按 `FEEDBACK` 类型落库，敏感或模糊新事实要求确认，中英文临时闲聊和低复用信息跳过。命中 `subject（主题键）` 的事实写入时，同主题旧事实自动标记为 `superseded（已取代）`，检索只返回 `active（有效）` 条目（如 Fastjson → Jackson 选型切换）。与 WorkingMemory 临时事实语义重复的长期记忆不会重复注入 prompt。
+- `LongTermMemory（长期记忆）`：跨会话稳定事实，SQLite 持久化，支持检索注入；写入前经过 `LongTermMemoryPolicy` 规则化分流，中英文显式低敏偏好/项目事实、稳定个人属性和多次重复出现的稳定事实可保存，反馈类事实按 `FEEDBACK` 类型落库，敏感或模糊新事实要求确认，中英文临时闲聊和低复用信息跳过；显式保存请求如果内容仍然明显临时或低复用，也先进入确认态而不是直接落库。命中 `subject（主题键）` 的事实写入时，同主题旧事实自动标记为 `superseded（已取代）`，检索只返回 `active（有效）` 条目（如 Fastjson → Jackson 选型切换）。与 WorkingMemory 临时事实语义重复的长期记忆不会重复注入 prompt。
 - `StickyMemory（强约束记忆）`：通过 `/save --pin` 保存，每轮全量注入 system prompt。
 
 保存长期事实：
@@ -476,7 +478,7 @@ DevCLI 的上下文分为四层：
 
 长期记忆写入策略：
 
-- 用户明确说“记住”“保存”“以后记得”或英文 “remember / save this preference / for future sessions” 时，低敏稳定事实优先保存。
+- 用户明确说“记住”“保存”“以后记得”或英文 “remember / save this preference / for future sessions” 时，低敏稳定事实优先保存；如果显式保存内容仍然包含“今天/这次/临时/朋友孩子高考”这类低复用信号，策略返回确认态。
 - 个人偏好、项目约定、常用路径、长期身份属性通过 `reason_code` 记录可解释写入原因，不再依赖未校准的小数打分。
 - 个人属性类键值事实（如“我是医生”）可自动进入长期记忆；模糊的新个人状态事实（如“我刚刚搬到北京”）需要确认。
 - 当信息涉及 token、密码、手机号、地址等敏感内容时，默认要求确认或跳过。
@@ -523,6 +525,8 @@ RAG 索引内容：
 - 文件路径、起止行号、chunk 名称、语义向量、`IndexEpoch（索引版本）`、`SymbolVersion（符号版本）` 和 `ClasspathEpoch（类路径版本）`。
 
 索引阶段会按文件批量生成 chunk embedding；批量请求失败或返回数量异常时，自动逐条降级处理并跳过单个失败 chunk。
+
+`search_code` 的 keyword 通道保持 SQLite 索引实现，继续参与 RRF 融合和失效事实管理；`grep_code` 是独立的实时精确检索工具，不替代 `search_code`。
 
 RAG 检索流程：
 
@@ -620,7 +624,7 @@ LLM tool call
 - 参数不合法时不会进入审批，更不会执行。
 - 用户不能批准策略层已经拒绝的操作。
 - 文件写入和命令执行会留下审计记录。
-- Side-Git snapshot 可用于回滚最近 turn 的文件改动。
+- Side-Git snapshot 可用于回滚最近 turn 的文件改动，并按保留上限自动裁剪旧快照。
 
 ## Renderer And Interaction
 

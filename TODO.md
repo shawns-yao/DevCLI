@@ -1,5 +1,45 @@
 # TODO
 
+## 2026-07-09 长期记忆低价值显式保存确认
+
+- 状态：已实现
+- 来源：长期记忆写入策略需要避免显式但明显临时、低复用的信息直接进入持久层，减少记忆库长期噪声
+- 影响范围：`src/main/java/com/devcli/memory/LongTermMemoryPolicy.java`、`src/test/java/com/devcli/memory/LongTermMemoryPolicyTest.java`、`README.md`、`AGENTS.md`、`docs/agents-reference.md`
+- 已实现：显式保存请求命中临时信息或低复用第三方事实时返回 `CONFIRM`，reason_code 为 `EXPLICIT_LOW_VALUE_REQUIRES_CONFIRMATION`；稳定偏好、稳定项目事实和稳定个人属性仍按原策略保存
+- 未实现：未引入 LLM judge 或人工确认交互 UI；当前仍由 `MemoryManager.storeFactWithPolicy` 返回确认提示
+- 验证建议：`mvn -Dtest=LongTermMemoryPolicyTest -DskipTests=false test`
+- 风险：用户确实想保存低复用事实时，需要上层确认流程继续承接；当前策略优先降低长期记忆噪声
+
+## 2026-07-09 Multi-Agent 资源租约释放补强
+
+- 状态：已实现
+- 来源：资源租约边界检查发现 `/team` Worker 只绑定 `runWithResourceLease` 上下文，步骤尝试结束后没有显式释放 step 租约；异常、Reviewer 打回或在位重做路径可能依赖超时抢占回收
+- 影响范围：`src/main/java/com/devcli/agent/AgentOrchestrator.java`、`src/test/java/com/devcli/agent/AgentOrchestratorTest.java`、`README.md`、`AGENTS.md`、`docs/agents-reference.md`、`docs/runtime-resource-lease-design.md`
+- 已实现：`AgentOrchestrator.executeWorkerOnce` 在 finally 中调用 `releaseResourceLeases(stepId)`；新增测试覆盖 Worker 尝试结束后释放资源租约
+- 未实现：未新增后台定时清理；现有 `pruneExpiredLeases` 仍作为超时残留的主动清理入口
+- 验证建议：`mvn -Dtest=AgentOrchestratorTest#shouldReleaseWorkerResourceLeaseAfterStepCompletes -DskipTests=false test`
+- 风险：并发 Worker 如果仍在同一毫秒级窗口写同一文件，冲突策略仍是拒绝后交给现有重试/审查流程处理，不做自动合并
+
+## 2026-07-09 Side-Git 快照自动裁剪
+
+- 状态：已实现
+- 来源：长会话下 turn 级快照持续增长，`devcli.snapshot.max` 之前只限制展示/查询数量，没有真正裁剪 side-history
+- 影响范围：`src/main/java/com/devcli/snapshot/SideGitManager.java`、`src/test/java/com/devcli/snapshot/SideGitManagerTest.java`、`README.md`、`AGENTS.md`、`docs/agents-reference.md`
+- 已实现：每次新建快照后按 `SnapshotConfig.maxSnapshots` 重写 Side-Git 历史，只保留最新 N 条快照；新增测试覆盖超过保留上限时旧快照被裁剪
+- 未实现：未对 unreachable Git object 做额外磁盘压缩；后续可评估 JGit GC 的稳定触发策略
+- 验证建议：`mvn -Dtest=SideGitManagerTest -DskipTests=false test`
+- 风险：历史重写会改变保留快照的 commit id；恢复功能按当前保留列表工作，不依赖旧 commit id
+
+## 2026-07-09 独立 grep_code 精确检索工具
+
+- 状态：已实现
+- 来源：RAG / keyword / grep 检索边界讨论后，明确保留 `search_code` 的 SQLite keyword 通道和 RRF 融合，不把 grep 塞入 RAG 内部路由
+- 影响范围：`src/main/java/com/devcli/tool/provider/GrepToolProvider.java`、`ToolRegistry` 工具注册、Agent / Plan / Reviewer 工具展示与提示词、README / AGENTS / agents-reference、工具与渲染测试
+- 已实现：新增只读 `grep_code` 工具，按当前项目根实时扫描文件；支持 `pattern`、`path`、`regex`、`case_sensitive`、`limit`；通过 `PathGuard` 限制路径；跳过常见缓存/构建目录和大文件；Reviewer 可使用该工具做精确文本验证
+- 未实现：无；`search_code` 内部检索链路、RRF 权重和 symbol-aware boost 未改动
+- 验证建议：运行 `ToolRegistryTest`、`PlainRendererTest`、`ToolCallRendererTest`、涉及 Reviewer 工具可见性的 `AgentOrchestratorTest`
+- 风险：`grep_code` 实时扫描大仓库时受文件数量影响，输出仍需依赖尺寸治理限制上下文体积
+
 ## 2026-07-02 ToolRegistry Provider 拆分第二阶段
 
 - 状态：已实现

@@ -27,7 +27,7 @@ For the primary entry point, see `/AGENTS.md`.
 
 ### Snapshot Config
 
-系统属性 > 环境变量 > 默认值：`devcli.snapshot.enabled`(true) / `devcli.snapshot.max`(50) / `devcli.snapshot.excludes`(.git,.devcli/snapshots,target,node_modules,dist,.idea,*.class,*.jar) / `devcli.snapshot.dir`(~/.devcli/snapshots)
+系统属性 > 环境变量 > 默认值：`devcli.snapshot.enabled`(true) / `devcli.snapshot.max`(50，自动保留最近 N 条快照) / `devcli.snapshot.excludes`(.git,.devcli/snapshots,target,node_modules,dist,.idea,*.class,*.jar) / `devcli.snapshot.dir`(~/.devcli/snapshots)
 
 ### Embedding Config
 
@@ -98,7 +98,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `SessionMemory` 保存当前进程内会话预摘要，按消息指纹复用，默认 30 分钟过期；Plan / Multi-Agent turn 结束后通过 `MemoryManager` 的单线程后台 executor 维护预摘要，避免主流程等待摘要 LLM 调用
 - 压缩边界 `<compact_boundary>` 记录已加载 Skill、RAG epoch、MCP 工具快照和压缩后恢复入口状态；RAG epoch 合并当前会话已命中证据与当前项目全局索引版本，MCP 工具快照包含 server 工具数量、schema 指纹和生命周期版本
 - 长期记忆主要通过 `/save` 或用户明确要求保存；中英文显式记忆意图、少量稳定个人属性和多次重复出现的稳定项目/偏好事实可由策略自动保存
-- 长期记忆只保存跨会话稳定事实，不保存临时指令；中英文临时表达、敏感信息和模糊新个人状态必须确认或跳过；与 WorkingMemory volatile fact 语义重复的长期记忆在 prompt 注入时会被抑制
+- 长期记忆只保存跨会话稳定事实，不保存临时指令；显式保存请求如果内容仍然明显临时或低复用，需要确认而不是直接落库；中英文临时表达、敏感信息和模糊新个人状态必须确认或跳过；与 WorkingMemory volatile fact 语义重复的长期记忆在 prompt 注入时会被抑制
 - 用户显式要求忽略记忆（如“别管记忆”“忽略记忆”）时，本会话不注入长期记忆、通用 WorkingMemory 和角色裁剪后的 WorkingMemory
 - 反馈类长期记忆按 `FEEDBACK` 类型落库，不混入普通 `FACT`
 
@@ -109,6 +109,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - SubAgent IOException 返回 ERROR 类型
 - 所有子代理共享 ToolRegistry 和 MemoryManager
 - `ToolRegistry.write_file` 会按 step 记录 `stepModifiedFiles`；步骤终态写入运行态 `ExecutionStep`、checkpoint `StepArtifact.modifiedFiles` 和 WorkingMemory。后续依赖步骤与 `/team resume` 都会看到上游修改文件清单。
+- `/team` Worker 每次尝试都通过 `ToolRegistry.runWithResourceLease(stepId, ...)` 绑定资源租约上下文，并在 finally 中调用 `releaseResourceLeases(stepId)`；Reviewer 打回、Worker 异常或在位重做不会遗留旧步骤租约。
 - `/plan` 的 `Task` 也会在任务完成或失败时消费同一份 `stepModifiedFiles`，并保存短 `resultSummary`。`Planner.replan()` 不是 Agent 循环，没有工具调用权，因此失败后重规划只读取这些结构化产物事实，不读取完整任务 result 作为主要依据。
 
 ### HITL System
@@ -211,6 +212,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 - side-git 在 ~/.devcli/snapshots/ 维护独立仓库（JGit，不依赖系统 git）
 - pre-turn 同步，post-turn 异步
+- 每次新建快照后按 `devcli.snapshot.max` 重写 side-history，只保留最新 N 条快照
 - revert_turn 纳入 HITL/AuditLog，恢复前先创建 pre-restore 快照
 
 ### Prompt Layering (Phase 19)
@@ -259,7 +261,7 @@ LLM 生成计划 JSON / 简单任务最小计划 / 重编号 task_1..N / 依赖�
 DAG 拓扑排序 / 可执行任务判定 / 进度可视化
 
 ### ToolRegistry.java
-11 个内置工具 + MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会返回 `search_tools` 引导和 query 示例
+12 个内置核心工具（含 `grep_code` 实时精确文本搜索）+ MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会返回 `search_tools` 引导和 query 示例
 
 ### MCP Package
 McpServerManager / McpClient / JsonRpcClient / StdioTransport / StreamableHttpTransport / McpSchemaSanitizer / resources/ / mention/ / notifications/

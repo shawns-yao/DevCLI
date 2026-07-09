@@ -62,7 +62,7 @@ Multi-Agent 的 WorkingMemory 按角色注入隔离视图：Planner 只看任务
 
 Multi-Agent 并行批次使用 `SubAgent.ForkContext` 共享冻结 system prompt 前缀、exact tool definitions 快照、skill body 快照和 fork fingerprint；每个子任务只追加自己的 user 后缀，避免并行 Worker / Reviewer 因历史或动态工具差异破坏 prompt cache 命中。
 
-并行 Worker 写文件时，`ToolRegistry.write_file` 会进入运行时资源租约检查：每个 `/plan` task 或 `/team` step 以自己的 id 持有写租约，同一文件只能被一个运行中步骤写入；冲突返回策略拒绝，不做 last-writer-wins 覆盖或 LLM 自动合并。设计说明见 `docs/runtime-resource-lease-design.md`。
+并行 Worker 写文件时，`ToolRegistry.write_file` 会进入运行时资源租约检查：每个 `/plan` task 或 `/team` step 以自己的 id 持有写租约，同一文件只能被一个运行中步骤写入；冲突返回策略拒绝，不做 last-writer-wins 覆盖或 LLM 自动合并。`/plan` task 和 `/team` Worker 尝试结束后都会在 finally 中释放本步骤租约，避免异常、Reviewer 打回或重做路径遗留租约。设计说明见 `docs/runtime-resource-lease-design.md`。
 
 Reviewer 前置硬约束：Worker 产物进入 Reviewer LLM 前，`AgentOrchestrator` 会先跑 Pre-Review Hook；Java 项目优先 `mvn -q -DskipTests test-compile`，无 Maven 时用 `javac -encoding UTF-8` 编译 `src/main/java`。失败时直接生成 `approved=false` 反馈打回 Worker，不唤醒 Reviewer LLM。
 
@@ -72,13 +72,15 @@ Final integration 只做入口/API/默认参数/跨模块联动胶水；普通�
 
 失败步骤支持有界在位重做（默认 1 次）：正常步骤走完仍有失败时，失败步骤保持原 id/依赖在 DAG 原位换思路重做（buildStepContext 注入上次失败反馈），而非生成平行恢复计划——恢复始终长在原 DAG 上、通过依赖关系看到已完成成果，从机制上消除"平行计划 vs 已落盘成果"冲突；redo 用尽仍失败则保持 FAILED 终态，由熔断与汇总处理。在位重做的状态与决策由 `StepRedoTracker` 承载（与调度循环解耦）。Orchestration 的计划（步骤/依赖/验收点）与进度（完整 result + 修改文件清单）落盘到 `~/.devcli/checkpoints/`（原子写入；全部成功后删除）；中断后可用 `/team resume [id]` 断点续跑——已完成步骤直接带回 result，其余重置 PENDING 重新执行；resume 不恢复 WorkingMemory / 会话记忆。
 
+Side-Git 快照按 `devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX` 保留最近快照；每次新建快照后会重写 side-history，只保留最新 N 条，避免长会话快照无限增长。
+
 副作用横向信息流：write_file/execute_command 等副作用工具的证据在 `WorkingMemory.recentToolResults` 中优先保留、不被只读操作（read_file/search）的 FIFO 淘汰挤出，使后续步骤/轮次持续看到"本会话改过哪些文件"。这是改进既有工具证据淘汰策略实现的，未新增重复的文件账本维度。
 
 职责边界：`WorkingMemory` 是**当前会话内**的副作用证据缓存（会淘汰、不跨进程）；步骤完成或失败时，`ToolRegistry` 记录的 `stepModifiedFiles` 会同步写入运行态 `ExecutionStep`、checkpoint `StepArtifact.modifiedFiles` 和 WorkingMemory 关键事件。后续依赖步骤会看到已完成依赖的修改文件清单，`/team resume` 会从 checkpoint 恢复 completed / failed artifact 的 `modifiedFiles`，让 Worker 先读当前落盘内容再衔接实现。同进程靠 WorkingMemory，跨进程靠 checkpoint，二者互补。
 
-内置工具 11 个：`read_file` / `write_file` / `list_dir` / `execute_command` / `create_project` / `search_code` / `web_search` / `web_fetch` / `save_memory` / `list_memory` / `revert_turn`
+内置核心工具 12 个：`read_file` / `write_file` / `list_dir` / `execute_command` / `create_project` / `search_code` / `grep_code` / `web_search` / `web_fetch` / `save_memory` / `list_memory` / `revert_turn`
 
-Code RAG 检索链路当前为 keyword + semantic + bounded graph → `RRF（倒数排名融合）` → symbol-aware boost → `CrossEncoderReranker（交叉编码器重排）`。Rerank 默认开启，默认指向本地 Docker 暴露的 OpenAI-compatible `/rerank` endpoint；不可用时自动降级回 RRF 结果，不阻断检索。`/index` 按文件批量生成 chunk embedding；批量请求失败或返回数量异常时逐条降级并保留成功 chunk。`ToolRegistry` 会按项目路径复用 `CodeRetriever` / SQLite 连接，项目路径切换时关闭旧连接。索引替换会为变更和删除的 symbol 生成 `negativeFact`，`search_code` 会输出相关失效事实，并附带结构化 `RAG_EVIDENCE_JSON` 载荷供 WorkingMemory 清理旧 RAG 证据，展示文本变化不应影响证据提取。
+Code RAG 检索链路当前为 keyword + semantic + bounded graph → `RRF（倒数排名融合）` → symbol-aware boost → `CrossEncoderReranker（交叉编码器重排）`。Rerank 默认开启，默认指向本地 Docker 暴露的 OpenAI-compatible `/rerank` endpoint；不可用时自动降级回 RRF 结果，不阻断检索。`/index` 按文件批量生成 chunk embedding；批量请求失败或返回数量异常时逐条降级并保留成功 chunk。`ToolRegistry` 会按项目路径复用 `CodeRetriever` / SQLite 连接，项目路径切换时关闭旧连接。索引替换会为变更和删除的 symbol 生成 `negativeFact`，`search_code` 会输出相关失效事实，并附带结构化 `RAG_EVIDENCE_JSON` 载荷供 WorkingMemory 清理旧 RAG 证据，展示文本变化不应影响证据提取。keyword 通道保持 SQLite 索引实现，`grep_code` 作为独立实时精确检索工具存在，不替代 `search_code`，用于类名、方法名、配置键、错误文本和固定字符串片段定位。
 
 MCP 动态工具：`mcp__{server}__{tool}`（+ resources 虚拟工具）
 
@@ -136,7 +138,7 @@ Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔�
 ### Memory
 
 - 长期记忆主要通过 `/save` 或用户明确要求保存；中英文显式记忆意图、少量稳定个人属性和多次重复出现的稳定项目/偏好事实可由策略自动保存
-- 长期记忆只保存跨会话稳定事实，不保存临时指令；中英文临时表达、敏感信息和模糊新个人状态必须确认或跳过；与 WorkingMemory volatile fact 语义重复的长期记忆在 prompt 注入时会被抑制
+- 长期记忆只保存跨会话稳定事实，不保存临时指令；显式保存请求如果内容仍然明显临时或低复用，需要确认而不是直接落库；中英文临时表达、敏感信息和模糊新个人状态必须确认或跳过；与 WorkingMemory volatile fact 语义重复的长期记忆在 prompt 注入时会被抑制
 - 用户显式要求忽略记忆（如“别管记忆”“忽略记忆”）时，本会话不注入长期记忆、通用 WorkingMemory 和角色裁剪后的 WorkingMemory
 - 反馈类长期记忆按 `FEEDBACK` 类型落库，不混入普通 `FACT`
 - 命中 `subject（主题键）` 的事实写入走 supersede：同主题旧事实置为 inactive、检索只返回 active（如用户从 Fastjson 改用 Jackson）；抽不到主题退回追加不覆盖
