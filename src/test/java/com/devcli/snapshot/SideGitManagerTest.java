@@ -59,4 +59,30 @@ class SideGitManagerTest {
         assertEquals(SnapshotPhase.POST_TURN, all.get(0).phase());
         assertEquals(SnapshotPhase.PRE_TURN, all.get(1).phase());
     }
+
+    @Test
+    void prunesOlderSnapshotsWhenRetentionLimitIsExceeded() throws Exception {
+        Path project = tempDir.resolve("project");
+        Path snapshots = tempDir.resolve("snapshots");
+        Files.createDirectories(project);
+
+        SideGitManager manager = new SideGitManager(project,
+                new SnapshotConfig(true, snapshots, 3, List.of(".git", "target")));
+        for (int i = 1; i <= 3; i++) {
+            Files.writeString(project.resolve("a.txt"), "turn-" + i + "-before");
+            manager.preTurnSnapshot("turn-" + i, "before " + i);
+            Files.writeString(project.resolve("a.txt"), "turn-" + i + "-after");
+            manager.postTurnSnapshot("turn-" + i, "after " + i);
+        }
+
+        List<TurnSnapshot> all = manager.listSnapshots(10);
+
+        assertEquals(3, all.size());
+        assertEquals(SnapshotPhase.POST_TURN, all.get(0).phase());
+        assertEquals("turn-3", all.get(0).turnId());
+        assertEquals(SnapshotPhase.PRE_TURN, all.get(1).phase());
+        assertEquals("turn-3", all.get(1).turnId());
+        assertEquals(SnapshotPhase.POST_TURN, all.get(2).phase());
+        assertEquals("turn-2", all.get(2).turnId());
+    }
 }

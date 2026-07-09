@@ -2,9 +2,13 @@ package com.devcli.snapshot;
 
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.errors.GitAPIException;
+import org.eclipse.jgit.lib.CommitBuilder;
+import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.ObjectId;
+import org.eclipse.jgit.lib.ObjectInserter;
 import org.eclipse.jgit.lib.ObjectLoader;
 import org.eclipse.jgit.lib.PersonIdent;
+import org.eclipse.jgit.lib.RefUpdate;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
@@ -22,6 +26,7 @@ import java.nio.file.PathMatcher;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -75,6 +80,7 @@ public class SideGitManager {
                     .setCommitter(SNAPSHOT_IDENT)
                     .setMessage(message)
                     .call();
+            pruneSnapshotsIfNeeded(git);
             return toSnapshot(commit);
         }
     }
@@ -159,6 +165,15 @@ public class SideGitManager {
             return "🧹 已清理当前项目的 Side-Git 快照目录: " + gitDir.getParent();
         } catch (IOException e) {
             return "❌ 清理快照失败: " + e.getMessage();
+        }
+    }
+
+    synchronized int pruneSnapshotsIfNeeded() throws IOException, GitAPIException {
+        if (!config.enabled() || !Files.exists(gitDir.resolve("config"))) {
+            return 0;
+        }
+        try (Git git = openGit()) {
+            return pruneSnapshotsIfNeeded(git);
         }
     }
 
@@ -317,6 +332,59 @@ public class SideGitManager {
             }
         }
         return false;
+    }
+
+    private int pruneSnapshotsIfNeeded(Git git) throws IOException, GitAPIException {
+        int max = Math.max(1, config.maxSnapshots());
+        List<RevCommit> snapshots = new ArrayList<>();
+        for (RevCommit commit : git.log().call()) {
+            snapshots.add(commit);
+        }
+        if (snapshots.size() <= max) {
+            return 0;
+        }
+
+        rewriteRetainedHistory(git.getRepository(), snapshots.subList(0, max));
+        return snapshots.size() - max;
+    }
+
+    private void rewriteRetainedHistory(Repository repository, List<RevCommit> retainedNewestFirst)
+            throws IOException {
+        ObjectId parent = null;
+        try (ObjectInserter inserter = repository.newObjectInserter()) {
+            for (int i = retainedNewestFirst.size() - 1; i >= 0; i--) {
+                RevCommit original = retainedNewestFirst.get(i);
+                CommitBuilder builder = new CommitBuilder();
+                builder.setTreeId(original.getTree().getId());
+                if (parent != null) {
+                    builder.setParentId(parent);
+                }
+                PersonIdent ident = snapshotIdentAt(original);
+                builder.setAuthor(ident);
+                builder.setCommitter(ident);
+                builder.setMessage(original.getFullMessage());
+                parent = inserter.insert(builder);
+            }
+            inserter.flush();
+        }
+
+        if (parent == null) {
+            return;
+        }
+        String refName = repository.getFullBranch();
+        if (refName == null || !refName.startsWith(Constants.R_HEADS)) {
+            refName = Constants.HEAD;
+        }
+        RefUpdate update = repository.updateRef(refName);
+        update.setNewObjectId(parent);
+        update.setForceUpdate(true);
+        update.update();
+    }
+
+    private PersonIdent snapshotIdentAt(RevCommit commit) {
+        Instant instant = Instant.ofEpochSecond(Math.max(0, commit.getCommitTime()));
+        return new PersonIdent(SNAPSHOT_IDENT.getName(), SNAPSHOT_IDENT.getEmailAddress(),
+                Date.from(instant), SNAPSHOT_IDENT.getTimeZone());
     }
 
     private static void deleteRecursively(Path root) throws IOException {
