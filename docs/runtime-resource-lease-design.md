@@ -57,7 +57,7 @@ Implemented now:
 - Different concurrent steps cannot write the same file.
 - `/plan` task execution binds `task_id` as the lease owner.
 - `/team` Worker step execution binds `step_id` as the lease owner.
-- Leases are released when the step finishes.
+- `/plan` task leases and `/team` Worker leases are released in a `finally` path when each attempt finishes.
 
 Still future work:
 

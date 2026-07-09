@@ -1391,9 +1391,13 @@ public class AgentOrchestrator {
     private AgentMessage executeWorkerOnce(ExecutionStep step, SubAgent worker, AgentMessage taskMsg,
                                            String context, PrintStream out,
                                            SubAgent.ForkContext workerForkContext) {
-        return toolRegistry.runWithResourceLease(step.id(), () -> workerForkContext == null
-                ? worker.executeWithContext(taskMsg, context, out)
-                : worker.executeForkedWithContext(taskMsg, context, workerForkContext, out));
+        try {
+            return toolRegistry.runWithResourceLease(step.id(), () -> workerForkContext == null
+                    ? worker.executeWithContext(taskMsg, context, out)
+                    : worker.executeForkedWithContext(taskMsg, context, workerForkContext, out));
+        } finally {
+            toolRegistry.releaseResourceLeases(step.id());
+        }
     }
 
     private boolean shouldAcceptFinalIntegrationAfterTransientReviewerFailure(ExecutionStep step, String issues) {

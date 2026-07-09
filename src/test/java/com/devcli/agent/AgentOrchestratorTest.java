@@ -435,6 +435,41 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    void shouldReleaseWorkerResourceLeaseAfterStepCompletes(@TempDir Path tempDir) {
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                return response("""
+                        {
+                          "summary": "单步写入",
+                          "steps": [
+                            {"id": "s1", "description": "写入租约测试文件", "type": "FILE_WRITE", "dependencies": []}
+                          ]
+                        }
+                        """);
+            }
+            if (body.contains("原始任务")) {
+                return response(approvedReviewJson());
+            }
+            if (body.contains("写入租约测试文件")) {
+                return response("worker result");
+            }
+            return response("fallback");
+        };
+
+        DispatchingStubGLMClient llmClient = new DispatchingStubGLMClient(dispatcher);
+        RecordingLeaseToolRegistry toolRegistry = new RecordingLeaseToolRegistry();
+        toolRegistry.setProjectPath(tempDir.toString());
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(llmClient, toolRegistry, mm);
+
+            orchestrator.run("验证 Multi-Agent 步骤结束后释放资源租约");
+
+            assertTrue(toolRegistry.releasedStepIds.contains("step_1"),
+                    "worker step should release its resource leases when it completes");
+        }
+    }
+
+    @Test
     void shouldScheduleSessionPreSummaryMaintenanceAfterMultiAgentTurn(@TempDir Path tempDir) {
         Function<String, LlmClient.ChatResponse> dispatcher = body -> {
             if (body.contains("请为以下任务制定执行计划")) {
@@ -1268,6 +1303,16 @@ class AgentOrchestratorTest {
         ToolRegistry toolRegistry = new ToolRegistry();
         toolRegistry.setProjectPath(tempDir.toString());
         return toolRegistry;
+    }
+
+    private static final class RecordingLeaseToolRegistry extends ToolRegistry {
+        private final List<String> releasedStepIds = new CopyOnWriteArrayList<>();
+
+        @Override
+        public void releaseResourceLeases(String stepId) {
+            releasedStepIds.add(stepId);
+            super.releaseResourceLeases(stepId);
+        }
     }
 
     @SuppressWarnings("unchecked")
