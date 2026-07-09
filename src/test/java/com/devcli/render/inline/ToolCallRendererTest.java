@@ -48,6 +48,17 @@ class ToolCallRendererTest {
     }
 
     @Test
+    void singleGrepCodeCollapsedHeaderShowsPattern() {
+        var grouped = ToolCallRenderer.group(List.of(
+                tc("grep_code", "{\"pattern\":\"UserService\"}")));
+
+        String header = ToolCallRenderer.collapsedHeader(grouped);
+
+        assertTrue(header.contains("GrepCode"), header);
+        assertTrue(header.contains("UserService"), header);
+    }
+
+    @Test
     void multipleGroupsCollapsedShowsTotalCount() {
         var grouped = ToolCallRenderer.group(List.of(
                 tc("read_file", "{}"),
@@ -96,6 +107,7 @@ class ToolCallRendererTest {
         assertEquals("📖 读取 1 个文件", ToolCallRenderer.toolLabel("read_file", 1));
         assertEquals("✏️ 写入 2 个文件", ToolCallRenderer.toolLabel("write_file", 2));
         assertEquals("⚡ 执行 1 条命令", ToolCallRenderer.toolLabel("execute_command", 1));
+        assertEquals("🔎 精确搜索代码 1 次", ToolCallRenderer.toolLabel("grep_code", 1));
         assertEquals("🧠 查看长期记忆 1 次", ToolCallRenderer.toolLabel("list_memory", 1));
     }
 
@@ -109,6 +121,8 @@ class ToolCallRendererTest {
     void extractKeyParamPullsOutPath() {
         assertEquals("README.md",
                 ToolCallRenderer.extractKeyParam("read_file", "{\"path\":\"README.md\"}"));
+        assertEquals("UserService",
+                ToolCallRenderer.extractKeyParam("grep_code", "{\"pattern\":\"UserService\"}"));
     }
 
     @Test

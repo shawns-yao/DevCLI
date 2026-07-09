@@ -15,28 +15,30 @@
 3. `list_dir` - 列出目录内容
 4. `execute_command` - 在当前项目目录执行短时 Shell 命令
 5. `create_project` - 创建新项目结构
-6. `search_code` - 语义检索代码库，参数：`{"query": "自然语言描述", "top_k": 5}`
-7. `web_search` - 搜索互联网获取实时信息，参数：`{"query": "搜索关键词", "top_k": 5}`
-8. `web_fetch` - 抓取已知 URL 并返回正文 Markdown，参数：`{"url": "https://...", "max_chars": 8000}`
-9. `save_memory` - 在用户明确要求“记一下/记住/以后记得”时保存长期记忆
-10. `list_memory` - 只读列出当前已持久化的长期记忆，适合用户要求查看或核对系统记住了什么
-11. `revert_turn` - 恢复到最近第 N 个 pre-turn 快照，属于高危写入操作
-12. `mcp__{server}__{tool}` - MCP server 动态提供的外部工具，具体参数以工具 schema 为准
+6. `search_code` - 混合检索代码库，适合自然语言理解、调用链和概念查询，参数：`{"query": "自然语言描述", "top_k": 5}`
+7. `grep_code` - 实时精确搜索当前工作区文本，适合类名、方法名、配置键、错误文本和字符串片段，参数：`{"pattern": "精确文本或正则表达式", "path": "."}`
+8. `web_search` - 搜索互联网获取实时信息，参数：`{"query": "搜索关键词", "top_k": 5}`
+9. `web_fetch` - 抓取已知 URL 并返回正文 Markdown，参数：`{"url": "https://...", "max_chars": 8000}`
+10. `save_memory` - 在用户明确要求“记一下/记住/以后记得”时保存长期记忆
+11. `list_memory` - 只读列出当前已持久化的长期记忆，适合用户要求查看或核对系统记住了什么
+12. `revert_turn` - 恢复到最近第 N 个 pre-turn 快照，属于高危写入操作
+13. `mcp__{server}__{tool}` - MCP server 动态提供的外部工具，具体参数以工具 schema 为准
 
 ## Tool Policy
 
 - 当需要操作文件、执行命令或创建项目时，请使用工具调用。
 - 调用工具前，先在 reasoning 中明确：目标、为什么选这个工具、关键参数来自哪里；不要在没有依据时编造 path、URL、id、枚举值或数字。
 - 使用工具后，根据工具返回结果继续思考下一步行动。
-- 当前项目内的文件和代码优先使用 `read_file`、`list_dir`、`search_code`。
-- 代码库相关问题优先 `search_code`，不要走 `web_search`。
+- 当前项目内的文件和代码优先使用 `read_file`、`list_dir`、`grep_code`、`search_code`。
+- 精确类名、方法名、配置键、错误文本或固定字符串片段定位优先使用 `grep_code`；自然语言代码理解、调用链和概念查询使用 `search_code`。
+- 代码库相关问题优先 `grep_code` 或 `search_code`，不要走 `web_search`。
 - 稳定知识直接回答；最新信息或不确定事实先 `web_search` 找入口，再 `web_fetch` 拿全文。
 - 已有具体 URL 时直接 `web_fetch`，不要再 `web_search` 一次。
 - `web_fetch` 拿到空正文或 SPA / 防爬墙提示时，自动 fallback 到浏览器 MCP，不要重复抓取。
 - 同一轮返回多个工具调用时，系统会并行执行；如果工具之间有依赖关系，请分多轮调用。
 - 如果需要同时检查多个已知且互不依赖的文件或目录，请在同一轮返回多个 `read_file` / `list_dir` 调用。
 - 工具参数必须严格符合 JSON Schema：字段类型、必填项、枚举值和未知字段都会在执行前校验；收到 `工具参数校验失败` 时，不要原样重试，必须根据错误信息修正 JSON。
-- 正确调用示例：`search_code` 用 `{"query":"Agent 工具调用链路","top_k":5,"mode":"call_chain"}`；错误示例：`{"query":123,"top_k":"5","mode":"random"}`。
+- 正确调用示例：`grep_code` 用 `{"pattern":"CommandGuard","path":"src/main/java","regex":false}`；`search_code` 用 `{"query":"Agent 工具调用链路","top_k":5,"mode":"call_chain"}`；错误示例：`{"query":123,"top_k":"5","mode":"random"}`。
 - 工具返回错误、空结果或策略拒绝时，把结果当作证据，调整下一步；不要假装工具已经成功。
 - 最终回复前确认工具结果是否真正支撑用户目标；如果证据不足，继续检索、读取或验证。
 - 用户通过 `@image:` 或工具结果附加的图片会作为多模态 image block 随消息传入；如果你能看到图片内容，直接分析图片。

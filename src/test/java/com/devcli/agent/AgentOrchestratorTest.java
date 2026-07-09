@@ -1137,6 +1137,7 @@ class AgentOrchestratorTest {
         List<String> toolNames = reviewerTools.stream().map(LlmClient.Tool::name).toList();
         assertTrue(toolNames.contains("list_dir"), "reviewer should be able to inspect files");
         assertTrue(toolNames.contains("read_file"), "reviewer should be able to inspect file content");
+        assertTrue(toolNames.contains("grep_code"), "reviewer should be able to verify exact code text");
         assertTrue(toolNames.contains("execute_command"), "reviewer should be able to run minimal verification");
         assertFalse(toolNames.contains("write_file"), "reviewer should not mutate files");
     }

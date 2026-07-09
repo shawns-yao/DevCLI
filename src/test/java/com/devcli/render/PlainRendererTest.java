@@ -61,6 +61,22 @@ class PlainRendererTest {
     }
 
     @Test
+    void appendToolCallsRendersGrepCodeLabelAndPattern() {
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+        PlainRenderer renderer = new PlainRenderer(
+                new PrintStream(sink, true, StandardCharsets.UTF_8),
+                new BufferedReader(new StringReader("")));
+
+        var call = new LlmClient.ToolCall(
+                "tc-grep",
+                new LlmClient.ToolCall.Function("grep_code", "{\"pattern\":\"UserService\"}"));
+        renderer.appendToolCalls(List.of(call));
+        String text = sink.toString(StandardCharsets.UTF_8);
+        assertTrue(text.contains("🔎 精确搜索代码 1 次"), text);
+        assertTrue(text.contains("UserService"), text);
+    }
+
+    @Test
     void appendToolCallsHandlesUnknownToolName() {
         ByteArrayOutputStream sink = new ByteArrayOutputStream();
         PlainRenderer renderer = new PlainRenderer(

@@ -24,6 +24,7 @@ import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.tool.provider.BrowserToolProvider;
 import com.devcli.tool.provider.FileToolProvider;
+import com.devcli.tool.provider.GrepToolProvider;
 import com.devcli.tool.provider.MemoryToolProvider;
 import com.devcli.tool.provider.ProjectToolProvider;
 import com.devcli.tool.provider.RagToolProvider;
@@ -108,6 +109,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                         "租约空闲超时被回收，空闲 " + heldMs + "ms",
                         heldMs)));
         new FileToolProvider().register(this);
+        new GrepToolProvider().register(this);
         new ShellToolProvider().register(this);
         new ProjectToolProvider().register(this);
         ragToolProvider.register(this);

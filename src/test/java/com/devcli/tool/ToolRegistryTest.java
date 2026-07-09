@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -48,6 +49,37 @@ class ToolRegistryTest {
         String result = registry.executeTool("search_tools", "{\"query\":\"python\"}");
 
         assertTrue(result.contains("create_project"), result);
+    }
+
+    @Test
+    void grepCodeFindsExactTextFromCurrentWorkspaceWithoutIndex(@TempDir Path tempDir) throws Exception {
+        Files.createDirectories(tempDir.resolve("src/main/java/demo"));
+        Files.writeString(tempDir.resolve("src/main/java/demo/UserService.java"), """
+                package demo;
+                class UserService {
+                    void findUser() {}
+                }
+                """);
+
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+
+        String result = registry.executeTool("grep_code",
+                "{\"pattern\":\"UserService\",\"path\":\"src/main/java\",\"regex\":false}");
+
+        assertTrue(result.contains("src/main/java/demo/UserService.java:2: class UserService {"), result);
+    }
+
+    @Test
+    void grepCodeUsesCurrentFileContentsWithoutRebuildingIndex(@TempDir Path tempDir) throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        Files.writeString(tempDir.resolve("RuntimeAdded.java"), "class RuntimeAdded {}\n");
+
+        String result = registry.executeTool("grep_code",
+                "{\"pattern\":\"RuntimeAdded\",\"regex\":false}");
+
+        assertTrue(result.contains("RuntimeAdded.java:1: class RuntimeAdded {}"), result);
     }
 
     @Test
