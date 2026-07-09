@@ -31,13 +31,23 @@ class LongTermMemoryPolicyTest {
     }
 
     @Test
-    void explicitLowRiskRememberInstructionShouldWinOverLowReuseHeuristics() {
+    void explicitLowRiskRememberInstructionShouldRequireConfirmationForLowReuseFacts() {
         LongTermMemoryPolicy.Decision decision =
                 LongTermMemoryPolicy.evaluate("请记住：我朋友的孩子今天高考", 0);
 
-        assertEquals(LongTermMemoryPolicy.Action.SAVE, decision.action());
+        assertEquals(LongTermMemoryPolicy.Action.CONFIRM, decision.action());
         assertEquals("explicit", decision.metadata().get("source"));
-        assertEquals("EXPLICIT_STABLE_MEMORY", decision.metadata().get("reason_code"));
+        assertEquals("EXPLICIT_LOW_VALUE_REQUIRES_CONFIRMATION", decision.metadata().get("reason_code"));
+    }
+
+    @Test
+    void explicitTemporaryInstructionShouldRequireConfirmationBeforeLongTermSave() {
+        LongTermMemoryPolicy.Decision decision =
+                LongTermMemoryPolicy.evaluate("请记住：这次先用临时 mock 数据", 0);
+
+        assertEquals(LongTermMemoryPolicy.Action.CONFIRM, decision.action());
+        assertEquals("explicit", decision.metadata().get("source"));
+        assertEquals("EXPLICIT_LOW_VALUE_REQUIRES_CONFIRMATION", decision.metadata().get("reason_code"));
     }
 
     @Test

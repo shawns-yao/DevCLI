@@ -53,6 +53,12 @@ public final class LongTermMemoryPolicy {
                     "CODE_STRUCTURE_SKIP", memoryType, sensitivity, "LOW");
         }
 
+        if (explicit && (isTemporary(text) || isLowReuseThirdPartyFact(text))) {
+            return Decision.confirm("显式保存请求包含临时或低复用信息，需要用户确认",
+                    source(true, recurrenceCount), memoryType, sensitivity,
+                    "EXPLICIT_LOW_VALUE_REQUIRES_CONFIRMATION", "MEDIUM");
+        }
+
         if (explicit) {
             return Decision.save("explicit", memoryType, sensitivity,
                     "EXPLICIT_STABLE_MEMORY", "HIGH");
