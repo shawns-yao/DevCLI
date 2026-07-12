@@ -95,6 +95,56 @@ class PlanExecuteAgentTest {
     }
 
     @Test
+    void fileWriteTaskShouldApplyPatchOnlyAfterIsolatedExecutionCompletes() throws Exception {
+        Path targetFile = tempDir.resolve("isolated-result.txt");
+        StubGLMClient llmClient = StubGLMClient.streaming(List.of(
+                StubResponse.plain(new LlmClient.ChatResponse(
+                        "assistant",
+                        "",
+                        List.of(new LlmClient.ToolCall(
+                                "call_write",
+                                new LlmClient.ToolCall.Function(
+                                        "write_file",
+                                        "{\"path\":\"isolated-result.txt\",\"content\":\"plan-isolated-content\"}"
+                                )
+                        )),
+                        120,
+                        30
+                )),
+                StubResponse.scripted(listener -> assertFalse(Files.exists(targetFile),
+                                "任务完成前主工作区不应出现隔离写入"),
+                        new LlmClient.ChatResponse("assistant", "文件写入完成", null, 140, 40))
+        ));
+
+        try (MemoryManager memoryManager = new MemoryManager(
+                llmClient,
+                4096,
+                128000,
+                new LongTermMemory(tempDir.resolve("memory-store-write").toFile()))) {
+            ToolRegistry toolRegistry = new ToolRegistry();
+            toolRegistry.setProjectPath(tempDir.toString());
+            PlanExecuteAgent agent = new PlanExecuteAgent(
+                    llmClient,
+                    toolRegistry,
+                    new StubPlanner(llmClient, Task.TaskType.FILE_WRITE),
+                    memoryManager,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute()
+            );
+
+            String result = agent.run("写入隔离文件");
+
+            assertTrue(result.contains("计划执行完成"), result);
+            assertEquals("plan-isolated-content", Files.readString(targetFile));
+            Path workspaceRoot = tempDir.resolve("Temp/devcli-workspaces");
+            if (Files.isDirectory(workspaceRoot)) {
+                try (var entries = Files.list(workspaceRoot)) {
+                    assertFalse(entries.findAny().isPresent(), "隔离工作区应在任务结束后清理");
+                }
+            }
+        }
+    }
+
+    @Test
     void shouldNotExtractFactsWhenPlanIsCanceled() throws Exception {
         StubGLMClient llmClient = new StubGLMClient(List.of());
         try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.resolve("memory-store-cancel").toFile());
@@ -220,14 +270,24 @@ class PlanExecuteAgentTest {
     }
 
     private static final class StubPlanner extends Planner {
+        private final Task.TaskType taskType;
+
         private StubPlanner(LlmClient llmClient) {
+            this(llmClient, Task.TaskType.FILE_READ);
+        }
+
+        private StubPlanner(LlmClient llmClient, Task.TaskType taskType) {
             super(llmClient);
+            this.taskType = taskType;
         }
 
         @Override
         public ExecutionPlan createPlan(String goal) {
             ExecutionPlan plan = new ExecutionPlan("plan-test", goal);
-            plan.addTask(new Task("task_1", "读取测试文件", Task.TaskType.FILE_READ));
+            String description = taskType == Task.TaskType.FILE_WRITE
+                    ? "写入测试文件"
+                    : "读取测试文件";
+            plan.addTask(new Task("task_1", description, taskType));
             plan.computeExecutionOrder();
             return plan;
         }

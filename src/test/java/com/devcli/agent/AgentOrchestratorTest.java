@@ -1280,6 +1280,118 @@ class AgentOrchestratorTest {
         }
     }
 
+    @Test
+    void approvedWorkspacePatchIsAppliedAfterReviewerReadsIsolatedFile(@TempDir Path tempDir) throws Exception {
+        AtomicInteger workerTurns = new AtomicInteger();
+        AtomicInteger reviewerTurns = new AtomicInteger();
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                return response("""
+                        {
+                          "summary": "隔离写入",
+                          "steps": [
+                            {"id": "s1", "description": "写入隔离文件 result.txt", "type": "FILE_WRITE", "dependencies": []}
+                          ]
+                        }
+                        """);
+            }
+            if (body.contains("执行结果：")) {
+                if (reviewerTurns.incrementAndGet() % 2 == 1) {
+                    return toolResponse("review-read", "read_file", "{\"path\":\"result.txt\"}");
+                }
+                return response(approvedReviewJson());
+            }
+            if (body.contains("写入隔离文件 result.txt")) {
+                if (workerTurns.incrementAndGet() == 1) {
+                    return toolResponse("worker-write", "write_file",
+                            "{\"path\":\"result.txt\",\"content\":\"isolated-content\"}");
+                }
+                return response("文件写入完成");
+            }
+            if (body.contains("最终集成验收")) {
+                return response("最终集成完成");
+            }
+            return response(approvedReviewJson());
+        };
+
+        DispatchingStubGLMClient llmClient = new DispatchingStubGLMClient(dispatcher);
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    llmClient, isolatedToolRegistry(tempDir), mm);
+
+            orchestrator.run("验证隔离工作区 PatchSet");
+
+            assertEquals("isolated-content", Files.readString(tempDir.resolve("result.txt")));
+            assertFalse(workspaceRootHasEntries(tempDir));
+        }
+    }
+
+    @Test
+    void rejectedWorkspacePatchShouldNotModifyMainProject(@TempDir Path tempDir) throws Exception {
+        AtomicInteger workerTurns = new AtomicInteger();
+        AtomicInteger reviewerTurns = new AtomicInteger();
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                return response("""
+                        {
+                          "summary": "拒绝隔离写入",
+                          "steps": [
+                            {"id": "s1", "description": "写入待拒绝文件 rejected.txt", "type": "FILE_WRITE", "dependencies": []}
+                          ]
+                        }
+                        """);
+            }
+            if (body.contains("执行结果：")) {
+                if (reviewerTurns.incrementAndGet() % 2 == 1) {
+                    return toolResponse("review-read", "read_file", "{\"path\":\"rejected.txt\"}");
+                }
+                return response(rejectedReviewJson());
+            }
+            if (body.contains("写入待拒绝文件 rejected.txt")) {
+                if (workerTurns.incrementAndGet() % 2 == 1) {
+                    return toolResponse("worker-write", "write_file",
+                            "{\"path\":\"rejected.txt\",\"content\":\"must-not-apply\"}");
+                }
+                return response("文件写入完成");
+            }
+            if (body.contains("最终集成验收")) {
+                return response("最终集成不应执行");
+            }
+            return response(rejectedReviewJson());
+        };
+
+        DispatchingStubGLMClient llmClient = new DispatchingStubGLMClient(dispatcher);
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    llmClient, isolatedToolRegistry(tempDir), mm);
+
+            String result = orchestrator.run("验证 Reviewer 拒绝时不应用 PatchSet");
+
+            assertTrue(result.contains("未完全完成"), result);
+            assertFalse(Files.exists(tempDir.resolve("rejected.txt")),
+                    "Reviewer 拒绝后主工作区不应出现隔离产物");
+            assertFalse(workspaceRootHasEntries(tempDir));
+        }
+    }
+
+    private static boolean workspaceRootHasEntries(Path projectRoot) throws IOException {
+        Path workspaceRoot = projectRoot.resolve("Temp/devcli-workspaces");
+        if (!Files.isDirectory(workspaceRoot)) {
+            return false;
+        }
+        try (var entries = Files.list(workspaceRoot)) {
+            return entries.findAny().isPresent();
+        }
+    }
+
+    private static LlmClient.ChatResponse toolResponse(String id, String name, String arguments) {
+        return new LlmClient.ChatResponse(
+                "assistant", "", null,
+                List.of(new LlmClient.ToolCall(id,
+                        new LlmClient.ToolCall.Function(name, arguments))),
+                100, 20);
+    }
+
     private static LlmClient.ChatResponse response(String content) {
         return new LlmClient.ChatResponse("assistant", content, null, 100, 20);
     }
@@ -1295,6 +1407,21 @@ class AgentOrchestratorTest {
                     "code_quality": 1.0
                   },
                   "issues": []
+                }
+                """;
+    }
+
+    private static String rejectedReviewJson() {
+        return """
+                {
+                  "approved": false,
+                  "summary": "拒绝应用",
+                  "scores": {
+                    "functional_correctness": 0.0,
+                    "integration_completeness": 0.5,
+                    "code_quality": 0.5
+                  },
+                  "issues": ["验收条件未满足"]
                 }
                 """;
     }

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.MemoryManager;
+import com.devcli.plan.ExecutionArtifact;
 import com.devcli.plan.ExecutionGraph;
 import com.devcli.plan.ResourceConflictDetector;
 import com.devcli.runtime.CancellationContext;
@@ -11,13 +12,14 @@ import com.devcli.tool.ToolRegistry;
 import com.devcli.trace.TraceContext;
 import com.devcli.trace.TraceRecorder;
 import com.devcli.util.AnsiStyle;
+import com.devcli.workspace.PatchSet;
+import com.devcli.workspace.WorkspaceExecutionSession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
-import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -59,7 +61,6 @@ public class AgentOrchestrator {
     private static final double MIN_REVIEW_SCORE = 0.6;
     private static final double REQUIRED_FUNCTIONAL_SCORE = 1.0;
     private static final double FINAL_INTEGRATION_FAILURE_RATIO_LIMIT = 0.5;
-    private static final int PRE_REVIEW_TIMEOUT_SECONDS = 60;
     private static final int MAX_PLANNER_STEPS = 5;
     /**
      * 失败步骤的在位重做上限。失败步骤保持原 id/依赖在 DAG 原位换思路重做，而非生成平行恢复计划——
@@ -93,40 +94,90 @@ public class AgentOrchestrator {
     /** 失败步骤在位重做的状态与决策（计数 + 上次失败原因），与调度循环解耦，见 {@link StepRedoTracker}。 */
     private final StepRedoTracker redoTracker = new StepRedoTracker(MAX_REDO_PER_STEP);
     /** resume 时从 checkpoint 载入的失败步骤产物（stepId → 已写文件 + 失败摘要），注入重做上下文；run() 新任务清空。 */
-    private Map<String, AgentCheckpoint.StepArtifact> restoredFailedArtifacts = new HashMap<>();
+    private Map<String, ExecutionArtifact> restoredFailedArtifacts = new HashMap<>();
+    private final ThreadLocal<ToolRegistry> activeStepToolRegistry = new ThreadLocal<>();
+    private final ThreadLocal<StepUpdateBuffer> activeStepUpdate = new ThreadLocal<>();
+    private final PreReviewVerifier preReviewVerifier = new PreReviewVerifier();
+
+    private static final class StepUpdateBuffer {
+        private final String stepId;
+        private ExecutionStep updated;
+
+        private StepUpdateBuffer(String stepId) {
+            this.stepId = stepId;
+        }
+    }
 
     // 执行步骤的数据结构（package-private 供测试访问）
     record ExecutionStep(String id, String description, String type,
-                                  List<String> dependencies, String result,
-                                  StepStatus status, List<String> modifiedFiles) {
+                         List<String> dependencies, ExecutionArtifact artifact) {
         ExecutionStep {
             dependencies = dependencies == null ? List.of() : List.copyOf(dependencies);
-            modifiedFiles = modifiedFiles == null ? List.of() : List.copyOf(modifiedFiles);
+            artifact = artifact == null ? ExecutionArtifact.pending(id) : artifact;
+        }
+
+        ExecutionStep(String id, String description, String type, List<String> dependencies,
+                      String result, StepStatus status, List<String> modifiedFiles) {
+            this(id, description, type, dependencies,
+                    legacyArtifact(id, result, status, modifiedFiles));
         }
 
         static ExecutionStep pending(String id, String description, String type, List<String> dependencies) {
-            return new ExecutionStep(id, description, type, dependencies, null, StepStatus.PENDING, List.of());
+            return new ExecutionStep(id, description, type, dependencies, ExecutionArtifact.pending(id));
+        }
+
+        String result() {
+            return artifact.output().isBlank() ? artifact.summary() : artifact.output();
+        }
+
+        StepStatus status() {
+            return switch (artifact.state()) {
+                case PENDING -> StepStatus.PENDING;
+                case RUNNING -> StepStatus.RUNNING;
+                case COMPLETED -> StepStatus.COMPLETED;
+                case FAILED -> StepStatus.FAILED;
+            };
+        }
+
+        List<String> modifiedFiles() {
+            return artifact.modifiedResources();
         }
 
         ExecutionStep withResult(String result) {
-            return new ExecutionStep(id, description, type, dependencies, result, StepStatus.COMPLETED, modifiedFiles);
+            return new ExecutionStep(id, description, type, dependencies,
+                    artifact.complete(result, result, artifact.modifiedResources(), System.currentTimeMillis()));
         }
 
         ExecutionStep withFailed(String result) {
-            return new ExecutionStep(id, description, type, dependencies, result, StepStatus.FAILED, modifiedFiles);
+            return new ExecutionStep(id, description, type, dependencies,
+                    artifact.fail(result, result, artifact.modifiedResources(), System.currentTimeMillis()));
         }
 
         ExecutionStep started() {
-            return new ExecutionStep(id, description, type, dependencies, result, StepStatus.RUNNING, modifiedFiles);
+            return new ExecutionStep(id, description, type, dependencies,
+                    artifact.start(System.currentTimeMillis()));
         }
 
-        /** 失败步骤在位重做：重置为 PENDING，清空上轮 result（失败原因另存于 lastFailureForRedo）。 */
         ExecutionStep withRedoPending() {
-            return new ExecutionStep(id, description, type, dependencies, null, StepStatus.PENDING, List.of());
+            return new ExecutionStep(id, description, type, dependencies, artifact.resetForRetry());
         }
 
         ExecutionStep withModifiedFiles(List<String> modifiedFiles) {
-            return new ExecutionStep(id, description, type, dependencies, result, status, modifiedFiles);
+            return new ExecutionStep(id, description, type, dependencies,
+                    artifact.withModifiedResources(modifiedFiles));
+        }
+
+        private static ExecutionArtifact legacyArtifact(String id, String result, StepStatus status,
+                                                        List<String> modifiedFiles) {
+            List<String> resources = modifiedFiles == null ? List.of() : modifiedFiles;
+            String text = result == null ? "" : result;
+            return switch (status == null ? StepStatus.PENDING : status) {
+                case PENDING -> ExecutionArtifact.pending(id).withModifiedResources(resources);
+                case RUNNING -> ExecutionArtifact.pending(id).start(System.currentTimeMillis())
+                        .withOutput(text).withSummary(text).withModifiedResources(resources);
+                case COMPLETED -> ExecutionArtifact.completed(id, text, text, resources);
+                case FAILED -> ExecutionArtifact.failed(id, text, text, resources);
+            };
         }
     }
 
@@ -373,70 +424,75 @@ public class AgentOrchestrator {
         if (loaded == null) {
             return formatNoCheckpointMessage(orchestrationIdOrNull);
         }
-        if (loaded.getPlanSteps() == null || loaded.getPlanSteps().isEmpty()) {
+        AgentCheckpoint.RecoveryState recovery = loaded.recoveryState();
+        if (recovery.planSteps().isEmpty()) {
             return "❌ checkpoint [" + loaded.getOrchestrationId()
                     + "] 缺少计划数据（旧格式落盘），无法恢复；请重新发起 /team 任务。";
         }
-        log.info("Multi-Agent resume started: checkpoint={}, completed={}/{}",
-                loaded.getOrchestrationId(), loaded.getCompletedSteps().size(), loaded.getPlanSteps().size());
+        long completedCount = recovery.artifacts().values().stream()
+                .filter(ExecutionArtifact::successful)
+                .count();
+        log.info("Multi-Agent resume started: checkpoint={}, protocol={}, completed={}/{}",
+                loaded.getOrchestrationId(), recovery.protocolVersion(),
+                completedCount, recovery.planSteps().size());
         TraceContext traceContext = TraceContext.root("team-resume");
         traceRecorder.record(traceContext, "resume.start", Map.of(
                 "checkpoint", loaded.getOrchestrationId(),
-                "completedSteps", loaded.getCompletedSteps().size(),
-                "planSteps", loaded.getPlanSteps().size()
+                "completedSteps", completedCount,
+                "planSteps", recovery.planSteps().size()
         ));
 
-        currentUserTask = loaded.getGoal() == null ? "" : loaded.getGoal();
+        currentUserTask = recovery.goal() == null ? "" : recovery.goal();
         memoryManager.addUserMessage(currentUserTask);
-        currentAcceptanceCriteria = fromCriterionRecords(loaded.getAcceptanceCriteria());
-        restoredFailedArtifacts = new HashMap<>(
-                loaded.getFailedArtifacts() == null ? Map.of() : loaded.getFailedArtifacts());
+        currentAcceptanceCriteria = fromCriterionRecords(recovery.acceptanceCriteria());
+        restoredFailedArtifacts = recovery.artifacts().entrySet().stream()
+                .filter(entry -> entry.getValue().state() == ExecutionGraph.NodeState.FAILED)
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
         toolRegistry.pruneExpiredLeases();
         if (CancellationContext.isCancelled()) {
             return "⏹️ 已取消当前多 Agent 任务。";
         }
 
-        List<ExecutionStep> steps = rebuildStepsFromCheckpoint(loaded);
-        restoreCheckpointArtifactsIntoWorkingMemory(loaded);
+        List<ExecutionStep> steps = rebuildStepsFromCheckpoint(recovery);
+        restoreCheckpointArtifactsIntoWorkingMemory(recovery);
         checkpoint = loaded; // 复用同一 checkpoint：id 不变，进度续写
 
         out.println(AnsiStyle.heading("🔁 恢复执行 checkpoint [" + loaded.getOrchestrationId() + "]"
-                + "（已完成 " + loaded.getCompletedSteps().size() + "/" + steps.size() + " 步）"));
+                + "（已完成 " + completedCount + "/" + steps.size() + " 步）"));
         out.println(summarizeSteps(steps) + "\n");
 
         return executeSteps(steps, traceContext);
     }
 
-    /** checkpoint 计划层 + 进度层 → 可调度的步骤列表。 */
-    private List<ExecutionStep> rebuildStepsFromCheckpoint(AgentCheckpoint loaded) {
+    /** 兼容旧调用入口，恢复语义统一委托给结构化协议。 */
+    private List<ExecutionStep> rebuildStepsFromCheckpoint(AgentCheckpoint checkpoint) {
+        return rebuildStepsFromCheckpoint(checkpoint.recoveryState());
+    }
+
+    /** checkpoint 计划层 + 结构化产物 → 可调度的步骤列表。 */
+    private List<ExecutionStep> rebuildStepsFromCheckpoint(AgentCheckpoint.RecoveryState recovery) {
         List<ExecutionStep> steps = new ArrayList<>();
-        for (AgentCheckpoint.PlanStep planStep : loaded.getPlanSteps()) {
+        for (AgentCheckpoint.PlanStep planStep : recovery.planSteps()) {
             List<String> deps = planStep.dependencies() == null ? List.of() : planStep.dependencies();
-            if (loaded.isStepCompleted(planStep.id())) {
-                AgentCheckpoint.StepArtifact artifact = loaded.getArtifacts().get(planStep.id());
-                String result = artifact == null || artifact.summary() == null ? "" : artifact.summary();
-                steps.add(new ExecutionStep(planStep.id(), planStep.description(), planStep.type(),
-                        deps, result, StepStatus.COMPLETED,
-                        artifact == null ? List.of() : artifact.modifiedFiles()));
+            ExecutionArtifact artifact = recovery.artifacts().get(planStep.id());
+            if (artifact != null && artifact.successful()) {
+                steps.add(new ExecutionStep(
+                        planStep.id(), planStep.description(), planStep.type(), deps, artifact));
             } else {
-                // 未完成步骤（含上次失败的、被阻塞的、以及旧 checkpoint 里曾标记 superseded 的）
-                // 一律重置为 PENDING 重新执行——在位重做模型下不再有 SUPERSEDED 接管语义。
-                steps.add(ExecutionStep.pending(planStep.id(), planStep.description(),
-                        planStep.type(), deps));
+                steps.add(ExecutionStep.pending(
+                        planStep.id(), planStep.description(), planStep.type(), deps));
             }
         }
         return steps;
     }
 
-    private void restoreCheckpointArtifactsIntoWorkingMemory(AgentCheckpoint loaded) {
-        if (loaded == null) {
-            return;
-        }
-        for (Map.Entry<String, AgentCheckpoint.StepArtifact> entry : loaded.getArtifacts().entrySet()) {
-            addStepModifiedFilesFact(entry.getKey(), entry.getValue().modifiedFiles(), "checkpoint 已完成步骤");
-        }
-        for (Map.Entry<String, AgentCheckpoint.StepArtifact> entry : restoredFailedArtifacts.entrySet()) {
-            addStepModifiedFilesFact(entry.getKey(), entry.getValue().modifiedFiles(), "checkpoint 失败步骤");
+    private void restoreCheckpointArtifactsIntoWorkingMemory(AgentCheckpoint.RecoveryState recovery) {
+        for (Map.Entry<String, ExecutionArtifact> entry : recovery.artifacts().entrySet()) {
+            String source = entry.getValue().successful()
+                    ? "checkpoint 已完成步骤"
+                    : "checkpoint 失败步骤";
+            addStepModifiedFilesFact(
+                    entry.getKey(), entry.getValue().modifiedResources(), source);
         }
     }
 
@@ -1097,11 +1153,25 @@ public class AgentOrchestrator {
     }
 
     private synchronized void updateStep(List<ExecutionStep> steps, String stepId, ExecutionStep updated) {
+        StepUpdateBuffer buffer = activeStepUpdate.get();
+        ExecutionStep effective = attachModifiedFiles(stepId, updated);
+        if (buffer != null && buffer.stepId.equals(stepId)) {
+            buffer.updated = effective;
+            return;
+        }
+        commitStepUpdate(steps, stepId, effective);
+    }
+
+    private synchronized void commitStepUpdate(List<ExecutionStep> steps, String stepId,
+                                               ExecutionStep updated) {
         for (int i = 0; i < steps.size(); i++) {
             if (steps.get(i).id().equals(stepId)) {
-                ExecutionStep effective = attachModifiedFiles(stepId, updated);
-                steps.set(i, effective);
-                recordStepToCheckpoint(stepId, effective);
+                steps.set(i, updated);
+                addStepModifiedFilesFact(stepId, updated.modifiedFiles(),
+                        updated.status() == StepStatus.COMPLETED
+                                ? "Multi-Agent 步骤完成"
+                                : "Multi-Agent 步骤失败");
+                recordStepToCheckpoint(stepId, updated);
                 return;
             }
         }
@@ -1111,12 +1181,15 @@ public class AgentOrchestrator {
         if (updated.status() != StepStatus.COMPLETED && updated.status() != StepStatus.FAILED) {
             return updated;
         }
-        List<String> consumed = toolRegistry.consumeStepModifiedFiles(stepId);
+        ToolRegistry registry = activeToolRegistry();
+        List<String> consumed = registry.consumeStepModifiedFiles(stepId);
         List<String> modifiedFiles = consumed.isEmpty() ? updated.modifiedFiles() : consumed;
-        addStepModifiedFilesFact(stepId, modifiedFiles, updated.status() == StepStatus.COMPLETED
-                ? "Multi-Agent 步骤完成"
-                : "Multi-Agent 步骤失败");
         return updated.withModifiedFiles(modifiedFiles);
+    }
+
+    private ToolRegistry activeToolRegistry() {
+        ToolRegistry active = activeStepToolRegistry.get();
+        return active == null ? toolRegistry : active;
     }
 
     private void addStepModifiedFilesFact(String stepId, List<String> modifiedFiles, String source) {
@@ -1255,12 +1328,87 @@ public class AgentOrchestrator {
                          PrintStream out,
                          SubAgent.ForkContext workerForkContext,
                          SubAgent.ForkContext reviewerForkContext) {
+        if (requiresIsolatedWorkspace(step)) {
+            runStepInIsolatedWorkspace(step, steps, retryCount, worker, reviewer, context, out,
+                    workerForkContext, reviewerForkContext);
+            return;
+        }
         try {
             runStepWithLease(step, steps, retryCount, worker, reviewer, context, out,
                     workerForkContext, reviewerForkContext);
         } finally {
             toolRegistry.releaseResourceLeases(step.id());
         }
+    }
+
+    private void runStepInIsolatedWorkspace(ExecutionStep step, List<ExecutionStep> steps,
+                                            Map<String, Integer> retryCount,
+                                            SubAgent worker, SubAgent reviewer, String context,
+                                            PrintStream out,
+                                            SubAgent.ForkContext workerForkContext,
+                                            SubAgent.ForkContext reviewerForkContext) {
+        StepUpdateBuffer buffer = new StepUpdateBuffer(step.id());
+        try (WorkspaceExecutionSession session = WorkspaceExecutionSession.open(toolRegistry, step.id())) {
+            ToolRegistry isolatedRegistry = session.toolRegistry();
+            SubAgent isolatedWorker = new SubAgent(
+                    worker.getName(), worker.getRole(), llmClient, isolatedRegistry);
+            SubAgent isolatedReviewer = new SubAgent(
+                    reviewer.getName(), reviewer.getRole(), llmClient, isolatedRegistry);
+            configureSubAgent(isolatedWorker);
+            configureSubAgent(isolatedReviewer);
+
+            activeStepToolRegistry.set(isolatedRegistry);
+            activeStepUpdate.set(buffer);
+            try {
+                runStepWithLease(step, steps, retryCount,
+                        isolatedWorker, isolatedReviewer, context, out,
+                        workerForkContext, reviewerForkContext);
+            } finally {
+                activeStepUpdate.remove();
+                activeStepToolRegistry.remove();
+                isolatedRegistry.releaseResourceLeases(step.id());
+                toolRegistry.releaseResourceLeases(step.id());
+                isolatedWorker.clearHistory();
+                isolatedReviewer.clearHistory();
+            }
+
+            ExecutionStep outcome = buffer.updated == null
+                    ? step.withFailed("隔离步骤未产生终态")
+                    : buffer.updated;
+            PatchSet patchSet = session.patchSet();
+            if (outcome.status() == StepStatus.COMPLETED) {
+                PatchSet.ApplyResult applyResult = session.apply(patchSet);
+                if (!applyResult.applied()) {
+                    String reason = applyResult.conflicts().isEmpty()
+                            ? "PatchSet 应用失败: " + applyResult.error()
+                            : "PatchSet 冲突: " + String.join(", ", applyResult.conflicts());
+                    outcome = step.withFailed(reason);
+                    out.println("❌ 步骤 [" + step.id() + "] " + reason + "\n");
+                } else {
+                    outcome = outcome.withModifiedFiles(applyResult.modifiedResources());
+                }
+            } else {
+                outcome = outcome.withModifiedFiles(List.of());
+            }
+            commitStepUpdate(steps, step.id(), outcome);
+        } catch (Exception e) {
+            toolRegistry.releaseResourceLeases(step.id());
+            commitStepUpdate(steps, step.id(),
+                    step.withFailed("隔离工作区执行失败: " + e.getMessage()));
+            out.println("❌ 步骤 [" + step.id() + "] 隔离工作区执行失败："
+                    + e.getMessage() + "\n");
+        }
+    }
+
+    private boolean requiresIsolatedWorkspace(ExecutionStep step) {
+        String configured = System.getProperty("devcli.workspace.isolation.enabled");
+        if (configured == null || configured.isBlank()) {
+            configured = System.getenv("DEVCLI_WORKSPACE_ISOLATION_ENABLED");
+        }
+        if (configured != null && !configured.isBlank() && !Boolean.parseBoolean(configured)) {
+            return false;
+        }
+        return requiresConcreteVerification(step);
     }
 
     private void runStepWithLease(ExecutionStep step, List<ExecutionStep> steps,
@@ -1386,11 +1534,12 @@ public class AgentOrchestrator {
                                            String context, PrintStream out,
                                            SubAgent.ForkContext workerForkContext) {
         try {
-            return toolRegistry.runWithResourceLease(step.id(), () -> workerForkContext == null
+            ToolRegistry registry = activeToolRegistry();
+            return registry.runWithResourceLease(step.id(), () -> workerForkContext == null
                     ? worker.executeWithContext(taskMsg, context, out)
                     : worker.executeForkedWithContext(taskMsg, context, workerForkContext, out));
         } finally {
-            toolRegistry.releaseResourceLeases(step.id());
+            activeToolRegistry().releaseResourceLeases(step.id());
         }
     }
 
@@ -1460,48 +1609,9 @@ public class AgentOrchestrator {
         if (!requiresConcreteVerification(step) || !requiresJavaHardCheck(step)) {
             return PreReviewResult.ok();
         }
-        Path projectRoot = Path.of(toolRegistry.getProjectPath()).toAbsolutePath().normalize();
-        Path javaRoot = projectRoot.resolve("src/main/java");
-        if (!Files.isDirectory(javaRoot)) {
-            return PreReviewResult.ok();
-        }
-
-        if (Files.isRegularFile(projectRoot.resolve("pom.xml"))) {
-            return runPreReviewCommand(projectRoot,
-                    mavenTestCompileCommand(),
-                    "mvn -q -DskipTests test-compile");
-        }
-
-        List<Path> javaFiles;
-        try (var stream = Files.walk(javaRoot)) {
-            javaFiles = stream
-                    .filter(Files::isRegularFile)
-                    .filter(path -> path.toString().endsWith(".java"))
-                    .toList();
-        } catch (IOException e) {
-            return PreReviewResult.failed("Pre-review hard check failed: 无法扫描 Java 文件：" + e.getMessage());
-        }
-        if (javaFiles.isEmpty()) {
-            return PreReviewResult.ok();
-        }
-
-        Path outputDir = projectRoot.resolve("target/devcli-pre-review-classes/" + step.id());
-        try {
-            Files.createDirectories(outputDir);
-        } catch (IOException e) {
-            return PreReviewResult.failed("Pre-review hard check failed: 无法创建编译目录：" + e.getMessage());
-        }
-
-        List<String> command = new ArrayList<>();
-        command.add("javac");
-        command.add("-encoding");
-        command.add("UTF-8");
-        command.add("-d");
-        command.add(outputDir.toString());
-        for (Path file : javaFiles) {
-            command.add(file.toString());
-        }
-        return runPreReviewCommand(projectRoot, command, "javac -encoding UTF-8");
+        Path projectRoot = Path.of(activeToolRegistry().getProjectPath()).toAbsolutePath().normalize();
+        PreReviewVerifier.Result result = preReviewVerifier.verify(projectRoot, step.id());
+        return new PreReviewResult(result.passed(), result.feedback());
     }
 
     private boolean requiresJavaHardCheck(ExecutionStep step) {
@@ -1514,40 +1624,6 @@ public class AgentOrchestrator {
                 || text.contains("编译")
                 || text.contains("入口")
                 || isFinalIntegrationStep(step);
-    }
-
-    private List<String> mavenTestCompileCommand() {
-        if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")) {
-            return List.of("cmd.exe", "/c", "mvn", "-q", "-DskipTests", "test-compile");
-        }
-        return List.of("mvn", "-q", "-DskipTests", "test-compile");
-    }
-
-    private PreReviewResult runPreReviewCommand(Path projectRoot, List<String> command, String displayCommand) {
-        ProcessBuilder processBuilder = new ProcessBuilder(command);
-        processBuilder.directory(projectRoot.toFile());
-        processBuilder.redirectErrorStream(true);
-        try {
-            Process process = processBuilder.start();
-            boolean finished = process.waitFor(PRE_REVIEW_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            if (!finished) {
-                process.destroyForcibly();
-                return PreReviewResult.failed("Pre-review hard check failed: " + displayCommand
-                        + " 超过 " + PRE_REVIEW_TIMEOUT_SECONDS + "s");
-            }
-            String output = decodeProcessOutput(process.getInputStream().readAllBytes());
-            if (process.exitValue() == 0) {
-                return PreReviewResult.ok();
-            }
-            return PreReviewResult.failed("Pre-review hard check failed: " + displayCommand
-                    + "\n" + summarizePreReviewFailure(output));
-        } catch (IOException e) {
-            return PreReviewResult.failed("Pre-review hard check failed: 无法执行 " + displayCommand
-                    + "：" + e.getMessage());
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return PreReviewResult.failed("Pre-review hard check failed: " + displayCommand + " 被中断");
-        }
     }
 
     private String buildRetryContext(String context, String issues) {
@@ -1596,43 +1672,11 @@ public class AgentOrchestrator {
         return summary.toString();
     }
 
-    private String summarizePreReviewFailure(String output) {
-        if (output == null || output.isBlank()) {
-            return "无编译输出；请检查命令是否可执行。";
-        }
-        return summarizeRetryIssues(abbreviate(output, 3000));
-    }
     private String abbreviate(String text, int maxLength) {
         if (text == null || text.length() <= maxLength) {
             return text == null ? "" : text;
         }
         return text.substring(0, maxLength) + "\n...<truncated>";
-    }
-
-    private String decodeProcessOutput(byte[] bytes) {
-        String utf8 = new String(bytes, StandardCharsets.UTF_8);
-        if (!looksMojibake(utf8)) {
-            return utf8;
-        }
-        String platform = new String(bytes, Charset.defaultCharset());
-        if (!looksMojibake(platform)) {
-            return platform;
-        }
-        try {
-            String gbk = new String(bytes, Charset.forName("GBK"));
-            if (!looksMojibake(gbk)) {
-                return gbk;
-            }
-        } catch (Exception ignored) {
-        }
-        return utf8;
-    }
-
-    private boolean looksMojibake(String text) {
-        if (text == null || text.isEmpty()) {
-            return false;
-        }
-        return text.indexOf('\uFFFD') >= 0 || text.contains("????");
     }
 
     private String buildStepContext(List<ExecutionStep> steps, ExecutionStep currentStep) {
@@ -1653,17 +1697,20 @@ public class AgentOrchestrator {
         }
         // resume 跨进程恢复：WorkingMemory 已空、StepRedoTracker 无上次失败原因，失败步骤的副作用
         // （已写文件 + 失败摘要）从 checkpoint 注入，让重做的 Worker 知道上次失败留下了什么。
-        AgentCheckpoint.StepArtifact failedArtifact = restoredFailedArtifacts.get(currentStep.id());
+        ExecutionArtifact failedArtifact = restoredFailedArtifacts.get(currentStep.id());
         if (failedArtifact != null) {
-            if (!failedArtifact.modifiedFiles().isEmpty()) {
+            if (!failedArtifact.modifiedResources().isEmpty()) {
                 context.append("本步骤上次运行失败并已写入以下文件（副作用不可逆）：\n");
-                for (String file : failedArtifact.modifiedFiles()) {
+                for (String file : failedArtifact.modifiedResources()) {
                     context.append("- ").append(file).append('\n');
                 }
                 context.append("重做前必须先读取这些文件的当前内容，在其真实状态上修改，不要假设它们不存在。\n");
             }
-            if (failedArtifact.summary() != null && !failedArtifact.summary().isBlank()) {
-                context.append("上次失败摘要：").append(abbreviate(failedArtifact.summary(), 300)).append("\n");
+            String failureSummary = failedArtifact.error().isBlank()
+                    ? failedArtifact.summary()
+                    : failedArtifact.error();
+            if (!failureSummary.isBlank()) {
+                context.append("上次失败摘要：").append(abbreviate(failureSummary, 300)).append("\n");
             }
             context.append("\n");
         }

@@ -18,6 +18,8 @@ import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillIndexFormatter;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.util.AnsiStyle;
+import com.devcli.workspace.PatchSet;
+import com.devcli.workspace.WorkspaceExecutionSession;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.tool.ToolRegistry.ToolExecutionResult;
 import com.devcli.tool.ToolRegistry.ToolInvocation;
@@ -116,6 +118,7 @@ public class PlanExecuteAgent {
 
     private final LlmClient llmClient;
     private final ToolRegistry toolRegistry;
+    private final ThreadLocal<ToolRegistry> activeTaskToolRegistry = new ThreadLocal<>();
     private final Planner planner;
     private final PlanReviewHandler reviewHandler;
     private final MemoryManager memoryManager;
@@ -555,19 +558,68 @@ public class PlanExecuteAgent {
 
     private TaskExecutionResult executeTaskWithArtifact(ExecutionPlan plan, Task task,
                                                         StreamState streamState, PrintStream out) {
-        try {
-            TaskRunResult taskRunResult = toolRegistry.runWithResourceLease(task.getId(),
-                    () -> executeTaskUnchecked(plan.getGoal(), plan, task, streamState, out));
-            return TaskExecutionResult.success(task, taskRunResult, consumeTaskModifiedFiles(task.getId()));
+        if (!requiresIsolatedWorkspace(task)) {
+            try {
+                TaskRunResult taskRunResult = toolRegistry.runWithResourceLease(task.getId(),
+                        () -> executeTaskUnchecked(plan.getGoal(), plan, task, streamState, out));
+                return TaskExecutionResult.success(task, taskRunResult, consumeTaskModifiedFiles(task.getId()));
+            } catch (Exception e) {
+                return TaskExecutionResult.failure(task, e, consumeTaskModifiedFiles(task.getId()));
+            } finally {
+                toolRegistry.releaseResourceLeases(task.getId());
+            }
+        }
+
+        try (WorkspaceExecutionSession session = WorkspaceExecutionSession.open(toolRegistry, task.getId())) {
+            ToolRegistry isolatedRegistry = session.toolRegistry();
+            activeTaskToolRegistry.set(isolatedRegistry);
+            try {
+                TaskRunResult taskRunResult = isolatedRegistry.runWithResourceLease(task.getId(),
+                        () -> executeTaskUnchecked(plan.getGoal(), plan, task, streamState, out));
+                if (CancellationContext.isCancelled()) {
+                    return TaskExecutionResult.failure(
+                            task, new IOException("用户取消"), List.of());
+                }
+                PatchSet patchSet = session.patchSet();
+                PatchSet.ApplyResult applyResult = session.apply(patchSet);
+                if (!applyResult.applied()) {
+                    String reason = applyResult.conflicts().isEmpty()
+                            ? "PatchSet 应用失败: " + applyResult.error()
+                            : "PatchSet 冲突: " + String.join(", ", applyResult.conflicts());
+                    return TaskExecutionResult.failure(task, new IOException(reason), List.of());
+                }
+                return TaskExecutionResult.success(
+                        task, taskRunResult, applyResult.modifiedResources());
+            } finally {
+                isolatedRegistry.releaseResourceLeases(task.getId());
+                activeTaskToolRegistry.remove();
+                toolRegistry.releaseResourceLeases(task.getId());
+            }
         } catch (Exception e) {
-            return TaskExecutionResult.failure(task, e, consumeTaskModifiedFiles(task.getId()));
-        } finally {
-            toolRegistry.releaseResourceLeases(task.getId());
+            return TaskExecutionResult.failure(task, e, List.of());
         }
     }
 
     private List<String> consumeTaskModifiedFiles(String taskId) {
-        return toolRegistry.consumeStepModifiedFiles(taskId);
+        return activeTaskToolRegistry().consumeStepModifiedFiles(taskId);
+    }
+
+    private ToolRegistry activeTaskToolRegistry() {
+        ToolRegistry active = activeTaskToolRegistry.get();
+        return active == null ? toolRegistry : active;
+    }
+
+    private boolean requiresIsolatedWorkspace(Task task) {
+        String configured = System.getProperty("devcli.workspace.isolation.enabled");
+        if (configured == null || configured.isBlank()) {
+            configured = System.getenv("DEVCLI_WORKSPACE_ISOLATION_ENABLED");
+        }
+        if (configured != null && !configured.isBlank() && !Boolean.parseBoolean(configured)) {
+            return false;
+        }
+        return task.getType() == Task.TaskType.FILE_WRITE
+                || task.getType() == Task.TaskType.COMMAND
+                || task.getType() == Task.TaskType.VERIFICATION;
     }
 
     private static final int MAX_TASK_ITERATIONS = 5;
@@ -600,7 +652,7 @@ public class PlanExecuteAgent {
                 LlmClient.Message.system(buildTaskSystemPrompt(task, taskInput)),
                 ImageReferenceParser.userMessage(
                         taskInput,
-                        Path.of(toolRegistry.getProjectPath()))
+                        Path.of(activeTaskToolRegistry().getProjectPath()))
         ));
 
         StringBuilder allResults = new StringBuilder();
@@ -623,7 +675,7 @@ public class PlanExecuteAgent {
 
                     @Override
                     public List<LlmClient.Tool> toolDefinitions(int iteration) {
-                        return toolRegistry.getToolDefinitions();
+                        return activeTaskToolRegistry().getToolDefinitions();
                     }
 
                     @Override
@@ -799,7 +851,7 @@ public class PlanExecuteAgent {
     }
 
     private void injectPendingLspDiagnostics(List<LlmClient.Message> messages, PrintStream out) {
-        LspDiagnosticReport report = toolRegistry.flushPendingLspDiagnostics();
+        LspDiagnosticReport report = activeTaskToolRegistry().flushPendingLspDiagnostics();
         if (report == null || report.isEmpty()) {
             return;
         }
@@ -904,7 +956,7 @@ public class PlanExecuteAgent {
         if (invocations.size() > 1) {
             log.info("Task {} executing {} tool calls in parallel", taskId, invocations.size());
         }
-        List<ToolExecutionResult> results = toolRegistry.executeTools(invocations);
+        List<ToolExecutionResult> results = activeTaskToolRegistry().executeTools(invocations);
         for (ToolExecutionResult result : results) {
             log.debug("Task {} tool result preview [{}]: {}", taskId, result.name(), preview(result.result(), 300));
         }
