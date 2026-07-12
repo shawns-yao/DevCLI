@@ -83,9 +83,12 @@ public class ExecutionPlan {
      * 获取可执行的任务（依赖都已完成）
      */
     public List<Task> getExecutableTasks() {
-        return tasks.values().stream()
-                .filter(t -> t.isExecutable(tasks))
-                .toList();
+        return ExecutionGraph.ready(
+                new ArrayList<>(tasks.values()),
+                Task::getId,
+                Task::getDependencies,
+                task -> graphState(task.getStatus()),
+                task -> false);
     }
 
     /**
@@ -93,45 +96,24 @@ public class ExecutionPlan {
      */
     public boolean computeExecutionOrder() {
         executionOrder.clear();
-        Set<String> visited = new HashSet<>();
-        Set<String> visiting = new HashSet<>();
-
-        for (Task task : tasks.values()) {
-            if (!visited.contains(task.getId())) {
-                if (!topologicalSort(task, visited, visiting)) {
-                    return false;  // 有环
-                }
-            }
+        List<Task> nodes = new ArrayList<>(tasks.values());
+        ExecutionGraph.ValidationResult validation = ExecutionGraph.validate(
+                nodes, Task::getId, Task::getDependencies);
+        if (!validation.valid()) {
+            return false;
         }
-
+        executionOrder.addAll(ExecutionGraph.topologicalOrder(
+                nodes, Task::getId, Task::getDependencies));
         return true;
     }
 
-    private boolean topologicalSort(Task task, Set<String> visited, Set<String> visiting) {
-        String id = task.getId();
-
-        if (visiting.contains(id)) {
-            return false;  // 有环
-        }
-        if (visited.contains(id)) {
-            return true;
-        }
-
-        visiting.add(id);
-
-        for (String depId : task.getDependencies()) {
-            Task dep = tasks.get(depId);
-            if (dep != null) {
-                if (!topologicalSort(dep, visited, visiting)) {
-                    return false;
-                }
-            }
-        }
-
-        visiting.remove(id);
-        visited.add(id);
-        executionOrder.add(id);
-        return true;
+    private static ExecutionGraph.NodeState graphState(Task.TaskStatus status) {
+        return switch (status) {
+            case PENDING -> ExecutionGraph.NodeState.PENDING;
+            case RUNNING -> ExecutionGraph.NodeState.RUNNING;
+            case COMPLETED -> ExecutionGraph.NodeState.COMPLETED;
+            case FAILED -> ExecutionGraph.NodeState.FAILED;
+        };
     }
 
     /**

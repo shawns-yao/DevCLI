@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.MemoryManager;
+import com.devcli.plan.ExecutionGraph;
 import com.devcli.plan.ResourceConflictDetector;
 import com.devcli.runtime.CancellationContext;
 import com.devcli.tool.ToolRegistry;
@@ -655,8 +656,16 @@ public class AgentOrchestrator {
                 }
             }
 
-            log.debug("Final plan after coarsen check: {} steps", steps.size());
-            return coarsenPlanIfNeeded(steps);
+            List<ExecutionStep> normalizedSteps = coarsenPlanIfNeeded(steps);
+            ExecutionGraph.ValidationResult validation = ExecutionGraph.validate(
+                    normalizedSteps, ExecutionStep::id, ExecutionStep::dependencies);
+            if (!validation.valid()) {
+                log.warn("Plan graph validation failed: {}", validation.errors());
+                currentAcceptanceCriteria = List.of();
+                return List.of();
+            }
+            log.debug("Final validated plan: {} steps", normalizedSteps.size());
+            return normalizedSteps;
         } catch (Exception e) {
             log.error("Failed to parse plan JSON", e);
             currentAcceptanceCriteria = List.of();
@@ -755,36 +764,21 @@ public class AgentOrchestrator {
      * 获取当前可执行的步骤（依赖已全部完成）
      */
     List<ExecutionStep> getExecutableSteps(List<ExecutionStep> steps) {
-        Map<String, StepStatus> statusMap = new HashMap<>();
-        for (ExecutionStep step : steps) {
-            statusMap.put(step.id(), step.status());
-        }
+        return ExecutionGraph.ready(
+                steps,
+                ExecutionStep::id,
+                ExecutionStep::dependencies,
+                step -> graphState(step.status()),
+                this::isFinalIntegrationStep);
+    }
 
-        List<ExecutionStep> normalExecutable = steps.stream()
-                .filter(step -> step.status() == StepStatus.PENDING)
-                .filter(step -> !isFinalIntegrationStep(step))
-                .filter(step -> step.dependencies().stream()
-                        .allMatch(dep -> statusMap.get(dep) == StepStatus.COMPLETED))
-                .toList();
-        if (!normalExecutable.isEmpty()) {
-            return normalExecutable;
-        }
-
-        boolean hasRunningNonFinal = steps.stream()
-                .filter(step -> !isFinalIntegrationStep(step))
-                .anyMatch(step -> step.status() == StepStatus.RUNNING);
-        if (hasRunningNonFinal) {
-            return List.of();
-        }
-        return steps.stream()
-                .filter(step -> step.status() == StepStatus.PENDING)
-                .filter(this::isFinalIntegrationStep)
-                .filter(step -> step.dependencies().stream()
-                        .allMatch(dep -> {
-                            StepStatus status = statusMap.get(dep);
-                            return status == StepStatus.COMPLETED || status == StepStatus.FAILED;
-                        }))
-                .toList();
+    private static ExecutionGraph.NodeState graphState(StepStatus status) {
+        return switch (status) {
+            case PENDING -> ExecutionGraph.NodeState.PENDING;
+            case RUNNING -> ExecutionGraph.NodeState.RUNNING;
+            case COMPLETED -> ExecutionGraph.NodeState.COMPLETED;
+            case FAILED -> ExecutionGraph.NodeState.FAILED;
+        };
     }
 
     boolean shouldFuseFinalIntegration(List<ExecutionStep> steps) {
