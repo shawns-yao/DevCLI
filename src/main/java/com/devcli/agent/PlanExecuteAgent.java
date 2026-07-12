@@ -604,7 +604,7 @@ public class PlanExecuteAgent {
         ));
 
         StringBuilder allResults = new StringBuilder();
-        int iteration = 0;
+        String finalTaskInput = taskInput;
         TaskStreamRenderer streamRenderer = new TaskStreamRenderer(task.getId(), streamState, out);
         TraceContext traceContext = TraceContext.root("plan-task");
         traceRecorder.record(traceContext, "task.start", Map.of(
@@ -613,116 +613,155 @@ public class PlanExecuteAgent {
                 "description", task.getDescription()
         ));
 
-        int totalInputTokens = 0;
-        int totalOutputTokens = 0;
-        int totalCachedInputTokens = 0;
         AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
-
-        while (iteration < MAX_TASK_ITERATIONS) {
-            if (CancellationContext.isCancelled()) {
-                streamRenderer.finish();
-                return TaskRunResult.of("⏹️ 已取消任务 [" + task.getId() + "]。", streamRenderer.hasStreamedOutput());
-            }
-            AgentBudget.ExitReason exitReason = budget.check();
-            if (exitReason != AgentBudget.ExitReason.WITHIN_BUDGET) {
-                streamRenderer.finish();
-                return TaskRunResult.of(budget.describeExit(exitReason), streamRenderer.hasStreamedOutput());
-            }
-            iteration++;
-            budget.beginIteration();
-
-            // 调 LLM 前刷新 Working Memory 等易变 system prompt 段，再评估是否需要压缩 messages。
-            messages.set(0, LlmClient.Message.system(buildTaskSystemPrompt(task, taskInput)));
-            injectPendingLspDiagnostics(messages, out);
-            maybeCompactHistory(messages, out);
-
-            LlmClient.ChatResponse response = llmClient.chat(
-                    messages,
-                    toolRegistry.getToolDefinitions(),
-                    streamRenderer
-            );
-            traceRecorder.record(traceContext, "llm.response", Map.of(
-                    "taskId", task.getId(),
-                    "iteration", iteration,
-                    "toolCalls", response.toolCalls() == null ? 0 : response.toolCalls().size(),
-                    "inputTokens", response.inputTokens(),
-                    "outputTokens", response.outputTokens()
-            ));
-            LlmTraceLogger.logReasoning(log,
-                    "plan-task task=" + task.getId() + " iteration=" + iteration,
-                    llmClient,
-                    response.reasoningContent());
-            if (CancellationContext.isCancelled()) {
-                streamRenderer.finish();
-                return TaskRunResult.of("⏹️ 已取消任务 [" + task.getId() + "]。", streamRenderer.hasStreamedOutput());
-            }
-
-            totalInputTokens += response.inputTokens();
-            totalOutputTokens += response.outputTokens();
-            totalCachedInputTokens += response.cachedInputTokens();
-            budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
-
-            log.info("Task {} iteration {} response: toolCalls={}, reasoningChars={}, contentChars={}",
-                    task.getId(),
-                    iteration,
-                    response.toolCalls() == null ? 0 : response.toolCalls().size(),
-                    response.reasoningContent() == null ? 0 : response.reasoningContent().length(),
-                    response.content() == null ? 0 : response.content().length());
-
-            if (!response.hasToolCalls()) {
-                memoryManager.recordTokenUsage(totalInputTokens, totalOutputTokens, totalCachedInputTokens);
-                if (!allResults.isEmpty() && (response.content() == null || response.content().isBlank())) {
-                    String toolOnlyResult = allResults.toString().trim();
-                    if (!toolOnlyResult.isBlank()) {
-                        memoryManager.addAssistantMessage("[计划任务 " + task.getId() + "] " + toolOnlyResult);
+        return new AgentExecutionEngine<TaskRunResult>(llmClient, budget).run(
+                new AgentExecutionEngine.Delegate<>() {
+                    @Override
+                    public List<LlmClient.Message> history() {
+                        return messages;
                     }
-                    streamRenderer.finish();
-                    return TaskRunResult.of(toolOnlyResult, streamRenderer.hasStreamedOutput());
-                }
-                if (response.content() != null && !response.content().isBlank()) {
-                    memoryManager.addAssistantMessage("[计划任务 " + task.getId() + "] " + response.content());
-                }
-                streamRenderer.finish();
-                return TaskRunResult.of(response.content(), streamRenderer.hasStreamedOutput());
-            }
 
-            // 有工具调用：执行工具并将结果回灌到消息历史
-            printToolCalls(out, response.toolCalls());
-            messages.add(LlmClient.Message.assistant(
-                    response.reasoningContent(),
-                    response.content(),
-                    response.toolCalls()
-            ));
+                    @Override
+                    public List<LlmClient.Tool> toolDefinitions(int iteration) {
+                        return toolRegistry.getToolDefinitions();
+                    }
 
-            // 在工具执行前 flush 并重置流式渲染器：避免 Markdown renderer pending 文本
-            // 被 HITL 提示"跨过"导致 🧠 / 🤖 标题与内容错位
-            streamRenderer.resetBetweenIterations();
+                    @Override
+                    public LlmClient.StreamListener streamListener() {
+                        return streamRenderer;
+                    }
 
-            List<ToolExecutionResult> toolResults = executeToolCalls(task.getId(), response.toolCalls());
-            streamState.recordToolResults(toolResults);
-            for (ToolExecutionResult toolResult : toolResults) {
-                traceRecorder.record(traceContext, "tool.result", Map.of(
-                        "taskId", task.getId(),
-                        "iteration", iteration,
-                        "tool", toolResult.name(),
-                        "elapsedMillis", toolResult.elapsedMillis(),
-                        "timedOut", toolResult.timedOut(),
-                        "resultPreview", preview(toolResult.result(), 300)
-                ));
-                budget.recordToolResult(toolResult.name(), toolResult.result());
-                memoryManager.addToolResult(toolResult.name(), toolResult.argumentsJson(), toolResult.result());
-                allResults.append(toolResult.result()).append("\n");
-                messages.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
-            }
-            appendImageToolMessages(messages, toolResults);
-        }
+                    @Override
+                    public int maxIterations() {
+                        return MAX_TASK_ITERATIONS;
+                    }
 
-        String fallbackResult = allResults.toString().trim();
-        if (!fallbackResult.isBlank()) {
-            memoryManager.addAssistantMessage("[计划任务 " + task.getId() + "] " + fallbackResult);
-        }
-        streamRenderer.finish();
-        return TaskRunResult.of(fallbackResult, streamRenderer.hasStreamedOutput());
+                    @Override
+                    public void beforeIteration(int iteration, AgentBudget currentBudget) {
+                        messages.set(0, LlmClient.Message.system(
+                                buildTaskSystemPrompt(task, finalTaskInput)));
+                        injectPendingLspDiagnostics(messages, out);
+                        maybeCompactHistory(messages, out);
+                    }
+
+                    @Override
+                    public void afterResponse(LlmClient.ChatResponse response, int iteration,
+                                              AgentBudget currentBudget) {
+                        traceRecorder.record(traceContext, "llm.response", Map.of(
+                                "taskId", task.getId(),
+                                "iteration", iteration,
+                                "toolCalls", response.toolCalls() == null ? 0 : response.toolCalls().size(),
+                                "inputTokens", response.inputTokens(),
+                                "outputTokens", response.outputTokens()
+                        ));
+                        LlmTraceLogger.logReasoning(log,
+                                "plan-task task=" + task.getId() + " iteration=" + iteration,
+                                llmClient,
+                                response.reasoningContent());
+                        log.info("Task {} iteration {} response: toolCalls={}, reasoningChars={}, contentChars={}",
+                                task.getId(),
+                                iteration,
+                                response.toolCalls() == null ? 0 : response.toolCalls().size(),
+                                response.reasoningContent() == null ? 0 : response.reasoningContent().length(),
+                                response.content() == null ? 0 : response.content().length());
+                    }
+
+                    @Override
+                    public void beforeToolExecution(LlmClient.ChatResponse response, int iteration,
+                                                    AgentBudget currentBudget) {
+                        printToolCalls(out, response.toolCalls());
+                        streamRenderer.resetBetweenIterations();
+                    }
+
+                    @Override
+                    public List<ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
+                                                                  int iteration) {
+                        return executeToolCalls(task.getId(), toolCalls);
+                    }
+
+                    @Override
+                    public void afterToolResults(LlmClient.ChatResponse response,
+                                                 List<ToolExecutionResult> toolResults,
+                                                 int iteration,
+                                                 AgentBudget currentBudget) {
+                        streamState.recordToolResults(toolResults);
+                        for (ToolExecutionResult toolResult : toolResults) {
+                            traceRecorder.record(traceContext, "tool.result", Map.of(
+                                    "taskId", task.getId(),
+                                    "iteration", iteration,
+                                    "tool", toolResult.name(),
+                                    "elapsedMillis", toolResult.elapsedMillis(),
+                                    "timedOut", toolResult.timedOut(),
+                                    "resultPreview", preview(toolResult.result(), 300)
+                            ));
+                            memoryManager.addToolResult(
+                                    toolResult.name(), toolResult.argumentsJson(), toolResult.result());
+                            allResults.append(toolResult.result()).append("\n");
+                        }
+                        appendImageToolMessages(messages, toolResults);
+                    }
+
+                    @Override
+                    public TaskRunResult completed(LlmClient.ChatResponse response,
+                                                   AgentBudget currentBudget) {
+                        memoryManager.recordTokenUsage(
+                                currentBudget.totalInputTokens(),
+                                currentBudget.totalOutputTokens(),
+                                currentBudget.totalCachedInputTokens());
+                        if (!allResults.isEmpty()
+                                && (response.content() == null || response.content().isBlank())) {
+                            String toolOnlyResult = allResults.toString().trim();
+                            if (!toolOnlyResult.isBlank()) {
+                                memoryManager.addAssistantMessage(
+                                        "[计划任务 " + task.getId() + "] " + toolOnlyResult);
+                            }
+                            streamRenderer.finish();
+                            return TaskRunResult.of(
+                                    toolOnlyResult, streamRenderer.hasStreamedOutput());
+                        }
+                        if (response.content() != null && !response.content().isBlank()) {
+                            memoryManager.addAssistantMessage(
+                                    "[计划任务 " + task.getId() + "] " + response.content());
+                        }
+                        streamRenderer.finish();
+                        return TaskRunResult.of(
+                                response.content(), streamRenderer.hasStreamedOutput());
+                    }
+
+                    @Override
+                    public TaskRunResult cancelled(AgentBudget currentBudget) {
+                        streamRenderer.finish();
+                        return TaskRunResult.of(
+                                "⏹️ 已取消任务 [" + task.getId() + "]。",
+                                streamRenderer.hasStreamedOutput());
+                    }
+
+                    @Override
+                    public TaskRunResult budgetExceeded(AgentBudget.ExitReason reason,
+                                                        AgentBudget currentBudget) {
+                        streamRenderer.finish();
+                        return TaskRunResult.of(
+                                currentBudget.describeExit(reason),
+                                streamRenderer.hasStreamedOutput());
+                    }
+
+                    @Override
+                    public TaskRunResult iterationLimitReached(AgentBudget currentBudget) {
+                        String fallbackResult = allResults.toString().trim();
+                        if (!fallbackResult.isBlank()) {
+                            memoryManager.addAssistantMessage(
+                                    "[计划任务 " + task.getId() + "] " + fallbackResult);
+                        }
+                        streamRenderer.finish();
+                        return TaskRunResult.of(
+                                fallbackResult, streamRenderer.hasStreamedOutput());
+                    }
+
+                    @Override
+                    public TaskRunResult failed(IOException error, AgentBudget currentBudget) {
+                        throw new UncheckedIOException(error);
+                    }
+                });
     }
 
     private String buildTaskSystemPrompt(Task task, String activationText) {

@@ -381,78 +381,107 @@ public class SubAgent {
         SubAgentStreamRenderer streamRenderer = new SubAgentStreamRenderer(name, role, out);
 
         AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
-
-        // 与 Agent.java 对称：主退出条件 = LLM 自决，budget 仅在 token / 停滞 / 硬轮数兜底。
-        while (true) {
-            AgentBudget.ExitReason exitReason = budget.check();
-            if (exitReason != AgentBudget.ExitReason.WITHIN_BUDGET) {
-                streamRenderer.finish();
-                String description = budget.describeExit(exitReason);
-                log.warn("[{}] run exhausted budget: reason={}, iteration={}, tokens={}/{}",
-                        name, exitReason, budget.iteration(),
-                        budget.totalInputTokens() + budget.totalOutputTokens(), budget.tokenBudget());
-                return AgentMessage.error(name, role, description);
-            }
-
-            budget.beginIteration();
-
-            // 调 LLM 前刷新 system prompt 的易变段，再评估是否接近 window 上限。
-            if (forkContext == null && !history.isEmpty() && "system".equals(history.get(0).role())) {
-                history.set(0, LlmClient.Message.system(getSystemPrompt()));
-            }
-            injectPendingLspDiagnostics(history, out);
-            maybeCompactHistory(history, out);
-
-            try {
-                LlmClient.ChatResponse response = llmClient.chat(
-                        history,
-                        toolDefinitionsFor(forkContext),
-                        streamRenderer
-                );
-                LlmTraceLogger.logReasoning(log,
-                        "sub-agent name=" + name + " role=" + role + " iteration=" + budget.iteration(),
-                        llmClient,
-                        response.reasoningContent());
-
-                budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
-                logPromptCacheDiagnostics(forkContext, response, budget);
-
-                if (response.hasToolCalls()) {
-                    budget.recordToolCalls(response.toolCalls());
-                    printToolCalls(out, response.toolCalls());
-                    history.add(LlmClient.Message.assistant(
-                            response.reasoningContent(),
-                            response.content(),
-                            response.toolCalls()
-                    ));
-
-                    // 在工具执行前 flush 并重置流式渲染器：TerminalMarkdownRenderer 按换行 flush，
-                    // 没有换行的 pending 内容会被 HITL 提示"跨过"导致标题错位。
-                    streamRenderer.resetBetweenIterations();
-
-                    List<ToolExecutionResult> toolResults = executeToolCalls(response.toolCalls());
-                    for (ToolExecutionResult toolResult : toolResults) {
-                        budget.recordToolResult(toolResult.name(), toolResult.result());
-                        toolResultConsumer.accept(toolResult.name(), toolResult.argumentsJson(), toolResult.result());
-                        history.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
+        return new AgentExecutionEngine<AgentMessage>(llmClient, budget).run(
+                new AgentExecutionEngine.Delegate<>() {
+                    @Override
+                    public List<LlmClient.Message> history() {
+                        return history;
                     }
-                    appendImageToolMessages(history, toolResults);
-                    continue;
-                }
 
-                // 没有工具调用，返回最终结果
-                history.add(LlmClient.Message.assistant(response.reasoningContent(), response.content()));
+                    @Override
+                    public List<LlmClient.Tool> toolDefinitions(int iteration) {
+                        return toolDefinitionsFor(forkContext);
+                    }
 
-                streamRenderer.finish();
+                    @Override
+                    public LlmClient.StreamListener streamListener() {
+                        return streamRenderer;
+                    }
 
-                return AgentMessage.result(name, role, response.content());
+                    @Override
+                    public void beforeIteration(int iteration, AgentBudget currentBudget) {
+                        if (forkContext == null && !history.isEmpty()
+                                && "system".equals(history.get(0).role())) {
+                            history.set(0, LlmClient.Message.system(getSystemPrompt()));
+                        }
+                        injectPendingLspDiagnostics(history, out);
+                        maybeCompactHistory(history, out);
+                    }
 
-            } catch (IOException e) {
-                log.error("[{}] LLM call failed", name, e);
-                streamRenderer.finish();
-                return AgentMessage.error(name, role, "LLM 调用失败: " + e.getMessage());
-            }
-        }
+                    @Override
+                    public void afterResponse(LlmClient.ChatResponse response, int iteration,
+                                              AgentBudget currentBudget) {
+                        LlmTraceLogger.logReasoning(log,
+                                "sub-agent name=" + name + " role=" + role
+                                        + " iteration=" + iteration,
+                                llmClient,
+                                response.reasoningContent());
+                        logPromptCacheDiagnostics(forkContext, response, currentBudget);
+                    }
+
+                    @Override
+                    public void beforeToolExecution(LlmClient.ChatResponse response, int iteration,
+                                                    AgentBudget currentBudget) {
+                        printToolCalls(out, response.toolCalls());
+                        streamRenderer.resetBetweenIterations();
+                    }
+
+                    @Override
+                    public List<ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
+                                                                  int iteration) {
+                        return executeToolCalls(toolCalls);
+                    }
+
+                    @Override
+                    public void afterToolResults(LlmClient.ChatResponse response,
+                                                 List<ToolExecutionResult> toolResults,
+                                                 int iteration,
+                                                 AgentBudget currentBudget) {
+                        for (ToolExecutionResult toolResult : toolResults) {
+                            toolResultConsumer.accept(
+                                    toolResult.name(), toolResult.argumentsJson(), toolResult.result());
+                        }
+                        appendImageToolMessages(history, toolResults);
+                    }
+
+                    @Override
+                    public AgentMessage completed(LlmClient.ChatResponse response,
+                                                  AgentBudget currentBudget) {
+                        streamRenderer.finish();
+                        return AgentMessage.result(name, role, response.content());
+                    }
+
+                    @Override
+                    public AgentMessage cancelled(AgentBudget currentBudget) {
+                        streamRenderer.finish();
+                        return AgentMessage.error(name, role, "任务已取消");
+                    }
+
+                    @Override
+                    public AgentMessage budgetExceeded(AgentBudget.ExitReason reason,
+                                                       AgentBudget currentBudget) {
+                        streamRenderer.finish();
+                        String description = currentBudget.describeExit(reason);
+                        log.warn("[{}] run exhausted budget: reason={}, iteration={}, tokens={}/{}",
+                                name, reason, currentBudget.iteration(),
+                                currentBudget.totalInputTokens() + currentBudget.totalOutputTokens(),
+                                currentBudget.tokenBudget());
+                        return AgentMessage.error(name, role, description);
+                    }
+
+                    @Override
+                    public AgentMessage iterationLimitReached(AgentBudget currentBudget) {
+                        return budgetExceeded(
+                                AgentBudget.ExitReason.HARD_ITERATION_LIMIT, currentBudget);
+                    }
+
+                    @Override
+                    public AgentMessage failed(IOException error, AgentBudget currentBudget) {
+                        log.error("[{}] LLM call failed", name, error);
+                        streamRenderer.finish();
+                        return AgentMessage.error(name, role, "LLM 调用失败: " + error.getMessage());
+                    }
+                });
     }
 
     /**

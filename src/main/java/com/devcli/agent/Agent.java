@@ -192,8 +192,7 @@ public class Agent implements AutoCloseable {
         long startNanos = System.nanoTime();
         AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
         TraceContext traceContext = TraceContext.root("react");
-        int turnToolCalls = 0;
-        int largestToolResultChars = 0;
+        TurnExecutionMetrics metrics = new TurnExecutionMetrics();
         traceRecorder.record(traceContext, "run.start", java.util.Map.of(
                 "model", modelLabel(),
                 "inputChars", userInput == null ? 0 : userInput.length()
@@ -202,131 +201,164 @@ public class Agent implements AutoCloseable {
 
         // 主退出条件 = LLM 自己决定（不再调用工具就返回）；
         // budget 仅在 token 用尽 / 检测到死循环 / 超出硬轮数时兜底。
-        while (true) {
-            if (CancellationContext.isCancelled()) {
-                log.info("ReAct run cancelled before iteration");
-                streamRenderer.finish();   // 兜底 flush，避免 pending 文本残留终端导致下一次输入错位
-                pushStatus(budget, startNanos, "idle");
-                return "⏹️ 已取消当前任务。";
-            }
-            // 调 LLM 前刷新 system prompt 的易变段（Working Memory / Sticky / Skill index），
-            // 再评估 conversationHistory 是否接近 window 上限；超阈值就把早期 messages 压缩成摘要。
-            updateSystemPromptWithMemory(memoryContext);
-            injectPendingLspDiagnostics();
-            maybeCompactHistory();
-            AgentBudget.ExitReason exitReason = budget.check();
-            if (exitReason != AgentBudget.ExitReason.WITHIN_BUDGET) {
-                String description = budget.describeExit(exitReason);
-                log.warn("ReAct run exhausted budget: reason={}, iteration={}, tokens={}/{}",
-                        exitReason, budget.iteration(),
-                        budget.totalInputTokens() + budget.totalOutputTokens(), budget.tokenBudget());
-                streamRenderer.finish();   // 兜底：budget 耗尽时上一次迭代的 pending 文本必须 flush
-                pushStatus(budget, startNanos, "idle");
-                return "❌ " + description;
-            }
-
-            int iteration = budget.beginIteration();
-
-            try {
-                List<LlmClient.Tool> toolDefinitions = toolRegistry.getToolDefinitions();
-                logRequestContext("react iteration=" + iteration, toolDefinitions);
-                streamRenderer.beginThinking();
-                // 调用 LLM
-                LlmClient.ChatResponse response = llmClient.chat(
-                        conversationHistory,
-                        toolDefinitions,
-                        streamRenderer
-                );
-                traceRecorder.record(traceContext, "llm.response", java.util.Map.of(
-                        "iteration", iteration,
-                        "toolCalls", response.toolCalls() == null ? 0 : response.toolCalls().size(),
-                        "inputTokens", response.inputTokens(),
-                        "outputTokens", response.outputTokens()
-                ));
-                LlmTraceLogger.logReasoning(log, "react iteration=" + iteration, llmClient, response.reasoningContent());
-                if (CancellationContext.isCancelled()) {
-                    log.info("ReAct run cancelled after LLM response");
-                    streamRenderer.finish();
-                    pushStatus(budget, startNanos, "idle");
-                    return "⏹️ 已取消当前任务。";
-                }
-
-                budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
-                pushStatus(budget, startNanos, "running");
-
-                // 如果有工具调用
-                if (response.hasToolCalls()) {
-                    appendReasoning(reasoningTranscript, response.reasoningContent());
-                    log.info("LLM requested {} tool call(s) in iteration {}", response.toolCalls().size(), iteration);
-                    budget.recordToolCalls(response.toolCalls());
-                    // 添加助手消息（包含工具调用）
-                    conversationHistory.add(LlmClient.Message.assistant(
-                            response.reasoningContent(),
-                            response.content(),
-                            response.toolCalls()
-                    ));
-
-                    // 在工具执行前就 flush 本轮流式渲染器，避免 TerminalMarkdownRenderer
-                    // 内部 pending 缓冲区（仅按换行 flush）里的文本被 HITL 提示"跨过"
-                    // 造成标题和内容错位。重置后下一轮迭代的 reasoning/content 会重新打印标题。
-                    streamRenderer.resetBetweenIterations();
-                    renderer().appendToolCalls(response.toolCalls());
-
-                    List<ToolExecutionResult> toolResults = executeToolCalls(response.toolCalls(), iteration);
-                    turnToolCalls += toolResults.size();
-                    for (ToolExecutionResult toolResult : toolResults) {
-                        largestToolResultChars = Math.max(largestToolResultChars,
-                                toolResult.result() == null ? 0 : toolResult.result().length());
-                        traceRecorder.record(traceContext, "tool.result", java.util.Map.of(
-                                "iteration", iteration,
-                                "tool", toolResult.name(),
-                                "elapsedMillis", toolResult.elapsedMillis(),
-                                "timedOut", toolResult.timedOut(),
-                                "resultPreview", preview(toolResult.result(), 300)
-                        ));
-                        budget.recordToolResult(toolResult.name(), toolResult.result());
-                        memoryManager.addToolResult(toolResult.name(), toolResult.argumentsJson(), toolResult.result());
-                        conversationHistory.add(LlmClient.Message.tool(toolResult.id(), toolResult.result()));
+        return new AgentExecutionEngine<String>(llmClient, budget).run(
+                new AgentExecutionEngine.Delegate<>() {
+                    @Override
+                    public List<LlmClient.Message> history() {
+                        return conversationHistory;
                     }
-                    appendImageToolMessages(toolResults);
 
-                    // 继续循环，让 LLM 根据工具结果继续思考
-                    continue;
-                }
+                    @Override
+                    public List<LlmClient.Tool> toolDefinitions(int iteration) {
+                        List<LlmClient.Tool> definitions = toolRegistry.getToolDefinitions();
+                        logRequestContext("react iteration=" + iteration, definitions);
+                        streamRenderer.beginThinking();
+                        return definitions;
+                    }
 
-                // 没有工具调用，直接返回结果
-                appendReasoning(reasoningTranscript, response.reasoningContent());
-                conversationHistory.add(LlmClient.Message.assistant(response.reasoningContent(), response.content()));
+                    @Override
+                    public LlmClient.StreamListener streamListener() {
+                        return streamRenderer;
+                    }
 
-                // 存入记忆
-                memoryManager.addAssistantMessage(response.content());
+                    @Override
+                    public void beforeIteration(int iteration, AgentBudget currentBudget) {
+                        updateSystemPromptWithMemory(memoryContext);
+                        injectPendingLspDiagnostics();
+                        maybeCompactHistory();
+                    }
 
-                // 记录 token 使用
-                memoryManager.recordTokenUsage(budget.totalInputTokens(), budget.totalOutputTokens(), budget.totalCachedInputTokens());
-                pushStatus(budget, startNanos, "idle");
-                log.info("ReAct run finished: inputTokens={}, outputTokens={}, reasoningChars={}, answerChars={}",
-                        budget.totalInputTokens(),
-                        budget.totalOutputTokens(),
-                        response.reasoningContent() == null ? 0 : response.reasoningContent().length(),
-                        response.content() == null ? 0 : response.content().length());
-                if (log.isDebugEnabled()) {
-                    log.debug("Assistant answer preview: {}", preview(response.content(), 500));
-                }
+                    @Override
+                    public void afterResponse(LlmClient.ChatResponse response, int iteration,
+                                              AgentBudget currentBudget) {
+                        traceRecorder.record(traceContext, "llm.response", java.util.Map.of(
+                                "iteration", iteration,
+                                "toolCalls", response.toolCalls() == null ? 0 : response.toolCalls().size(),
+                                "inputTokens", response.inputTokens(),
+                                "outputTokens", response.outputTokens()
+                        ));
+                        LlmTraceLogger.logReasoning(log,
+                                "react iteration=" + iteration,
+                                llmClient,
+                                response.reasoningContent());
+                        pushStatus(currentBudget, startNanos, "running");
+                    }
 
-                if (streamRenderer.hasStreamedOutput()) {
-                    streamRenderer.finish();
-                    maintainSessionPreSummaryAfterTurn(turnToolCalls, largestToolResultChars);
-                    return "";
-                }
-                streamRenderer.clearThinkingPanel();
-                String finalResponse = formatUserFacingResponse(reasoningTranscript.toString(), response.content());
-                maintainSessionPreSummaryAfterTurn(turnToolCalls, largestToolResultChars);
-                return finalResponse;
+                    @Override
+                    public void beforeToolExecution(LlmClient.ChatResponse response, int iteration,
+                                                    AgentBudget currentBudget) {
+                        appendReasoning(reasoningTranscript, response.reasoningContent());
+                        log.info("LLM requested {} tool call(s) in iteration {}",
+                                response.toolCalls().size(), iteration);
+                        streamRenderer.resetBetweenIterations();
+                        renderer().appendToolCalls(response.toolCalls());
+                    }
 
-            } catch (IOException e) {
-                log.error("LLM call failed in ReAct loop", e);
-                streamRenderer.finish();
-                return "❌ 调用 LLM 失败: " + e.getMessage();
+                    @Override
+                    public List<ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
+                                                                  int iteration) {
+                        return executeToolCalls(toolCalls, iteration);
+                    }
+
+                    @Override
+                    public void afterToolResults(LlmClient.ChatResponse response,
+                                                 List<ToolExecutionResult> toolResults,
+                                                 int iteration,
+                                                 AgentBudget currentBudget) {
+                        metrics.record(toolResults);
+                        for (ToolExecutionResult toolResult : toolResults) {
+                            traceRecorder.record(traceContext, "tool.result", java.util.Map.of(
+                                    "iteration", iteration,
+                                    "tool", toolResult.name(),
+                                    "elapsedMillis", toolResult.elapsedMillis(),
+                                    "timedOut", toolResult.timedOut(),
+                                    "resultPreview", preview(toolResult.result(), 300)
+                            ));
+                            memoryManager.addToolResult(
+                                    toolResult.name(), toolResult.argumentsJson(), toolResult.result());
+                        }
+                        appendImageToolMessages(toolResults);
+                    }
+
+                    @Override
+                    public String completed(LlmClient.ChatResponse response,
+                                            AgentBudget currentBudget) {
+                        appendReasoning(reasoningTranscript, response.reasoningContent());
+                        memoryManager.addAssistantMessage(response.content());
+                        memoryManager.recordTokenUsage(
+                                currentBudget.totalInputTokens(),
+                                currentBudget.totalOutputTokens(),
+                                currentBudget.totalCachedInputTokens());
+                        pushStatus(currentBudget, startNanos, "idle");
+                        log.info("ReAct run finished: inputTokens={}, outputTokens={}, reasoningChars={}, answerChars={}",
+                                currentBudget.totalInputTokens(),
+                                currentBudget.totalOutputTokens(),
+                                response.reasoningContent() == null ? 0 : response.reasoningContent().length(),
+                                response.content() == null ? 0 : response.content().length());
+                        if (log.isDebugEnabled()) {
+                            log.debug("Assistant answer preview: {}", preview(response.content(), 500));
+                        }
+
+                        if (streamRenderer.hasStreamedOutput()) {
+                            streamRenderer.finish();
+                            maintainSessionPreSummaryAfterTurn(
+                                    metrics.toolCalls, metrics.largestToolResultChars);
+                            return "";
+                        }
+                        streamRenderer.clearThinkingPanel();
+                        String finalResponse = formatUserFacingResponse(
+                                reasoningTranscript.toString(), response.content());
+                        maintainSessionPreSummaryAfterTurn(
+                                metrics.toolCalls, metrics.largestToolResultChars);
+                        return finalResponse;
+                    }
+
+                    @Override
+                    public String cancelled(AgentBudget currentBudget) {
+                        log.info("ReAct run cancelled");
+                        streamRenderer.finish();
+                        pushStatus(currentBudget, startNanos, "idle");
+                        return "⏹️ 已取消当前任务。";
+                    }
+
+                    @Override
+                    public String budgetExceeded(AgentBudget.ExitReason reason,
+                                                 AgentBudget currentBudget) {
+                        String description = currentBudget.describeExit(reason);
+                        log.warn("ReAct run exhausted budget: reason={}, iteration={}, tokens={}/{}",
+                                reason, currentBudget.iteration(),
+                                currentBudget.totalInputTokens() + currentBudget.totalOutputTokens(),
+                                currentBudget.tokenBudget());
+                        streamRenderer.finish();
+                        pushStatus(currentBudget, startNanos, "idle");
+                        return "❌ " + description;
+                    }
+
+                    @Override
+                    public String iterationLimitReached(AgentBudget currentBudget) {
+                        return budgetExceeded(
+                                AgentBudget.ExitReason.HARD_ITERATION_LIMIT, currentBudget);
+                    }
+
+                    @Override
+                    public String failed(IOException error, AgentBudget currentBudget) {
+                        log.error("LLM call failed in ReAct loop", error);
+                        streamRenderer.finish();
+                        return "❌ 调用 LLM 失败: " + error.getMessage();
+                    }
+                });
+    }
+
+    private static final class TurnExecutionMetrics {
+        private int toolCalls;
+        private int largestToolResultChars;
+
+        private void record(List<ToolExecutionResult> results) {
+            toolCalls += results.size();
+            for (ToolExecutionResult result : results) {
+                largestToolResultChars = Math.max(
+                        largestToolResultChars,
+                        result.result() == null ? 0 : result.result().length());
             }
         }
     }
