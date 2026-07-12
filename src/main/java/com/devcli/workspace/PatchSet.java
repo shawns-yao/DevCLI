@@ -1,0 +1,237 @@
+package com.devcli.workspace;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * 隔离工作区产生的结构化文件变更集。
+ */
+public final class PatchSet {
+    static final String MISSING_HASH = "<missing>";
+
+    public enum ChangeType {
+        ADD,
+        MODIFY,
+        DELETE
+    }
+
+    public record FileChange(String relativePath, ChangeType type,
+                             String beforeHash, String afterHash, byte[] content) {
+        public FileChange {
+            if (relativePath == null || relativePath.isBlank()) {
+                throw new IllegalArgumentException("relativePath is required");
+            }
+            type = type == null ? ChangeType.MODIFY : type;
+            beforeHash = beforeHash == null ? MISSING_HASH : beforeHash;
+            afterHash = afterHash == null ? MISSING_HASH : afterHash;
+            content = content == null ? new byte[0] : content.clone();
+        }
+
+        @Override
+        public byte[] content() {
+            return content.clone();
+        }
+    }
+
+    public record ApplyResult(boolean applied, List<String> conflicts,
+                              List<String> modifiedResources, String error) {
+        public ApplyResult {
+            conflicts = conflicts == null ? List.of() : List.copyOf(conflicts);
+            modifiedResources = modifiedResources == null ? List.of() : List.copyOf(modifiedResources);
+            error = error == null ? "" : error;
+        }
+
+        static ApplyResult success(List<String> modifiedResources) {
+            return new ApplyResult(true, List.of(), modifiedResources, "");
+        }
+
+        static ApplyResult conflict(List<String> conflicts) {
+            return new ApplyResult(false, conflicts, List.of(), "patch conflict");
+        }
+
+        static ApplyResult failure(String error) {
+            return new ApplyResult(false, List.of(), List.of(), error);
+        }
+    }
+
+    private final List<FileChange> changes;
+
+    public PatchSet(List<FileChange> changes) {
+        this.changes = changes == null ? List.of() : changes.stream()
+                .sorted(Comparator.comparing(FileChange::relativePath))
+                .toList();
+    }
+
+    public List<FileChange> changes() {
+        return changes;
+    }
+
+    public boolean isEmpty() {
+        return changes.isEmpty();
+    }
+
+    public ApplyResult apply(Path projectRoot) {
+        Path root = normalizeRoot(projectRoot);
+        List<String> conflicts = new ArrayList<>();
+        Map<Path, byte[]> originals = new LinkedHashMap<>();
+        Map<Path, Boolean> existed = new LinkedHashMap<>();
+
+        try {
+            for (FileChange change : changes) {
+                Path target = resolveSafe(root, change.relativePath());
+                if (hasUnsafePathEntry(root, target)) {
+                    conflicts.add(change.relativePath());
+                    continue;
+                }
+                boolean present = Files.exists(target, LinkOption.NOFOLLOW_LINKS);
+                boolean regularFile = Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS);
+                if (present && !regularFile) {
+                    conflicts.add(change.relativePath());
+                    continue;
+                }
+                String currentHash = regularFile ? hash(Files.readAllBytes(target)) : MISSING_HASH;
+                if (!currentHash.equals(change.beforeHash())) {
+                    conflicts.add(change.relativePath());
+                    continue;
+                }
+                existed.put(target, regularFile);
+                originals.put(target, regularFile ? Files.readAllBytes(target) : new byte[0]);
+            }
+            if (!conflicts.isEmpty()) {
+                conflicts.sort(String::compareTo);
+                return ApplyResult.conflict(conflicts);
+            }
+
+            List<String> applied = new ArrayList<>();
+            try {
+                for (FileChange change : changes) {
+                    Path target = resolveSafe(root, change.relativePath());
+                    if (hasUnsafePathEntry(root, target)) {
+                        throw new IOException("unsafe patch path: " + change.relativePath());
+                    }
+                    if (change.type() == ChangeType.DELETE) {
+                        Files.deleteIfExists(target);
+                    } else {
+                        Files.createDirectories(target.getParent());
+                        if (hasUnsafePathEntry(root, target)) {
+                            throw new IOException("unsafe patch path: " + change.relativePath());
+                        }
+                        Path temporary = Files.createTempFile(
+                                target.getParent(), ".devcli-patch-", ".tmp");
+                        try {
+                            Files.write(temporary, change.content());
+                            try {
+                                Files.move(temporary, target,
+                                        StandardCopyOption.ATOMIC_MOVE,
+                                        StandardCopyOption.REPLACE_EXISTING);
+                            } catch (IOException atomicFailure) {
+                                Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
+                            }
+                        } finally {
+                            Files.deleteIfExists(temporary);
+                        }
+                    }
+                    applied.add(change.relativePath());
+                }
+                return ApplyResult.success(applied);
+            } catch (Exception applyFailure) {
+                rollback(originals, existed);
+                return ApplyResult.failure(applyFailure.getMessage());
+            }
+        } catch (Exception e) {
+            return ApplyResult.failure(e.getMessage());
+        }
+    }
+
+    private static void rollback(Map<Path, byte[]> originals, Map<Path, Boolean> existed) {
+        List<Path> paths = new ArrayList<>(originals.keySet());
+        paths.sort(Comparator.comparingInt(Path::getNameCount).reversed());
+        for (Path path : paths) {
+            try {
+                if (Boolean.TRUE.equals(existed.get(path))) {
+                    Files.createDirectories(path.getParent());
+                    Files.write(path, originals.get(path));
+                } else {
+                    Files.deleteIfExists(path);
+                }
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
+    static String hash(byte[] bytes) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes);
+            StringBuilder result = new StringBuilder(digest.length * 2);
+            for (byte value : digest) {
+                result.append(String.format("%02x", value));
+            }
+            return result.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
+    }
+
+    private static Path normalizeRoot(Path root) {
+        if (root == null) {
+            throw new IllegalArgumentException("projectRoot is required");
+        }
+        Path normalized = root.toAbsolutePath().normalize();
+        if (!Files.exists(normalized, LinkOption.NOFOLLOW_LINKS)) {
+            return normalized;
+        }
+        try {
+            return normalized.toRealPath();
+        } catch (IOException e) {
+            throw new IllegalArgumentException("cannot resolve project root: " + normalized, e);
+        }
+    }
+
+    private static Path resolveSafe(Path root, String relativePath) {
+        Path relative = Path.of(relativePath);
+        if (relative.isAbsolute()) {
+            throw new IllegalArgumentException("patch path must be relative: " + relativePath);
+        }
+        Path resolved = root.resolve(relative).normalize();
+        if (resolved.equals(root) || !resolved.startsWith(root)) {
+            throw new IllegalArgumentException("patch path escapes project root: " + relativePath);
+        }
+        return resolved;
+    }
+
+    private static boolean hasUnsafePathEntry(Path root, Path target) {
+        Path relative = root.relativize(target);
+        Path current = root;
+        for (int i = 0; i < relative.getNameCount(); i++) {
+            current = current.resolve(relative.getName(i));
+            if (Files.isSymbolicLink(current)) {
+                return true;
+            }
+            boolean present = Files.exists(current, LinkOption.NOFOLLOW_LINKS);
+            if (present) {
+                try {
+                    if (!current.toRealPath().startsWith(root)) {
+                        return true;
+                    }
+                } catch (IOException e) {
+                    return true;
+                }
+            }
+            boolean last = i == relative.getNameCount() - 1;
+            if (!last && present && !Files.isDirectory(current, LinkOption.NOFOLLOW_LINKS)) {
+                return true;
+            }
+        }
+        return false;
+    }
+}

@@ -152,6 +152,34 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         return projectPath;
     }
 
+    /**
+     * 为隔离工作区创建项目级工具注册表。内置 Provider 重新绑定到新根目录，
+     * MCP 描述与调用器、策略配置和记忆处理器沿用父注册表。
+     */
+    public ToolRegistry forkForProject(Path projectRoot) {
+        Path root = Objects.requireNonNull(projectRoot, "projectRoot")
+                .toAbsolutePath().normalize();
+        ToolRegistry fork = createProjectForkRegistry();
+        fork.setProjectPath(root.toString());
+        fork.contextProfile = contextProfile;
+        fork.browserGuard = browserGuard;
+        fork.browserConnector = browserConnector;
+        fork.memorySaver = memorySaver;
+        fork.memorySaveHandler = memorySaveHandler;
+        fork.memoryListHandler = memoryListHandler;
+        fork.skillRegistry = skillRegistry;
+        fork.skillContextBuffer = skillContextBuffer;
+        mcpTools.values().forEach(registered ->
+                fork.registerMcpToolOutput(registered.descriptor(), registered.invoker()));
+        fork.mcpServerLifecycleVersions.putAll(mcpServerLifecycleVersions);
+        fork.activatedMcpToolDefinitions.addAll(activatedMcpToolDefinitions);
+        return fork;
+    }
+
+    protected ToolRegistry createProjectForkRegistry() {
+        return new ToolRegistry(commandTimeoutSeconds, toolBatchTimeoutSeconds);
+    }
+
     public void setContextProfile(ContextProfile contextProfile) {
         if (contextProfile != null) {
             this.contextProfile = contextProfile;

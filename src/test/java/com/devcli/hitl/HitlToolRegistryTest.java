@@ -98,6 +98,28 @@ class HitlToolRegistryTest {
     }
 
     @Test
+    void projectForkRetainsHitlApprovalMiddleware(@TempDir Path tempDir) throws Exception {
+        Path parentRoot = tempDir.resolve("parent");
+        Path forkRoot = tempDir.resolve("fork");
+        Files.createDirectories(parentRoot);
+        Files.createDirectories(forkRoot);
+        StubHandler stub = new StubHandler(req -> ApprovalResult.approve());
+        HitlToolRegistry registry = new HitlToolRegistry(stub);
+        registry.setProjectPath(parentRoot.toString());
+
+        try (ToolRegistry fork = registry.forkForProject(forkRoot)) {
+            String result = fork.executeTool("write_file",
+                    "{\"path\":\"approved-in-fork.txt\",\"content\":\"fork-content\"}");
+
+            assertFalse(result.startsWith("[HITL]"), result);
+            assertEquals(1, stub.requestCount(), "隔离注册表仍应触发 HITL 审批");
+            assertEquals("fork-content", Files.readString(forkRoot.resolve("approved-in-fork.txt")));
+            assertFalse(Files.exists(parentRoot.resolve("approved-in-fork.txt")));
+            assertInstanceOf(HitlToolRegistry.class, fork);
+        }
+    }
+
+    @Test
     void skippedDecisionBlocksExecution(@TempDir Path tempDir) {
         Path target = tempDir.resolve("skipped.txt");
         StubHandler stub = new StubHandler(req -> ApprovalResult.skip());

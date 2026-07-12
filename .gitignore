@@ -14,8 +14,10 @@ target/
 # AI 工具本地配置（settings / plans / memory，个人本地，不提交）
 .claude/
 
-# 日志
+# 日志与运行时临时目录
 *.log
+Log/
+Temp/
 
 # 操作系统
 .DS_Store

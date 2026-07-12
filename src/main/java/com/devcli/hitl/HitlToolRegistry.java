@@ -91,6 +91,11 @@ public class HitlToolRegistry extends ToolRegistry {
         return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
     }
 
+    @Override
+    protected ToolRegistry createProjectForkRegistry() {
+        return new HitlToolRegistry(hitlHandler);
+    }
+
     public HitlHandler getHitlHandler() {
         return hitlHandler;
     }

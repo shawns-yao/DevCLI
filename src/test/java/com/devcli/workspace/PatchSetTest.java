@@ -1,0 +1,84 @@
+package com.devcli.workspace;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+class PatchSetTest {
+
+    @Test
+    void existingDirectoryAtAddedFilePathIsConflict(@TempDir Path tempDir) throws Exception {
+        Path project = tempDir.resolve("project");
+        Path occupied = project.resolve("occupied");
+        Files.createDirectories(occupied);
+        byte[] content = "replacement".getBytes(StandardCharsets.UTF_8);
+        PatchSet patchSet = new PatchSet(List.of(new PatchSet.FileChange(
+                "occupied",
+                PatchSet.ChangeType.ADD,
+                PatchSet.MISSING_HASH,
+                PatchSet.hash(content),
+                content
+        )));
+
+        PatchSet.ApplyResult result = patchSet.apply(project);
+
+        assertFalse(result.applied());
+        assertEquals(List.of("occupied"), result.conflicts());
+        assertTrue(Files.isDirectory(occupied), "冲突检测不得删除原有目录");
+    }
+
+    @Test
+    void symbolicLinkParentCannotEscapeProjectRoot(@TempDir Path tempDir) throws Exception {
+        Path project = tempDir.resolve("project");
+        Path outside = tempDir.resolve("outside");
+        Files.createDirectories(project);
+        Files.createDirectories(outside);
+        Path link = project.resolve("linked");
+        createDirectoryLink(link, outside);
+
+        byte[] content = "escaped".getBytes(StandardCharsets.UTF_8);
+        PatchSet patchSet = new PatchSet(List.of(new PatchSet.FileChange(
+                "linked/escape.txt",
+                PatchSet.ChangeType.ADD,
+                PatchSet.MISSING_HASH,
+                PatchSet.hash(content),
+                content
+        )));
+
+        PatchSet.ApplyResult result = patchSet.apply(project);
+
+        assertFalse(result.applied());
+        assertFalse(Files.exists(outside.resolve("escape.txt")),
+                "PatchSet 不得经符号链接写出项目根目录");
+    }
+
+    private static void createDirectoryLink(Path link, Path target) throws Exception {
+        if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")) {
+            Process process = new ProcessBuilder(
+                    "cmd.exe", "/c", "mklink", "/J", link.toString(), target.toString())
+                    .redirectErrorStream(true)
+                    .start();
+            boolean finished = process.waitFor(5, TimeUnit.SECONDS);
+            assumeTrue(finished && process.exitValue() == 0,
+                    "当前 Windows 环境无法创建目录联接");
+            return;
+        }
+        try {
+            Files.createSymbolicLink(link, target);
+        } catch (UnsupportedOperationException | IOException | SecurityException e) {
+            assumeTrue(false, "当前文件系统不支持创建符号链接: " + e.getMessage());
+        }
+    }
+}
