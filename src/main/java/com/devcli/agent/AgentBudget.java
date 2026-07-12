@@ -2,6 +2,7 @@ package com.devcli.agent;
 
 import com.devcli.llm.LlmClient;
 import com.devcli.context.ContextProfile;
+import com.devcli.tool.ToolRegistry;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -128,12 +129,22 @@ public class AgentBudget {
         }
     }
 
+    public void recordToolResult(ToolRegistry.ToolExecutionResult result) {
+        if (result == null) {
+            resetToolErrorWindow();
+            return;
+        }
+        recordToolError(result.name(), ToolErrorClassifier.classify(result.status(), result.errorCode()));
+    }
+
+    /** 兼容尚未迁移的文本结果入口。 */
     public void recordToolResult(String toolName, String result) {
-        String category = ToolErrorClassifier.classify(result);
-        if (category.isBlank()) {
-            recentToolErrorSignatures.clear();
-            repeatedToolError = false;  // Bug #3 修复：重置重复错误标志
-            repeatedToolErrorSignature = "";
+        recordToolError(toolName, ToolErrorClassifier.classify(result));
+    }
+
+    private void recordToolError(String toolName, String category) {
+        if (category == null || category.isBlank()) {
+            resetToolErrorWindow();
             return;
         }
         String signature = (toolName == null ? "" : toolName) + "|" + category;
@@ -152,6 +163,12 @@ public class AgentBudget {
             repeatedToolError = false;
             repeatedToolErrorSignature = "";
         }
+    }
+
+    private void resetToolErrorWindow() {
+        recentToolErrorSignatures.clear();
+        repeatedToolError = false;
+        repeatedToolErrorSignature = "";
     }
 
     public ExitReason check() {

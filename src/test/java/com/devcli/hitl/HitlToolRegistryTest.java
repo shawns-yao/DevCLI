@@ -8,6 +8,10 @@ import com.devcli.browser.BrowserGuard;
 import com.devcli.browser.BrowserSession;
 import com.devcli.browser.SensitivePagePolicy;
 import com.devcli.mcp.protocol.McpToolDescriptor;
+import com.devcli.tool.ToolErrorCode;
+import com.devcli.tool.ToolOutput;
+import com.devcli.tool.ToolRegistry;
+import com.devcli.tool.ToolStatus;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -73,6 +77,24 @@ class HitlToolRegistryTest {
         assertTrue(result.contains("too risky"));
         assertFalse(Files.exists(target), "拒绝后文件不应被创建");
         assertEquals(1, stub.requestCount(), "应只发起一次审批");
+    }
+
+    @Test
+    void rejectionUsesStructuredResultThroughBasePipeline(@TempDir Path tempDir) throws Exception {
+        Path target = tempDir.resolve("structured-reject.txt");
+        StubHandler stub = new StubHandler(req -> ApprovalResult.reject("denied"));
+        HitlToolRegistry registry = new HitlToolRegistry(stub);
+
+        ToolOutput output = registry.executeToolOutput("write_file",
+                "{\"path\":\"" + target.toString().replace("\\", "\\\\") + "\",\"content\":\"x\"}");
+
+        assertEquals(ToolStatus.REJECTED, output.status());
+        assertEquals(ToolErrorCode.HITL_REJECTED, output.errorCode());
+        assertFalse(output.retryable());
+        assertFalse(Files.exists(target));
+        assertEquals(ToolRegistry.class, HitlToolRegistry.class
+                .getMethod("executeToolOutput", String.class, String.class)
+                .getDeclaringClass());
     }
 
     @Test

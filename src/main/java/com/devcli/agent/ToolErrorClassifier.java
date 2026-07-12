@@ -1,9 +1,30 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolErrorCode;
+import com.devcli.tool.ToolStatus;
+
 import java.util.Locale;
 
 final class ToolErrorClassifier {
     private ToolErrorClassifier() {
+    }
+
+    static String classify(ToolStatus status, ToolErrorCode errorCode) {
+        if (status == null || status == ToolStatus.SUCCESS) {
+            return "";
+        }
+        ToolErrorCode code = errorCode == null ? ToolErrorCode.NONE : errorCode;
+        return switch (code) {
+            case NONE -> status.name().toLowerCase(Locale.ROOT);
+            case UNKNOWN_TOOL -> "unknown-tool";
+            case INVALID_ARGUMENTS -> "schema";
+            case SKILL_PERMISSION_DENIED, HITL_REJECTED, POLICY_DENIED -> "policy";
+            case RESOURCE_CONFLICT -> "resource-conflict";
+            case EXECUTION_FAILED -> "execution";
+            case MCP_ERROR -> "mcp";
+            case CANCELLED -> "cancelled";
+            case TIMEOUT -> "timeout";
+        };
     }
 
     static String classify(String result) {

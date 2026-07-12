@@ -2,6 +2,9 @@ package com.devcli.agent;
 
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.GLMClient;
+import com.devcli.tool.ToolErrorCode;
+import com.devcli.tool.ToolRegistry;
+import com.devcli.tool.ToolStatus;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -96,6 +99,40 @@ class AgentBudgetTest {
         budget.recordToolResult("read_file", "工具执行失败: no such file");
 
         assertEquals(AgentBudget.ExitReason.WITHIN_BUDGET, budget.check());
+    }
+
+    @Test
+    void successfulStructuredResultDoesNotTreatErrorLikeTextAsFailure() {
+        AgentBudget budget = new AgentBudget(1_000_000, 3, 50);
+        ToolRegistry.ToolExecutionResult result = new ToolRegistry.ToolExecutionResult(
+                "call_1", "search_code", "{}", "symbol not found in comments",
+                1, ToolStatus.SUCCESS, ToolErrorCode.NONE, false, List.of());
+
+        budget.recordToolResult(result);
+        budget.recordToolResult(result);
+        budget.recordToolResult(result);
+
+        assertEquals(AgentBudget.ExitReason.WITHIN_BUDGET, budget.check());
+    }
+
+    @Test
+    void structuredErrorCodeTriggersCircuitBreakerRegardlessOfMessageText() {
+        AgentBudget budget = new AgentBudget(1_000_000, 3, 50);
+
+        budget.recordToolResult(toolError("call_1", "字段缺失"));
+        budget.recordToolResult(toolError("call_2", "输入不符合约束"));
+        assertEquals(AgentBudget.ExitReason.WITHIN_BUDGET, budget.check());
+
+        budget.recordToolResult(toolError("call_3", "请修正参数"));
+        assertEquals(AgentBudget.ExitReason.REPEATED_TOOL_ERROR, budget.check());
+        assertTrue(budget.describeExit(AgentBudget.ExitReason.REPEATED_TOOL_ERROR)
+                .contains("mcp__demo__search|schema"));
+    }
+
+    private static ToolRegistry.ToolExecutionResult toolError(String id, String message) {
+        return new ToolRegistry.ToolExecutionResult(
+                id, "mcp__demo__search", "{}", message,
+                1, ToolStatus.REJECTED, ToolErrorCode.INVALID_ARGUMENTS, true, List.of());
     }
 
     @Test

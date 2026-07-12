@@ -59,6 +59,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private static final int MAX_WRITE_FILE_BYTES = 5 * 1024 * 1024;
     // 需要审计的内置工具（与 ApprovalPolicy 的 DANGEROUS_TOOLS 保持一致）；MCP 工具按前缀动态纳入审计。
     private static final Set<String> AUDIT_TOOLS = Set.of("write_file", "execute_command", "create_project", "revert_turn");
+    private static final String PIPELINE_PARSED_ARGUMENTS = "parsedArguments";
+    private static final String PIPELINE_BROWSER_AUDIT = "browserAuditMetadata";
     private final Map<String, Tool> tools = new ConcurrentHashMap<>();
     private final Map<String, McpRegisteredTool> mcpTools = new ConcurrentHashMap<>();
     private final Map<String, Long> mcpServerLifecycleVersions = new ConcurrentHashMap<>();
@@ -82,6 +84,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private final ThreadLocal<SkillContextBuffer> skillContextBufferOverride = new ThreadLocal<>();
     private final ResourceLeaseManager resourceLeaseManager = new ResourceLeaseManager();
     private final ThreadLocal<String> resourceLeaseStep = new ThreadLocal<>();
+    private final ToolExecutionPipeline executionPipeline = new ToolExecutionPipeline(this::executeResolvedTool);
     private java.util.function.BiConsumer<String, String[]> writeFileObserver = (p, ba) -> {};
     /** 按 step 归集 write_file 实际写过的文件（key 为 resourceLeaseStep 的 stepId），供 checkpoint 记录产物。 */
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.Set<String>> stepModifiedFiles =
@@ -101,6 +104,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     ToolRegistry(long commandTimeoutSeconds, long toolBatchTimeoutSeconds) {
         this.commandTimeoutSeconds = commandTimeoutSeconds;
         this.toolBatchTimeoutSeconds = toolBatchTimeoutSeconds;
+        configureExecutionPipeline();
         // 租约抢占（空闲超时回收他人租约）接入审计链：被回收的慢步骤可事后排查
         resourceLeaseManager.setPreemptionListener((path, evictedStepId, newStepId, heldMs) ->
                 auditLog.record(AuditLog.AuditEntry.error(
@@ -129,8 +133,6 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         this.projectPath = projectPath;
         this.pathGuard = new PathGuard(projectPath);
         this.lspManager.setProjectPath(projectPath);
-        // 把 projectPath 同步给 ToolExecutionResult，让 ToolResultSizeManager 落盘时使用正确的根目录
-        ToolExecutionResult.setActiveProjectPath(projectPath);
         if (!customSnapshotService) {
             this.snapshotService.close();
             this.snapshotService = SnapshotService.forProject(Path.of(projectPath));
@@ -638,81 +640,133 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
      * - 其他情况 → allow（仅表示工具调用真的发生过，工具内部的业务错误仍以返回字符串呈现给 LLM）
      */
     public String executeTool(String name, String argumentsJson) {
-        return doExecuteTool(name, argumentsJson).text();
+        return executionPipeline.execute(name, argumentsJson, null).text();
     }
 
     public ToolOutput executeToolOutput(String name, String argumentsJson) {
         if (isLegacyExecuteToolOverride()) {
             return ToolOutput.text(executeTool(name, argumentsJson));
         }
-        return doExecuteTool(name, argumentsJson);
+        return executionPipeline.execute(name, argumentsJson, null);
     }
 
+    /** 兼容扩展类的原有受保护入口，实际执行统一进入中间件管线。 */
     protected ToolOutput doExecuteTool(String name, String argumentsJson) {
-        if (CancellationContext.isCancelled()) {
-            return ToolOutput.text("用户取消了此次工具调用");
-        }
-        Tool tool = tools.get(name);
-        if (tool == null) {
-            return ToolOutput.text(unknownToolGuidance(name));
-        }
-        ToolOutput skillPermissionError = validateSkillToolAllowed(name);
-        if (skillPermissionError != null) {
-            return skillPermissionError;
-        }
+        return executionPipeline.execute(name, argumentsJson, null);
+    }
 
-        boolean shouldAudit = shouldAudit(name);
-        long start = System.nanoTime();
-        BrowserAuditMetadata auditMetadata = null;
+    protected final void registerExecutionMiddleware(ToolExecutionPipeline.Stage stage,
+                                                     ToolExecutionPipeline.Middleware middleware) {
+        executionPipeline.register(stage, middleware);
+    }
 
-        try {
-            ToolOutput validationError = validateToolArguments(name, argumentsJson);
-            if (validationError != null) {
-                return validationError;
+    private void configureExecutionPipeline() {
+        executionPipeline.register(ToolExecutionPipeline.Stage.CANCELLATION, (context, chain) ->
+                CancellationContext.isCancelled()
+                        ? ToolOutput.cancelled("用户取消了此次工具调用")
+                        : chain.proceed(context));
+        executionPipeline.register(ToolExecutionPipeline.Stage.EXISTENCE, (context, chain) ->
+                tools.containsKey(context.name())
+                        ? chain.proceed(context)
+                        : ToolOutput.error(ToolErrorCode.UNKNOWN_TOOL,
+                        unknownToolGuidance(context.name()), true));
+        executionPipeline.register(ToolExecutionPipeline.Stage.SKILL_PERMISSION, (context, chain) -> {
+            ToolOutput error = validateSkillToolAllowed(context.name());
+            return error == null ? chain.proceed(context) : error;
+        });
+        executionPipeline.register(ToolExecutionPipeline.Stage.ARGUMENT_VALIDATION, (context, chain) -> {
+            ToolOutput error = validateToolArguments(context.name(), context.argumentsJson());
+            if (error != null) {
+                return error;
             }
-            JsonNode parsedArgs = parseArguments(argumentsJson);
-
-            McpRegisteredTool mcpTool = mcpTools.get(name);
-            if (mcpTool != null) {
-                BrowserCheckResult browserCheck = checkBrowserTool(name, argumentsJson, false);
-                auditMetadata = browserCheck.metadata();
+            context.putAttribute(PIPELINE_PARSED_ARGUMENTS, parseValidatedArguments(context.argumentsJson()));
+            return chain.proceed(context);
+        });
+        executionPipeline.register(ToolExecutionPipeline.Stage.AUDIT, this::executeWithAudit);
+        executionPipeline.register(ToolExecutionPipeline.Stage.POLICY, (context, chain) -> {
+            if (mcpTools.containsKey(context.name())) {
+                BrowserCheckResult browserCheck = checkBrowserTool(
+                        context.name(), context.argumentsJson(), false);
+                context.putAttribute(PIPELINE_BROWSER_AUDIT, browserCheck.metadata());
                 if (browserCheck.blocked()) {
                     throw new PolicyException(browserCheck.reason());
                 }
-                ToolOutput output = mcpTool.invoker().apply(argumentsJson);
-                if (output == null) {
-                    output = ToolOutput.text("");
-                }
-                if (browserGuard != null) {
-                    browserGuard.applyAfterExecution(name, argumentsJson, output.text());
-                }
-                if (shouldAudit) {
-                    auditLog.record(AuditLog.AuditEntry.allow(name, argumentsJson, elapsedMillis(start), auditMetadata));
-                }
-                return output;
             }
+            return chain.proceed(context);
+        });
+        executionPipeline.register(ToolExecutionPipeline.Stage.RESULT_GOVERNANCE, (context, chain) ->
+                governToolOutput(context.name(), context.invocationId(), chain.proceed(context)));
+    }
 
-            Map<String, String> argMap = new HashMap<>();
-            parsedArgs.fields().forEachRemaining(entry ->
-                    argMap.put(entry.getKey(), entry.getValue().asText()));
-            String result = tool.executor().execute(argMap);
-            if (shouldAudit) {
-                auditLog.record(AuditLog.AuditEntry.allow(name, argumentsJson, elapsedMillis(start), auditMetadata));
-            }
-            return ToolOutput.text(result);
-        } catch (PolicyException e) {
-            if (shouldAudit) {
-                auditLog.record(AuditLog.AuditEntry.denyByPolicy(
-                        name, argumentsJson, e.getMessage(), elapsedMillis(start), auditMetadata));
-            }
-            return ToolOutput.text("🛡️ 策略拒绝: " + e.getMessage());
-        } catch (Exception e) {
-            if (shouldAudit) {
-                auditLog.record(AuditLog.AuditEntry.error(
-                        name, argumentsJson, e.getMessage(), elapsedMillis(start), auditMetadata));
-            }
-            return ToolOutput.text("工具执行失败: " + e.getMessage());
+    private ToolOutput governToolOutput(String name, String invocationId, ToolOutput output) {
+        ToolOutput normalized = output == null ? ToolOutput.success("") : output;
+        if (invocationId == null || invocationId.isBlank()) {
+            return normalized;
         }
+        String managedText = ToolResultSizeManager.process(
+                name, invocationId, projectPath, normalized.hasImageParts(), normalized.text());
+        return new ToolOutput(normalized.status(), normalized.errorCode(), normalized.retryable(),
+                managedText, normalized.imageParts(), normalized.modifiedResources());
+    }
+
+    private ToolOutput executeWithAudit(ToolExecutionPipeline.Context context,
+                                        ToolExecutionPipeline.Chain chain) {
+        boolean audit = shouldAudit(context.name());
+        long start = System.nanoTime();
+        try {
+            ToolOutput output = chain.proceed(context);
+            if (audit) {
+                auditLog.record(AuditLog.AuditEntry.allow(
+                        context.name(), context.argumentsJson(), elapsedMillis(start),
+                        context.attribute(PIPELINE_BROWSER_AUDIT, BrowserAuditMetadata.class)));
+            }
+            return output;
+        } catch (ResourceLeaseException e) {
+            if (audit) {
+                auditLog.record(AuditLog.AuditEntry.denyByPolicy(
+                        context.name(), context.argumentsJson(), e.getMessage(), elapsedMillis(start),
+                        context.attribute(PIPELINE_BROWSER_AUDIT, BrowserAuditMetadata.class)));
+            }
+            return ToolOutput.rejected(ToolErrorCode.RESOURCE_CONFLICT,
+                    "策略拒绝: " + e.getMessage(), true);
+        } catch (PolicyException e) {
+            if (audit) {
+                auditLog.record(AuditLog.AuditEntry.denyByPolicy(
+                        context.name(), context.argumentsJson(), e.getMessage(), elapsedMillis(start),
+                        context.attribute(PIPELINE_BROWSER_AUDIT, BrowserAuditMetadata.class)));
+            }
+            return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
+                    "策略拒绝: " + e.getMessage());
+        } catch (Exception e) {
+            if (audit) {
+                auditLog.record(AuditLog.AuditEntry.error(
+                        context.name(), context.argumentsJson(), e.getMessage(), elapsedMillis(start),
+                        context.attribute(PIPELINE_BROWSER_AUDIT, BrowserAuditMetadata.class)));
+            }
+            return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                    "工具执行失败: " + e.getMessage(), true);
+        }
+    }
+
+    private ToolOutput executeResolvedTool(ToolExecutionPipeline.Context context) {
+        McpRegisteredTool mcpTool = mcpTools.get(context.name());
+        if (mcpTool != null) {
+            ToolOutput output = mcpTool.invoker().apply(context.argumentsJson());
+            if (browserGuard != null) {
+                browserGuard.applyAfterExecution(context.name(), context.argumentsJson(), output == null ? "" : output.text());
+            }
+            return output;
+        }
+
+        Tool tool = tools.get(context.name());
+        JsonNode parsedArgs = context.attribute(PIPELINE_PARSED_ARGUMENTS, JsonNode.class);
+        if (parsedArgs == null) {
+            parsedArgs = parseValidatedArguments(context.argumentsJson());
+        }
+        Map<String, String> argMap = new HashMap<>();
+        parsedArgs.fields().forEachRemaining(entry ->
+                argMap.put(entry.getKey(), entry.getValue().asText()));
+        return ToolOutput.text(tool.executor().execute(argMap));
     }
 
     private static String unknownToolGuidance(String name) {
@@ -743,9 +797,10 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         if (allowedTools.isEmpty() || allowedTools.contains(name)) {
             return null;
         }
-        return ToolOutput.text("Skill 工具权限拒绝: 当前已加载 Skill 只允许使用 "
-                + String.join(", ", allowedTools)
-                + "；被拒绝工具: " + name);
+        return ToolOutput.rejected(ToolErrorCode.SKILL_PERMISSION_DENIED,
+                "Skill 工具权限拒绝: 当前已加载 Skill 只允许使用 "
+                        + String.join(", ", allowedTools)
+                        + "；被拒绝工具: " + name);
     }
 
     protected ToolOutput validateToolArguments(String name, String argumentsJson) {
@@ -771,6 +826,14 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         return null;
     }
 
+    private JsonNode parseValidatedArguments(String argumentsJson) {
+        try {
+            return parseArguments(argumentsJson);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("工具参数不是合法 JSON: " + e.getOriginalMessage(), e);
+        }
+    }
+
     private JsonNode parseArguments(String argumentsJson) throws JsonProcessingException {
         if (argumentsJson == null || argumentsJson.isBlank()) {
             return mapper.createObjectNode();
@@ -779,17 +842,37 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     private ToolOutput validationFailed(String message) {
-        return ToolOutput.text("工具参数校验失败: " + (message == null || message.isBlank() ? "参数不符合工具 schema" : message)
-                + "。请根据工具 JSON Schema 修正参数后重试。");
+        return ToolOutput.rejected(ToolErrorCode.INVALID_ARGUMENTS,
+                "工具参数校验失败: "
+                        + (message == null || message.isBlank() ? "参数不符合工具 schema" : message)
+                        + "。请根据工具 JSON Schema 修正参数后重试。",
+                true);
+    }
+
+    private ToolOutput executeToolOutput(ToolInvocation invocation) {
+        if (isLegacyExecuteToolOverride() || isExecuteToolOutputOverride()) {
+            return governToolOutput(invocation.name(), invocation.id(),
+                    executeToolOutput(invocation.name(), invocation.argumentsJson()));
+        }
+        return executionPipeline.execute(
+                invocation.name(), invocation.argumentsJson(), invocation.id());
     }
 
     private boolean isLegacyExecuteToolOverride() {
+        return declaringClassOf("executeTool") != ToolRegistry.class;
+    }
+
+    private boolean isExecuteToolOutputOverride() {
+        return declaringClassOf("executeToolOutput") != ToolRegistry.class;
+    }
+
+    private Class<?> declaringClassOf(String methodName) {
         try {
             return getClass()
-                    .getMethod("executeTool", String.class, String.class)
-                    .getDeclaringClass() != ToolRegistry.class;
+                    .getMethod(methodName, String.class, String.class)
+                    .getDeclaringClass();
         } catch (NoSuchMethodException e) {
-            return false;
+            return ToolRegistry.class;
         }
     }
 
@@ -817,14 +900,15 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         }
         if (CancellationContext.isCancelled()) {
             return invocations.stream()
-                    .map(invocation -> ToolExecutionResult.failed(invocation, "用户取消了此次工具调用"))
+                    .map(invocation -> ToolExecutionResult.cancelled(invocation, "用户取消了此次工具调用"))
                     .toList();
         }
         if (invocations.size() == 1) {
             ToolInvocation invocation = invocations.get(0);
             long startedAt = System.nanoTime();
-            ToolOutput output = executeToolOutput(invocation.name(), invocation.argumentsJson());
-            return List.of(ToolExecutionResult.completed(invocation, output, elapsedMillis(startedAt)));
+            ToolOutput output = executeToolOutput(invocation);
+            return List.of(ToolExecutionResult.completed(
+                    invocation, output, elapsedMillis(startedAt)));
         }
 
         int parallelism = Math.min(invocations.size(), MAX_PARALLEL_TOOLS);
@@ -839,14 +923,15 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
             List<Callable<ToolExecutionResult>> tasks = invocations.stream()
                     .<Callable<ToolExecutionResult>>map(invocation -> () -> {
                         if (CancellationContext.isCancelled()) {
-                            return ToolExecutionResult.failed(invocation, "用户取消了此次工具调用");
+                            return ToolExecutionResult.cancelled(invocation, "用户取消了此次工具调用");
                         }
                         long startedAt = System.nanoTime();
                         java.util.concurrent.atomic.AtomicReference<ToolOutput> output =
                                 new java.util.concurrent.atomic.AtomicReference<>(ToolOutput.text(""));
                         runWithSkillContextBuffer(activeSkillBuffer,
-                                () -> output.set(executeToolOutput(invocation.name(), invocation.argumentsJson())));
-                        return ToolExecutionResult.completed(invocation, output.get(), elapsedMillis(startedAt));
+                                () -> output.set(executeToolOutput(invocation)));
+                        return ToolExecutionResult.completed(
+                                invocation, output.get(), elapsedMillis(startedAt));
                     })
                     .toList();
 
@@ -954,46 +1039,49 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public record ToolInvocation(String id, String name, String argumentsJson) {}
 
     public record ToolExecutionResult(String id, String name, String argumentsJson,
-                                      String result, long elapsedMillis, boolean timedOut,
+                                      String result, long elapsedMillis,
+                                      ToolStatus status, ToolErrorCode errorCode, boolean retryable,
                                       List<com.devcli.llm.LlmClient.ContentPart> imageParts) {
-        // 当前 ToolRegistry 实例的 projectPath。在 completed(...) 工厂方法里读取。
-        // 用 ThreadLocal 也行；这里用线程安全的 volatile 静态字段——所有 ToolRegistry
-        // 共享同一个 size manager 配置，简单。
-        private static volatile String activeProjectPath = System.getProperty("user.dir");
-
-        static void setActiveProjectPath(String projectPath) {
-            if (projectPath != null && !projectPath.isBlank()) {
-                activeProjectPath = projectPath;
-            }
-        }
-
-        private static ToolExecutionResult completed(ToolInvocation invocation, ToolOutput output, long elapsedMillis) {
-            String rawResult = output == null ? "" : output.text();
+        private static ToolExecutionResult completed(ToolInvocation invocation, ToolOutput output,
+                                                     long elapsedMillis) {
+            String result = output == null ? "" : output.text();
             List<com.devcli.llm.LlmClient.ContentPart> images = output == null ? List.of() : output.imageParts();
-            // 工具结果尺寸治理：> 5K 截断，> 50K 落盘 + 预览。
-            // 见 ToolResultSizeManager 的白名单（read_file / list_dir 等）。
-            String managedResult = ToolResultSizeManager.process(
-                    invocation.name(),
-                    invocation.id(),
-                    activeProjectPath,
-                    images != null && !images.isEmpty(),
-                    rawResult);
             return new ToolExecutionResult(
                     invocation.id(),
                     invocation.name(),
                     invocation.argumentsJson(),
-                    managedResult,
+                    result,
                     elapsedMillis,
-                    false,
+                    output == null ? ToolStatus.SUCCESS : output.status(),
+                    output == null ? ToolErrorCode.NONE : output.errorCode(),
+                    output != null && output.retryable(),
                     images);
         }
 
-        private static ToolExecutionResult completed(ToolInvocation invocation, String result, long elapsedMillis) {
-            return completed(invocation, ToolOutput.text(result), elapsedMillis);
+        public static ToolExecutionResult failed(ToolInvocation invocation, String message) {
+            return new ToolExecutionResult(
+                    invocation.id(),
+                    invocation.name(),
+                    invocation.argumentsJson(),
+                    "工具执行失败: " + message,
+                    0,
+                    ToolStatus.ERROR,
+                    ToolErrorCode.EXECUTION_FAILED,
+                    true,
+                    List.of());
         }
 
-        public static ToolExecutionResult failed(ToolInvocation invocation, String message) {
-            return completed(invocation, "工具执行失败: " + message, 0);
+        public static ToolExecutionResult cancelled(ToolInvocation invocation, String message) {
+            return new ToolExecutionResult(
+                    invocation.id(),
+                    invocation.name(),
+                    invocation.argumentsJson(),
+                    message,
+                    0,
+                    ToolStatus.CANCELLED,
+                    ToolErrorCode.CANCELLED,
+                    false,
+                    List.of());
         }
 
         private static ToolExecutionResult timedOut(ToolInvocation invocation, long timeoutSeconds) {
@@ -1003,9 +1091,15 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                     invocation.argumentsJson(),
                     "工具执行超时（" + timeoutSeconds + "秒），已取消",
                     timeoutSeconds * 1000,
+                    ToolStatus.TIMEOUT,
+                    ToolErrorCode.TIMEOUT,
                     true,
                     List.of()
             );
+        }
+
+        public boolean timedOut() {
+            return status == ToolStatus.TIMEOUT;
         }
 
         public boolean hasImageParts() {

@@ -2,21 +2,15 @@ package com.devcli.hitl;
 
 import com.devcli.browser.BrowserCheckResult;
 import com.devcli.policy.AuditLog;
+import com.devcli.tool.ToolErrorCode;
+import com.devcli.tool.ToolExecutionPipeline;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
 
 import java.util.concurrent.TimeUnit;
 
 /**
- * HITL 工具注册表 - 在危险工具调用前插入人工审批
- *
- * 继承自 ToolRegistry，覆写 executeTool 方法，在执行危险操作之前
- * 通过 HitlHandler 向用户请求审批。
- *
- * 如果 HITL 未启用，行为与父类完全相同，无额外开销。
- *
- * HITL 拒绝 / 跳过路径会写一行 audit（approver=hitl），HITL 通过后由父类 ToolRegistry 写
- * allow / policy-deny / error，HITL 审批与策略拦截共用同一份 ~/.devcli/audit/ 文件。
+ * 在统一工具执行管线的 HITL 阶段插入人工审批。
  */
 public class HitlToolRegistry extends ToolRegistry {
 
@@ -25,48 +19,44 @@ public class HitlToolRegistry extends ToolRegistry {
     public HitlToolRegistry(HitlHandler hitlHandler) {
         super();
         this.hitlHandler = hitlHandler;
+        registerExecutionMiddleware(ToolExecutionPipeline.Stage.HITL, this::applyHitl);
     }
 
-    @Override
-    public String executeTool(String name, String argumentsJson) {
-        return executeToolOutput(name, argumentsJson).text();
-    }
-
-    @Override
-    public ToolOutput executeToolOutput(String name, String argumentsJson) {
-        // HITL 未启用或该工具不需要审批，直接执行
+    private ToolOutput applyHitl(ToolExecutionPipeline.Context context,
+                                 ToolExecutionPipeline.Chain chain) {
+        String name = context.name();
+        String argumentsJson = context.argumentsJson();
         if (!hitlHandler.isEnabled() || !ApprovalPolicy.requiresApproval(name)) {
-            return super.doExecuteTool(name, argumentsJson);
+            return chain.proceed(context);
         }
-        ToolOutput skillPermissionError = validateSkillToolAllowed(name);
-        if (skillPermissionError != null) {
-            return skillPermissionError;
-        }
-        ToolOutput validationError = validateToolArguments(name, argumentsJson);
-        if (validationError != null) {
-            return validationError;
-        }
+
         BrowserCheckResult browserCheck = checkBrowserTool(name, argumentsJson, true);
         if (browserCheck.blocked()) {
-            return super.doExecuteTool(name, argumentsJson);
+            return chain.proceed(context);
         }
         if (browserCheck.requiresPerCallApproval()) {
-            return executeAfterExplicitApproval(name, argumentsJson, browserCheck.sensitiveNotice());
+            return executeAfterExplicitApproval(context, chain, browserCheck.sensitiveNotice());
         }
+
         String mcpServer = ApprovalPolicy.mcpServerName(name);
         boolean forcePerCallApproval = mcpToolRequiresPerCallApproval(name);
         if (!forcePerCallApproval
-                && (hitlHandler.isApprovedAllByTool(name) || hitlHandler.isApprovedAllByServer(mcpServer))) {
-            return super.doExecuteTool(name, argumentsJson);
+                && (hitlHandler.isApprovedAllByTool(name)
+                || hitlHandler.isApprovedAllByServer(mcpServer))) {
+            return chain.proceed(context);
         }
 
-        return executeAfterExplicitApproval(name, argumentsJson,
+        return executeAfterExplicitApproval(context, chain,
                 forcePerCallApproval ? mcpToolApprovalNotice(name) : null);
     }
 
-    private ToolOutput executeAfterExplicitApproval(String name, String argumentsJson, String sensitiveNotice) {
+    private ToolOutput executeAfterExplicitApproval(ToolExecutionPipeline.Context context,
+                                                    ToolExecutionPipeline.Chain chain,
+                                                    String sensitiveNotice) {
         long start = System.nanoTime();
-        ApprovalRequest request = ApprovalRequest.of(name, argumentsJson, null, null, sensitiveNotice);
+        String originalArguments = context.argumentsJson();
+        ApprovalRequest request = ApprovalRequest.of(
+                context.name(), originalArguments, null, null, sensitiveNotice);
         ApprovalResult result = hitlHandler.requestApproval(request);
 
         if (result.isRejected()) {
@@ -74,19 +64,27 @@ public class HitlToolRegistry extends ToolRegistry {
                     ? result.reason()
                     : "用户拒绝了此操作";
             getAuditLog().record(AuditLog.AuditEntry.denyByHitl(
-                    name, argumentsJson, reason, elapsedMillis(start)));
-            return ToolOutput.text("[HITL] 操作已被拒绝：" + reason);
+                    context.name(), originalArguments, reason, elapsedMillis(start)));
+            return ToolOutput.rejected(ToolErrorCode.HITL_REJECTED,
+                    "[HITL] 操作已被拒绝：" + reason);
         }
 
         if (result.isSkipped()) {
             getAuditLog().record(AuditLog.AuditEntry.denyByHitl(
-                    name, argumentsJson, "用户跳过", elapsedMillis(start)));
-            return ToolOutput.text("[HITL] 操作已被跳过");
+                    context.name(), originalArguments, "用户跳过", elapsedMillis(start)));
+            return ToolOutput.rejected(ToolErrorCode.HITL_REJECTED,
+                    "[HITL] 操作已被跳过");
         }
 
-        // 批准（含修改参数）- 使用 effectiveArguments 获取最终参数；父类执行路径会负责 allow audit
-        String effectiveArgs = result.effectiveArguments(argumentsJson);
-        return super.doExecuteTool(name, effectiveArgs);
+        String effectiveArguments = result.effectiveArguments(originalArguments);
+        if (!effectiveArguments.equals(originalArguments)) {
+            ToolOutput validationError = validateToolArguments(context.name(), effectiveArguments);
+            if (validationError != null) {
+                return validationError;
+            }
+            context.replaceArguments(effectiveArguments);
+        }
+        return chain.proceed(context);
     }
 
     private static long elapsedMillis(long startNanos) {
