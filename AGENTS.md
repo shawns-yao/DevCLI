@@ -46,7 +46,7 @@ mvn test -DskipTests=false                  # 全量回归
 
 ## 架构概览
 
-三条主执行路径，共享 ToolRegistry / MemoryManager / SnapshotService：
+三条主执行路径，共享 ToolRegistry / MemoryManager / SnapshotService；ReAct、Plan task、SubAgent 的单轮控制流统一由 `AgentExecutionEngine` 承载，负责取消、预算、LLM 调用、工具消息协议和异常出口，各路径只实现差异钩子：
 
 | 路径 | 入口 | 触发 |
 |------|------|------|
@@ -56,7 +56,7 @@ mvn test -DskipTests=false                  # 全量回归
 
 Multi-Agent 中 Planner 负责拆解 DAG，Worker 负责实现子任务，Reviewer 负责硬检查通过后的质量审查。
 
-Planner 必须输出 `acceptance_criteria`；Orchestrator 会把验收点前置注入 Worker，并要求 Reviewer 用 `criteria_results` 逐条验证。验收点 `severity` 会随计划和 checkpoint 固化；critical/high 验收点失败或缺少覆盖时强制不通过。
+Plan 与 Multi-Agent 的 DAG 就绪判断和图结构校验统一使用 `ExecutionGraph`：普通节点只在依赖全部完成后执行，最终集成节点可在依赖进入完成或失败终态后执行；缺失依赖和环会在执行前拒绝。Planner 必须输出 `acceptance_criteria`；Orchestrator 会把验收点前置注入 Worker，并要求 Reviewer 用 `criteria_results` 逐条验证。验收点 `severity` 会随计划和 checkpoint 固化；critical/high 验收点失败或缺少覆盖时强制不通过。
 
 Multi-Agent 的 WorkingMemory 按角色注入隔离视图：Planner 只看任务状态 + 会话关键事件，不看工具原文证据；Worker 看完整任务状态 + 关键事件 + 工具证据；Reviewer 只看任务状态 + 工具证据，避免把会话事件误当验收依据。
 
@@ -84,7 +84,7 @@ Code RAG 检索链路当前为 keyword + semantic + bounded graph → `RRF（倒
 
 MCP 动态工具：`mcp__{server}__{tool}`（+ resources 虚拟工具）
 
-工具调用可靠性链路：LLM 先按 reasoning 说明目标、工具选择和参数来源；工具定义使用 JSON Schema 强约束类型、必填项、枚举值和未知字段；`ToolRegistry` 执行前通过 `json-schema-validator` + 本地兜底校验内置工具和 MCP 工具参数，失败以 `工具参数校验失败` 回传模型修正；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会提示先调用 `search_tools`；危险工具继续走 HITL / Policy / AuditLog；MCP 工具结果被截断或落盘预览时会标记折叠分类；工具结果进入 WorkingMemory，最终回答必须用工具证据闭环。
+工具调用可靠性链路：LLM 先按 reasoning 说明目标、工具选择和参数来源；工具定义使用 JSON Schema 强约束类型、必填项、枚举值和未知字段；`ToolRegistry` 通过 `ToolExecutionPipeline` 分阶段执行取消、工具存在性、Skill 权限、参数校验、HITL、审计、策略和结果尺寸治理，HITL 不再覆写执行入口；工具结果使用 `ToolStatus`、`ToolErrorCode` 和 retryable 结构化表达，ReAct、Plan、SubAgent 的重复错误熔断不再依赖结果文本关键词；执行前通过 `json-schema-validator` + 本地兜底校验内置工具和 MCP 工具参数，失败以 `工具参数校验失败` 回传模型修正；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会提示先调用 `search_tools`；危险工具继续走 HITL / Policy / AuditLog；MCP 工具结果被截断或落盘预览时会标记折叠分类；工具结果进入 WorkingMemory，最终回答必须用工具证据闭环。
 
 ## 仓库结构
 
@@ -112,7 +112,7 @@ src/main/java/com/devcli/
 └── render/      Renderer, InlineRenderer, PlainRenderer, RendererFactory
 ```
 
-Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔离；turn 执行池默认 2 线程 / 64 队列，过载返回 `429 runtime_busy`。同一 thread 的 turn 有上下文延续（存储即状态）：每 turn 新建 Agent，执行前经 `RuntimeThreadStore.turnHistory` 重放该 thread 最近 20 轮的输入/输出对（`TurnRunner` 接口带 threadId；失败/被拒 turn 不进历史）。
+Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔离；turn 执行池默认 2 线程 / 64 队列，过载返回 `429 runtime_busy`；`KeyedSerialExecutor` 保证同一 thread 的 turn 按提交顺序串行，不同 thread 可并行。同一 thread 的 turn 有上下文延续（存储即状态）：每 turn 新建 Agent，执行前经 `RuntimeThreadStore.turnHistory` 重放该 thread 最近 20 轮的输入/输出对（`TurnRunner` 接口带 threadId；失败/被拒 turn 不进历史）。交互、后台任务和无头 turn 使用运行级 `RunContext` 隔离项目路径、取消令牌和资源生命周期；取消状态不再回退到进程级全局 token，线程中断也视为取消。`HeadlessAgentRunner` 统一创建并关闭无头 Agent 使用的 ToolRegistry / MemoryManager，工具大结果落盘使用所属 ToolRegistry 的实例项目路径，不使用跨实例静态路径。
 
 启动与 inline 渲染当前约定：
 

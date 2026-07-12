@@ -226,6 +226,10 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - DurableTaskManager(SQLite) / CLI: /task, /task list, /task add, /task cancel, /task log
 - Runtime API: `serve --http --port 8080`，仅 127.0.0.1，需 API Key
 - 端点：POST /v1/threads / POST /v1/threads/{id}/turns / GET /v1/threads/{id}/events
+- Runtime API 的 turn 通过 `KeyedSerialExecutor` 调度：同一 thread 串行，不同 thread 并行，容量仍受 turn threads + queue 上限约束
+- 每次交互、后台任务和无头 turn 绑定独立 `RunContext`，其中包含项目路径与取消令牌；预先创建的线程池不读取其他运行的取消状态，线程中断也进入取消语义
+- `HeadlessAgentRunner` 统一管理无头 Agent、ToolRegistry 和 MemoryManager 生命周期；后台任务取消时同时取消对应 RunContext 并中断执行线程
+- ToolResultSizeManager 的落盘项目路径来自执行该工具的 ToolRegistry 实例，不再通过静态活动路径跨运行共享
 
 ### Image Input (Phase 21)
 
@@ -251,17 +255,23 @@ ReAct 主循环 / 对话历史 / 工具调用与结果回灌
 ### AgentOrchestrator.java
 Multi-Agent 编排器 / 三角色管理 / 按依赖分配 / 审查重试
 
+### AgentExecutionEngine.java
+ReAct / Plan task / SubAgent 共用循环；统一取消和预算检查、LLM 调用、assistant/tool 消息协议、结构化工具错误记录与 IOException 出口；路径差异通过 Delegate 钩子注入
+
 ### SubAgent.java
-可配置角色子代理 / 独立对话历史 / Worker 用工具、Planner/Reviewer 不用
+可配置角色子代理 / 独立对话历史 / Worker 用工具、Planner/Reviewer 不用；执行循环委托给 AgentExecutionEngine
 
 ### Planner.java
 LLM 生成计划 JSON / 简单任务最小计划 / 重编号 task_1..N / 依赖计算
 
+### ExecutionGraph.java
+Plan / Multi-Agent 共用 DAG 调度与校验；统一普通节点和最终集成节点的就绪规则、缺失依赖检测、环检测和拓扑排序
+
 ### ExecutionPlan.java
-DAG 拓扑排序 / 可执行任务判定 / 进度可视化
+任务状态 / 进度可视化；可执行任务判定和拓扑排序委托给 ExecutionGraph
 
 ### ToolRegistry.java
-12 个内置核心工具（含 `grep_code` 实时精确文本搜索）+ MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会返回 `search_tools` 引导和 query 示例
+12 个内置核心工具（含 `grep_code` 实时精确文本搜索）+ MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult；`ToolExecutionPipeline` 按阶段执行取消、存在性、Skill 权限、参数校验、HITL、审计、策略和结果治理；`ToolOutput` / `ToolExecutionResult` 携带 status、errorCode、retryable、imageParts 和 modifiedResources；HITL 作为管线中间件，不再覆写 executeTool；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会返回 `search_tools` 引导和 query 示例
 
 ### MCP Package
 McpServerManager / McpClient / JsonRpcClient / StdioTransport / StreamableHttpTransport / McpSchemaSanitizer / resources/ / mention/ / notifications/

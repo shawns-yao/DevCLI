@@ -29,7 +29,7 @@ DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、�
 
 围绕这三条路径，DevCLI 提供以下能力：
 
-- `ToolRegistry（工具注册表）`：统一管理内置工具、MCP 动态工具和 resource 读取工具；所有工具调用都走 JSON Schema 参数校验、HITL、策略层和审计链。
+- `ToolRegistry（工具注册表）`：统一管理内置工具、MCP 动态工具和 resource 读取工具；工具调用通过分阶段中间件执行取消检查、存在性检查、Skill 权限、JSON Schema 参数校验、HITL、策略、审计和结果尺寸治理，并返回带状态、错误码和重试语义的结构化结果。
 - `RAG（检索增强生成）`：用 JavaParser 切分 Java 代码，结合 SQLite 向量存储、关键词召回、代码关系图谱、RRF（倒数排名融合）、symbol-aware boost（符号感知加权）和 CrossEncoderReranker（交叉编码器重排），把相关类、方法、调用链注入模型上下文。
 - `Memory（记忆）`：区分对话历史、工作记忆、长期记忆和强约束记忆。长期记忆写入前经过规则化写入策略，避免把临时闲聊、敏感信息或低复用事实写入持久层。
 - `Prompt（提示词分层）`：base、personality、mode、approval、project_context、skills、context_mgmt、handoff 分层组装，支持 jar 内置、用户级和项目级覆盖。
@@ -38,7 +38,10 @@ DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、�
 - `HITL（Human-in-the-Loop）`：危险工具和敏感页面操作进入人工审批；审批前先过策略层，策略拒绝的操作不能靠用户批准绕过。
 - `Snapshot（快照）`：通过 Side-Git 在 turn 前后保存快照，支持回滚最近一轮变更，并按 `devcli.snapshot.max` 自动裁剪旧快照，降低 Agent 自动改文件的风险。
 - `Renderer（渲染器）`：默认 inline 模式提供底部状态栏、行内 thinking、工具块和 diff；也保留 plain 和 Lanterna TUI 模式。
-- `Runtime API`：本地 HTTP API 暴露 threads / turns / events，便于外部进程把 DevCLI 当作本地 Agent runtime 调用。
+- `Runtime API`：本地 HTTP API 暴露 threads / turns / events；同一 thread 的 turn 按提交顺序串行执行，不同 thread 可并行，避免同一会话并发读取过期历史。
+- `RunContext（运行上下文）`：每次交互、后台任务或无头 turn 绑定独立项目路径、取消令牌和资源生命周期；预先创建的线程不会读取其他任务的取消状态，无头 Agent 结束后会关闭本次创建的工具与记忆资源。
+- `AgentExecutionEngine（执行引擎）`：ReAct、Plan task 和 SubAgent 共用同一套取消、预算、LLM 调用、工具消息回灌和异常控制流程，各路径只保留提示词、渲染、记忆和任务结果等差异逻辑。
+- `ExecutionGraph（执行图）`：Plan 与 Multi-Agent 共用依赖就绪判断、最终集成调度、缺失依赖和环检测，避免两条编排路径各自实现 DAG 规则。
 - `Image Input`：支持 `@image:` 本地路径、file URL 和剪贴板图片，图片会做尺寸、格式和大小处理后进入模型输入。
 
 ## Architecture
