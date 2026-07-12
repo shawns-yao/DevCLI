@@ -1,5 +1,8 @@
 package com.devcli.runtime.task;
 
+import com.devcli.runtime.CancellationContext;
+import com.devcli.runtime.RunContext;
+
 import java.io.Closeable;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -17,15 +20,21 @@ import java.util.concurrent.TimeUnit;
 
 public class DurableTaskManager implements Closeable {
     private final Path dbPath;
+    private final Path projectPath;
     private final TaskRunner runner;
     private final int workerCount;
     private final Connection connection;
-    private final Map<String, Thread> runningTasks = new ConcurrentHashMap<>();
+    private final Map<String, RunningTask> runningTasks = new ConcurrentHashMap<>();
     private ExecutorService workers;
     private volatile boolean running;
 
     public DurableTaskManager(Path dbPath, TaskRunner runner, int workerCount) throws SQLException {
+        this(dbPath, Path.of(System.getProperty("user.dir")), runner, workerCount);
+    }
+
+    public DurableTaskManager(Path dbPath, Path projectPath, TaskRunner runner, int workerCount) throws SQLException {
         this.dbPath = dbPath;
+        this.projectPath = projectPath.toAbsolutePath().normalize();
         this.runner = runner;
         this.workerCount = Math.max(1, workerCount);
         try {
@@ -144,9 +153,10 @@ public class DurableTaskManager implements Closeable {
         if (current.isEmpty() || current.get().terminal()) {
             return false;
         }
-        Thread thread = runningTasks.remove(id);
-        if (thread != null) {
-            thread.interrupt();
+        RunningTask runningTask = runningTasks.remove(id);
+        if (runningTask != null) {
+            runningTask.context().cancel();
+            runningTask.thread().interrupt();
         }
         markTerminal(id, TaskStatus.CANCELED, current.get().result(), "用户取消", current.get().startedAt());
         notifyAll();
@@ -169,9 +179,9 @@ public class DurableTaskManager implements Closeable {
                     continue;
                 }
                 String taskId = task.id();
-                runningTasks.put(taskId, Thread.currentThread());
                 Instant startedAt = Instant.now();
-                try {
+                try (RunContext context = CancellationContext.startRunContext(projectPath)) {
+                    runningTasks.put(taskId, new RunningTask(Thread.currentThread(), context));
                     String result = runner.run(task.prompt());
                     synchronized (this) {
                         DurableTask latest = find(taskId).orElse(null);
@@ -326,10 +336,14 @@ public class DurableTaskManager implements Closeable {
         return Instant.parse(value);
     }
 
+    private record RunningTask(Thread thread, RunContext context) {
+    }
+
     @Override
     public synchronized void close() {
         running = false;
         notifyAll();
+        runningTasks.values().forEach(task -> task.context().cancel());
         if (workers != null) {
             workers.shutdownNow();
             try {

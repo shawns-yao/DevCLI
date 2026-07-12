@@ -49,6 +49,7 @@ public class Agent implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(Agent.class);
     private LlmClient llmClient;
     private final ToolRegistry toolRegistry;
+    private final boolean ownsToolRegistry;
     private final List<LlmClient.Message> conversationHistory;
     private final MemoryManager memoryManager;
     private final ConversationHistoryCompactor historyCompactor;
@@ -63,12 +64,17 @@ public class Agent implements AutoCloseable {
     private String currentSkillActivationText = "";
 
     public Agent(LlmClient llmClient) {
-        this(llmClient, new ToolRegistry());
+        this(llmClient, new ToolRegistry(), true);
     }
 
     public Agent(LlmClient llmClient, ToolRegistry toolRegistry) {
+        this(llmClient, toolRegistry, false);
+    }
+
+    Agent(LlmClient llmClient, ToolRegistry toolRegistry, boolean ownsToolRegistry) {
         this.llmClient = llmClient;
         this.toolRegistry = toolRegistry;
+        this.ownsToolRegistry = ownsToolRegistry;
         this.conversationHistory = new ArrayList<>();
         this.memoryManager = new MemoryManager(llmClient);
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
@@ -515,8 +521,14 @@ public class Agent implements AutoCloseable {
      */
     @Override
     public void close() {
-        if (memoryManager != null) {
-            memoryManager.close();
+        try {
+            if (memoryManager != null) {
+                memoryManager.close();
+            }
+        } finally {
+            if (ownsToolRegistry && toolRegistry != null) {
+                toolRegistry.close();
+            }
         }
     }
 

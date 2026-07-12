@@ -35,6 +35,8 @@ import com.devcli.rag.CodeRelation;
 import com.devcli.rag.SearchResultFormatter;
 import com.devcli.runtime.CancellationContext;
 import com.devcli.runtime.CancellationToken;
+import com.devcli.runtime.HeadlessAgentRunner;
+import com.devcli.runtime.RunContext;
 import com.devcli.runtime.api.RuntimeApiServer;
 import com.devcli.runtime.api.RuntimeThreadStore;
 import com.devcli.runtime.task.DurableTaskManager;
@@ -771,6 +773,7 @@ public class Main {
                 renderer.updateStatus(statusInfo(llmClient, hitlHandler, snapshotMode, mcpServerManager, skillRegistry));
                 String response = runWithCancelSupport(terminal,
                         ui,
+                        Path.of(reactAgent.getToolRegistry().getProjectPath()),
                         () -> snapshotService.runTurn(snapshotMode, taskInput, runTask::call));
                 if (!"react".equals(snapshotMode)) {
                     renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
@@ -848,11 +851,11 @@ public class Main {
     }
 
     private static String runHeadlessTask(String prompt, LlmClient llmClient) {
-        ToolRegistry registry = new ToolRegistry();
-        registry.setProjectPath(Path.of(".").toAbsolutePath().normalize().toString());
-        try (Agent agent = new Agent(llmClient, registry)) {
-            return agent.run(prompt);
-        }
+        return HeadlessAgentRunner.run(
+                llmClient,
+                Path.of("."),
+                prompt,
+                List.of());
     }
 
     /** 重放历史的 turn 上限：更早的 turn 直接丢弃，窗口内的超长治理交给 ConversationHistoryCompactor。 */
@@ -865,21 +868,20 @@ public class Main {
      */
     private static String runHeadlessTurn(String threadId, String prompt,
                                           LlmClient llmClient, RuntimeThreadStore store) {
-        ToolRegistry registry = new ToolRegistry();
-        registry.setProjectPath(Path.of(".").toAbsolutePath().normalize().toString());
-        try (Agent agent = new Agent(llmClient, registry)) {
-            List<RuntimeThreadStore.TurnRecord> history = store.turnHistory(threadId);
-            if (history.size() > RUNTIME_TURN_HISTORY_LIMIT) {
-                history = history.subList(history.size() - RUNTIME_TURN_HISTORY_LIMIT, history.size());
-            }
-            List<LlmClient.Message> seed = new ArrayList<>();
-            for (RuntimeThreadStore.TurnRecord turn : history) {
-                seed.add(LlmClient.Message.user(turn.input()));
-                seed.add(LlmClient.Message.assistant(turn.output()));
-            }
-            agent.seedHistory(seed);
-            return agent.run(prompt);
+        List<RuntimeThreadStore.TurnRecord> history = store.turnHistory(threadId);
+        if (history.size() > RUNTIME_TURN_HISTORY_LIMIT) {
+            history = history.subList(history.size() - RUNTIME_TURN_HISTORY_LIMIT, history.size());
         }
+        List<LlmClient.Message> seed = new ArrayList<>();
+        for (RuntimeThreadStore.TurnRecord turn : history) {
+            seed.add(LlmClient.Message.user(turn.input()));
+            seed.add(LlmClient.Message.assistant(turn.output()));
+        }
+        return HeadlessAgentRunner.run(
+                llmClient,
+                Path.of("."),
+                prompt,
+                seed);
     }
 
     private static DurableTaskManager openTaskManager(AtomicReference<LlmClient> llmClientRef) {
@@ -939,8 +941,10 @@ public class Main {
         return null;
     }
 
-    private static String runWithCancelSupport(Terminal terminal, PrintStream out, Callable<String> task) {
-        CancellationToken token = CancellationContext.startRun();
+    private static String runWithCancelSupport(Terminal terminal, PrintStream out,
+                                               Path projectPath, Callable<String> task) {
+        RunContext runContext = CancellationContext.startRunContext(projectPath);
+        CancellationToken token = runContext.cancellationToken();
         ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
             Thread thread = new Thread(r, "devcli-agent-runner");
             thread.setDaemon(true);
@@ -989,7 +993,7 @@ public class Main {
                 } catch (Exception ignored) {
                 }
             }
-            CancellationContext.clear(token);
+            runContext.close();
             executor.shutdownNow();
         }
     }

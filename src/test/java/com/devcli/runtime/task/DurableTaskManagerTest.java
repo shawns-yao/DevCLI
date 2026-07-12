@@ -1,10 +1,16 @@
 package com.devcli.runtime.task;
 
+import com.devcli.runtime.CancellationContext;
+import com.devcli.runtime.RunContext;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -41,6 +47,36 @@ class DurableTaskManagerTest {
     }
 
     @Test
+    void bindsAndCancelsRunContextForRunningTask(@TempDir Path tempDir) throws Exception {
+        AtomicReference<RunContext> seenContext = new AtomicReference<>();
+        CountDownLatch started = new CountDownLatch(1);
+        try (DurableTaskManager manager = new DurableTaskManager(
+                tempDir.resolve("tasks.db"),
+                prompt -> {
+                    RunContext context = CancellationContext.currentRun();
+                    seenContext.set(context);
+                    started.countDown();
+                    if (context == null) {
+                        return "missing-context";
+                    }
+                    while (!context.isCancelled()) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
+                    }
+                    return "canceled";
+                },
+                1)) {
+            manager.start();
+            DurableTask task = manager.enqueue("slow");
+
+            assertTrue(started.await(3, TimeUnit.SECONDS));
+            assertNotNull(seenContext.get());
+            assertTrue(manager.cancel(task.id()));
+            assertTrue(waitForCancellation(seenContext.get()));
+            assertEquals(TaskStatus.CANCELED, waitForTerminal(manager, task.id()).status());
+        }
+    }
+
+    @Test
     void cancelsRunningTask(@TempDir Path tempDir) throws Exception {
         try (DurableTaskManager manager = new DurableTaskManager(
                 tempDir.resolve("tasks.db"),
@@ -58,6 +94,17 @@ class DurableTaskManagerTest {
 
             assertEquals(TaskStatus.CANCELED, canceled.status());
         }
+    }
+
+    private static boolean waitForCancellation(RunContext context) throws InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(3).toNanos();
+        while (System.nanoTime() < deadline) {
+            if (context.isCancelled()) {
+                return true;
+            }
+            Thread.sleep(10);
+        }
+        return false;
     }
 
     private static DurableTask waitForTerminal(DurableTaskManager manager, String id) throws InterruptedException {

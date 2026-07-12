@@ -8,6 +8,7 @@ import com.devcli.hitl.HitlHandler;
 import com.devcli.llm.LlmClient;
 import com.devcli.runtime.CancellationContext;
 import com.devcli.runtime.CancellationToken;
+import com.devcli.runtime.RunContext;
 import com.devcli.snapshot.RestoreResult;
 import com.devcli.snapshot.SnapshotService;
 import com.devcli.snapshot.TurnSnapshot;
@@ -220,7 +221,9 @@ public final class TuiSessionController implements AutoCloseable {
     }
 
     private void runAgentTask(String input, RunMode mode) {
-        CancellationToken token = CancellationContext.startRun();
+        RunContext runContext = CancellationContext.startRunContext(
+                java.nio.file.Path.of(reactAgent.getToolRegistry().getProjectPath()));
+        CancellationToken token = runContext.cancellationToken();
         currentToken = token;
         statusPane.startTimer();
         statusPane.updateMode(mode.label);
@@ -241,7 +244,7 @@ public final class TuiSessionController implements AutoCloseable {
         } catch (Exception e) {
             output = "执行失败: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
         } finally {
-            CancellationContext.clear(token);
+            runContext.close();
             currentToken = null;
             ui(() -> {
                 statusPane.stopTimer();
