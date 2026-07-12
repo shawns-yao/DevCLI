@@ -31,6 +31,7 @@ public class RuntimeApiServer implements AutoCloseable {
     private final HttpServer server;
     private final ExecutorService httpExecutor;
     private final ThreadPoolExecutor turnExecutor;
+    private final KeyedSerialExecutor serialTurnExecutor;
 
     public RuntimeApiServer(RuntimeThreadStore store, TurnRunner runner, int port, String apiKey) throws IOException {
         if (apiKey == null || apiKey.isBlank()) {
@@ -42,15 +43,20 @@ public class RuntimeApiServer implements AutoCloseable {
         this.server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
         this.httpExecutor = Executors.newFixedThreadPool(configuredPositiveInt(
                 "devcli.runtime.api.http.threads", DEFAULT_HTTP_THREADS), daemonThreadFactory("devcli-runtime-api-http"));
+        int turnThreads = configuredPositiveInt(
+                "devcli.runtime.api.turn.threads", DEFAULT_TURN_THREADS);
+        int turnQueueSize = configuredPositiveInt(
+                "devcli.runtime.api.turn.queue", DEFAULT_TURN_QUEUE_SIZE);
         this.turnExecutor = new ThreadPoolExecutor(
-                configuredPositiveInt("devcli.runtime.api.turn.threads", DEFAULT_TURN_THREADS),
-                configuredPositiveInt("devcli.runtime.api.turn.threads", DEFAULT_TURN_THREADS),
+                turnThreads,
+                turnThreads,
                 0L,
                 TimeUnit.MILLISECONDS,
-                new ArrayBlockingQueue<>(configuredPositiveInt(
-                        "devcli.runtime.api.turn.queue", DEFAULT_TURN_QUEUE_SIZE)),
+                new ArrayBlockingQueue<>(turnQueueSize),
                 daemonThreadFactory("devcli-runtime-api-turn"),
                 new ThreadPoolExecutor.AbortPolicy());
+        this.serialTurnExecutor = new KeyedSerialExecutor(
+                turnExecutor, turnThreads + turnQueueSize);
         this.server.createContext("/v1/threads", this::handleThreads);
         this.server.setExecutor(httpExecutor);
     }
@@ -111,7 +117,7 @@ public class RuntimeApiServer implements AutoCloseable {
         }
         String turnId = "turn_" + Long.toHexString(System.nanoTime());
         try {
-            turnExecutor.submit(() -> runTurn(threadId, turnId, input));
+            serialTurnExecutor.execute(threadId, () -> runTurn(threadId, turnId, input));
         } catch (RejectedExecutionException e) {
             store.appendEvent(threadId, "turn.rejected",
                     "{\"turn_id\":\"" + turnId + "\",\"error\":\"runtime_busy\"}");
