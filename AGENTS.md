@@ -56,27 +56,29 @@ mvn test -DskipTests=false                  # 全量回归
 
 Multi-Agent 中 Planner 负责拆解 DAG，Worker 负责实现子任务，Reviewer 负责硬检查通过后的质量审查。
 
-Plan 与 Multi-Agent 的 DAG 就绪判断和图结构校验统一使用 `ExecutionGraph`：普通节点只在依赖全部完成后执行，最终集成节点可在依赖进入完成或失败终态后执行；缺失依赖和环会在执行前拒绝。Planner 必须输出 `acceptance_criteria`；Orchestrator 会把验收点前置注入 Worker，并要求 Reviewer 用 `criteria_results` 逐条验证。验收点 `severity` 会随计划和 checkpoint 固化；critical/high 验收点失败或缺少覆盖时强制不通过。
+Plan 与 Multi-Agent 的 DAG 就绪判断和图结构校验统一使用 `ExecutionGraph`：普通节点只在依赖全部完成后执行，最终集成节点可在依赖进入完成或失败终态后执行；缺失依赖和环会在执行前拒绝。Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用 `ExecutionArtifact`，状态、输出、摘要、修改资源、错误、尝试次数和时间戳不再分散存储。Planner 必须输出 `acceptance_criteria`；Orchestrator 会把验收点前置注入 Worker，并要求 Reviewer 用 `criteria_results` 逐条验证。验收点 `severity` 会随计划和 checkpoint 固化；critical/high 验收点失败或缺少覆盖时强制不通过。
 
 Multi-Agent 的 WorkingMemory 按角色注入隔离视图：Planner 只看任务状态 + 会话关键事件，不看工具原文证据；Worker 看完整任务状态 + 关键事件 + 工具证据；Reviewer 只看任务状态 + 工具证据，避免把会话事件误当验收依据。
 
 Multi-Agent 并行批次使用 `SubAgent.ForkContext` 共享冻结 system prompt 前缀、exact tool definitions 快照、skill body 快照和 fork fingerprint；每个子任务只追加自己的 user 后缀，避免并行 Worker / Reviewer 因历史或动态工具差异破坏 prompt cache 命中。
 
-并行 Worker 写文件时，`ToolRegistry.write_file` 会进入运行时资源租约检查：每个 `/plan` task 或 `/team` step 以自己的 id 持有写租约，同一文件只能被一个运行中步骤写入；冲突返回策略拒绝，不做 last-writer-wins 覆盖或 LLM 自动合并。`/plan` task 和 `/team` Worker 尝试结束后都会在 finally 中释放本步骤租约，避免异常、Reviewer 打回或重做路径遗留租约。设计说明见 `docs/runtime-resource-lease-design.md`。
+并行 Worker 写文件时，隔离 ToolRegistry 内的 `write_file` 仍进入运行时资源租约检查：每个 `/plan` task 或 `/team` step 以自己的 id 持有写租约，同一隔离工作区文件只能被一个运行中步骤写入；冲突返回策略拒绝，不做 last-writer-wins 覆盖或 LLM 自动合并。`/plan` task 和 `/team` Worker 尝试结束后都会在 finally 中释放本步骤租约。设计说明见 `docs/runtime-resource-lease-design.md`。
 
-Reviewer 前置硬约束：Worker 产物进入 Reviewer LLM 前，`AgentOrchestrator` 会先跑 Pre-Review Hook；Java 项目优先 `mvn -q -DskipTests test-compile`，无 Maven 时用 `javac -encoding UTF-8` 编译 `src/main/java`。失败时直接生成 `approved=false` 反馈打回 Worker，不唤醒 Reviewer LLM。
+副作用执行协议：`/plan` 的 FILE_WRITE / COMMAND / VERIFICATION 与 `/team` 的副作用步骤使用 `WorkspaceExecutionSession` 创建隔离工作区和项目级 ToolRegistry；Worker、Pre-Review、Reviewer 读取同一隔离目录。批准后生成 `PatchSet`，先做 SHA-256 前置版本校验和全量冲突预检，再以原子替换写回主项目；冲突、Reviewer 拒绝、执行失败或取消时不应用。PatchSet 拒绝非普通文件覆盖、相对路径逃逸和符号链接/重解析点逃逸，应用中途失败会回滚已改文件。隔离默认开启，`DEVCLI_WORKSPACE_ISOLATION_ENABLED=false` / `-Ddevcli.workspace.isolation.enabled=false` 可临时关闭，`-Ddevcli.workspace.dir` 可覆盖隔离目录；这不是容器或 VM 沙箱。
+
+Reviewer 前置硬约束：Worker 产物进入 Reviewer LLM 前，`AgentOrchestrator` 委托 `PreReviewVerifier` 执行 Pre-Review Hook；Java 项目优先 `mvn -q -DskipTests test-compile`，无 Maven 时用 `javac -encoding UTF-8` 编译 `src/main/java`。验证器独立负责 Java 文件扫描、命令选择、超时、进程输出解码和失败摘要。失败时直接生成 `approved=false` 反馈打回 Worker，不唤醒 Reviewer LLM。
 
 Reviewer 输出必须是可解析 JSON，并包含三层评分：`functional_correctness`、`integration_completeness`、`code_quality`。任一分数低于 `0.6`，或 `functional_correctness < 1.0`，Orchestrator 强制判不通过；非 JSON 文本不再凭“通过”等关键词放行。
 
 Final integration 只做入口/API/默认参数/跨模块联动胶水；普通步骤失败比例达到 `50%` 时熔断，不让最终步骤强行修补。
 
-失败步骤支持有界在位重做（默认 1 次）：正常步骤走完仍有失败时，失败步骤保持原 id/依赖在 DAG 原位换思路重做（buildStepContext 注入上次失败反馈），而非生成平行恢复计划——恢复始终长在原 DAG 上、通过依赖关系看到已完成成果，从机制上消除"平行计划 vs 已落盘成果"冲突；redo 用尽仍失败则保持 FAILED 终态，由熔断与汇总处理。在位重做的状态与决策由 `StepRedoTracker` 承载（与调度循环解耦）。Orchestration 的计划（步骤/依赖/验收点）与进度（完整 result + 修改文件清单）落盘到 `~/.devcli/checkpoints/`（原子写入；全部成功后删除）；中断后可用 `/team resume [id]` 断点续跑——已完成步骤直接带回 result，其余重置 PENDING 重新执行；resume 不恢复 WorkingMemory / 会话记忆。
+失败步骤支持有界在位重做（默认 1 次）：正常步骤走完仍有失败时，失败步骤保持原 id/依赖在 DAG 原位换思路重做（buildStepContext 注入上次失败反馈），而非生成平行恢复计划；redo 用尽仍失败则保持 FAILED 终态，由熔断与汇总处理。在位重做的状态与决策由 `StepRedoTracker` 承载。checkpoint 协议版本 2 保存共享 `ExecutionArtifact`，通过 `RecoveryState` 统一恢复 completed / failed 产物；旧 checkpoint 的 completed / failed map 会先归一化。计划、依赖、验收点和执行产物原子写入 `~/.devcli/checkpoints/`，全部成功后删除；`/team resume [id]` 保留已完成产物，其余节点重置为 PENDING，resume 不恢复 WorkingMemory / 会话记忆。
 
 Side-Git 快照按 `devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX` 保留最近快照；每次新建快照后会重写 side-history，只保留最新 N 条，避免长会话快照无限增长。
 
 副作用横向信息流：write_file/execute_command 等副作用工具的证据在 `WorkingMemory.recentToolResults` 中优先保留、不被只读操作（read_file/search）的 FIFO 淘汰挤出，使后续步骤/轮次持续看到"本会话改过哪些文件"。这是改进既有工具证据淘汰策略实现的，未新增重复的文件账本维度。
 
-职责边界：`WorkingMemory` 是**当前会话内**的副作用证据缓存（会淘汰、不跨进程）；步骤完成或失败时，`ToolRegistry` 记录的 `stepModifiedFiles` 会同步写入运行态 `ExecutionStep`、checkpoint `StepArtifact.modifiedFiles` 和 WorkingMemory 关键事件。后续依赖步骤会看到已完成依赖的修改文件清单，`/team resume` 会从 checkpoint 恢复 completed / failed artifact 的 `modifiedFiles`，让 Worker 先读当前落盘内容再衔接实现。同进程靠 WorkingMemory，跨进程靠 checkpoint，二者互补。
+职责边界：`WorkingMemory` 是当前会话内的副作用证据缓存，会淘汰且不跨进程；`ExecutionArtifact` 是 Plan / Multi-Agent / checkpoint 的任务终态唯一来源。隔离执行期间的修改只存在工作区内，PatchSet 成功应用后才把 `modifiedResources` 同步到运行态、checkpoint 和 WorkingMemory。后续依赖步骤读取已批准的主项目成果；同进程靠 WorkingMemory，跨进程靠 checkpoint `RecoveryState`。
 
 内置核心工具 12 个：`read_file` / `write_file` / `list_dir` / `execute_command` / `create_project` / `search_code` / `grep_code` / `web_search` / `web_fetch` / `save_memory` / `list_memory` / `revert_turn`
 
@@ -96,13 +98,14 @@ src/main/java/com/devcli/
 ├── llm/         AnthropicClient, GLMClient, DeepSeekClient, StepClient, KimiClient, OpenAiClient
 ├── context/     ContextProfile, ContextMode, TokenUsageFormatter
 ├── memory/      MemoryManager, ConversationHistoryCompactor, LongTermMemory, TaskLedger
-├── plan/        Planner, ExecutionPlan, Task
+├── plan/        Planner, ExecutionPlan, ExecutionGraph, ExecutionArtifact, Task
 ├── rag/         CodeIndex, CodeRetriever, VectorStore, CodeChunker
 ├── lsp/         LspManager, LspDiagnosticFormatter
 ├── prompt/      PromptAssembler, PromptContext, PromptRepository
 ├── image/       ImageReferenceParser
 ├── runtime/     api/ (RuntimeApiServer) + task/ (DurableTaskManager)
 ├── snapshot/    SideGitManager, SnapshotService
+├── workspace/   IsolatedWorkspace, WorkspaceExecutionSession, PatchSet
 ├── tool/        ToolRegistry
 ├── mcp/         McpClient, McpServerManager, transport/, resources/, mention/
 ├── hitl/        HitlToolRegistry, ApprovalPolicy, TerminalHitlHandler

@@ -24,8 +24,8 @@ DevCLI 是一个面向 Java 后端开发者的终端 Agent CLI。它可以在命
 DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、代码仓库、记忆、审批、终端交互”串成一个本地开发工作流。核心执行路径分三类：
 
 - `ReAct`：默认模式。模型边思考边选择工具，工具结果会回灌到下一轮推理，适合阅读代码、定位问题、执行命令、做小范围修改。
-- `Plan-and-Execute`：通过 `/plan` 进入。Planner 先拆任务和依赖，再按 DAG（有向无环图）执行，适合多步骤改造、跨文件修复、需要先审计划的任务。任务完成或失败时会记录结构化修改文件清单和短结果摘要；失败后 replan 是无工具的 Planner 调用，只用这些最小产物事实生成后续计划，避免重复规划已落盘成果。
-- `Multi-Agent`：通过 `/team` 进入。Planner 负责拆解和验收标准，Worker 执行具体子任务，Reviewer 在硬检查通过后做质量审查，适合复杂任务和需要并行推进的工作。
+- `Plan-and-Execute`：通过 `/plan` 进入。Planner 先拆任务和依赖，再按 DAG（有向无环图）执行，适合多步骤改造、跨文件修复、需要先审计划的任务。任务状态与产物统一保存在 `ExecutionArtifact`；FILE_WRITE、COMMAND 和 VERIFICATION 在隔离工作区执行，任务成功后才通过 PatchSet 回写主项目。失败后 replan 是无工具的 Planner 调用，只用结构化产物事实生成后续计划，避免重复规划已落盘成果。
+- `Multi-Agent`：通过 `/team` 进入。Planner 负责拆解和验收标准，Worker 在隔离工作区执行具体子任务，Pre-Review 先做硬验证，Reviewer 读取同一隔离产物做质量审查；只有审查通过且 PatchSet 无冲突时才修改主项目。
 
 围绕这三条路径，DevCLI 提供以下能力：
 
@@ -42,6 +42,8 @@ DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、�
 - `RunContext（运行上下文）`：每次交互、后台任务或无头 turn 绑定独立项目路径、取消令牌和资源生命周期；预先创建的线程不会读取其他任务的取消状态，无头 Agent 结束后会关闭本次创建的工具与记忆资源。
 - `AgentExecutionEngine（执行引擎）`：ReAct、Plan task 和 SubAgent 共用同一套取消、预算、LLM 调用、工具消息回灌和异常控制流程，各路径只保留提示词、渲染、记忆和任务结果等差异逻辑。
 - `ExecutionGraph（执行图）`：Plan 与 Multi-Agent 共用依赖就绪判断、最终集成调度、缺失依赖和环检测，避免两条编排路径各自实现 DAG 规则。
+- `ExecutionArtifact（执行产物）`：Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用状态、输出、摘要、修改资源、错误、尝试次数与时间戳；checkpoint 协议版本 2 通过统一恢复状态兼容旧数据。
+- `Workspace + PatchSet（隔离工作区与补丁集）`：副作用任务先复制项目到隔离目录执行，使用 SHA-256 前置版本校验、全量冲突预检、链接逃逸拦截、原子替换和失败回滚后再写回主项目。
 - `Image Input`：支持 `@image:` 本地路径、file URL 和剪贴板图片，图片会做尺寸、格式和大小处理后进入模型输入。
 
 ## Architecture
@@ -69,7 +71,8 @@ Main
 - `WorkingMemory（工作记忆）` 只保存当前会话派生状态，不承担压缩职责。`RagEvidenceMemory（RAG 证据记忆）` 会记录检索证据的 `IndexEpoch（索引版本）`、`SymbolVersion（符号版本）` 和 `ClasspathEpoch（类路径版本）`；`search_code` 通过结构化 `RAG_EVIDENCE_JSON` 载荷传递证据，避免依赖展示文本解析。
 - `LongTermMemory（长期记忆）` 只保存跨会话稳定事实，默认不把临时任务请求写入长期层。`SymbolInvalidation（符号失效）` 会在索引替换时记录变更和删除的旧/新符号版本差异，并通过 `NegativeFact（负向事实）` 告诉模型哪些旧事实不可用；`search_code` 会输出与查询相关的失效事实，供 WorkingMemory 清理旧 RAG 证据。长期记忆注入时会抑制与 WorkingMemory 临时事实语义重复的条目。
 - `PathGuard（路径围栏）` 负责限制文件访问不逃逸项目根。
-- `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 和 `/team` 并行执行时拦截 `write_file`，同一文件只能被一个运行中 task / step 写入，并在 task / Worker 尝试结束后释放对应租约，避免运行时新增文件写入目标导致互相覆盖或后续步骤被残留租约阻塞。
+- `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 和 `/team` 并行执行时拦截 `write_file`，同一文件只能被一个运行中 task / step 写入，并在 task / Worker 尝试结束后释放对应租约，避免隔离工作区内部并发覆盖。
+- `PatchSet（补丁集）` 是隔离结果进入主项目的唯一文件回写边界：Reviewer 拒绝、任务失败、用户取消、前置哈希冲突、非普通文件覆盖或路径/链接逃逸都会阻止整批应用，不做部分写入。
 - `CommandGuard（命令防线）` 是危险命令快速拒绝层，不替代 HITL 和路径策略。
 - `HitlToolRegistry（审批工具注册表）` 位于真实工具执行前，保证危险操作先经过审批和策略判定。
 
@@ -366,11 +369,13 @@ Runtime API 默认仅绑定 `127.0.0.1`。HTTP 请求线程和 Agent 执行线�
 /team 检查认证模块的安全问题，修复高风险项并补充测试
 ```
 
-Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 做实现，Reviewer 做硬检查后的质量审查。验收点会前置注入 Worker，并由 Reviewer 用 `criteria_results` 逐条验证；Planner 给出的 `severity` 会随计划和 checkpoint 固化，critical/high 失败或缺少覆盖强制不通过。三角色注入 role-scoped WorkingMemory：Planner 看任务状态 + 关键事件，Worker 看完整上下文，Reviewer 看任务状态 + 工具证据。Reviewer 前会自动执行 Java 编译硬检查，失败直接打回；Reviewer 必须输出可解析 JSON，并采用 `functional_correctness` / `integration_completeness` / `code_quality` 三层评分，未达阈值强制不通过，非 JSON 文本不再凭关键词放行。
+Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 在步骤级隔离工作区实现，`PreReviewVerifier` 在同一隔离目录执行 Java 编译硬检查，Reviewer 再读取真实隔离产物做质量审查。验收点会前置注入 Worker，并由 Reviewer 用 `criteria_results` 逐条验证；Planner 给出的 `severity` 会随计划和 checkpoint 固化，critical/high 失败或缺少覆盖强制不通过。三角色注入 role-scoped WorkingMemory：Planner 看任务状态 + 关键事件，Worker 看完整上下文，Reviewer 看任务状态 + 工具证据。Reviewer 必须输出可解析 JSON，并采用 `functional_correctness` / `integration_completeness` / `code_quality` 三层评分，未达阈值强制不通过，非 JSON 文本不再凭关键词放行；审查通过后生成 PatchSet，只有全量冲突预检通过才一次性写回主项目。
 
 并行 Worker 数量默认 `2`，可通过 `DEVCLI_TEAM_WORKERS` 环境变量或 `-Ddevcli.team.workers` 系统属性调整（取值夹在 `[1, 8]`，非法值回退默认）。同一依赖批次内相互独立的步骤会按 Worker 池大小并行执行。
 
-失败恢复采用「在位重做」而非平行重规划：失败步骤保持原 id/依赖在 DAG 原位换思路重做（默认 1 次，带上次失败反馈），恢复始终长在原 DAG 上、通过依赖关系看到已完成成果，从机制上避免「新计划与已落盘成果冲突」；redo 用尽仍失败则保持失败终态。代码开发有副作用（write_file 已落盘），所以 write_file/execute_command 的工具证据在工作记忆中优先保留、不被只读操作挤出，使后续步骤持续看到本会话改过哪些文件，在真实现状上工作。
+隔离工作区默认开启，可通过 `DEVCLI_WORKSPACE_ISOLATION_ENABLED=false` 或 `-Ddevcli.workspace.isolation.enabled=false` 临时关闭；默认目录为项目下的 `Temp/devcli-workspaces`，可用 `-Ddevcli.workspace.dir=/path/to/workspaces` 覆盖。该隔离只约束项目文件回写，不等同于容器或 VM 沙箱。
+
+失败恢复采用「在位重做」而非平行重规划：失败步骤保持原 id/依赖在 DAG 原位换思路重做（默认 1 次，带上次失败反馈），恢复始终长在原 DAG 上、通过依赖关系看到已完成成果；redo 用尽仍失败则保持失败终态。Plan `Task`、Multi-Agent `ExecutionStep` 与 checkpoint 共用 `ExecutionArtifact`，checkpoint 协议版本 2 通过 `RecoveryState` 恢复 completed/failed 产物，并兼容旧 checkpoint。write_file/execute_command 的工具证据在工作记忆中优先保留，已批准的 PatchSet 修改资源会同步进入运行态、checkpoint 和后续依赖上下文。
 
 常见任务写法：
 
@@ -462,7 +467,7 @@ Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 做实现
 DevCLI 的上下文分为四层：
 
 - `ConversationHistory（对话历史）`：真实 LLM messages，由压缩器治理窗口。
-- `WorkingMemory（工作记忆）`：当前会话工具证据、任务状态和临时事实，不跨会话持久化。用户显式要求“别管记忆”“忽略记忆”等时，本会话不注入长期记忆、通用 WorkingMemory 和角色裁剪后的 WorkingMemory。其中 `TaskLedger（任务账本）` 结构化记录计划执行进度（当前 step / 已完成 / 待执行 / 失败），不进对话历史、压缩不触碰它，让长 plan 压缩后仍能看到进度；当前由 `/plan`（PlanExecuteAgent）维护。Multi-Agent 步骤完成或失败时会把 `stepModifiedFiles` 写入运行态、checkpoint 和 WorkingMemory，后续依赖步骤及 `/team resume` 会看到上游修改文件。压缩后恢复上下文会按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 和 MCP 工具状态分节注入，并做预算控制与行级去重；microcompact 工具引用会按 storedPath / toolCallId 去重；Multi-Agent 会按 Planner / Worker / Reviewer 裁剪恢复内容，避免恢复段重复携带完整工具输出。压缩边界会同时记录全局 RAG 索引版本和当前会话 RAG 证据版本。
+- `WorkingMemory（工作记忆）`：当前会话工具证据、任务状态和临时事实，不跨会话持久化。用户显式要求“别管记忆”“忽略记忆”等时，本会话不注入长期记忆、通用 WorkingMemory 和角色裁剪后的 WorkingMemory。其中 `TaskLedger（任务账本）` 结构化记录计划执行进度，不进对话历史、压缩不触碰它；当前由 `/plan` 维护。Plan 与 Multi-Agent 的任务终态统一落在 `ExecutionArtifact`，只有主项目成功应用的 PatchSet 修改资源才写入运行态、checkpoint 和 WorkingMemory；checkpoint 版本 2 的 `RecoveryState` 负责跨进程恢复，旧 completed/failed 结构会先归一化。压缩后恢复上下文会按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 和 MCP 工具状态分节注入，并做预算控制与行级去重；microcompact 工具引用会按 storedPath / toolCallId 去重；Multi-Agent 会按 Planner / Worker / Reviewer 裁剪恢复内容，避免恢复段重复携带完整工具输出。压缩边界会同时记录全局 RAG 索引版本和当前会话 RAG 证据版本。
 - `SessionMemory（会话预摘要）`：当前进程内缓存压缩前置摘要，覆盖同一消息指纹且未过期时可被压缩器复用；默认 30 分钟过期。Plan / Multi-Agent turn 结束后会后台维护预摘要，避免主流程等待摘要 LLM 调用。
 - `LongTermMemory（长期记忆）`：跨会话稳定事实，SQLite 持久化，支持检索注入；写入前经过 `LongTermMemoryPolicy` 规则化分流，中英文显式低敏偏好/项目事实、稳定个人属性和多次重复出现的稳定事实可保存，反馈类事实按 `FEEDBACK` 类型落库，敏感或模糊新事实要求确认，中英文临时闲聊和低复用信息跳过；显式保存请求如果内容仍然明显临时或低复用，也先进入确认态而不是直接落库。命中 `subject（主题键）` 的事实写入时，同主题旧事实自动标记为 `superseded（已取代）`，检索只返回 `active（有效）` 条目（如 Fastjson → Jackson 选型切换）。与 WorkingMemory 临时事实语义重复的长期记忆不会重复注入 prompt。
 - `StickyMemory（强约束记忆）`：通过 `/save --pin` 保存，每轮全量注入 system prompt。

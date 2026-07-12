@@ -2,13 +2,13 @@
 
 ## 2026-07-12 Agent Runtime 架构统一改造
 
-- 状态：部分实现
+- 状态：已实现（架构主线）
 - 来源：三条 Agent 执行路径、后台任务和 Runtime API 缺少统一运行上下文，工具结果、任务图、工作区隔离与会话并发仍存在分裂模型
 - 影响范围：Runtime、Agent、Tool、Plan、Multi-Agent、Runtime API、后台任务、验证器、工作区隔离及相关文档与测试
-- 已实现：新增运行级 `RunContext`，隔离项目路径、取消令牌和资源生命周期；取消状态不再使用进程级全局回退，线程中断可直接触发取消；后台任务为每个任务绑定独立运行上下文并在取消时同步取消令牌；无头 Agent 统一通过生命周期入口创建和关闭工具注册与记忆资源；工具大结果落盘路径改为使用所属工具注册实例的项目路径，消除跨项目静态串扰；Agent 明确区分自有与外部工具注册资源；工具结果新增状态、错误码、重试语义、图片和修改资源字段；ReAct、Plan、SubAgent 的错误熔断改用结构化错误码；工具执行统一进入分阶段中间件管线；HITL 从覆写执行入口改为管线中间件，拒绝和跳过返回结构化结果；新增统一 `AgentExecutionEngine`，ReAct、Plan task、SubAgent 共用预算检查、取消检查、LLM 调用、工具消息协议、工具结果回灌和异常出口，三条路径不再各自维护循环；新增共享 `ExecutionGraph`，Plan 与 Multi-Agent 共用依赖就绪判断、最终集成调度、缺失依赖和环检测；Runtime API 使用有界 keyed 串行执行器，同一 thread 的 turn 按提交顺序串行，不同 thread 仍可并行
-- 未实现：统一任务产物模型、结构化恢复协议、隔离工作区与 PatchSet、大型入口与编排器拆分；部分旧 Provider 仍通过文本表达业务失败，尚未全部迁移到结构化结果
-- 验证建议：运行 `CancellationContextTest`、`RunContextTest`、`HeadlessAgentRunnerTest`、`DurableTaskManagerTest`、`AgentLifecycleTest`、`ToolRegistryProjectIsolationTest`、`ToolOutputTest`、`ToolExecutionPipelineTest`、`ToolRegistryStructuredResultTest`、`HitlToolRegistryTest`、`AgentBudgetTest`、`AgentExecutionEngineTest`、`PlanExecuteAgentTest`、`SubAgentTest`、`ExecutionGraphTest`、`ExecutionPlanTest`、`AgentOrchestratorTest`、`KeyedSerialExecutorTest`、`RuntimeApiServerTest`
-- 风险：交互 Agent 仍共享进程级工具注册，命令工具仍可能绕过文件级资源租约；任务节点和 checkpoint 产物仍是两套数据模型；旧 Provider 返回的失败文本目前仍可能被视为成功状态
+- 已实现：新增运行级 `RunContext`，隔离项目路径、取消令牌和资源生命周期；取消状态不再使用进程级全局回退，线程中断可直接触发取消；后台任务为每个任务绑定独立运行上下文并在取消时同步取消令牌；无头 Agent 统一通过生命周期入口创建和关闭工具注册与记忆资源；工具大结果落盘路径改为使用所属工具注册实例的项目路径，消除跨项目静态串扰；Agent 明确区分自有与外部工具注册资源；工具结果新增状态、错误码、重试语义、图片和修改资源字段；ReAct、Plan、SubAgent 的错误熔断改用结构化错误码；工具执行统一进入分阶段中间件管线；HITL 从覆写执行入口改为管线中间件，拒绝和跳过返回结构化结果；新增统一 `AgentExecutionEngine`，ReAct、Plan task、SubAgent 共用预算检查、取消检查、LLM 调用、工具消息协议、工具结果回灌和异常出口，三条路径不再各自维护循环；新增共享 `ExecutionGraph`，Plan 与 Multi-Agent 共用依赖就绪判断、最终集成调度、缺失依赖和环检测；Runtime API 使用有界 keyed 串行执行器，同一 thread 的 turn 按提交顺序串行，不同 thread 仍可并行；新增共享 `ExecutionArtifact`，Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 统一使用状态、输出、摘要、修改资源、错误、尝试次数与时间戳；checkpoint 协议升级为版本 2，通过 `RecoveryState` 统一恢复，新版本保存共享 artifact，旧 completed/failed map 可迁移；新增 `IsolatedWorkspace`、`WorkspaceExecutionSession` 和 `PatchSet`，Plan 的 FILE_WRITE/COMMAND/VERIFICATION 与 Multi-Agent 副作用步骤在隔离目录执行，Reviewer 读取同一隔离产物，批准后才以哈希前置校验一次性应用主工作区，冲突、拒绝、失败或取消均不应用；PatchSet 拒绝非普通文件覆盖、路径逃逸和链接逃逸，并在应用失败时回滚；Pre-Review 编译、超时、输出解码和失败摘要已从编排器拆分到独立验证器
+- 未实现：部分旧 Provider 仍通过文本表达业务失败，尚未逐项迁移为明确的业务错误码；交互入口和编排器仍可继续按职责拆分，但本期已完成执行引擎、任务图、预审验证器与工作区生命周期的关键边界拆分
+- 验证建议：运行 `CancellationContextTest`、`RunContextTest`、`HeadlessAgentRunnerTest`、`DurableTaskManagerTest`、`AgentLifecycleTest`、`ToolRegistryProjectIsolationTest`、`ToolOutputTest`、`ToolExecutionPipelineTest`、`ToolRegistryStructuredResultTest`、`HitlToolRegistryTest`、`AgentBudgetTest`、`AgentExecutionEngineTest`、`PlanExecuteAgentTest`、`SubAgentTest`、`ExecutionGraphTest`、`ExecutionArtifactTest`、`ExecutionPlanTest`、`AgentCheckpointTest`、`AgentOrchestratorTest`、`PreReviewVerifierTest`、`IsolatedWorkspaceTest`、`PatchSetTest`、`ToolRegistryForkTest`、`KeyedSerialExecutorTest`、`RuntimeApiServerTest`
+- 风险：隔离工作区是进程内文件系统隔离，不等同于容器或 VM 安全沙箱；命令仍可访问操作系统允许的外部资源，PatchSet 只约束回写主项目的文件变更；旧 Provider 返回的部分失败文本仍可能被视为成功状态；符号链接安全测试依赖运行环境是否允许创建链接
 
 ## 2026-07-09 长期记忆低价值显式保存确认
 

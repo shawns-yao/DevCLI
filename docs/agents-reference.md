@@ -107,10 +107,13 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 三角色：Planner / Worker(默认 2 个) / Reviewer
 - 流程：规划 → 按依赖分配 Worker → Reviewer 审查 → 未通过重试(最多 2 次)
 - SubAgent IOException 返回 ERROR 类型
-- 所有子代理共享 ToolRegistry 和 MemoryManager
-- `ToolRegistry.write_file` 会按 step 记录 `stepModifiedFiles`；步骤终态写入运行态 `ExecutionStep`、checkpoint `StepArtifact.modifiedFiles` 和 WorkingMemory。后续依赖步骤与 `/team resume` 都会看到上游修改文件清单。
-- `/team` Worker 每次尝试都通过 `ToolRegistry.runWithResourceLease(stepId, ...)` 绑定资源租约上下文，并在 finally 中调用 `releaseResourceLeases(stepId)`；Reviewer 打回、Worker 异常或在位重做不会遗留旧步骤租约。
-- `/plan` 的 `Task` 也会在任务完成或失败时消费同一份 `stepModifiedFiles`，并保存短 `resultSummary`。`Planner.replan()` 不是 Agent 循环，没有工具调用权，因此失败后重规划只读取这些结构化产物事实，不读取完整任务 result 作为主要依据。
+- Planner 共享主 ToolRegistry；副作用 Worker 使用 `WorkspaceExecutionSession` 创建隔离 ToolRegistry，Pre-Review 与 Reviewer 在同一隔离目录读取真实产物，MemoryManager 继续共享角色裁剪视图。
+- Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用 `ExecutionArtifact`，统一保存 state、output、summary、modifiedResources、error、attempt、startedAt、finishedAt。
+- checkpoint 协议版本 2 通过 `RecoveryState` 恢复共享 artifact；旧 completed/failed map 会转换为统一产物，保留旧 JSON 兼容构造器与访问方法。
+- `/team` Worker 每次尝试都通过隔离 ToolRegistry 的 `runWithResourceLease(stepId, ...)` 绑定资源租约上下文，并在 finally 中释放；Reviewer 打回、Worker 异常或在位重做不会遗留租约。
+- `/plan` 的 FILE_WRITE / COMMAND / VERIFICATION 与 `/team` 副作用步骤在隔离工作区执行；批准后生成 PatchSet，先做 SHA-256 前置版本和全量冲突校验，再原子写回主项目。拒绝、失败、取消和冲突不应用，应用中途失败回滚。
+- `PreReviewVerifier` 独立负责 Maven/javac 选择、Java 文件扫描、超时、进程输出解码和失败摘要；`AgentOrchestrator.runPreReviewHook` 保留兼容入口并委托验证器。
+- `Planner.replan()` 不是 Agent 循环，没有工具调用权，因此失败后重规划只读取 ExecutionArtifact 的最小结构化产物事实，不读取完整任务 result 作为主要依据。
 
 ### HITL System
 
@@ -267,11 +270,23 @@ LLM 生成计划 JSON / 简单任务最小计划 / 重编号 task_1..N / 依赖�
 ### ExecutionGraph.java
 Plan / Multi-Agent 共用 DAG 调度与校验；统一普通节点和最终集成节点的就绪规则、缺失依赖检测、环检测和拓扑排序
 
+### ExecutionArtifact.java
+Plan Task / Multi-Agent ExecutionStep / checkpoint 共用任务产物；统一状态、输出、摘要、修改资源、错误、尝试次数与执行时间
+
 ### ExecutionPlan.java
 任务状态 / 进度可视化；可执行任务判定和拓扑排序委托给 ExecutionGraph
 
+### AgentCheckpoint.java
+checkpoint 协议版本 2；通过 RecoveryState 恢复共享 ExecutionArtifact，并兼容旧 completed / failed JSON 结构
+
+### PreReviewVerifier.java
+Reviewer 前 Java 硬验证；封装 Maven/javac 命令、扫描、超时、输出解码和失败摘要，避免编排器承担进程执行细节
+
 ### ToolRegistry.java
 12 个内置核心工具（含 `grep_code` 实时精确文本搜索）+ MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult；`ToolExecutionPipeline` 按阶段执行取消、存在性、Skill 权限、参数校验、HITL、审计、策略和结果治理；`ToolOutput` / `ToolExecutionResult` 携带 status、errorCode、retryable、imageParts 和 modifiedResources；HITL 作为管线中间件，不再覆写 executeTool；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会返回 `search_tools` 引导和 query 示例
+
+### Workspace Package
+IsolatedWorkspace 复制并清理步骤级工作区；WorkspaceExecutionSession 管理隔离 ToolRegistry 生命周期；PatchSet 负责哈希冲突预检、路径与链接边界、原子应用和失败回滚
 
 ### MCP Package
 McpServerManager / McpClient / JsonRpcClient / StdioTransport / StreamableHttpTransport / McpSchemaSanitizer / resources/ / mention/ / notifications/
