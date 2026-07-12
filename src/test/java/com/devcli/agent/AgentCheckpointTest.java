@@ -4,6 +4,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import com.devcli.plan.ExecutionArtifact;
+import com.devcli.plan.ExecutionGraph;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -135,5 +137,25 @@ class AgentCheckpointTest {
         assertFalse(checkpoint.getFailedArtifacts().containsKey("step-1"),
                 "重做成功后同 step 的失败 artifact 应被清理");
         assertEquals("重做成功", checkpoint.getArtifacts().get("step-1").summary());
+    }
+
+    @Test
+    void recoveryStateNormalizesCompletedAndFailedArtifacts() {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-v2", "目标");
+        checkpoint.setPlanSteps(List.of(
+                new AgentCheckpoint.PlanStep("step-1", "完成步骤", "code", List.of()),
+                new AgentCheckpoint.PlanStep("step-2", "失败步骤", "test", List.of("step-1"))));
+        checkpoint.addCompletedStep("step-1", List.of("src/A.java"), "完成");
+        checkpoint.addFailedStep("step-2", List.of("src/B.java"), "测试失败");
+
+        AgentCheckpoint.RecoveryState recovery = checkpoint.recoveryState();
+        ExecutionArtifact completed = recovery.artifacts().get("step-1");
+        ExecutionArtifact failed = recovery.artifacts().get("step-2");
+
+        assertEquals(AgentCheckpoint.CURRENT_PROTOCOL_VERSION, recovery.protocolVersion());
+        assertEquals(ExecutionGraph.NodeState.COMPLETED, completed.state());
+        assertEquals(ExecutionGraph.NodeState.FAILED, failed.state());
+        assertEquals(List.of("src/A.java"), completed.modifiedResources());
+        assertEquals("测试失败", failed.error());
     }
 }

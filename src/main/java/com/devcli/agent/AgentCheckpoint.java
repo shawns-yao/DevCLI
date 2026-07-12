@@ -2,6 +2,8 @@ package com.devcli.agent;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.devcli.plan.ExecutionArtifact;
+import com.devcli.plan.ExecutionGraph;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -16,6 +18,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.LinkedHashMap;
 
 /**
  * Multi-Agent orchestration checkpoint for failure recovery.
@@ -38,7 +41,9 @@ public class AgentCheckpoint {
         .enable(SerializationFeature.INDENT_OUTPUT);
     /** 步骤 result 落盘上限：buildStepContext 注入依赖结果最多 800 字符，8KB 足够保真。 */
     public static final int MAX_SUMMARY_LENGTH = 8 * 1024;
+    public static final int CURRENT_PROTOCOL_VERSION = 2;
 
+    private int protocolVersion = CURRENT_PROTOCOL_VERSION;
     private String orchestrationId;
     private String goal;
     private List<PlanStep> planSteps;
@@ -56,7 +61,38 @@ public class AgentCheckpoint {
     private int failedSteps;
     private String lastError;
 
-    public record StepArtifact(String stepId, List<String> modifiedFiles, String summary) {}
+    public record StepArtifact(String stepId, List<String> modifiedFiles, String summary,
+                               ExecutionArtifact artifact) {
+        public StepArtifact {
+            stepId = stepId == null ? "" : stepId;
+            modifiedFiles = modifiedFiles == null ? List.of() : List.copyOf(modifiedFiles);
+            summary = summary == null ? "" : summary;
+        }
+
+        public StepArtifact(String stepId, List<String> modifiedFiles, String summary) {
+            this(stepId, modifiedFiles, summary, null);
+        }
+
+        ExecutionArtifact normalized(ExecutionGraph.NodeState fallbackState) {
+            if (artifact != null) {
+                return artifact;
+            }
+            return fallbackState == ExecutionGraph.NodeState.COMPLETED
+                    ? ExecutionArtifact.completed(stepId, summary, summary, modifiedFiles)
+                    : ExecutionArtifact.failed(stepId, summary, summary, modifiedFiles);
+        }
+    }
+
+    public record RecoveryState(int protocolVersion, String orchestrationId, String goal,
+                                List<PlanStep> planSteps,
+                                List<CriterionRecord> acceptanceCriteria,
+                                Map<String, ExecutionArtifact> artifacts) {
+        public RecoveryState {
+            planSteps = planSteps == null ? List.of() : List.copyOf(planSteps);
+            acceptanceCriteria = acceptanceCriteria == null ? List.of() : List.copyOf(acceptanceCriteria);
+            artifacts = artifacts == null ? Map.of() : Map.copyOf(artifacts);
+        }
+    }
 
     /** 计划层步骤快照：恢复时重建 ExecutionStep 所需的全部静态信息。 */
     public record PlanStep(String id, String description, String type, List<String> dependencies) {}
@@ -94,8 +130,9 @@ public class AgentCheckpoint {
         String bounded = summary == null ? "" : (summary.length() > MAX_SUMMARY_LENGTH
                 ? summary.substring(0, MAX_SUMMARY_LENGTH) + "...(截断)"
                 : summary);
-        artifacts.put(stepId, new StepArtifact(stepId,
-                modifiedFiles == null ? List.of() : List.copyOf(modifiedFiles), bounded));
+        List<String> resources = modifiedFiles == null ? List.of() : List.copyOf(modifiedFiles);
+        artifacts.put(stepId, new StepArtifact(stepId, resources, bounded,
+                ExecutionArtifact.completed(stepId, bounded, bounded, resources)));
         // 重做成功：清理同 step 的旧失败 artifact，避免成功与失败记录并存导致状态不一致
         failedArtifacts.remove(stepId);
         timestamp = System.currentTimeMillis();
@@ -118,8 +155,9 @@ public class AgentCheckpoint {
         String bounded = summary == null ? "" : (summary.length() > MAX_SUMMARY_LENGTH
                 ? summary.substring(0, MAX_SUMMARY_LENGTH) + "...(截断)"
                 : summary);
-        failedArtifacts.put(stepId, new StepArtifact(stepId,
-                modifiedFiles == null ? List.of() : List.copyOf(modifiedFiles), bounded));
+        List<String> resources = modifiedFiles == null ? List.of() : List.copyOf(modifiedFiles);
+        failedArtifacts.put(stepId, new StepArtifact(stepId, resources, bounded,
+                ExecutionArtifact.failed(stepId, bounded, bounded, resources)));
         recordFailure(stepId + ": " + bounded);
     }
 
@@ -133,6 +171,23 @@ public class AgentCheckpoint {
 
     public List<String> getCompletedSteps() {
         return new ArrayList<>(completedSteps);
+    }
+
+    public RecoveryState recoveryState() {
+        Map<String, ExecutionArtifact> normalized = new LinkedHashMap<>();
+        Map<String, StepArtifact> completed = artifacts == null ? Map.of() : artifacts;
+        Map<String, StepArtifact> failed = failedArtifacts == null ? Map.of() : failedArtifacts;
+        completed.forEach((stepId, artifact) -> normalized.put(stepId,
+                artifact.normalized(ExecutionGraph.NodeState.COMPLETED)));
+        failed.forEach((stepId, artifact) -> normalized.put(stepId,
+                artifact.normalized(ExecutionGraph.NodeState.FAILED)));
+        return new RecoveryState(
+                protocolVersion <= 0 ? 1 : protocolVersion,
+                orchestrationId,
+                goal,
+                planSteps,
+                acceptanceCriteria,
+                normalized);
     }
 
     // ─────────────────────────────────────────────────────────
@@ -268,6 +323,14 @@ public class AgentCheckpoint {
     // ─────────────────────────────────────────────────────────
     // Getters / Setters
     // ─────────────────────────────────────────────────────────
+
+    public int getProtocolVersion() {
+        return protocolVersion;
+    }
+
+    public void setProtocolVersion(int protocolVersion) {
+        this.protocolVersion = protocolVersion;
+    }
 
     public String getOrchestrationId() {
         return orchestrationId;

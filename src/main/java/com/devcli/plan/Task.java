@@ -1,79 +1,90 @@
 package com.devcli.plan;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 
 /**
- * 任务节点 - 表示一个可执行的任务单元
+ * 任务节点 - 表示一个可执行的任务单元。
  */
 public class Task {
     private final String id;
     private final String description;
     private final TaskType type;
-    private volatile TaskStatus status;
-    private volatile String result;
-    private volatile String error;
-    private volatile List<String> modifiedFiles;
-    private volatile String resultSummary;
-    private final List<String> dependencies;  // 依赖的其他任务ID
-    private final List<String> dependents;    // 依赖此任务的其他任务ID
-    private volatile long startTime;
-    private volatile long endTime;
+    private volatile ExecutionArtifact artifact;
+    private final List<String> dependencies;
+    private final List<String> dependents;
 
     public enum TaskType {
-        PLANNING,      // 规划任务
-        FILE_READ,     // 读取文件
-        FILE_WRITE,    // 写入文件
-        COMMAND,       // 执行命令
-        ANALYSIS,      // 分析结果
-        VERIFICATION   // 验证结果
+        PLANNING,
+        FILE_READ,
+        FILE_WRITE,
+        COMMAND,
+        ANALYSIS,
+        VERIFICATION
     }
 
     public enum TaskStatus {
-        PENDING,       // 等待执行
-        RUNNING,       // 执行中
-        COMPLETED,     // 已完成
-        FAILED         // 失败
+        PENDING,
+        RUNNING,
+        COMPLETED,
+        FAILED
     }
 
     public Task(String id, String description, TaskType type) {
         this.id = id;
         this.description = description;
         this.type = type;
-        this.status = TaskStatus.PENDING;
+        this.artifact = ExecutionArtifact.pending(id);
         this.dependencies = new ArrayList<>();
         this.dependents = new ArrayList<>();
-        this.modifiedFiles = List.of();
-        this.resultSummary = "";
     }
 
     public Task(String id, String description, TaskType type, List<String> dependencies) {
         this(id, description, type);
-        this.dependencies.addAll(dependencies);
+        if (dependencies != null) {
+            this.dependencies.addAll(dependencies);
+        }
     }
 
-    // Getters
     public String getId() { return id; }
     public String getDescription() { return description; }
     public TaskType getType() { return type; }
-    public TaskStatus getStatus() { return status; }
-    public String getResult() { return result; }
-    public String getError() { return error; }
-    public List<String> getModifiedFiles() { return new ArrayList<>(modifiedFiles); }
-    public String getResultSummary() { return resultSummary; }
+    public TaskStatus getStatus() { return taskStatus(artifact.state()); }
+    public String getResult() { return artifact.output(); }
+    public String getError() { return artifact.error(); }
+    public List<String> getModifiedFiles() { return new ArrayList<>(artifact.modifiedResources()); }
+    public String getResultSummary() { return artifact.summary(); }
     public List<String> getDependencies() { return new ArrayList<>(dependencies); }
     public List<String> getDependents() { return new ArrayList<>(dependents); }
-    public long getStartTime() { return startTime; }
-    public long getEndTime() { return endTime; }
+    public long getStartTime() { return artifact.startedAt(); }
+    public long getEndTime() { return artifact.finishedAt(); }
+    public ExecutionArtifact getArtifact() { return artifact; }
 
-    // Setters
-    public void setStatus(TaskStatus status) { this.status = status; }
-    public void setResult(String result) { this.result = result; }
-    public void setError(String error) { this.error = error; }
-    public void setModifiedFiles(List<String> modifiedFiles) {
-        this.modifiedFiles = modifiedFiles == null ? List.of() : List.copyOf(modifiedFiles);
+    public void setStatus(TaskStatus status) {
+        this.artifact = artifact.withState(graphState(status));
     }
+
+    public void setResult(String result) {
+        this.artifact = artifact.withOutput(result);
+    }
+
+    public void setError(String error) {
+        this.artifact = artifact.withError(error);
+    }
+
+    public void setModifiedFiles(List<String> modifiedFiles) {
+        this.artifact = artifact.withModifiedResources(modifiedFiles);
+    }
+
     public void setResultSummary(String resultSummary) {
-        this.resultSummary = resultSummary == null ? "" : resultSummary.trim();
+        this.artifact = artifact.withSummary(resultSummary == null ? "" : resultSummary.trim());
+    }
+
+    public void applyArtifact(ExecutionArtifact artifact) {
+        if (artifact != null && id.equals(artifact.nodeId())) {
+            this.artifact = artifact;
+        }
     }
 
     public void addDependent(String taskId) {
@@ -89,36 +100,27 @@ public class Task {
     }
 
     public void markStarted() {
-        this.status = TaskStatus.RUNNING;
-        this.startTime = System.currentTimeMillis();
+        this.artifact = artifact.start(System.currentTimeMillis());
     }
 
     public void markCompleted(String result) {
-        this.status = TaskStatus.COMPLETED;
-        this.result = result;
-        this.endTime = System.currentTimeMillis();
+        this.artifact = artifact.complete(
+                result, artifact.summary(), artifact.modifiedResources(), System.currentTimeMillis());
     }
 
     public void markFailed(String error) {
-        this.status = TaskStatus.FAILED;
-        this.error = error;
-        this.endTime = System.currentTimeMillis();
+        this.artifact = artifact.fail(
+                error, artifact.summary(), artifact.modifiedResources(), System.currentTimeMillis());
     }
 
-    /**
-     * 获取执行耗时（毫秒）
-     */
     public long getDuration() {
-        if (startTime == 0) return 0;
-        if (endTime == 0) return System.currentTimeMillis() - startTime;
-        return endTime - startTime;
+        if (artifact.startedAt() == 0) return 0;
+        if (artifact.finishedAt() == 0) return System.currentTimeMillis() - artifact.startedAt();
+        return artifact.finishedAt() - artifact.startedAt();
     }
 
-    /**
-     * 是否可以执行（所有依赖都已完成）
-     */
     public boolean isExecutable(Map<String, Task> allTasks) {
-        if (status != TaskStatus.PENDING) return false;
+        if (getStatus() != TaskStatus.PENDING) return false;
         for (String depId : dependencies) {
             Task dep = allTasks.get(depId);
             if (dep == null || dep.getStatus() != TaskStatus.COMPLETED) {
@@ -128,8 +130,26 @@ public class Task {
         return true;
     }
 
+    private static ExecutionGraph.NodeState graphState(TaskStatus status) {
+        return switch (status) {
+            case PENDING -> ExecutionGraph.NodeState.PENDING;
+            case RUNNING -> ExecutionGraph.NodeState.RUNNING;
+            case COMPLETED -> ExecutionGraph.NodeState.COMPLETED;
+            case FAILED -> ExecutionGraph.NodeState.FAILED;
+        };
+    }
+
+    private static TaskStatus taskStatus(ExecutionGraph.NodeState state) {
+        return switch (state) {
+            case PENDING -> TaskStatus.PENDING;
+            case RUNNING -> TaskStatus.RUNNING;
+            case COMPLETED -> TaskStatus.COMPLETED;
+            case FAILED -> TaskStatus.FAILED;
+        };
+    }
+
     @Override
     public String toString() {
-        return String.format("Task[%s: %s] (%s)", id, description, status);
+        return String.format("Task[%s: %s] (%s)", id, description, getStatus());
     }
 }
