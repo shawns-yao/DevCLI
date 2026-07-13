@@ -2,13 +2,14 @@
 
 ## 2026-07-13 架构复查剩余问题
 
-- 状态：未实现
+- 状态：高优先级项已实现（2026-07-13），中低优先级项待处理
 - 来源：副作用隔离与恢复事务完成后的二次架构复查
 - 影响范围：命令执行、MCP 信任边界、跨进程提交、工作区物化、PatchSet 内存模型、checkpoint 日志、Runtime 串行器和大型入口类
-- 待实现：为命令提供容器或受限进程后端，不能只依赖工作目录和命令黑名单；项目提交锁升级为跨进程文件锁；MCP 只读注解增加服务端信任策略；PatchSet 构建改为流式哈希，只保留变更文件内容，避免按项目体积占用内存；增加 Git worktree、增量基线或写时复制后端；为孤儿 `.patch-journal` 增加 TTL 清理和敏感备份权限控制；继续拆分 CLI、Multi-Agent、Plan 和 ToolRegistry；旧 Provider 的文本失败迁移为结构化错误码；KeyedSerialExecutor 不应在捕获 JVM `Error` 后继续执行后续任务；项目锁缓存和不可中断复制等待需要有界生命周期
-- 优先级：命令沙箱、跨进程提交锁、PatchSet 流式构建为高；工作区增量后端、checkpoint 日志治理、大型类拆分为中；锁缓存和异常边界为低
-- 验证建议：新增跨进程提交集成测试、大型仓库内存基准、命令越界安全测试、MCP 伪造注解测试、孤儿日志清理测试和 JVM Error 边界测试
-- 风险：现有文件系统隔离不能阻止命令访问主机；两个 DevCLI 进程仍可并发提交同一项目；大型仓库生成 PatchSet 时可能出现明显内存峰值；checkpoint 备份包含原文件明文
+- 已实现：隔离命令和 Pre-Review 强制通过受限 Docker 执行，禁止主机回退；项目提交增加跨进程 `FileLock`；MCP readOnly 注解默认不可信，并支持本地只读允许列表与拒绝列表；PatchSet 改为逐文件流式哈希，只读取变更文件内容
+- 待实现：增加 Git worktree、增量基线或写时复制后端；为孤儿 `.patch-journal` 增加 TTL 清理和敏感备份权限控制；继续拆分 CLI、Multi-Agent、Plan 和 ToolRegistry；旧 Provider 的文本失败迁移为结构化错误码；KeyedSerialExecutor 不应在捕获 JVM `Error` 后继续执行后续任务；项目锁缓存和不可中断复制等待需要有界生命周期
+- 优先级：高优先级四项已完成；工作区增量后端、checkpoint 日志治理、大型类拆分为中；锁缓存和异常边界为低
+- 验证结果：已覆盖 Docker 路由与参数、Pre-Review 沙箱要求、真实子 JVM 跨进程锁、64MB 文件低堆 PatchSet 构建、MCP 伪造注解与本地策略
+- 风险：Docker daemon 本身属于主机高权限基础设施；跨进程文件锁在部分网络文件系统上的语义可能较弱；变更文件内容仍需载入内存；checkpoint 备份包含原文件明文
 
 ## 2026-07-13 副作用隔离与补丁恢复事务补强
 
@@ -16,9 +17,9 @@
 - 来源：架构复查发现任务标签无法约束真实工具副作用、并行 PatchSet 可同时通过哈希预检、PatchSet 与 checkpoint 之间存在崩溃窗口、Runtime 同会话通道退役存在竞态，隔离工作区和预审编译还存在生命周期边界
 - 影响范围：ToolRegistry 与执行管线、Plan、Multi-Agent、Runtime API、checkpoint、workspace、Pre-Review、Skill fork、README、AGENTS、详细架构文档和配置模板
 - 已实现：新增 `ToolEffect` 与 `ToolAccessScope`，非隔离任务强制只读，隔离任务禁止外部副作用；MCP 缺失安全注解时保守拒绝；工具定义、`search_tools` 缓存和并行工具线程保持同一能力范围，并行线程继承资源租约归属；项目级 ToolRegistry fork 复制 SkillContextBuffer；新增项目级公平提交锁；checkpoint 协议升级为版本 3，PatchSet 应用前保存 before/after 哈希和原文件备份，resume 在同一项目锁内完成提升、继续或回滚，对账保存失败和回滚不完整时停止；未来 checkpoint 版本明确报告不兼容；PatchSet 回滚失败返回具体路径；Runtime keyed 串行器原子管理通道生命周期，调度拒绝通知等待者，单任务异常不阻塞后续 turn；隔离工作区新增后端接口、有界并行复制、TTL 孤儿清理和跨进程活动租约；无 Maven 的 Java 预审改用 javac 参数文件；从 Plan 和 Multi-Agent 大类抽离工作区执行与补丁提交协调职责
-- 未实现：容器或 VM 命令沙箱、Git worktree/写时复制/增量基线后端未实现；默认复制后端仍复制排除目录之外的整个项目
+- 未实现：Git worktree/写时复制/增量基线后端未实现；默认复制后端仍复制排除目录之外的整个项目；Docker 命令隔离不等同于独立 VM 或操作系统级沙箱
 - 验证建议：运行 `ToolCapabilityTest`、`ToolRegistryForkTest`、`ToolExecutionPipelineTest`、`PlanExecuteAgentTest`、`AgentOrchestratorTest`、`AgentCheckpointTest`、`WorkspaceExecutionSessionTest`、`PatchSetTest`、`IsolatedWorkspaceTest`、`KeyedSerialExecutorTest`、`RuntimeApiServerTest`、`PreReviewVerifierTest`，并执行 `mvn -q -DskipTests test-compile`
-- 风险：文件系统隔离不能限制命令通过绝对路径或脚本访问主机资源；外部进程不受项目级 JVM 锁约束；复制大型仓库仍会消耗与并行副作用步骤数量近似成比例的磁盘空间
+- 风险：Docker daemon 本身仍是主机高权限组件；跨进程 FileLock 在网络文件系统上的可靠性取决于底层实现；复制大型仓库仍会消耗与并行副作用步骤数量近似成比例的磁盘空间
 
 ## 2026-07-12 Agent Runtime 架构统一改造
 

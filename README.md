@@ -43,7 +43,7 @@ DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、�
 - `AgentExecutionEngine（执行引擎）`：ReAct、Plan task 和 SubAgent 共用同一套取消、预算、LLM 调用、工具消息回灌和异常控制流程，各路径只保留提示词、渲染、记忆和任务结果等差异逻辑。
 - `ExecutionGraph（执行图）`：Plan 与 Multi-Agent 共用依赖就绪判断、最终集成调度、缺失依赖和环检测，避免两条编排路径各自实现 DAG 规则。
 - `ExecutionArtifact（执行产物）`：Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用状态、输出、摘要、修改资源、错误、尝试次数与时间戳；checkpoint 协议版本 3 增加 PatchSet 写前日志和恢复对账，兼容旧协议并拒绝未来版本。
-- `Workspace + PatchSet（隔离工作区与补丁集）`：副作用任务通过可替换后端物化隔离目录，默认复制后端采用有界并行复制与哈希；项目级公平锁串行化补丁预检、应用和 checkpoint 终态，失败回滚会报告未恢复文件。
+- `Workspace + PatchSet（隔离工作区与补丁集）`：副作用任务通过可替换后端物化隔离目录，默认复制后端采用有界并行复制；PatchSet 逐文件流式哈希，只把变更文件内容载入内存；JVM 公平锁与跨进程文件锁共同串行化补丁预检、应用和 checkpoint 终态。
 - `Image Input`：支持 `@image:` 本地路径、file URL 和剪贴板图片，图片会做尺寸、格式和大小处理后进入模型输入。
 
 ## Architecture
@@ -73,7 +73,7 @@ Main
 - `PathGuard（路径围栏）` 负责限制文件访问不逃逸项目根。
 - `ToolEffect + ToolAccessScope（工具副作用能力）` 由执行管线强制：非隔离分析任务只获得只读能力，隔离任务才允许项目写入和主机命令；MCP 缺失只读注解或声明 destructive/openWorld 时按外部副作用处理。工具定义、`search_tools` 缓存和并行工具线程使用同一能力范围。
 - `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 和 `/team` 并行执行时拦截 `write_file`，同一文件只能被一个运行中 task / step 写入；并行工具线程会继承步骤租约归属，任务结束后释放租约。
-- `PatchSet（补丁集）` 是隔离结果进入主项目的唯一文件回写边界：项目级提交锁覆盖预检、应用和 checkpoint 终态；协议版本 3 在应用前保存目标哈希与原文件备份，恢复时按最终哈希提升完成、继续待执行或自动回滚。Reviewer 拒绝、任务失败、用户取消、前置哈希冲突、非普通文件覆盖或路径/链接逃逸都会阻止整批应用。
+- `PatchSet（补丁集）` 是隔离结果进入主项目的唯一文件回写边界：JVM 公平锁和 `~/.devcli/locks/project-commit/` 下的跨进程文件锁覆盖预检、应用和 checkpoint 终态；构建阶段流式计算哈希，未变化文件不读取完整内容。协议版本 3 在应用前保存目标哈希与原文件备份，恢复时按最终哈希提升完成、继续待执行或自动回滚。Reviewer 拒绝、任务失败、用户取消、前置哈希冲突、非普通文件覆盖或路径/链接逃逸都会阻止整批应用。
 - `CommandGuard（命令防线）` 是危险命令快速拒绝层，不替代 HITL 和路径策略。
 - `HitlToolRegistry（审批工具注册表）` 位于真实工具执行前，保证危险操作先经过审批和策略判定。
 
@@ -265,6 +265,8 @@ MCP 配置文件：
 - 用户级：`~/.devcli/mcp.json`
 - 项目级：`.devcli/mcp.json`
 
+MCP server 的 `readOnly` 注解默认不可信。每个 server 可通过 `trustReadOnlyAnnotations: true` 显式信任服务端注解，或用 `readOnlyTools` 配置本地只读工具允许列表；`deniedTools` 中的工具不会注册。`destructive` 或 `openWorld` 工具始终不能降级为只读，本地允许列表配置错误会扩大能力边界。
+
 DevCLI 在默认配置缺失时会创建 Chrome DevTools MCP 示例配置：
 
 ```json
@@ -370,11 +372,11 @@ Runtime API 默认仅绑定 `127.0.0.1`。HTTP 请求线程和 Agent 执行线�
 /team 检查认证模块的安全问题，修复高风险项并补充测试
 ```
 
-Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 在步骤级隔离工作区实现，`PreReviewVerifier` 在同一隔离目录执行 Java 编译硬检查；无 Maven 项目通过 javac 参数文件传递源码清单，避免 Windows 命令行长度限制。Reviewer 再读取真实隔离产物做质量审查。验收点会前置注入 Worker，并由 Reviewer 用 `criteria_results` 逐条验证；Planner 给出的 `severity` 会随计划和 checkpoint 固化，critical/high 失败或缺少覆盖强制不通过。三角色注入 role-scoped WorkingMemory：Planner 看任务状态 + 关键事件，Worker 看完整上下文，Reviewer 看任务状态 + 工具证据。Reviewer 必须输出可解析 JSON，并采用 `functional_correctness` / `integration_completeness` / `code_quality` 三层评分，未达阈值强制不通过，非 JSON 文本不再凭关键词放行；审查通过后生成 PatchSet，只有全量冲突预检通过才一次性写回主项目。
+Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 在步骤级隔离工作区实现，`PreReviewVerifier` 在同一隔离目录通过强制 Docker 沙箱执行 Java 编译硬检查；无 Maven 项目通过 javac 参数文件传递源码清单，避免 Windows 命令行长度限制。Reviewer 再读取真实隔离产物做质量审查。验收点会前置注入 Worker，并由 Reviewer 用 `criteria_results` 逐条验证；Planner 给出的 `severity` 会随计划和 checkpoint 固化，critical/high 失败或缺少覆盖强制不通过。三角色注入 role-scoped WorkingMemory：Planner 看任务状态 + 关键事件，Worker 看完整上下文，Reviewer 看任务状态 + 工具证据。Reviewer 必须输出可解析 JSON，并采用 `functional_correctness` / `integration_completeness` / `code_quality` 三层评分，未达阈值强制不通过，非 JSON 文本不再凭关键词放行；审查通过后生成 PatchSet，只有全量冲突预检通过才一次性写回主项目。
 
 并行 Worker 数量默认 `2`，可通过 `DEVCLI_TEAM_WORKERS` 环境变量或 `-Ddevcli.team.workers` 系统属性调整（取值夹在 `[1, 8]`，非法值回退默认）。同一依赖批次内相互独立的步骤会按 Worker 池大小并行执行。
 
-隔离工作区默认开启，可通过 `DEVCLI_WORKSPACE_ISOLATION_ENABLED=false` 或 `-Ddevcli.workspace.isolation.enabled=false` 临时关闭；默认目录为项目下的 `Temp/devcli-workspaces`，可用 `-Ddevcli.workspace.dir=/path/to/workspaces` 覆盖。创建前会清理超过 24 小时且没有活动文件租约的孤儿目录，TTL 可用 `DEVCLI_WORKSPACE_ORPHAN_TTL_HOURS` 或 `-Ddevcli.workspace.orphan.ttl.hours` 调整。该隔离只约束项目文件回写，命令仍可访问操作系统允许的外部资源，不等同于容器或 VM 沙箱。
+隔离工作区默认开启，可通过 `DEVCLI_WORKSPACE_ISOLATION_ENABLED=false` 或 `-Ddevcli.workspace.isolation.enabled=false` 临时关闭；默认目录为项目下的 `Temp/devcli-workspaces`，可用 `-Ddevcli.workspace.dir=/path/to/workspaces` 覆盖。创建前会清理超过 24 小时且没有活动文件租约的孤儿目录，TTL 可用 `DEVCLI_WORKSPACE_ORPHAN_TTL_HOURS` 或 `-Ddevcli.workspace.orphan.ttl.hours` 调整。隔离任务的 `execute_command` 和 Pre-Review 强制进入 Docker，使用无网络、只读根文件系统、能力清空和资源上限；Docker 不可用时明确失败，不回退主机。默认镜像为 `maven:3.9.9-eclipse-temurin-17`，必须提前拉取，可通过 `DEVCLI_COMMAND_SANDBOX_IMAGE` 覆盖；其他技术栈应配置包含所需工具的镜像。
 
 失败恢复采用「在位重做」而非平行重规划：失败步骤保持原 id/依赖在 DAG 原位换思路重做（默认 1 次，带上次失败反馈），恢复始终长在原 DAG 上、通过依赖关系看到已完成成果；redo 用尽仍失败则保持失败终态。Plan `Task`、Multi-Agent `ExecutionStep` 与 checkpoint 共用 `ExecutionArtifact`；协议版本 3 在恢复执行前对账未完成的 PatchSet 提交，保存失败或回滚不完整时停止 resume，未来协议版本明确报告不兼容。write_file/execute_command 的工具证据在工作记忆中优先保留，已批准的 PatchSet 修改资源会同步进入运行态、checkpoint 和后续依赖上下文。
 
