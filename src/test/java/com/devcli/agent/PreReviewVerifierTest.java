@@ -2,6 +2,8 @@ package com.devcli.agent;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -47,5 +49,27 @@ class PreReviewVerifierTest {
         assertFalse(result.passed());
         assertTrue(result.feedback().contains("javac -encoding UTF-8"), result.feedback());
         assertTrue(result.feedback().contains("Broken.java"), result.feedback());
+    }
+
+    @Test
+    @EnabledOnOs(OS.WINDOWS)
+    void shouldCompileLargeJavaSourceSetWithoutExceedingWindowsCommandLine(@TempDir Path tempDir)
+            throws Exception {
+        Path javaRoot = tempDir.resolve("src/main/java");
+        Files.createDirectories(javaRoot);
+        String suffix = "LongSourceName".repeat(6);
+        String lastClassName = null;
+        for (int index = 0; index < 400; index++) {
+            lastClassName = "Generated" + index + suffix;
+            Files.writeString(javaRoot.resolve(lastClassName + ".java"),
+                    "public class " + lastClassName + " {}",
+                    StandardCharsets.UTF_8);
+        }
+
+        PreReviewVerifier.Result result = new PreReviewVerifier().verify(tempDir, "step-large");
+
+        assertTrue(result.passed(), result.feedback());
+        assertTrue(Files.isRegularFile(tempDir.resolve(
+                "target/devcli-pre-review-classes/step-large/" + lastClassName + ".class")));
     }
 }

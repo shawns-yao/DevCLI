@@ -65,14 +65,43 @@ final class PreReviewVerifier {
             return Result.failed("Pre-review hard check failed: 无法创建编译目录：" + e.getMessage());
         }
 
-        List<String> command = new ArrayList<>();
-        command.add("javac");
-        command.add("-encoding");
-        command.add("UTF-8");
-        command.add("-d");
-        command.add(outputDir.toString());
-        javaFiles.stream().map(Path::toString).forEach(command::add);
-        return runCommand(normalizedRoot, command, "javac -encoding UTF-8");
+        Path argumentFile = null;
+        try {
+            argumentFile = Files.createTempFile(outputBase, "javac-", ".args");
+            writeJavacArguments(argumentFile, normalizedRoot, outputDir, javaFiles);
+            return runCommand(normalizedRoot,
+                    List.of("javac", "@" + argumentFile.toAbsolutePath().normalize()),
+                    "javac -encoding UTF-8");
+        } catch (IOException e) {
+            return Result.failed("Pre-review hard check failed: 无法创建 javac 参数文件：" + e.getMessage());
+        } finally {
+            if (argumentFile != null) {
+                try {
+                    Files.deleteIfExists(argumentFile);
+                } catch (IOException ignored) {
+                    // 参数文件清理失败不覆盖编译结果。
+                }
+            }
+        }
+    }
+
+    private void writeJavacArguments(Path argumentFile, Path projectRoot,
+                                     Path outputDir, List<Path> javaFiles) throws IOException {
+        List<String> arguments = new ArrayList<>();
+        arguments.add("-encoding");
+        arguments.add("UTF-8");
+        arguments.add("-d");
+        arguments.add(quoteJavacArgument(projectRoot.relativize(outputDir)));
+        javaFiles.stream()
+                .map(projectRoot::relativize)
+                .map(this::quoteJavacArgument)
+                .forEach(arguments::add);
+        Files.write(argumentFile, arguments, StandardCharsets.UTF_8);
+    }
+
+    private String quoteJavacArgument(Path path) {
+        String normalized = path.toString().replace('\\', '/').replace("\"", "\\\"");
+        return "\"" + normalized + "\"";
     }
 
     private List<String> mavenTestCompileCommand() {
