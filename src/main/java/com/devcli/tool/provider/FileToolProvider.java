@@ -1,6 +1,8 @@
 package com.devcli.tool.provider;
 
 import com.devcli.policy.PolicyException;
+import com.devcli.tool.ToolErrorCode;
+import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
 
 import java.io.File;
@@ -11,21 +13,22 @@ import java.nio.file.Path;
 public final class FileToolProvider implements ToolProvider {
     @Override
     public void register(ToolContext context) {
-        context.registerTool(new ToolRegistry.Tool(
+        context.registerTool(ToolRegistry.Tool.structured(
                 "read_file",
                 "读取文件内容（仅限项目根目录之内）",
                 context.createToolParameters(new ToolParameter("path", "string", "文件路径", true)),
                 args -> {
                     Path safe = context.resolveSafePath(args.get("path"));
                     try {
-                        return "文件内容:\n" + Files.readString(safe);
+                        return ToolOutput.success("文件内容:\n" + Files.readString(safe));
                     } catch (Exception e) {
-                        return "读取文件失败: " + e.getMessage();
+                        return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                                "读取文件失败: " + e.getMessage(), false);
                     }
                 }
         ));
 
-        context.registerTool(new ToolRegistry.Tool(
+        context.registerTool(ToolRegistry.Tool.structured(
                 "write_file",
                 "写入文件内容（仅限项目根目录之内，单文件 5MB 上限）",
                 context.createToolParameters(
@@ -64,14 +67,15 @@ public final class FileToolProvider implements ToolProvider {
                         }
                         Files.writeString(safe, content);
                         context.recordFileWrite(path, safe, before, content, activeStep);
-                        return "文件已写入: " + path;
+                        return ToolOutput.success("文件已写入: " + path);
                     } catch (Exception e) {
-                        return "写入文件失败: " + e.getMessage();
+                        return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                                "写入文件失败: " + e.getMessage(), false);
                     }
                 }
         ));
 
-        context.registerTool(new ToolRegistry.Tool(
+        context.registerTool(ToolRegistry.Tool.structured(
                 "list_dir",
                 "列出目录内容（仅限项目根目录之内）",
                 context.createToolParameters(new ToolParameter("path", "string", "目录路径", true)),
@@ -80,7 +84,8 @@ public final class FileToolProvider implements ToolProvider {
                     try {
                         File[] files = safe.toFile().listFiles();
                         if (files == null) {
-                            return "目录为空或不存在";
+                            return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                                    "目录为空或不存在", false);
                         }
                         StringBuilder sb = new StringBuilder("目录内容:\n");
                         for (File f : files) {
@@ -88,9 +93,10 @@ public final class FileToolProvider implements ToolProvider {
                                     .append(f.getName())
                                     .append("\n");
                         }
-                        return sb.toString();
+                        return ToolOutput.success(sb.toString());
                     } catch (Exception e) {
-                        return "列出目录失败: " + e.getMessage();
+                        return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                                "列出目录失败: " + e.getMessage(), false);
                     }
                 }
         ));

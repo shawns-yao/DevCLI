@@ -1,5 +1,7 @@
 package com.devcli.tool.provider;
 
+import com.devcli.tool.ToolErrorCode;
+import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
 
 import java.nio.file.Files;
@@ -8,7 +10,7 @@ import java.nio.file.Path;
 public final class ProjectToolProvider implements ToolProvider {
     @Override
     public void register(ToolContext context) {
-        context.registerTool(new ToolRegistry.Tool(
+        context.registerTool(ToolRegistry.Tool.structured(
                 "create_project",
                 "创建新项目结构",
                 context.createToolParameters(
@@ -43,12 +45,15 @@ public final class ProjectToolProvider implements ToolProvider {
                             case "node" -> Files.writeString(projectRoot.resolve("package.json"),
                                     String.format("{\"name\": \"%s\", \"version\": \"1.0.0\"}", name));
                             default -> {
-                                return "创建项目失败: 不支持的项目类型 " + type;
+                                return ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS,
+                                        "创建项目失败: 不支持的项目类型 " + type, false);
                             }
                         }
-                        return "项目已创建: " + name + " (类型: " + type + ")";
+                        return ToolOutput.success(
+                                "项目已创建: " + name + " (类型: " + type + ")");
                     } catch (Exception e) {
-                        return "创建项目失败: " + e.getMessage();
+                        return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                                "创建项目失败: " + e.getMessage(), false);
                     }
                 }
         ));

@@ -5,6 +5,8 @@ import com.devcli.rag.RagEvidencePayload;
 import com.devcli.rag.SearchResultFormatter;
 import com.devcli.rag.SymbolInvalidation;
 import com.devcli.rag.VectorStore;
+import com.devcli.tool.ToolErrorCode;
+import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
 
 import java.nio.file.Path;
@@ -17,7 +19,7 @@ public final class RagToolProvider implements ToolProvider, AutoCloseable {
 
     @Override
     public void register(ToolContext context) {
-        context.registerTool(new ToolRegistry.Tool(
+        context.registerTool(ToolRegistry.Tool.structured(
                 "search_code",
                 "检索代码库。mode 可选：auto/general/call_chain/definition/error_trace/config；调用链场景可用 graph_depth 0-3 控制图谱扩展。",
                 context.createToolParameters(
@@ -49,7 +51,7 @@ public final class RagToolProvider implements ToolProvider, AutoCloseable {
         closeCachedCodeRetriever();
     }
 
-    private String searchCode(ToolContext context, Map<String, String> args) {
+    private ToolOutput searchCode(ToolContext context, Map<String, String> args) {
         String query = args.get("query");
         int topK = 5;
         try {
@@ -72,7 +74,8 @@ public final class RagToolProvider implements ToolProvider, AutoCloseable {
             synchronized (retriever) {
                 var stats = retriever.getStats();
                 if (stats.chunkCount() == 0) {
-                    return "代码库尚未索引，请先使用 /index 命令索引当前项目。";
+                    return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                            "代码库尚未索引，请先使用 /index 命令索引当前项目。", false);
                 }
 
                 List<VectorStore.SearchResult> results = retriever.search(query, topK, args.get("mode"), graphDepth);
@@ -84,9 +87,10 @@ public final class RagToolProvider implements ToolProvider, AutoCloseable {
                 String invalidationFacts = SearchResultFormatter.formatInvalidations(invalidations);
                 if (results.isEmpty()) {
                     if (!invalidationFacts.isBlank()) {
-                        return RagEvidencePayload.appendTo(invalidationFacts, query, results, invalidations);
+                        return ToolOutput.success(RagEvidencePayload.appendTo(
+                                invalidationFacts, query, results, invalidations));
                     }
-                    return "未找到与查询相关的代码。";
+                    return ToolOutput.success("未找到与查询相关的代码。");
                 }
 
                 String formatted = SearchResultFormatter.formatForTool(query, results);
@@ -97,11 +101,13 @@ public final class RagToolProvider implements ToolProvider, AutoCloseable {
                     formatted = "（注意：语义检索服务不可用，本次已降级为关键词+结构化检索，结果可能不完整）\n\n"
                             + formatted;
                 }
-                return RagEvidencePayload.appendTo(formatted, query, results, invalidations);
+                return ToolOutput.success(RagEvidencePayload.appendTo(
+                        formatted, query, results, invalidations));
             }
         } catch (Exception e) {
             closeCachedCodeRetriever();
-            return "代码检索失败: " + e.getMessage();
+            return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                    "代码检索失败: " + e.getMessage(), true);
         }
     }
 

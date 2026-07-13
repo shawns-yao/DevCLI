@@ -1,5 +1,7 @@
 package com.devcli.tool.provider;
 
+import com.devcli.tool.ToolErrorCode;
+import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.web.FetchResult;
 import com.devcli.web.HtmlExtractor;
@@ -21,7 +23,7 @@ public final class WebToolProvider implements ToolProvider {
 
     @Override
     public void register(ToolContext context) {
-        context.registerTool(new ToolRegistry.Tool(
+        context.registerTool(ToolRegistry.Tool.structured(
                 "web_search",
                 "搜索互联网，获取实时信息（最新版本、官方文档、技术资讯等）。" +
                         "支持 SerpAPI（默认）和 SearXNG（自托管）两种 provider，由 SEARCH_PROVIDER 环境变量切换。",
@@ -29,10 +31,10 @@ public final class WebToolProvider implements ToolProvider {
                         new ToolParameter("query", "string", "搜索关键词，例如'Java 21 新特性'、'Spring Boot 3.3 release notes'", true),
                         new ToolParameter("top_k", "integer", "返回结果数量（默认5）", false)
                 ),
-                args -> webSearch(args.get("query"), parseInt(args.get("top_k"), 5))
+                args -> webSearchOutput(args.get("query"), parseInt(args.get("top_k"), 5))
         ));
 
-        context.registerTool(new ToolRegistry.Tool(
+        context.registerTool(ToolRegistry.Tool.structured(
                 "web_fetch",
                 "抓取指定 URL，提取正文转 Markdown。" +
                         "适用静态 / SSR 页面（博客、文档、官网）；JS 渲染或防爬站会返回空正文，本期不重试。",
@@ -40,38 +42,52 @@ public final class WebToolProvider implements ToolProvider {
                         new ToolParameter("url", "string", "完整 URL，需 http 或 https 协议", true),
                         new ToolParameter("max_chars", "integer", "返回 Markdown 最大字符数（默认 8000，超出截断）", false)
                 ),
-                args -> webFetch(args.get("url"), parseInt(args.get("max_chars"), DEFAULT_FETCH_MAX_CHARS))
+                args -> webFetchOutput(args.get("url"), parseInt(args.get("max_chars"), DEFAULT_FETCH_MAX_CHARS))
         ));
     }
 
     String webSearch(String query, int topK) {
+        return webSearchOutput(query, topK).text();
+    }
+
+    private ToolOutput webSearchOutput(String query, int topK) {
         if (query == null || query.isBlank()) {
-            return "搜索关键词不能为空";
+            return ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS,
+                    "搜索关键词不能为空", false);
         }
         SearchProvider provider = searchProvider();
         if (!provider.isReady()) {
-            return "⚠️ " + provider.unavailableHint();
+            return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                    provider.unavailableHint(), true);
         }
         try {
             List<SearchResult> results = provider.search(query.trim(), topK);
-            return formatSearchResults(provider.name(), query, results);
+            return ToolOutput.success(formatSearchResults(provider.name(), query, results));
         } catch (Exception e) {
-            return "搜索失败 (" + provider.name() + "): " + e.getMessage();
+            return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                    "搜索失败 (" + provider.name() + "): " + e.getMessage(), true);
         }
     }
 
     String webFetch(String url, int maxChars) {
+        return webFetchOutput(url, maxChars).text();
+    }
+
+    private ToolOutput webFetchOutput(String url, int maxChars) {
         if (url == null || url.isBlank()) {
-            return "URL 不能为空";
+            return ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS,
+                    "URL 不能为空", false);
         }
         NetworkPolicy policy = networkPolicy();
         String denyReason = policy.checkUrl(url);
         if (denyReason != null) {
-            return "❌ 网络访问被拒绝: " + denyReason;
+            return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
+                    "网络访问被拒绝: " + denyReason);
         }
         String rateReason = policy.acquire();
         if (rateReason != null) {
-            return "❌ " + rateReason;
+            return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                    rateReason, true);
         }
 
         try {
@@ -85,9 +101,10 @@ public final class WebToolProvider implements ToolProvider {
                 truncated = true;
             }
             FetchResult result = FetchResult.ok(raw.url(), extracted.title(), markdown, originalLength, truncated);
-            return formatFetchResult(result);
+            return ToolOutput.success(formatFetchResult(result));
         } catch (Exception e) {
-            return "抓取失败: " + e.getMessage();
+            return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                    "抓取失败: " + e.getMessage(), true);
         }
     }
 

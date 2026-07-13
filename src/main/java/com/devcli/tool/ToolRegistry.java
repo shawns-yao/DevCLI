@@ -387,9 +387,13 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public long commandTimeoutSeconds() { return commandTimeoutSeconds; }
     @Override
     public String executeCommand(String command) {
+        return executeCommandOutput(command).text();
+    }
+    @Override
+    public ToolOutput executeCommandOutput(String command) {
         boolean sandboxRequired = currentToolAccessScope() == ToolAccessScope.ISOLATED_PROJECT;
         return commandExecutionService.execute(new CommandExecutionService.Request(
-                command, Path.of(projectPath), commandTimeoutSeconds, sandboxRequired)).toToolText();
+                command, Path.of(projectPath), commandTimeoutSeconds, sandboxRequired)).toToolOutput();
     }
     @Override
     public java.util.function.Consumer<String> memorySaver() { return memorySaver; }
@@ -871,7 +875,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         Map<String, String> argMap = new HashMap<>();
         parsedArgs.fields().forEachRemaining(entry ->
                 argMap.put(entry.getKey(), entry.getValue().asText()));
-        return ToolOutput.text(tool.executor().execute(argMap));
+        return tool.executor().executeOutput(argMap);
     }
 
     private static String unknownToolGuidance(String name) {
@@ -1190,6 +1194,11 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
             this(name, description, parameters, executor, ToolEffect.builtIn(name));
         }
 
+        public static Tool structured(String name, String description, JsonNode parameters,
+                                      StructuredToolExecutor executor) {
+            return new Tool(name, description, parameters, executor, ToolEffect.builtIn(name));
+        }
+
         public Tool {
             effect = effect == null ? ToolEffect.EXTERNAL_MUTATION : effect;
         }
@@ -1282,5 +1291,24 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     public interface ToolExecutor {
         String execute(Map<String, String> args);
+
+        default ToolOutput executeOutput(Map<String, String> args) {
+            return ToolOutput.success(execute(args));
+        }
+    }
+
+    @FunctionalInterface
+    public interface StructuredToolExecutor extends ToolExecutor {
+        ToolOutput executeStructured(Map<String, String> args);
+
+        @Override
+        default String execute(Map<String, String> args) {
+            return executeStructured(args).text();
+        }
+
+        @Override
+        default ToolOutput executeOutput(Map<String, String> args) {
+            return executeStructured(args);
+        }
     }
 }

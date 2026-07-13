@@ -1,5 +1,8 @@
 package com.devcli.tool.command;
 
+import com.devcli.tool.ToolErrorCode;
+import com.devcli.tool.ToolOutput;
+
 import java.nio.file.Path;
 
 @FunctionalInterface
@@ -27,11 +30,21 @@ public interface CommandExecutionService {
             return !timedOut && !cancelled && exitCode == 0;
         }
 
-        public String toToolText() {
-            if (timedOut || cancelled) {
-                return output;
+        public ToolOutput toToolOutput() {
+            if (timedOut) {
+                return ToolOutput.timedOut(output);
             }
-            return "命令执行完成 (exit code: " + exitCode + ")\n" + output;
+            if (cancelled) {
+                return ToolOutput.cancelled(output);
+            }
+            String text = "命令执行完成 (exit code: " + exitCode + ")\n" + output;
+            return exitCode == 0
+                    ? ToolOutput.success(text)
+                    : ToolOutput.error(ToolErrorCode.EXECUTION_FAILED, text, false);
+        }
+
+        public String toToolText() {
+            return toToolOutput().text();
         }
     }
 

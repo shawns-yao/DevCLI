@@ -61,4 +61,37 @@ class ToolRegistryStructuredResultTest {
             assertFalse(output.retryable());
         }
     }
+
+    @Test
+    void reportsProviderValidationFailuresWithStableCodes() {
+        try (ToolRegistry registry = new ToolRegistry()) {
+            ToolOutput grep = registry.executeToolOutput("grep_code", "{\"pattern\":\" \"}");
+            ToolOutput command = registry.executeToolOutput("execute_command", "{\"command\":\" \"}");
+            ToolOutput search = registry.executeToolOutput("search_tools", "{\"query\":\" \"}");
+            ToolOutput skill = registry.executeToolOutput("load_skill", "{\"name\":\"missing\"}");
+            ToolOutput memory = registry.executeToolOutput("save_memory", "{\"fact\":\"value\"}");
+
+            assertEquals(ToolErrorCode.INVALID_ARGUMENTS, grep.errorCode());
+            assertEquals(ToolErrorCode.INVALID_ARGUMENTS, command.errorCode());
+            assertEquals(ToolErrorCode.INVALID_ARGUMENTS, search.errorCode());
+            assertEquals(ToolErrorCode.EXECUTION_FAILED, skill.errorCode());
+            assertEquals(ToolErrorCode.EXECUTION_FAILED, memory.errorCode());
+        }
+    }
+
+    @Test
+    void reportsCommandExitFailureWithoutParsingText(@TempDir Path projectRoot) {
+        try (ToolRegistry registry = new ToolRegistry()) {
+            registry.setProjectPath(projectRoot.toString());
+            registry.setCommandExecutionService(request ->
+                    com.devcli.tool.command.CommandExecutionService.Result.completed(7, "failed"));
+
+            ToolOutput output = registry.executeToolOutput(
+                    "execute_command", "{\"command\":\"build\"}");
+
+            assertEquals(ToolStatus.ERROR, output.status());
+            assertEquals(ToolErrorCode.EXECUTION_FAILED, output.errorCode());
+            assertFalse(output.retryable());
+        }
+    }
 }

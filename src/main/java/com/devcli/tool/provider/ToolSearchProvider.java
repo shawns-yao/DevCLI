@@ -1,5 +1,7 @@
 package com.devcli.tool.provider;
 
+import com.devcli.tool.ToolErrorCode;
+import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
 
 import java.util.Arrays;
@@ -14,15 +16,24 @@ public final class ToolSearchProvider implements ToolProvider {
 
     @Override
     public void register(ToolContext context) {
-        context.registerTool(new ToolRegistry.Tool(
+        context.registerTool(ToolRegistry.Tool.structured(
                 "search_tools",
                 "Search currently available tools by name, description and parameter schema. Use this when the exact MCP or built-in tool name is unknown.",
                 context.createToolParameters(
                         new ToolParameter("query", "string", "keywords to search in tool name, description and parameter schema", true),
                         new ToolParameter("limit", "string", "maximum number of matches to return, default 10", false)
                 ),
-                args -> searchTools(context, args.get("query"), args.get("limit"))
+                args -> searchToolsOutput(context, args.get("query"), args.get("limit"))
         ));
+    }
+
+    private ToolOutput searchToolsOutput(ToolContext context, String query, String limitValue) {
+        String normalized = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
+        if (normalized.isBlank()) {
+            return ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS,
+                    "search_tools 失败: query 不能为空", false);
+        }
+        return ToolOutput.success(searchTools(context, query, limitValue));
     }
 
     public String searchTools(ToolContext context, String query, String limitValue) {

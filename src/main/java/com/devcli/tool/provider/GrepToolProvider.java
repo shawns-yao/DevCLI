@@ -1,5 +1,7 @@
 package com.devcli.tool.provider;
 
+import com.devcli.tool.ToolErrorCode;
+import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
 
 import java.io.IOException;
@@ -28,7 +30,7 @@ public final class GrepToolProvider implements ToolProvider {
 
     @Override
     public void register(ToolContext context) {
-        context.registerTool(new ToolRegistry.Tool(
+        context.registerTool(ToolRegistry.Tool.structured(
                 "grep_code",
                 "实时精确搜索当前工作区文件内容；适合类名、方法名、配置键、错误文本等精确定位，不依赖 RAG 索引。",
                 context.createToolParameters(
@@ -42,14 +44,16 @@ public final class GrepToolProvider implements ToolProvider {
         ));
     }
 
-    private String grep(Map<String, String> args, ToolContext context) {
+    private ToolOutput grep(Map<String, String> args, ToolContext context) {
         String pattern = args.get("pattern");
         if (pattern == null || pattern.isBlank()) {
-            return "grep_code 失败: pattern 不能为空";
+            return ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS,
+                    "grep_code 失败: pattern 不能为空", false);
         }
         Path start = context.resolveSafePath(args.getOrDefault("path", "."));
         if (!Files.exists(start)) {
-            return "grep_code 未找到路径: " + args.getOrDefault("path", ".");
+            return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                    "grep_code 未找到路径: " + args.getOrDefault("path", "."), false);
         }
 
         boolean regex = parseBoolean(args.get("regex"), true);
@@ -62,7 +66,8 @@ public final class GrepToolProvider implements ToolProvider {
                 int flags = caseSensitive ? 0 : Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE;
                 compiled = Pattern.compile(pattern, flags);
             } catch (PatternSyntaxException e) {
-                return "grep_code 失败: 正则表达式无效: " + e.getMessage();
+                return ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS,
+                        "grep_code 失败: 正则表达式无效: " + e.getMessage(), false);
             }
         } else if (!caseSensitive) {
             plainNeedle = pattern.toLowerCase(Locale.ROOT);
@@ -94,11 +99,12 @@ public final class GrepToolProvider implements ToolProvider {
                 }
                 matches.add(relative(root, file) + ":" + (i + 1) + ": " + line.strip());
                 if (matches.size() >= limit) {
-                    return String.join("\n", matches);
+                    return ToolOutput.success(String.join("\n", matches));
                 }
             }
         }
-        return matches.isEmpty() ? "(no matches)" : String.join("\n", matches);
+        return ToolOutput.success(matches.isEmpty()
+                ? "(no matches)" : String.join("\n", matches));
     }
 
     private void collectFiles(Path start, List<Path> files) {
