@@ -264,11 +264,7 @@ public class MemoryManager implements AutoCloseable {
                 true,
                 ""
         );
-        if (subject.isBlank()) {
-            longTermMemory.store(entry);               // 无法确定主题：追加，不覆盖
-        } else {
-            longTermMemory.storeWithSubject(entry);    // 同主题旧事实被 supersede
-        }
+        longTermMemory.storeManaged(entry);
     }
 
     private static MemoryEntry.MemoryType memoryEntryType(Map<String, String> metadata) {

@@ -1,12 +1,16 @@
 package com.devcli.memory;
 
 import java.time.Instant;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 
 /**
  * 记忆条目 - Memory 系统的基础数据单元
  */
 public class MemoryEntry {
+    public static final int CURRENT_SCHEMA_VERSION = 1;
+
     private final String id;
     private final String content;
     private final MemoryType type;
@@ -19,6 +23,12 @@ public class MemoryEntry {
     private final boolean active;
     /** 取代本条的新事实 id；active=false 时有意义，否则为空串。 */
     private final String supersededBy;
+    /** 持久化结构版本，用于后续无损迁移。 */
+    private final int schemaVersion;
+    /** 同一主题内的递增修订号；普通记忆从 1 开始。 */
+    private final int revision;
+    /** 过期时间；null 表示不过期。 */
+    private final Instant expiresAt;
 
     public enum MemoryType {
         CONVERSATION,  // 对话记忆
@@ -34,25 +44,38 @@ public class MemoryEntry {
 
     public MemoryEntry(String id, String content, MemoryType type, Instant timestamp,
                        Map<String, String> metadata, int tokenCount) {
-        this(id, content, type, timestamp, metadata, tokenCount, "", true, "");
+        this(id, content, type, timestamp, metadata, tokenCount, "", true, "",
+                CURRENT_SCHEMA_VERSION, 1, null);
     }
 
     /**
-     * 完整构造（含冲突消解字段）。旧构造默认 {@code subject="" / active=true / supersededBy=""}，
+     * 完整构造（含冲突消解字段）。旧构造默认当前 schema、revision=1、永不过期，
      * 保持对既有调用点的兼容。
      */
     public MemoryEntry(String id, String content, MemoryType type, Instant timestamp,
                        Map<String, String> metadata, int tokenCount,
                        String subject, boolean active, String supersededBy) {
+        this(id, content, type, timestamp, metadata, tokenCount, subject, active, supersededBy,
+                CURRENT_SCHEMA_VERSION, 1, null);
+    }
+
+    public MemoryEntry(String id, String content, MemoryType type, Instant timestamp,
+                       Map<String, String> metadata, int tokenCount,
+                       String subject, boolean active, String supersededBy,
+                       int schemaVersion, int revision, Instant expiresAt) {
         this.id = id;
         this.content = content;
         this.type = type;
         this.timestamp = timestamp != null ? timestamp : Instant.now();
-        this.metadata = metadata != null ? metadata : Map.of();
+        this.metadata = metadata == null ? Map.of()
+                : Collections.unmodifiableMap(new HashMap<>(metadata));
         this.tokenCount = tokenCount;
         this.subject = subject == null ? "" : subject;
         this.active = active;
         this.supersededBy = supersededBy == null ? "" : supersededBy;
+        this.schemaVersion = Math.max(1, schemaVersion);
+        this.revision = Math.max(1, revision);
+        this.expiresAt = expiresAt;
     }
 
     public String getId() { return id; }
@@ -64,6 +87,26 @@ public class MemoryEntry {
     public String getSubject() { return subject; }
     public boolean isActive() { return active; }
     public String getSupersededBy() { return supersededBy; }
+    public int getSchemaVersion() { return schemaVersion; }
+    public int getRevision() { return revision; }
+    public Instant getExpiresAt() { return expiresAt; }
+
+    public boolean isExpired(Instant now) {
+        return expiresAt != null && !expiresAt.isAfter(now == null ? Instant.now() : now);
+    }
+
+    public MemoryEntry withLifecycle(int nextRevision, Instant nextExpiresAt,
+                                     Map<String, String> nextMetadata) {
+        return copy(subject, active, supersededBy, nextRevision, nextExpiresAt, nextMetadata);
+    }
+
+    MemoryEntry copy(String nextSubject, boolean nextActive, String nextSupersededBy,
+                     int nextRevision, Instant nextExpiresAt, Map<String, String> nextMetadata) {
+        return new MemoryEntry(id, content, type, timestamp,
+                nextMetadata == null ? metadata : nextMetadata, tokenCount,
+                nextSubject, nextActive, nextSupersededBy, CURRENT_SCHEMA_VERSION,
+                nextRevision, nextExpiresAt);
+    }
 
     /**
      * 粗略估算 token 数（中文约 1.5 字/token，英文约 4 字符/token）

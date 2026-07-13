@@ -86,6 +86,11 @@ public class LongTermMemory implements Memory, AutoCloseable {
     public synchronized void store(MemoryEntry entry) {
         // Bug #13 修复：整个方法加锁，确保去重检查和插入原子性
         if (entry == null) return;
+        pruneExpired();
+        Instant expiresAt = entry.getExpiresAt() != null
+                ? entry.getExpiresAt()
+                : MemoryLifecyclePolicy.expiresAt(entry.getType(), Instant.now());
+        entry = entry.withLifecycle(entry.getRevision(), expiresAt, entry.getMetadata());
         MemoryEntry previousById = entries.get(entry.getId());
         if (previousById == null && findDuplicateContent(entry) != null) {
             return;
@@ -126,23 +131,46 @@ public class LongTermMemory implements Memory, AutoCloseable {
      */
     public synchronized void storeWithSubject(MemoryEntry entry) {
         if (entry == null) return;
+        pruneExpired();
+        Optional<MemoryConflictDetector.Conflict> conflict =
+                MemoryConflictDetector.detect(entry, new ArrayList<>(entries.values()));
         String subject = entry.getSubject();
+        if ((subject == null || subject.isBlank()) && conflict.isPresent()) {
+            subject = conflict.get().subject();
+        }
         if (subject == null || subject.isBlank()) {
             store(entry);
             return;
         }
-        // 1. 同主题现存 active 旧条 → 标记 inactive，superseded_by 指向新条
+
         List<MemoryEntry> supersededTargets = new ArrayList<>();
+        int nextRevision = 1;
         for (MemoryEntry existing : entries.values()) {
+            String existingSubject = existing.getSubject().isBlank()
+                    ? MemoryConflictDetector.inferSubject(existing.getContent())
+                    : existing.getSubject();
+            if (subject.equals(existingSubject)) {
+                nextRevision = Math.max(nextRevision, existing.getRevision() + 1);
+            }
             if (existing.isActive()
-                    && subject.equals(existing.getSubject())
+                    && subject.equals(existingSubject)
                     && !existing.getId().equals(entry.getId())) {
                 supersededTargets.add(existing);
             }
         }
+
+        Map<String, String> metadata = new HashMap<>(entry.getMetadata());
+        conflict.ifPresent(value -> {
+            metadata.put("conflict_detected", "true");
+            metadata.put("conflict_with", value.existingId());
+        });
+        Instant expiresAt = entry.getExpiresAt() != null
+                ? entry.getExpiresAt()
+                : MemoryLifecyclePolicy.expiresAt(entry.getType(), Instant.now());
+        MemoryEntry managedEntry = entry.copy(subject, true, "", nextRevision, expiresAt, metadata);
+
         for (MemoryEntry old : supersededTargets) {
-            MemoryEntry inactive = asSuperseded(old, entry.getId());
-            // content/token 未变，无需动 tokenCounter / contentHashes / 向量索引
+            MemoryEntry inactive = asSuperseded(old, managedEntry.getId());
             boolean persisted = store.upsert(inactive);
             if (!persisted && persistentStore) {
                 log.warn("Failed to persist supersede of {} (subject={}); kept in-memory only",
@@ -150,32 +178,34 @@ public class LongTermMemory implements Memory, AutoCloseable {
             }
             entries.put(inactive.getId(), inactive);
         }
-        // 2. 写入新条（走标准 store：维护 hash/token、向量钩子、active-only 去重）
-        store(entry);
+        store(managedEntry);
+    }
+
+    public synchronized void storeManaged(MemoryEntry entry) {
+        if (entry == null) return;
+        if (!entry.getSubject().isBlank()
+                || MemoryConflictDetector.detect(entry, new ArrayList<>(entries.values())).isPresent()) {
+            storeWithSubject(entry);
+        } else {
+            store(entry);
+        }
     }
 
     /** 基于旧条派生一个被取代的失效副本：仅改 active=false 与 supersededBy，其余保持不变。 */
     private static MemoryEntry asSuperseded(MemoryEntry old, String newId) {
-        return new MemoryEntry(
-                old.getId(),
-                old.getContent(),
-                old.getType(),
-                old.getTimestamp(),
-                old.getMetadata(),
-                old.getTokenCount(),
-                old.getSubject(),
-                false,
-                newId
-        );
+        return old.copy(old.getSubject(), false, newId, old.getRevision(),
+                old.getExpiresAt(), old.getMetadata());
     }
 
     @Override
-    public Optional<MemoryEntry> retrieve(String id) {
+    public synchronized Optional<MemoryEntry> retrieve(String id) {
+        pruneExpired();
         return Optional.ofNullable(entries.get(id));
     }
 
     @Override
-    public List<MemoryEntry> search(String query, int limit) {
+    public synchronized List<MemoryEntry> search(String query, int limit) {
+        pruneExpired();
         Set<String> queryTokens = MemoryQueryTokenizer.tokenize(query);
         return entries.values().stream()
                 .filter(MemoryEntry::isActive)
@@ -191,12 +221,13 @@ public class LongTermMemory implements Memory, AutoCloseable {
     }
 
     @Override
-    public List<MemoryEntry> getAll() {
+    public synchronized List<MemoryEntry> getAll() {
+        pruneExpired();
         return new ArrayList<>(entries.values());
     }
 
     @Override
-    public boolean delete(String id) {
+    public synchronized boolean delete(String id) {
         MemoryEntry toRemove = entries.get(id);
         if (toRemove == null) {
             return false;
@@ -224,6 +255,19 @@ public class LongTermMemory implements Memory, AutoCloseable {
         return true;
     }
 
+    private void pruneExpired() {
+        Instant now = Instant.now();
+        List<String> expiredIds = entries.values().stream()
+                .filter(entry -> entry.isExpired(now))
+                .map(MemoryEntry::getId)
+                .toList();
+        for (String id : expiredIds) {
+            if (!delete(id)) {
+                log.warn("Failed to prune expired memory {}", id);
+            }
+        }
+    }
+
     private MemoryEntry findDuplicateContent(MemoryEntry entry) {
         int hash = entry.getContent().hashCode();
         if (!contentHashes.contains(hash)) {
@@ -249,7 +293,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
     }
 
     @Override
-    public void clear() {
+    public synchronized void clear() {
         entries.clear();
         contentHashes.clear();
         tokenCounter.set(0);
@@ -275,12 +319,14 @@ public class LongTermMemory implements Memory, AutoCloseable {
     }
 
     @Override
-    public int getTokenCount() {
+    public synchronized int getTokenCount() {
+        pruneExpired();
         return tokenCounter.get();
     }
 
     @Override
-    public int size() {
+    public synchronized int size() {
+        pruneExpired();
         return entries.size();
     }
 
@@ -294,7 +340,8 @@ public class LongTermMemory implements Memory, AutoCloseable {
     }
 
     /** 按类型筛选记忆 */
-    public List<MemoryEntry> getByType(MemoryEntry.MemoryType type) {
+    public synchronized List<MemoryEntry> getByType(MemoryEntry.MemoryType type) {
+        pruneExpired();
         return entries.values().stream()
                 .filter(entry -> entry.getType() == type)
                 .collect(Collectors.toList());

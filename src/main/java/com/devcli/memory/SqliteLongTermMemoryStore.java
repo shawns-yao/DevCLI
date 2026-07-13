@@ -80,6 +80,9 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
                             subject TEXT NOT NULL DEFAULT '',
                             active INTEGER NOT NULL DEFAULT 1,
                             superseded_by TEXT NOT NULL DEFAULT '',
+                            schema_version INTEGER NOT NULL DEFAULT 1,
+                            revision INTEGER NOT NULL DEFAULT 1,
+                            expires_at_ms INTEGER,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
                         """);
@@ -87,6 +90,9 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
                 addColumnIfMissing(stmt, "subject", "TEXT NOT NULL DEFAULT ''");
                 addColumnIfMissing(stmt, "active", "INTEGER NOT NULL DEFAULT 1");
                 addColumnIfMissing(stmt, "superseded_by", "TEXT NOT NULL DEFAULT ''");
+                addColumnIfMissing(stmt, "schema_version", "INTEGER NOT NULL DEFAULT 1");
+                addColumnIfMissing(stmt, "revision", "INTEGER NOT NULL DEFAULT 1");
+                addColumnIfMissing(stmt, "expires_at_ms", "INTEGER");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_memory_facts_type ON memory_facts(type)");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_memory_facts_subject_active "
                         + "ON memory_facts(subject, active)");
@@ -114,7 +120,7 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
         try (Statement stmt = connection.createStatement();
              ResultSet rs = stmt.executeQuery(
                      "SELECT id, content, type, timestamp_ms, metadata_json, token_count, "
-                             + "subject, active, superseded_by "
+                             + "subject, active, superseded_by, schema_version, revision, expires_at_ms "
                              + "FROM memory_facts ORDER BY timestamp_ms ASC")) {
             while (rs.next()) {
                 MemoryEntry entry = parseRow(rs);
@@ -133,8 +139,8 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
         if (!usable || entry == null) return false;
         String sql = """
                 INSERT INTO memory_facts(id, content, type, timestamp_ms, metadata_json, token_count,
-                                         subject, active, superseded_by)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                         subject, active, superseded_by, schema_version, revision, expires_at_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     content = excluded.content,
                     type = excluded.type,
@@ -143,7 +149,10 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
                     token_count = excluded.token_count,
                     subject = excluded.subject,
                     active = excluded.active,
-                    superseded_by = excluded.superseded_by
+                    superseded_by = excluded.superseded_by,
+                    schema_version = excluded.schema_version,
+                    revision = excluded.revision,
+                    expires_at_ms = excluded.expires_at_ms
                 """;
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setString(1, entry.getId());
@@ -155,6 +164,13 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
             ps.setString(7, entry.getSubject());
             ps.setInt(8, entry.isActive() ? 1 : 0);
             ps.setString(9, entry.getSupersededBy());
+            ps.setInt(10, entry.getSchemaVersion());
+            ps.setInt(11, entry.getRevision());
+            if (entry.getExpiresAt() == null) {
+                ps.setObject(12, null);
+            } else {
+                ps.setLong(12, entry.getExpiresAt().toEpochMilli());
+            }
             ps.executeUpdate();
             return true;
         } catch (SQLException | JsonProcessingException e) {
@@ -230,8 +246,12 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
             String subject = rs.getString("subject");
             boolean active = rs.getInt("active") != 0;
             String supersededBy = rs.getString("superseded_by");
+            int schemaVersion = rs.getInt("schema_version");
+            int revision = rs.getInt("revision");
+            long expiresAtMillis = rs.getLong("expires_at_ms");
+            Instant expiresAt = rs.wasNull() ? null : Instant.ofEpochMilli(expiresAtMillis);
             return new MemoryEntry(id, content, type, timestamp, metadata, tokenCount,
-                    subject, active, supersededBy);
+                    subject, active, supersededBy, schemaVersion, revision, expiresAt);
         } catch (IllegalArgumentException e) {
             log.warn("Skip corrupted row in memory_facts: {}", e.getMessage());
             return null;
