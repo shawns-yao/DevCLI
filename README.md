@@ -67,11 +67,12 @@ Main
 
 关键边界：
 
-- `ConversationHistoryCompactor（对话历史压缩器）` 是治理 LLM messages 窗口的唯一压缩点；压缩分两层：第 0 层 `microcompact` 先把单条超大消息（多为大工具结果）头尾截断，并把最近 2 个 user round 之前的旧 `tool_result` 按 `toolCallId` 成批落盘为 `<microcompact_boundary>` 引用（不调 LLM、不删消息、保 tool_call 配对），扛不住再走 LLM 摘要（Map-Reduce / 增量）。摘要为固定九段结构化（对标 Claude Code `/compact` 模板），超长时先程序化 GC（按段裁剪、不调 LLM），不够再 LLM 兜底。
+- 所有内置 LLM Provider 使用统一 `LlmException` 错误模型，区分认证、限流、过载、超时、网络、参数、上下文超限、内容过滤、服务端和响应格式错误。限流、过载、超时、网络和 5xx 按指数退避与 jitter 有界重试；流式内容已经输出后不重试，避免重复正文或工具调用。
+- `ConversationHistoryCompactor（对话历史压缩器）` 是治理 LLM messages 窗口的唯一压缩点；压缩分两层：第 0 层 `microcompact` 先把单条超大消息（多为大工具结果）头尾截断，并把最近 2 个 user round 之前的旧 `tool_result` 按 `toolCallId` 成批落盘为 `<microcompact_boundary>` 引用（不调 LLM、不删消息、保 tool_call 配对），扛不住再走 LLM 摘要（Map-Reduce / 增量）。摘要提交到 history 前会经过运行时语义守卫，抽取必须、禁止、默认值、命令、版本和配置赋值等关键约束；摘要缺失时直接从原始消息恢复，不再等后续任务失败后发现。
 - `WorkingMemory（工作记忆）` 只保存当前会话派生状态，不承担压缩职责。`RagEvidenceMemory（RAG 证据记忆）` 会记录检索证据的 `IndexEpoch（索引版本）`、`SymbolVersion（符号版本）` 和 `ClasspathEpoch（类路径版本）`；`search_code` 通过结构化 `RAG_EVIDENCE_JSON` 载荷传递证据，避免依赖展示文本解析。
-- `LongTermMemory（长期记忆）` 只保存跨会话稳定事实，默认不把临时任务请求写入长期层。`SymbolInvalidation（符号失效）` 会在索引替换时记录变更和删除的旧/新符号版本差异，并通过 `NegativeFact（负向事实）` 告诉模型哪些旧事实不可用；`search_code` 会输出与查询相关的失效事实，供 WorkingMemory 清理旧 RAG 证据。长期记忆注入时会抑制与 WorkingMemory 临时事实语义重复的条目。
+- `LongTermMemory（长期记忆）` 只保存跨会话稳定事实，默认不把临时任务请求写入长期层。每条记忆统一记录 schemaVersion、主题内 revision 和 expiresAt；新写入事实按类型应用 TTL，检索时自动清理过期项。同主题内容变化或可解析键值事实冲突时自动标记 `conflict_with`，旧事实进入 superseded 状态。长期记忆注入时会抑制与 WorkingMemory 临时事实语义重复的条目。
 - `PathGuard（路径围栏）` 负责限制文件访问不逃逸项目根。
-- `ToolEffect + ToolAccessScope（工具副作用能力）` 由执行管线强制：非隔离分析任务只获得只读能力，隔离任务才允许项目写入和主机命令；MCP 缺失只读注解或声明 destructive/openWorld 时按外部副作用处理。工具定义、`search_tools` 缓存和并行工具线程使用同一能力范围。
+- `ToolEffect + ToolAccessScope（工具副作用能力）` 由执行管线强制：非隔离分析任务只获得只读能力，隔离任务才允许项目写入和主机命令；MCP 缺失只读注解或声明 destructive/openWorld 时按外部副作用处理。工具参数先转换为稳定语义指纹，字段顺序、查询大小写和冗余空白不再绕过停滞检测；成功的只读结果会短期缓存，任何副作用执行都会清空缓存。
 - `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 和 `/team` 并行执行时拦截 `write_file`，同一文件只能被一个运行中 task / step 写入；并行工具线程会继承步骤租约归属，任务结束后释放租约。`ToolRegistry` 托管共享后台清理器，project fork 复用同一线程，最后一个注册表关闭后停止；周期可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
 - `PatchSet（补丁集）` 是隔离结果进入主项目的唯一文件回写边界：JVM 公平锁和 `~/.devcli/locks/project-commit/` 下的跨进程文件锁覆盖预检、应用和 checkpoint 终态；构建阶段流式计算哈希，未变化文件不读取完整内容。协议版本 3 在应用前保存目标哈希与原文件备份，恢复时按最终哈希提升完成、继续待执行或自动回滚。Reviewer 拒绝、任务失败、用户取消、前置哈希冲突、非普通文件覆盖或路径/链接逃逸都会阻止整批应用。
 - `CommandGuard（命令防线）` 是危险命令快速拒绝层，不替代 HITL 和路径策略。
@@ -210,6 +211,10 @@ KIMI_MODEL=kimi-k2.6
 ```
 
 未显式切换时默认使用 `anthropic` provider；运行时可用 `/model` 切换已配置的 provider。
+
+统一重试默认最多 3 次，初始退避 500ms、上限 8s、jitter 0.2，可通过 `DEVCLI_LLM_RETRY_MAX_ATTEMPTS`、`DEVCLI_LLM_RETRY_INITIAL_DELAY_MS`、`DEVCLI_LLM_RETRY_MAX_DELAY_MS`、`DEVCLI_LLM_RETRY_JITTER_RATIO` 调整。
+
+长期记忆 TTL 可通过 `DEVCLI_MEMORY_TTL_DAYS` 设置统一值，或使用 `DEVCLI_MEMORY_TTL_FACT_DAYS`、`DEVCLI_MEMORY_TTL_FEEDBACK_DAYS`、`DEVCLI_MEMORY_TTL_SUMMARY_DAYS` 按类型覆盖。只读工具缓存默认 128 条、30 秒，可通过 `DEVCLI_TOOL_RESULT_CACHE_MAX_ENTRIES` 和 `DEVCLI_TOOL_RESULT_CACHE_TTL_SECONDS` 调整。
 
 ### Embedding
 

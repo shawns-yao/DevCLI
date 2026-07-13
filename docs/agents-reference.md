@@ -359,6 +359,16 @@ EMBEDDING_BASE_URL=http://localhost:11434
 
 ---
 
+## Runtime Reliability And Memory Lifecycle
+
+模型调用统一通过 `LlmException` 表达错误，`LlmErrorCode` 区分认证、限流、过载、超时、网络、参数、上下文超限、内容过滤、服务端和响应格式错误。Anthropic 与 OpenAI-compatible 基类复用同一 `LlmRetryExecutor`；限流、过载、超时、网络和 5xx 使用指数退避与 jitter，其他错误立即返回。流式 listener 已收到任何 reasoning/content delta 后，当前调用转为不可重试，避免重复输出和重复工具调用。
+
+`ConversationHistoryCompactor` 在摘要尺寸治理后、重建 history 前调用 `CompactionSemanticGuard`。守卫从待压缩原消息中提取必须、禁止、默认值、命令、版本、端口、目录、验收和配置赋值等关键约束，通过规范化文本与标识符锚点判断保留情况；缺失约束直接以提取式恢复段补回，并在摘要上限内优先保留。
+
+`MemoryEntry` 持久化 `schemaVersion`、`revision` 和 `expiresAt`。旧构造与旧 SQLite 行迁移为 schema 1、revision 1、无历史过期时间；新写入条目按类型 TTL 生成 expiresAt。LongTermMemory 在检索、读取、计数和类型筛选前清理过期条目，并同步删除持久化记录和向量索引。显式 subject 内容变化以及 `key=value`、`主题是值` 等可解析声明冲突会记录 `conflict_detected/conflict_with`，旧条软删除，新条 revision 递增。
+
+`ToolInvocationFingerprint` 对 JSON 对象字段排序，统一查询字段大小写、冗余空白和路径分隔符。AgentBudget 使用该指纹判断语义重复；ToolRegistry 只缓存成功、无图片的 READ_ONLY 结果，默认 128 条、30 秒。项目路径切换或任何非只读工具进入执行阶段时清空缓存，禁止把副作用前的陈旧读取跨状态复用。
+
 ## Benchmark Evaluation
 
 评测入口位于 `src/test/java/com/devcli/benchmark/`，默认不进入快速回归。RAG benchmark 支持 CodeSearchNet Java 公共 test split，并统一计算 Recall@5、MRR@5、nDCG@5；长文档型 definition 查询直接走 semantic route，短符号和调用链查询继续使用 keyword、semantic、graph、RRF 与可选 rerank。
