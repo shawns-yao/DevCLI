@@ -6,6 +6,7 @@ import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -30,30 +31,30 @@ final class KeyedSerialExecutor {
         Objects.requireNonNull(task, "task");
         reserve();
 
-        Lane lane = lanes.computeIfAbsent(key, ignored -> new Lane());
-        boolean schedule;
-        synchronized (lane) {
-            lane.tasks.addLast(task);
-            schedule = !lane.running;
-            if (schedule) {
-                lane.running = true;
+        AtomicBoolean schedule = new AtomicBoolean();
+        Lane lane = lanes.compute(key, (ignored, current) -> {
+            Lane selected = current == null ? new Lane() : current;
+            synchronized (selected) {
+                selected.tasks.addLast(task);
+                if (!selected.running) {
+                    selected.running = true;
+                    selected.scheduling = true;
+                    selected.schedulingFailure = null;
+                    schedule.set(true);
+                }
             }
-        }
-        if (!schedule) {
+            return selected;
+        });
+        if (!schedule.get()) {
+            awaitSchedulingOutcome(lane);
             return;
         }
 
         try {
             executor.execute(() -> drain(key, lane));
+            completeScheduling(lane);
         } catch (RejectedExecutionException e) {
-            int released;
-            synchronized (lane) {
-                released = lane.tasks.size();
-                lane.tasks.clear();
-                lane.running = false;
-            }
-            pending.addAndGet(-released);
-            lanes.remove(key, lane);
+            rejectScheduling(key, lane, e);
             throw e;
         }
     }
@@ -71,20 +72,113 @@ final class KeyedSerialExecutor {
     }
 
     private void drain(String key, Lane lane) {
+        completeScheduling(lane);
+        Throwable taskFailure = null;
         while (true) {
             Runnable task;
             synchronized (lane) {
                 task = lane.tasks.pollFirst();
-                if (task == null) {
-                    lane.running = false;
-                    lanes.remove(key, lane);
+            }
+            if (task == null) {
+                if (retireLane(key, lane)) {
+                    rethrow(taskFailure);
                     return;
                 }
+                continue;
             }
             try {
                 task.run();
+            } catch (Throwable failure) {
+                if (taskFailure == null) {
+                    taskFailure = failure;
+                } else {
+                    taskFailure.addSuppressed(failure);
+                }
             } finally {
                 pending.decrementAndGet();
+            }
+        }
+    }
+
+    private static void rethrow(Throwable failure) {
+        if (failure == null) {
+            return;
+        }
+        if (failure instanceof RuntimeException runtimeException) {
+            throw runtimeException;
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
+        throw new IllegalStateException("serial task failed", failure);
+    }
+
+    private boolean retireLane(String key, Lane lane) {
+        AtomicBoolean retired = new AtomicBoolean();
+        lanes.compute(key, (ignored, current) -> {
+            if (current != lane) {
+                retired.set(true);
+                return current;
+            }
+            synchronized (lane) {
+                if (!lane.tasks.isEmpty()) {
+                    return lane;
+                }
+                lane.running = false;
+                retired.set(true);
+                return null;
+            }
+        });
+        return retired.get();
+    }
+
+    private void completeScheduling(Lane lane) {
+        synchronized (lane) {
+            if (!lane.scheduling) {
+                return;
+            }
+            lane.scheduling = false;
+            lane.notifyAll();
+        }
+    }
+
+    private void rejectScheduling(String key, Lane lane, RejectedExecutionException failure) {
+        AtomicInteger released = new AtomicInteger();
+        lanes.compute(key, (ignored, current) -> {
+            if (current != lane) {
+                return current;
+            }
+            synchronized (lane) {
+                if (!lane.scheduling) {
+                    return lane;
+                }
+                released.set(lane.tasks.size());
+                lane.tasks.clear();
+                lane.running = false;
+                lane.scheduling = false;
+                lane.schedulingFailure = failure;
+                lane.notifyAll();
+                return null;
+            }
+        });
+        pending.addAndGet(-released.get());
+    }
+
+    private void awaitSchedulingOutcome(Lane lane) {
+        boolean interrupted = false;
+        synchronized (lane) {
+            while (lane.scheduling) {
+                try {
+                    lane.wait();
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            if (lane.schedulingFailure != null) {
+                throw lane.schedulingFailure;
             }
         }
     }
@@ -92,5 +186,7 @@ final class KeyedSerialExecutor {
     private static final class Lane {
         private final Deque<Runnable> tasks = new ArrayDeque<>();
         private boolean running;
+        private boolean scheduling;
+        private RejectedExecutionException schedulingFailure;
     }
 }
