@@ -72,7 +72,7 @@ Reviewer 输出必须是可解析 JSON，并包含三层评分：`functional_cor
 
 Final integration 只做入口/API/默认参数/跨模块联动胶水；普通步骤失败比例达到 `50%` 时熔断，不让最终步骤强行修补。
 
-失败步骤支持有界在位重做（默认 1 次）：失败步骤保持原 id/依赖在 DAG 原位换思路重做，redo 用尽后保持 FAILED。checkpoint 协议版本 3 保存共享 `ExecutionArtifact` 和 pending PatchSet 写前日志；应用前记录 before/after 哈希与原文件备份，恢复时在项目提交锁内按最终哈希提升 COMPLETED、继续 PENDING 或自动回滚。对账保存失败、回滚不完整时停止 resume；高于当前版本的 checkpoint 明确报告不兼容，版本 1/2 保持兼容。计划、依赖、验收点和执行产物原子写入 `~/.devcli/checkpoints/`，全部成功后删除；resume 不恢复 WorkingMemory / 会话记忆。
+失败步骤支持有界在位重做（默认 1 次）：失败步骤保持原 id/依赖在 DAG 原位换思路重做，redo 用尽后保持 FAILED。checkpoint 协议版本 3 保存共享 `ExecutionArtifact` 和 pending PatchSet 写前日志；应用前记录 before/after 哈希与原文件备份，恢复时在项目提交锁内按最终哈希提升 COMPLETED、继续 PENDING 或自动回滚。写前日志目录和备份限制为当前所有者访问，超过 TTL 且没有对应 checkpoint 的孤儿日志会清理。对账保存失败、回滚不完整时停止 resume；高于当前版本的 checkpoint 明确报告不兼容，版本 1/2 保持兼容。计划、依赖、验收点和执行产物原子写入 `~/.devcli/checkpoints/`，全部成功后删除；resume 不恢复 WorkingMemory / 会话记忆。
 
 Side-Git 快照按 `devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX` 保留最近快照；每次新建快照后会重写 side-history，只保留最新 N 条，避免长会话快照无限增长。
 
@@ -115,7 +115,7 @@ src/main/java/com/devcli/
 └── render/      Renderer, InlineRenderer, PlainRenderer, RendererFactory
 ```
 
-Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔离；turn 执行池默认 2 线程 / 64 队列，过载返回 `429 runtime_busy`；`KeyedSerialExecutor` 通过同 key 原子创建、入队和退役保证同一 thread 永远串行，底层调度拒绝会传递给全部等待提交者，单个 turn 异常不会阻塞同通道后续任务。同一 thread 的 turn 有上下文延续（存储即状态）：每 turn 新建 Agent，执行前经 `RuntimeThreadStore.turnHistory` 重放该 thread 最近 20 轮的输入/输出对（`TurnRunner` 接口带 threadId；失败/被拒 turn 不进历史）。交互、后台任务和无头 turn 使用运行级 `RunContext` 隔离项目路径、取消令牌和资源生命周期；取消状态不再回退到进程级全局 token，线程中断也视为取消。`HeadlessAgentRunner` 统一创建并关闭无头 Agent 使用的 ToolRegistry / MemoryManager，工具大结果落盘使用所属 ToolRegistry 的实例项目路径，不使用跨实例静态路径。
+Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔离；turn 执行池默认 2 线程 / 64 队列，过载返回 `429 runtime_busy`；`KeyedSerialExecutor` 通过同 key 原子创建、入队和退役保证同一 thread 永远串行，底层调度拒绝会传递给全部等待提交者，普通 turn 异常不会阻塞同通道后续任务；JVM `Error` 会立即终止该通道并把已排队 turn 标记为 `fatal_runtime_error`，禁止继续执行潜在损坏状态。同一 thread 的 turn 有上下文延续（存储即状态）：每 turn 新建 Agent，执行前经 `RuntimeThreadStore.turnHistory` 重放该 thread 最近 20 轮的输入/输出对（`TurnRunner` 接口带 threadId；失败/被拒 turn 不进历史）。交互、后台任务和无头 turn 使用运行级 `RunContext` 隔离项目路径、取消令牌和资源生命周期；取消状态不再回退到进程级全局 token，线程中断也视为取消。`HeadlessAgentRunner` 统一创建并关闭无头 Agent 使用的 ToolRegistry / MemoryManager，工具大结果落盘使用所属 ToolRegistry 的实例项目路径，不使用跨实例静态路径。
 
 启动与 inline 渲染当前约定：
 

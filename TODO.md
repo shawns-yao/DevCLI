@@ -6,10 +6,11 @@
 - 来源：副作用隔离与恢复事务完成后的二次架构复查
 - 影响范围：命令执行、MCP 信任边界、跨进程提交、工作区物化、PatchSet 内存模型、checkpoint 日志、Runtime 串行器和大型入口类
 - 已实现：隔离命令和 Pre-Review 强制通过受限 Docker 执行，禁止主机回退；项目提交增加跨进程 `FileLock`；MCP readOnly 注解默认不可信，并支持本地只读允许列表与拒绝列表；PatchSet 改为逐文件流式哈希，只读取变更文件内容
-- 待实现：增加 Git worktree、增量基线或写时复制后端；为孤儿 `.patch-journal` 增加 TTL 清理和敏感备份权限控制；继续拆分 CLI、Multi-Agent、Plan 和 ToolRegistry；旧 Provider 的文本失败迁移为结构化错误码；KeyedSerialExecutor 不应在捕获 JVM `Error` 后继续执行后续任务；项目锁缓存和不可中断复制等待需要有界生命周期
+- 已补强：孤儿 `.patch-journal` 已增加 TTL 清理，恢复所需日志不会误删；备份使用 POSIX `600/700` 或 Windows 所有者专用 ACL；`KeyedSerialExecutor` 遇到 JVM `Error` 会终止同 key 通道并拒绝排队任务；项目锁缓存按使用者计数退役；复制等待和线程终止均增加上限
+- 待实现：增加 Git worktree、增量基线或写时复制后端；继续拆分 CLI、Multi-Agent、Plan 和 ToolRegistry；旧 Provider 的文本失败迁移为结构化错误码
 - 优先级：高优先级四项已完成；工作区增量后端、checkpoint 日志治理、大型类拆分为中；锁缓存和异常边界为低
 - 验证结果：已覆盖 Docker 路由与参数、Pre-Review 沙箱要求、真实子 JVM 跨进程锁、64MB 文件低堆 PatchSet 构建、MCP 伪造注解与本地策略
-- 风险：Docker daemon 本身属于主机高权限基础设施；跨进程文件锁在部分网络文件系统上的语义可能较弱；变更文件内容仍需载入内存；checkpoint 备份包含原文件明文
+- 风险：Docker daemon 本身属于主机高权限基础设施；跨进程文件锁在部分网络文件系统上的语义可能较弱；变更文件内容仍需载入内存；checkpoint 备份虽然已限制所有者访问，但内容仍是可恢复所需的原文件明文
 
 ## 2026-07-13 副作用隔离与补丁恢复事务补强
 
