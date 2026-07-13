@@ -18,7 +18,7 @@ final class ToolErrorClassifier {
             case NONE -> status.name().toLowerCase(Locale.ROOT);
             case UNKNOWN_TOOL -> "unknown-tool";
             case INVALID_ARGUMENTS -> "schema";
-            case SKILL_PERMISSION_DENIED, HITL_REJECTED, POLICY_DENIED -> "policy";
+            case CAPABILITY_DENIED, SKILL_PERMISSION_DENIED, HITL_REJECTED, POLICY_DENIED -> "policy";
             case RESOURCE_CONFLICT -> "resource-conflict";
             case EXECUTION_FAILED -> "execution";
             case MCP_ERROR -> "mcp";

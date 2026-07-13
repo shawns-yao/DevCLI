@@ -16,6 +16,7 @@ public final class ToolExecutionPipeline {
     public enum Stage {
         CANCELLATION,
         EXISTENCE,
+        CAPABILITY,
         SKILL_PERMISSION,
         ARGUMENT_VALIDATION,
         HITL,

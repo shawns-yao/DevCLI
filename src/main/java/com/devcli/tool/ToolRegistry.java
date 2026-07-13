@@ -82,6 +82,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private final ThreadLocal<SkillContextBuffer> skillContextBufferOverride = new ThreadLocal<>();
+    private final ThreadLocal<ToolAccessScope> toolAccessScope = new ThreadLocal<>();
     private final ResourceLeaseManager resourceLeaseManager = new ResourceLeaseManager();
     private final ThreadLocal<String> resourceLeaseStep = new ThreadLocal<>();
     private final ToolExecutionPipeline executionPipeline = new ToolExecutionPipeline(this::executeResolvedTool);
@@ -168,7 +169,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         fork.memorySaveHandler = memorySaveHandler;
         fork.memoryListHandler = memoryListHandler;
         fork.skillRegistry = skillRegistry;
-        fork.skillContextBuffer = skillContextBuffer;
+        fork.skillContextBuffer = skillContextBuffer == null ? null : skillContextBuffer.copy();
         mcpTools.values().forEach(registered ->
                 fork.registerMcpToolOutput(registered.descriptor(), registered.invoker()));
         fork.mcpServerLifecycleVersions.putAll(mcpServerLifecycleVersions);
@@ -262,6 +263,28 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public SkillContextBuffer activeSkillContextBuffer() {
         SkillContextBuffer override = skillContextBufferOverride.get();
         return override == null ? skillContextBuffer : override;
+    }
+
+    public <T> T runWithToolAccess(ToolAccessScope scope, java.util.function.Supplier<T> action) {
+        if (action == null) {
+            return null;
+        }
+        ToolAccessScope previous = toolAccessScope.get();
+        toolAccessScope.set(scope == null ? ToolAccessScope.FULL : scope);
+        try {
+            return action.get();
+        } finally {
+            if (previous == null) {
+                toolAccessScope.remove();
+            } else {
+                toolAccessScope.set(previous);
+            }
+        }
+    }
+
+    public ToolAccessScope currentToolAccessScope() {
+        ToolAccessScope current = toolAccessScope.get();
+        return current == null ? ToolAccessScope.FULL : current;
     }
 
     public <T> T runWithResourceLease(String stepId, java.util.function.Supplier<T> action) {
@@ -362,13 +385,21 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     @Override
     public SnapshotService snapshotService() { return snapshotService; }
     @Override
-    public List<Tool> searchableTools() { return List.copyOf(tools.values()); }
+    public List<Tool> searchableTools() {
+        ToolAccessScope scope = currentToolAccessScope();
+        return tools.values().stream()
+                .filter(tool -> scope.permits(tool.effect()))
+                .toList();
+    }
     @Override
     public boolean isMcpTool(String toolName) { return mcpTools.containsKey(toolName); }
     @Override
     public boolean activateToolDefinition(String toolName) { return activateMcpToolDefinition(toolName); }
     @Override
-    public long toolCatalogVersion() { return toolCatalogVersion.get(); }
+    public long toolCatalogVersion() {
+        return toolCatalogVersion.get() * ToolAccessScope.values().length
+                + currentToolAccessScope().ordinal();
+    }
 
     /**
      * 注册 write_file 写入观察者：参数 (path, [before, after])，
@@ -464,8 +495,10 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
      * 获取所有工具定义（用于LLM）
      */
     public List<com.devcli.llm.LlmClient.Tool> getToolDefinitions() {
+        ToolAccessScope scope = currentToolAccessScope();
         return tools.values().stream()
                 .filter(tool -> isToolDefinitionVisible(tool.name()))
+                .filter(tool -> scope.permits(tool.effect()))
                 .map(t -> new com.devcli.llm.LlmClient.Tool(t.name(), t.description(), t.parameters()))
                 .toList();
     }
@@ -504,7 +537,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                 toolName,
                 mcpDescription(descriptor),
                 descriptor.inputSchema(),
-                args -> "MCP 工具不应通过 Map<String,String> 入口执行"
+                args -> "MCP 工具不应通过 Map<String,String> 入口执行",
+                ToolEffect.fromMcp(descriptor.annotations())
         ));
         invalidateToolSearchIndex();
     }
@@ -698,6 +732,16 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                         ? chain.proceed(context)
                         : ToolOutput.error(ToolErrorCode.UNKNOWN_TOOL,
                         unknownToolGuidance(context.name()), true));
+        executionPipeline.register(ToolExecutionPipeline.Stage.CAPABILITY, (context, chain) -> {
+            Tool tool = tools.get(context.name());
+            ToolAccessScope scope = currentToolAccessScope();
+            if (tool != null && !scope.permits(tool.effect())) {
+                return ToolOutput.rejected(ToolErrorCode.CAPABILITY_DENIED,
+                        "工具能力被当前执行范围拒绝: " + context.name()
+                                + " (scope=" + scope + ", effect=" + tool.effect() + ")");
+            }
+            return chain.proceed(context);
+        });
         executionPipeline.register(ToolExecutionPipeline.Stage.SKILL_PERMISSION, (context, chain) -> {
             ToolOutput error = validateSkillToolAllowed(context.name());
             return error == null ? chain.proceed(context) : error;
@@ -941,6 +985,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
         int parallelism = Math.min(invocations.size(), MAX_PARALLEL_TOOLS);
         SkillContextBuffer activeSkillBuffer = activeSkillContextBuffer();
+        ToolAccessScope activeAccessScope = currentToolAccessScope();
+        String activeResourceLeaseStep = resourceLeaseStep.get();
         ExecutorService executor = Executors.newFixedThreadPool(parallelism, r -> {
             Thread thread = new Thread(r, "devcli-tool-executor");
             thread.setDaemon(true);
@@ -956,8 +1002,12 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                         long startedAt = System.nanoTime();
                         java.util.concurrent.atomic.AtomicReference<ToolOutput> output =
                                 new java.util.concurrent.atomic.AtomicReference<>(ToolOutput.text(""));
-                        runWithSkillContextBuffer(activeSkillBuffer,
-                                () -> output.set(executeToolOutput(invocation)));
+                        runWithToolAccess(activeAccessScope, () ->
+                                runWithResourceLease(activeResourceLeaseStep, () -> {
+                                    runWithSkillContextBuffer(activeSkillBuffer,
+                                            () -> output.set(executeToolOutput(invocation)));
+                                    return null;
+                                }));
                         return ToolExecutionResult.completed(
                                 invocation, output.get(), elapsedMillis(startedAt));
                     })
@@ -1048,7 +1098,69 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         }
     }
 
-    public record Tool(String name, String description, JsonNode parameters, ToolExecutor executor) {}
+    public enum ToolEffect {
+        READ_ONLY,
+        LOCAL_CONTEXT,
+        PROJECT_MUTATION,
+        HOST_PROCESS,
+        EXTERNAL_MUTATION;
+
+        static ToolEffect fromMcp(McpToolDescriptor.Annotations annotations) {
+            if (annotations != null && annotations.readOnly()
+                    && !annotations.destructive() && !annotations.openWorld()) {
+                return READ_ONLY;
+            }
+            return EXTERNAL_MUTATION;
+        }
+
+        static ToolEffect builtIn(String name) {
+            return switch (name == null ? "" : name) {
+                case "read_file", "list_dir", "search_code", "grep_code",
+                        "web_search", "web_fetch", "list_memory", "search_tools",
+                        "browser_status" -> READ_ONLY;
+                case "load_skill" -> LOCAL_CONTEXT;
+                case "write_file", "create_project", "revert_turn" -> PROJECT_MUTATION;
+                case "browser_connect", "browser_disconnect" -> EXTERNAL_MUTATION;
+                case "execute_command" -> HOST_PROCESS;
+                case "save_memory" -> EXTERNAL_MUTATION;
+                default -> EXTERNAL_MUTATION;
+            };
+        }
+    }
+
+    public enum ToolAccessScope {
+        FULL {
+            @Override
+            boolean permits(ToolEffect effect) {
+                return true;
+            }
+        },
+        READ_ONLY {
+            @Override
+            boolean permits(ToolEffect effect) {
+                return effect == ToolEffect.READ_ONLY || effect == ToolEffect.LOCAL_CONTEXT;
+            }
+        },
+        ISOLATED_PROJECT {
+            @Override
+            boolean permits(ToolEffect effect) {
+                return effect != ToolEffect.EXTERNAL_MUTATION;
+            }
+        };
+
+        abstract boolean permits(ToolEffect effect);
+    }
+
+    public record Tool(String name, String description, JsonNode parameters,
+                       ToolExecutor executor, ToolEffect effect) {
+        public Tool(String name, String description, JsonNode parameters, ToolExecutor executor) {
+            this(name, description, parameters, executor, ToolEffect.builtIn(name));
+        }
+
+        public Tool {
+            effect = effect == null ? ToolEffect.EXTERNAL_MUTATION : effect;
+        }
+    }
 
     private record McpRegisteredTool(McpToolDescriptor descriptor, Function<String, ToolOutput> invoker) {}
 
