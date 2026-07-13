@@ -8,7 +8,8 @@
 - 已实现：隔离命令和 Pre-Review 强制通过受限 Docker 执行，禁止主机回退；项目提交增加跨进程 `FileLock`；MCP readOnly 注解默认不可信，并支持本地只读允许列表与拒绝列表；PatchSet 改为逐文件流式哈希，只读取变更文件内容
 - 已补强：孤儿 `.patch-journal` 已增加 TTL 清理，恢复所需日志不会误删；备份使用 POSIX `600/700` 或 Windows 所有者专用 ACL；`KeyedSerialExecutor` 遇到 JVM `Error` 会终止同 key 通道并拒绝排队任务；项目锁缓存按使用者计数退役；复制等待和线程终止均增加上限
 - 已补强：工作区后端默认自动选择 Git worktree 或有界复制；worktree 会叠加当前脏文件、删除文件、未跟踪及被忽略文件，并清理排除目录、符号链接和过期元数据
-- 待实现：继续拆分 CLI、Multi-Agent、Plan 和 ToolRegistry；旧 Provider 的文本失败迁移为结构化错误码
+- 已补强：内置 Provider 支持直接返回结构化 `ToolOutput`，参数错误、策略拒绝、执行失败、超时、取消和非零命令退出不再依赖文本解析
+- 待实现：继续拆分 CLI、Multi-Agent、Plan 和 ToolRegistry
 - 优先级：高优先级四项和 Git worktree 后端已完成；文件系统级写时复制、大型类拆分为中；其余体验和评测能力为低
 - 验证结果：已覆盖 Docker 路由与参数、Pre-Review 沙箱要求、真实子 JVM 跨进程锁、64MB 文件低堆 PatchSet 构建、MCP 伪造注解与本地策略
 - 风险：Docker daemon 本身属于主机高权限基础设施；跨进程文件锁在部分网络文件系统上的语义可能较弱；变更文件内容仍需载入内存；checkpoint 备份虽然已限制所有者访问，但内容仍是可恢复所需的原文件明文
@@ -29,7 +30,7 @@
 - 来源：三条 Agent 执行路径、后台任务和 Runtime API 缺少统一运行上下文，工具结果、任务图、工作区隔离与会话并发仍存在分裂模型
 - 影响范围：Runtime、Agent、Tool、Plan、Multi-Agent、Runtime API、后台任务、验证器、工作区隔离及相关文档与测试
 - 已实现：新增运行级 `RunContext`，隔离项目路径、取消令牌和资源生命周期；取消状态不再使用进程级全局回退，线程中断可直接触发取消；后台任务为每个任务绑定独立运行上下文并在取消时同步取消令牌；无头 Agent 统一通过生命周期入口创建和关闭工具注册与记忆资源；工具大结果落盘路径改为使用所属工具注册实例的项目路径，消除跨项目静态串扰；Agent 明确区分自有与外部工具注册资源；工具结果新增状态、错误码、重试语义、图片和修改资源字段；ReAct、Plan、SubAgent 的错误熔断改用结构化错误码；工具执行统一进入分阶段中间件管线；HITL 从覆写执行入口改为管线中间件，拒绝和跳过返回结构化结果；新增统一 `AgentExecutionEngine`，ReAct、Plan task、SubAgent 共用预算检查、取消检查、LLM 调用、工具消息协议、工具结果回灌和异常出口，三条路径不再各自维护循环；新增共享 `ExecutionGraph`，Plan 与 Multi-Agent 共用依赖就绪判断、最终集成调度、缺失依赖和环检测；Runtime API 使用有界 keyed 串行执行器，同一 thread 的 turn 按提交顺序串行，不同 thread 仍可并行；新增共享 `ExecutionArtifact`，Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 统一使用状态、输出、摘要、修改资源、错误、尝试次数与时间戳；checkpoint 协议升级为版本 2，通过 `RecoveryState` 统一恢复，新版本保存共享 artifact，旧 completed/failed map 可迁移；新增 `IsolatedWorkspace`、`WorkspaceExecutionSession` 和 `PatchSet`，Plan 的 FILE_WRITE/COMMAND/VERIFICATION 与 Multi-Agent 副作用步骤在隔离目录执行，Reviewer 读取同一隔离产物，批准后才以哈希前置校验一次性应用主工作区，冲突、拒绝、失败或取消均不应用；PatchSet 拒绝非普通文件覆盖、路径逃逸和链接逃逸，并在应用失败时回滚；Pre-Review 编译、超时、输出解码和失败摘要已从编排器拆分到独立验证器
-- 未实现：部分旧 Provider 仍通过文本表达业务失败，尚未逐项迁移为明确的业务错误码；交互入口和编排器仍可继续按职责拆分，但本期已完成执行引擎、任务图、预审验证器与工作区生命周期的关键边界拆分
+- 未实现：交互入口和编排器仍可继续按职责拆分，但本期已完成执行引擎、任务图、预审验证器、工作区生命周期和内置 Provider 结构化错误边界
 - 验证建议：运行 `CancellationContextTest`、`RunContextTest`、`HeadlessAgentRunnerTest`、`DurableTaskManagerTest`、`AgentLifecycleTest`、`ToolRegistryProjectIsolationTest`、`ToolOutputTest`、`ToolExecutionPipelineTest`、`ToolRegistryStructuredResultTest`、`HitlToolRegistryTest`、`AgentBudgetTest`、`AgentExecutionEngineTest`、`PlanExecuteAgentTest`、`SubAgentTest`、`ExecutionGraphTest`、`ExecutionArtifactTest`、`ExecutionPlanTest`、`AgentCheckpointTest`、`AgentOrchestratorTest`、`PreReviewVerifierTest`、`IsolatedWorkspaceTest`、`PatchSetTest`、`ToolRegistryForkTest`、`KeyedSerialExecutorTest`、`RuntimeApiServerTest`
 - 风险：隔离工作区是进程内文件系统隔离，不等同于容器或 VM 安全沙箱；命令仍可访问操作系统允许的外部资源，PatchSet 只约束回写主项目的文件变更；旧 Provider 返回的部分失败文本仍可能被视为成功状态；符号链接安全测试依赖运行环境是否允许创建链接
 
