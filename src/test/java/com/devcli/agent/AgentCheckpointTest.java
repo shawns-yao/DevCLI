@@ -6,7 +6,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import com.devcli.plan.ExecutionArtifact;
 import com.devcli.plan.ExecutionGraph;
+import com.devcli.workspace.PatchSet;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -140,6 +142,76 @@ class AgentCheckpointTest {
     }
 
     @Test
+    void reconcilesAppliedPatchJournalAsCompleted(@TempDir Path project) throws Exception {
+        Path target = project.resolve("shared.txt");
+        Files.writeString(target, "before");
+        byte[] before = "before".getBytes(StandardCharsets.UTF_8);
+        byte[] after = "after".getBytes(StandardCharsets.UTF_8);
+        PatchSet patchSet = new PatchSet(List.of(new PatchSet.FileChange(
+                "shared.txt", PatchSet.ChangeType.MODIFY,
+                PatchSet.hash(before), PatchSet.hash(after), after)));
+        ExecutionArtifact intended = ExecutionArtifact.pending("step-1")
+                .start(10L)
+                .complete("done", "done", List.of("shared.txt"), 20L);
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-journal-applied", "goal");
+        checkpoint.preparePatchCommit("step-1", project, patchSet, intended);
+        assertTrue(patchSet.apply(project).applied());
+
+        AgentCheckpoint loaded = AgentCheckpoint.load("orch-journal-applied");
+        assertNotNull(loaded);
+        AgentCheckpoint.PatchReconcileResult result = loaded.reconcilePendingPatchCommits(project);
+
+        assertEquals(AgentCheckpoint.PatchReconcileAction.PROMOTED_COMPLETED,
+                result.actions().get("step-1"));
+        assertTrue(loaded.recoveryState().artifacts().get("step-1").successful());
+        assertEquals("after", Files.readString(target));
+        assertTrue(loaded.getPendingPatchCommits().isEmpty());
+    }
+
+    @Test
+    void reconcilesMixedPatchJournalByRollingBack(@TempDir Path project) throws Exception {
+        byte[] aBefore = "a-before".getBytes(StandardCharsets.UTF_8);
+        byte[] bBefore = "b-before".getBytes(StandardCharsets.UTF_8);
+        Files.write(project.resolve("a.txt"), aBefore);
+        Files.write(project.resolve("b.txt"), bBefore);
+        byte[] aAfter = "a-after".getBytes(StandardCharsets.UTF_8);
+        byte[] bAfter = "b-after".getBytes(StandardCharsets.UTF_8);
+        PatchSet patchSet = new PatchSet(List.of(
+                new PatchSet.FileChange("a.txt", PatchSet.ChangeType.MODIFY,
+                        PatchSet.hash(aBefore), PatchSet.hash(aAfter), aAfter),
+                new PatchSet.FileChange("b.txt", PatchSet.ChangeType.MODIFY,
+                        PatchSet.hash(bBefore), PatchSet.hash(bAfter), bAfter)
+        ));
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-journal-mixed", "goal");
+        checkpoint.preparePatchCommit("step-1", project, patchSet,
+                ExecutionArtifact.completed("step-1", "done", "done", List.of("a.txt", "b.txt")));
+        Files.write(project.resolve("a.txt"), aAfter);
+
+        AgentCheckpoint loaded = AgentCheckpoint.load("orch-journal-mixed");
+        assertNotNull(loaded);
+        AgentCheckpoint.PatchReconcileResult result = loaded.reconcilePendingPatchCommits(project);
+
+        assertEquals(AgentCheckpoint.PatchReconcileAction.ROLLED_BACK,
+                result.actions().get("step-1"));
+        assertEquals("a-before", Files.readString(project.resolve("a.txt")));
+        assertEquals("b-before", Files.readString(project.resolve("b.txt")));
+        assertFalse(loaded.recoveryState().artifacts().containsKey("step-1"));
+        assertTrue(loaded.getPendingPatchCommits().isEmpty());
+    }
+
+    @Test
+    void patchJournalStepIdCannotEscapeJournalRoot(@TempDir Path project) throws Exception {
+        Path marker = tempDir.resolve("keep.txt");
+        Files.writeString(marker, "keep");
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-safe-journal", "goal");
+
+        checkpoint.preparePatchCommit("..", project, new PatchSet(List.of()),
+                ExecutionArtifact.pending(".."));
+
+        assertTrue(Files.exists(marker), "步骤标识不能删除写前日志根目录中的其他文件");
+    }
+
+    @Test
     void recoveryStateNormalizesCompletedAndFailedArtifacts() {
         AgentCheckpoint checkpoint = new AgentCheckpoint("orch-v2", "目标");
         checkpoint.setPlanSteps(List.of(
@@ -157,5 +229,30 @@ class AgentCheckpointTest {
         assertEquals(ExecutionGraph.NodeState.FAILED, failed.state());
         assertEquals(List.of("src/A.java"), completed.modifiedResources());
         assertEquals("测试失败", failed.error());
+    }
+
+    @Test
+    void rejectsCheckpointFromFutureProtocolVersion() {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-future", "目标");
+        checkpoint.setProtocolVersion(AgentCheckpoint.CURRENT_PROTOCOL_VERSION + 1);
+        checkpoint.save();
+
+        AgentCheckpoint.LoadResult result = AgentCheckpoint.loadResult("orch-future");
+
+        assertEquals(AgentCheckpoint.LoadStatus.INCOMPATIBLE, result.status());
+        assertNull(result.checkpoint());
+        assertTrue(result.message().contains("不兼容"));
+    }
+
+    @Test
+    void loadsCheckpointFromLegacyProtocolVersion() {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-legacy", "目标");
+        checkpoint.setProtocolVersion(1);
+        checkpoint.save();
+
+        AgentCheckpoint loaded = AgentCheckpoint.load("orch-legacy");
+
+        assertNotNull(loaded);
+        assertEquals(1, loaded.recoveryState().protocolVersion());
     }
 }

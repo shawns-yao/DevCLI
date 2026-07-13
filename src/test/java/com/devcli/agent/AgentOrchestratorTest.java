@@ -1281,6 +1281,50 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    void analysisStepCannotInvokeProjectMutationTool(@TempDir Path tempDir) throws Exception {
+        AtomicInteger workerTurns = new AtomicInteger();
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                return response("""
+                        {
+                          "summary": "只读分析",
+                          "steps": [
+                            {"id": "s1", "description": "分析需求", "type": "ANALYSIS", "dependencies": []}
+                          ]
+                        }
+                        """);
+            }
+            if (body.contains("分析需求")) {
+                if (workerTurns.incrementAndGet() == 1) {
+                    return toolResponse("worker-write-denied", "write_file",
+                            "{\"path\":\"must-not-write.txt\",\"content\":\"denied\"}");
+                }
+                return response("分析完成");
+            }
+            if (body.contains("最终集成验收")) {
+                return response("最终集成完成");
+            }
+            if (body.contains("执行结果：")) {
+                return response(approvedReviewJson());
+            }
+            return response(approvedReviewJson());
+        };
+
+        RecordingDispatchingStubGLMClient llmClient = new RecordingDispatchingStubGLMClient(dispatcher);
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    llmClient, isolatedToolRegistry(tempDir), mm);
+
+            orchestrator.run("只分析，不修改项目");
+
+            assertFalse(Files.exists(tempDir.resolve("must-not-write.txt")));
+            assertTrue(llmClient.calls.stream()
+                    .flatMap(List::stream)
+                    .anyMatch(message -> message.content().contains("工具能力被当前执行范围拒绝")));
+        }
+    }
+
+    @Test
     void approvedWorkspacePatchIsAppliedAfterReviewerReadsIsolatedFile(@TempDir Path tempDir) throws Exception {
         AtomicInteger workerTurns = new AtomicInteger();
         AtomicInteger reviewerTurns = new AtomicInteger();
@@ -1554,6 +1598,23 @@ class AgentOrchestratorTest {
 
             assertTrue(result.contains("多 Agent 协作任务完成"), result);
             assertNull(AgentCheckpoint.load("orch-resume2"));
+        }
+    }
+
+    @Test
+    void resumeReportsFutureCheckpointAsIncompatible(@TempDir File memoryDir) {
+        AgentCheckpoint future = new AgentCheckpoint("orch-future-resume", "未来任务");
+        future.setProtocolVersion(AgentCheckpoint.CURRENT_PROTOCOL_VERSION + 1);
+        future.save();
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(memoryDir)) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    new GLMClient("test-key"), new ToolRegistry(), mm);
+
+            String result = orchestrator.resume("orch-future-resume");
+
+            assertTrue(result.contains("不兼容"), result);
+        } finally {
+            future.delete();
         }
     }
 

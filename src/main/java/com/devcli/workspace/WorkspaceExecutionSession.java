@@ -5,6 +5,7 @@ import com.devcli.tool.ToolRegistry;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Objects;
+import java.util.function.Consumer;
 
 /**
  * 隔离工作区和项目级 ToolRegistry 的统一生命周期入口。
@@ -48,8 +49,37 @@ public final class WorkspaceExecutionSession implements AutoCloseable {
     }
 
     public PatchSet.ApplyResult apply(PatchSet patchSet) {
+        try {
+            return commit(patchSet, () -> { }, result -> { });
+        } catch (Exception e) {
+            return PatchSet.ApplyResult.failure("PatchSet 提交失败: " + e.getMessage());
+        }
+    }
+
+    public PatchSet.ApplyResult commit(PatchSet patchSet,
+                                       Consumer<PatchSet.ApplyResult> terminalDecision) throws Exception {
+        return commit(patchSet, () -> { }, terminalDecision);
+    }
+
+    public PatchSet.ApplyResult commit(PatchSet patchSet,
+                                       CommitPreparation preparation,
+                                       Consumer<PatchSet.ApplyResult> terminalDecision) throws Exception {
         Objects.requireNonNull(patchSet, "patchSet");
-        return patchSet.apply(projectRoot);
+        CommitPreparation beforeApply = preparation == null ? () -> { } : preparation;
+        Consumer<PatchSet.ApplyResult> decision = terminalDecision == null
+                ? result -> { }
+                : terminalDecision;
+        return ProjectCommitCoordinator.withProjectLock(projectRoot, () -> {
+            beforeApply.prepare();
+            PatchSet.ApplyResult result = patchSet.apply(projectRoot);
+            decision.accept(result);
+            return result;
+        });
+    }
+
+    @FunctionalInterface
+    public interface CommitPreparation {
+        void prepare() throws Exception;
     }
 
     @Override

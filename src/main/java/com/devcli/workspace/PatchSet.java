@@ -19,6 +19,10 @@ import java.util.Map;
 public final class PatchSet {
     static final String MISSING_HASH = "<missing>";
 
+    public static boolean isMissingHash(String hash) {
+        return MISSING_HASH.equals(hash);
+    }
+
     public enum ChangeType {
         ADD,
         MODIFY,
@@ -44,23 +48,44 @@ public final class PatchSet {
     }
 
     public record ApplyResult(boolean applied, List<String> conflicts,
-                              List<String> modifiedResources, String error) {
+                              List<String> modifiedResources, String error,
+                              List<String> rollbackFailures) {
         public ApplyResult {
             conflicts = conflicts == null ? List.of() : List.copyOf(conflicts);
             modifiedResources = modifiedResources == null ? List.of() : List.copyOf(modifiedResources);
             error = error == null ? "" : error;
+            rollbackFailures = rollbackFailures == null ? List.of() : List.copyOf(rollbackFailures);
+        }
+
+        public boolean rollbackComplete() {
+            return rollbackFailures.isEmpty();
+        }
+
+        public String failureDescription() {
+            if (!conflicts.isEmpty()) {
+                return "PatchSet 冲突: " + String.join(", ", conflicts);
+            }
+            String base = "PatchSet 应用失败: " + error;
+            if (rollbackFailures.isEmpty()) {
+                return base;
+            }
+            return base + "; 回滚不完整: " + String.join(" | ", rollbackFailures);
         }
 
         static ApplyResult success(List<String> modifiedResources) {
-            return new ApplyResult(true, List.of(), modifiedResources, "");
+            return new ApplyResult(true, List.of(), modifiedResources, "", List.of());
         }
 
         static ApplyResult conflict(List<String> conflicts) {
-            return new ApplyResult(false, conflicts, List.of(), "patch conflict");
+            return new ApplyResult(false, conflicts, List.of(), "patch conflict", List.of());
         }
 
         static ApplyResult failure(String error) {
-            return new ApplyResult(false, List.of(), List.of(), error);
+            return failure(error, List.of());
+        }
+
+        static ApplyResult failure(String error, List<String> rollbackFailures) {
+            return new ApplyResult(false, List.of(), List.of(), error, rollbackFailures);
         }
     }
 
@@ -145,15 +170,19 @@ public final class PatchSet {
                 }
                 return ApplyResult.success(applied);
             } catch (Exception applyFailure) {
-                rollback(originals, existed);
-                return ApplyResult.failure(applyFailure.getMessage());
+                List<String> rollbackFailures = rollback(originals, existed);
+                String error = applyFailure.getMessage() == null
+                        ? applyFailure.getClass().getSimpleName()
+                        : applyFailure.getMessage();
+                return ApplyResult.failure(error, rollbackFailures);
             }
         } catch (Exception e) {
             return ApplyResult.failure(e.getMessage());
         }
     }
 
-    private static void rollback(Map<Path, byte[]> originals, Map<Path, Boolean> existed) {
+    private static List<String> rollback(Map<Path, byte[]> originals, Map<Path, Boolean> existed) {
+        List<String> failures = new ArrayList<>();
         List<Path> paths = new ArrayList<>(originals.keySet());
         paths.sort(Comparator.comparingInt(Path::getNameCount).reversed());
         for (Path path : paths) {
@@ -164,12 +193,17 @@ public final class PatchSet {
                 } else {
                     Files.deleteIfExists(path);
                 }
-            } catch (IOException ignored) {
+            } catch (Exception rollbackFailure) {
+                String message = rollbackFailure.getMessage() == null
+                        ? rollbackFailure.getClass().getSimpleName()
+                        : rollbackFailure.getMessage();
+                failures.add(path + ": " + message);
             }
         }
+        return failures;
     }
 
-    static String hash(byte[] bytes) {
+    public static String hash(byte[] bytes) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes);
             StringBuilder result = new StringBuilder(digest.length * 2);

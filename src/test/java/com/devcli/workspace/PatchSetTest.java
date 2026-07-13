@@ -40,6 +40,29 @@ class PatchSetTest {
     }
 
     @Test
+    void applyFailureReportsRollbackOutcome(@TempDir Path tempDir) throws Exception {
+        Path project = tempDir.resolve("project");
+        Files.createDirectories(project);
+        byte[] parent = "parent-file".getBytes(StandardCharsets.UTF_8);
+        byte[] child = "child-file".getBytes(StandardCharsets.UTF_8);
+        PatchSet patchSet = new PatchSet(List.of(
+                new PatchSet.FileChange("a", PatchSet.ChangeType.ADD,
+                        PatchSet.MISSING_HASH, PatchSet.hash(parent), parent),
+                new PatchSet.FileChange("a/child.txt", PatchSet.ChangeType.ADD,
+                        PatchSet.MISSING_HASH, PatchSet.hash(child), child)
+        ));
+
+        PatchSet.ApplyResult result = patchSet.apply(project);
+
+        assertFalse(result.applied());
+        assertTrue(result.error().contains("a"), result.error());
+        assertTrue(result.rollbackFailures().isEmpty(), result.rollbackFailures().toString());
+        assertTrue(result.rollbackComplete());
+        assertFalse(Files.exists(project.resolve("a")),
+                "应用失败后已写入的父文件应被回滚");
+    }
+
+    @Test
     void symbolicLinkParentCannotEscapeProjectRoot(@TempDir Path tempDir) throws Exception {
         Path project = tempDir.resolve("project");
         Path outside = tempDir.resolve("outside");

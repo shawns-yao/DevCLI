@@ -98,6 +98,8 @@ public class AgentOrchestrator {
     private final ThreadLocal<ToolRegistry> activeStepToolRegistry = new ThreadLocal<>();
     private final ThreadLocal<StepUpdateBuffer> activeStepUpdate = new ThreadLocal<>();
     private final PreReviewVerifier preReviewVerifier = new PreReviewVerifier();
+    private final WorkspaceCommitCoordinator workspaceCommitCoordinator =
+            new WorkspaceCommitCoordinator();
 
     private static final class StepUpdateBuffer {
         private final String stepId;
@@ -418,11 +420,29 @@ public class AgentOrchestrator {
      * @param orchestrationIdOrNull 指定 checkpoint id；为空时取最近一次保存的 checkpoint
      */
     public String resume(String orchestrationIdOrNull) {
-        AgentCheckpoint loaded = (orchestrationIdOrNull == null || orchestrationIdOrNull.isBlank())
-                ? AgentCheckpoint.loadLatest()
-                : AgentCheckpoint.load(orchestrationIdOrNull.trim());
+        AgentCheckpoint.LoadResult loadResult =
+                (orchestrationIdOrNull == null || orchestrationIdOrNull.isBlank())
+                        ? AgentCheckpoint.loadLatestResult()
+                        : AgentCheckpoint.loadResult(orchestrationIdOrNull.trim());
+        if (loadResult.status() == AgentCheckpoint.LoadStatus.INCOMPATIBLE) {
+            return "❌ " + loadResult.message();
+        }
+        AgentCheckpoint loaded = loadResult.checkpoint();
         if (loaded == null) {
             return formatNoCheckpointMessage(orchestrationIdOrNull);
+        }
+        Path projectRoot = Path.of(toolRegistry.getProjectPath());
+        AgentCheckpoint.PatchReconcileResult patchReconcile;
+        try {
+            patchReconcile = workspaceCommitCoordinator.reconcile(loaded, projectRoot);
+        } catch (Exception e) {
+            return "❌ checkpoint [" + loaded.getOrchestrationId()
+                    + "] PatchSet 恢复对账保存失败：" + e.getMessage();
+        }
+        if (!patchReconcile.failures().isEmpty()) {
+            return "❌ checkpoint [" + loaded.getOrchestrationId()
+                    + "] 存在无法自动回滚的 PatchSet 写前日志："
+                    + patchReconcile.failures();
         }
         AgentCheckpoint.RecoveryState recovery = loaded.recoveryState();
         if (recovery.planSteps().isEmpty()) {
@@ -1210,7 +1230,7 @@ public class AgentOrchestrator {
             checkpoint.addCompletedStep(stepId,
                     updated.modifiedFiles(),
                     updated.result());
-            checkpoint.save();
+            saveCheckpointStrict();
         } else if (updated.status() == StepStatus.FAILED) {
             // 失败步骤可能已写入文件（副作用不可逆）：保留 modifiedFiles 进 checkpoint，
             // resume 后注入重做上下文，让 Worker 知道上次失败已留下哪些文件。
@@ -1218,7 +1238,15 @@ public class AgentOrchestrator {
             checkpoint.addFailedStep(stepId,
                     updated.modifiedFiles(),
                     updated.result());
-            checkpoint.save();
+            saveCheckpointStrict();
+        }
+    }
+
+    private void saveCheckpointStrict() {
+        try {
+            checkpoint.saveStrict();
+        } catch (IOException e) {
+            throw new IllegalStateException("Checkpoint 持久化失败: " + e.getMessage(), e);
         }
     }
 
@@ -1334,8 +1362,11 @@ public class AgentOrchestrator {
             return;
         }
         try {
-            runStepWithLease(step, steps, retryCount, worker, reviewer, context, out,
-                    workerForkContext, reviewerForkContext);
+            toolRegistry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY, () -> {
+                runStepWithLease(step, steps, retryCount, worker, reviewer, context, out,
+                        workerForkContext, reviewerForkContext);
+                return null;
+            });
         } finally {
             toolRegistry.releaseResourceLeases(step.id());
         }
@@ -1360,9 +1391,12 @@ public class AgentOrchestrator {
             activeStepToolRegistry.set(isolatedRegistry);
             activeStepUpdate.set(buffer);
             try {
-                runStepWithLease(step, steps, retryCount,
-                        isolatedWorker, isolatedReviewer, context, out,
-                        workerForkContext, reviewerForkContext);
+                isolatedRegistry.runWithToolAccess(ToolRegistry.ToolAccessScope.ISOLATED_PROJECT, () -> {
+                    runStepWithLease(step, steps, retryCount,
+                            isolatedWorker, isolatedReviewer, context, out,
+                            workerForkContext, reviewerForkContext);
+                    return null;
+                });
             } finally {
                 activeStepUpdate.remove();
                 activeStepToolRegistry.remove();
@@ -1377,20 +1411,28 @@ public class AgentOrchestrator {
                     : buffer.updated;
             PatchSet patchSet = session.patchSet();
             if (outcome.status() == StepStatus.COMPLETED) {
-                PatchSet.ApplyResult applyResult = session.apply(patchSet);
-                if (!applyResult.applied()) {
-                    String reason = applyResult.conflicts().isEmpty()
-                            ? "PatchSet 应用失败: " + applyResult.error()
-                            : "PatchSet 冲突: " + String.join(", ", applyResult.conflicts());
-                    outcome = step.withFailed(reason);
-                    out.println("❌ 步骤 [" + step.id() + "] " + reason + "\n");
-                } else {
-                    outcome = outcome.withModifiedFiles(applyResult.modifiedResources());
-                }
+                ExecutionStep workerOutcome = outcome;
+                workspaceCommitCoordinator.commit(
+                        session,
+                        patchSet,
+                        checkpoint,
+                        step.id(),
+                        Path.of(toolRegistry.getProjectPath()),
+                        workerOutcome.artifact(),
+                        applyResult -> {
+                            ExecutionStep decision;
+                            if (!applyResult.applied()) {
+                                String reason = applyResult.failureDescription();
+                                decision = step.withFailed(reason);
+                                out.println("❌ 步骤 [" + step.id() + "] " + reason + "\n");
+                            } else {
+                                decision = workerOutcome.withModifiedFiles(applyResult.modifiedResources());
+                            }
+                            commitStepUpdate(steps, step.id(), decision);
+                        });
             } else {
-                outcome = outcome.withModifiedFiles(List.of());
+                commitStepUpdate(steps, step.id(), outcome.withModifiedFiles(List.of()));
             }
-            commitStepUpdate(steps, step.id(), outcome);
         } catch (Exception e) {
             toolRegistry.releaseResourceLeases(step.id());
             commitStepUpdate(steps, step.id(),

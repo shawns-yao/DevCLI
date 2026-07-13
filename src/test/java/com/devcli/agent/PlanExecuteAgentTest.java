@@ -145,6 +145,47 @@ class PlanExecuteAgentTest {
     }
 
     @Test
+    void analysisTaskCannotInvokeProjectMutationTool(@TempDir Path projectDir) throws Exception {
+        Path targetFile = projectDir.resolve("must-not-write.txt");
+        StubGLMClient llmClient = new StubGLMClient(List.of(
+                new LlmClient.ChatResponse(
+                        "assistant",
+                        "",
+                        List.of(new LlmClient.ToolCall(
+                                "call_write_denied",
+                                new LlmClient.ToolCall.Function(
+                                        "write_file",
+                                        "{\"path\":\"must-not-write.txt\",\"content\":\"denied\"}"
+                                )
+                        )),
+                        120,
+                        30
+                ),
+                new LlmClient.ChatResponse("assistant", "分析完成", null, 140, 40)
+        ));
+
+        try (MemoryManager memoryManager = new MemoryManager(
+                llmClient, 4096, 128000,
+                new LongTermMemory(projectDir.resolve("memory-store-analysis").toFile()))) {
+            ToolRegistry toolRegistry = new ToolRegistry();
+            toolRegistry.setProjectPath(projectDir.toString());
+            PlanExecuteAgent agent = new PlanExecuteAgent(
+                    llmClient,
+                    toolRegistry,
+                    new StubPlanner(llmClient, Task.TaskType.ANALYSIS),
+                    memoryManager,
+                    (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute()
+            );
+
+            agent.run("只分析，不修改文件");
+
+            assertFalse(Files.exists(targetFile));
+            assertTrue(llmClient.messagesByCall.get(1).stream()
+                    .anyMatch(message -> message.content().contains("工具能力被当前执行范围拒绝")));
+        }
+    }
+
+    @Test
     void shouldNotExtractFactsWhenPlanIsCanceled() throws Exception {
         StubGLMClient llmClient = new StubGLMClient(List.of());
         try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.resolve("memory-store-cancel").toFile());

@@ -18,8 +18,6 @@ import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillIndexFormatter;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.util.AnsiStyle;
-import com.devcli.workspace.PatchSet;
-import com.devcli.workspace.WorkspaceExecutionSession;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.tool.ToolRegistry.ToolExecutionResult;
 import com.devcli.tool.ToolRegistry.ToolInvocation;
@@ -118,6 +116,7 @@ public class PlanExecuteAgent {
 
     private final LlmClient llmClient;
     private final ToolRegistry toolRegistry;
+    private final PlanTaskWorkspaceExecutor taskWorkspaceExecutor;
     private final ThreadLocal<ToolRegistry> activeTaskToolRegistry = new ThreadLocal<>();
     private final Planner planner;
     private final PlanReviewHandler reviewHandler;
@@ -159,6 +158,7 @@ public class PlanExecuteAgent {
                      MemoryManager memoryManager, PlanReviewHandler reviewHandler, PrintStream out) {
         this.llmClient = llmClient;
         this.toolRegistry = toolRegistry != null ? toolRegistry : new ToolRegistry();
+        this.taskWorkspaceExecutor = new PlanTaskWorkspaceExecutor(this.toolRegistry);
         this.out = out == null ? deferredSystemOut() : out;
         this.planner = planner != null ? planner : new Planner(llmClient, this.out);
         this.reviewHandler = reviewHandler == null ? (goal, plan) -> PlanReviewDecision.execute() : reviewHandler;
@@ -558,46 +558,25 @@ public class PlanExecuteAgent {
 
     private TaskExecutionResult executeTaskWithArtifact(ExecutionPlan plan, Task task,
                                                         StreamState streamState, PrintStream out) {
-        if (!requiresIsolatedWorkspace(task)) {
-            try {
-                TaskRunResult taskRunResult = toolRegistry.runWithResourceLease(task.getId(),
-                        () -> executeTaskUnchecked(plan.getGoal(), plan, task, streamState, out));
-                return TaskExecutionResult.success(task, taskRunResult, consumeTaskModifiedFiles(task.getId()));
-            } catch (Exception e) {
-                return TaskExecutionResult.failure(task, e, consumeTaskModifiedFiles(task.getId()));
-            } finally {
-                toolRegistry.releaseResourceLeases(task.getId());
-            }
+        PlanTaskWorkspaceExecutor.Execution<TaskRunResult> execution =
+                taskWorkspaceExecutor.execute(
+                        task.getId(),
+                        requiresIsolatedWorkspace(task),
+                        activeRegistry -> {
+                            activeTaskToolRegistry.set(activeRegistry);
+                            try {
+                                return executeTaskUnchecked(
+                                        plan.getGoal(), plan, task, streamState, out);
+                            } finally {
+                                activeTaskToolRegistry.remove();
+                            }
+                        });
+        if (execution.failed()) {
+            return TaskExecutionResult.failure(
+                    task, execution.error(), execution.modifiedFiles());
         }
-
-        try (WorkspaceExecutionSession session = WorkspaceExecutionSession.open(toolRegistry, task.getId())) {
-            ToolRegistry isolatedRegistry = session.toolRegistry();
-            activeTaskToolRegistry.set(isolatedRegistry);
-            try {
-                TaskRunResult taskRunResult = isolatedRegistry.runWithResourceLease(task.getId(),
-                        () -> executeTaskUnchecked(plan.getGoal(), plan, task, streamState, out));
-                if (CancellationContext.isCancelled()) {
-                    return TaskExecutionResult.failure(
-                            task, new IOException("用户取消"), List.of());
-                }
-                PatchSet patchSet = session.patchSet();
-                PatchSet.ApplyResult applyResult = session.apply(patchSet);
-                if (!applyResult.applied()) {
-                    String reason = applyResult.conflicts().isEmpty()
-                            ? "PatchSet 应用失败: " + applyResult.error()
-                            : "PatchSet 冲突: " + String.join(", ", applyResult.conflicts());
-                    return TaskExecutionResult.failure(task, new IOException(reason), List.of());
-                }
-                return TaskExecutionResult.success(
-                        task, taskRunResult, applyResult.modifiedResources());
-            } finally {
-                isolatedRegistry.releaseResourceLeases(task.getId());
-                activeTaskToolRegistry.remove();
-                toolRegistry.releaseResourceLeases(task.getId());
-            }
-        } catch (Exception e) {
-            return TaskExecutionResult.failure(task, e, List.of());
-        }
+        return TaskExecutionResult.success(
+                task, execution.value(), execution.modifiedFiles());
     }
 
     private List<String> consumeTaskModifiedFiles(String taskId) {
