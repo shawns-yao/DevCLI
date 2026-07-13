@@ -57,7 +57,34 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
 
     @Override
     public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {
-        StreamListener streamListener = listener == null ? StreamListener.NO_OP : listener;
+        StreamListener delegate = listener == null ? StreamListener.NO_OP : listener;
+        java.util.concurrent.atomic.AtomicBoolean streamed = new java.util.concurrent.atomic.AtomicBoolean();
+        StreamListener tracking = new StreamListener() {
+            @Override
+            public void onReasoningDelta(String delta) {
+                streamed.set(true);
+                delegate.onReasoningDelta(delta);
+            }
+
+            @Override
+            public void onContentDelta(String delta) {
+                streamed.set(true);
+                delegate.onContentDelta(delta);
+            }
+        };
+        return LlmRetryExecutor.execute(getProviderName(), getModelName(),
+                LlmRetryPolicy.fromSystemProperties(), Thread::sleep, () -> {
+                    try {
+                        return chatOnce(messages, tools, tracking);
+                    } catch (IOException error) {
+                        LlmException normalized = LlmErrors.normalize(getProviderName(), getModelName(), error);
+                        throw streamed.get() ? normalized.withoutRetry() : normalized;
+                    }
+                });
+    }
+
+    private ChatResponse chatOnce(List<Message> messages, List<Tool> tools,
+                                  StreamListener streamListener) throws IOException {
         RequestBody body = RequestBody.create(
                 buildRequestBody(messages, tools).toString(),
                 MediaType.parse("application/json")
@@ -75,10 +102,11 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
             ResponseBody responseBodyObj = response.body();
             if (!response.isSuccessful()) {
                 String errorBody = responseBodyObj != null ? responseBodyObj.string() : "无响应体";
-                throw new IOException("API请求失败: " + response.code() + " - " + errorBody);
+                throw LlmErrors.fromHttp(getProviderName(), getModelName(), response.code(), errorBody,
+                        LlmErrors.retryAfterMillis(response.header("Retry-After")));
             }
             if (responseBodyObj == null) {
-                throw new IOException("API返回空响应体");
+                throw LlmErrors.malformedResponse(getProviderName(), getModelName(), "empty response body", null);
             }
 
             BufferedSource source = responseBodyObj.source();
@@ -109,7 +137,22 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                     break;
                 }
 
-                JsonNode root = mapper.readTree(payload);
+                JsonNode root;
+                try {
+                    root = mapper.readTree(payload);
+                } catch (IOException malformed) {
+                    throw LlmErrors.malformedResponse(getProviderName(), getModelName(),
+                            "invalid stream payload", malformed);
+                }
+                if (root.has("error")) {
+                    JsonNode errorNode = root.path("error");
+                    String errorCode = errorNode.path("code").asText("");
+                    String message = errorNode.path("message").asText(root.toString());
+                    int syntheticStatus = errorCode.contains("rate_limit") ? 429
+                            : errorCode.contains("overload") ? 529 : 400;
+                    throw LlmErrors.fromHttp(getProviderName(), getModelName(), syntheticStatus,
+                            errorCode + ": " + message, 0L);
+                }
                 JsonNode usage = root.path("usage");
                 if (!usage.isMissingNode()) {
                     inputTokens = usage.path("prompt_tokens").asInt(inputTokens);
@@ -151,11 +194,16 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                 mergeToolCallDeltas(toolAccumulators, delta.path("tool_calls"));
             }
 
+            List<ToolCall> toolCalls = buildToolCalls(toolAccumulators);
+            if (content.isEmpty() && reasoning.isEmpty() && toolCalls.isEmpty()) {
+                throw LlmErrors.malformedResponse(getProviderName(), getModelName(),
+                        "empty assistant response", null);
+            }
             return new ChatResponse(
                     role,
                     content.toString(),
                     reasoning.toString(),
-                    buildToolCalls(toolAccumulators),
+                    toolCalls,
                     inputTokens,
                     outputTokens,
                     cachedInputTokens

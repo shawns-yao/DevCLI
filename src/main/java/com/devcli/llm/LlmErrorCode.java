@@ -1,0 +1,15 @@
+package com.devcli.llm;
+
+public enum LlmErrorCode {
+    AUTHENTICATION,
+    RATE_LIMITED,
+    OVERLOADED,
+    TIMEOUT,
+    NETWORK,
+    INVALID_REQUEST,
+    CONTEXT_LENGTH,
+    CONTENT_FILTER,
+    SERVER_ERROR,
+    MALFORMED_RESPONSE,
+    UNKNOWN
+}

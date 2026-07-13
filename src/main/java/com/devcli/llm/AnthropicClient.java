@@ -59,7 +59,34 @@ public class AnthropicClient implements LlmClient {
 
     @Override
     public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {
-        StreamListener streamListener = listener == null ? StreamListener.NO_OP : listener;
+        StreamListener delegate = listener == null ? StreamListener.NO_OP : listener;
+        java.util.concurrent.atomic.AtomicBoolean streamed = new java.util.concurrent.atomic.AtomicBoolean();
+        StreamListener tracking = new StreamListener() {
+            @Override
+            public void onReasoningDelta(String delta) {
+                streamed.set(true);
+                delegate.onReasoningDelta(delta);
+            }
+
+            @Override
+            public void onContentDelta(String delta) {
+                streamed.set(true);
+                delegate.onContentDelta(delta);
+            }
+        };
+        return LlmRetryExecutor.execute(getProviderName(), getModelName(),
+                LlmRetryPolicy.fromSystemProperties(), Thread::sleep, () -> {
+                    try {
+                        return chatOnce(messages, tools, tracking);
+                    } catch (IOException error) {
+                        LlmException normalized = LlmErrors.normalize(getProviderName(), getModelName(), error);
+                        throw streamed.get() ? normalized.withoutRetry() : normalized;
+                    }
+                });
+    }
+
+    private ChatResponse chatOnce(List<Message> messages, List<Tool> tools,
+                                  StreamListener streamListener) throws IOException {
         RequestBody body = RequestBody.create(
                 buildRequestBody(messages, tools).toString(),
                 MediaType.parse("application/json")
@@ -77,10 +104,11 @@ public class AnthropicClient implements LlmClient {
             ResponseBody responseBody = response.body();
             if (!response.isSuccessful()) {
                 String errorBody = responseBody != null ? responseBody.string() : "无响应体";
-                throw new IOException("API请求失败: " + response.code() + " - " + errorBody);
+                throw LlmErrors.fromHttp(getProviderName(), getModelName(), response.code(), errorBody,
+                        LlmErrors.retryAfterMillis(response.header("Retry-After")));
             }
             if (responseBody == null) {
-                throw new IOException("API返回空响应体");
+                throw LlmErrors.malformedResponse(getProviderName(), getModelName(), "empty response body", null);
             }
             return parseStream(responseBody.source(), streamListener);
         }
@@ -274,7 +302,13 @@ public class AnthropicClient implements LlmClient {
                 continue;
             }
 
-            JsonNode root = mapper.readTree(payload);
+            JsonNode root;
+            try {
+                root = mapper.readTree(payload);
+            } catch (IOException malformed) {
+                throw LlmErrors.malformedResponse(getProviderName(), getModelName(),
+                        "invalid stream payload", malformed);
+            }
             String type = root.path("type").asText("");
             if ("message_start".equals(type)) {
                 inputTokens = root.path("message").path("usage").path("input_tokens").asInt(inputTokens);
@@ -286,18 +320,28 @@ public class AnthropicClient implements LlmClient {
             } else if ("content_block_delta".equals(type)) {
                 handleContentBlockDelta(root, content, reasoning, toolAccumulators, listener);
             } else if ("error".equals(type)) {
-                String message = root.path("error").path("message").asText(root.toString());
-                throw new IOException("API请求失败: " + message);
+                JsonNode errorNode = root.path("error");
+                String errorType = errorNode.path("type").asText("");
+                String message = errorNode.path("message").asText(root.toString());
+                int syntheticStatus = errorType.contains("rate_limit") ? 429
+                        : errorType.contains("overloaded") ? 529 : 400;
+                throw LlmErrors.fromHttp(getProviderName(), getModelName(), syntheticStatus,
+                        errorType + ": " + message, 0L);
             } else if ("message_stop".equals(type)) {
                 break;
             }
         }
 
+        List<ToolCall> toolCalls = buildToolCalls(toolAccumulators);
+        if (content.isEmpty() && reasoning.isEmpty() && toolCalls.isEmpty()) {
+            throw LlmErrors.malformedResponse(getProviderName(), getModelName(),
+                    "empty assistant response", null);
+        }
         return new ChatResponse(
                 "assistant",
                 content.toString(),
                 reasoning.toString(),
-                buildToolCalls(toolAccumulators),
+                toolCalls,
                 inputTokens,
                 outputTokens,
                 0
