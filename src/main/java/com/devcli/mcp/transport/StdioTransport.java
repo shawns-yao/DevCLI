@@ -30,18 +30,20 @@ public class StdioTransport implements McpTransport {
     private volatile boolean closed;
 
     public StdioTransport(String command, List<String> args, Map<String, String> env, Path workingDir) throws IOException {
-        List<String> commandLine = new ArrayList<>();
-        commandLine.add(command);
-        if (args != null) {
-            commandLine.addAll(args);
-        }
-        ProcessBuilder builder = new ProcessBuilder(commandLine);
+        ProcessBuilder builder = new ProcessBuilder();
         if (workingDir != null) {
             builder.directory(workingDir.toFile());
         }
         if (env != null && !env.isEmpty()) {
             builder.environment().putAll(env);
         }
+        List<String> commandLine = new ArrayList<>();
+        commandLine.add(ExecutableResolver.resolve(command, builder.environment(),
+                ExecutableResolver.isWindows()));
+        if (args != null) {
+            commandLine.addAll(args);
+        }
+        builder.command(commandLine);
         this.process = builder.start();
         this.stdin = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
         startStdoutReader();
