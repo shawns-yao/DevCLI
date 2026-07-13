@@ -160,7 +160,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 ### Chrome DevTools MCP
 
-- 默认 server：chrome-devtools，`npx -y chrome-devtools-mcp@latest --isolated=true`
+- 默认 server：chrome-devtools，`npx -y chrome-devtools-mcp@latest --isolated=true`；Windows stdio 启动前按 `PATH` / `PATHEXT` 选择可执行的 `.cmd` / `.bat` 包装器
 - `/browser connect`：切到 --autoConnect 复用登录态 Chrome
 - `/browser connect <port>`：旧式 CDP 端口路径
 - `/browser disconnect`：切回 isolated
@@ -200,8 +200,10 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `DEVCLI_NO_STATUSBAR=true`：禁用底部状态栏
 - `NO_COLOR=1`：禁用 ANSI 颜色
 - 当前开屏 Banner 是无右侧盒线边框的简洁布局，避免 ANSI/CJK 字宽导致竖线错位
-- InlineRenderer 复用 JLine 4 的编辑能力，默认提示符是 `* `，右提示显示 `message / @path / @image`
+- InlineRenderer 复用 JLine 4 的编辑能力，默认提示符是 `* `，右提示显示 `message / @path / @image`；`/help`、补全和历史导航共用命令清单与 LineReader
 - BottomStatusBar 是 JLine `Status` 托管的底部 dock：由 JLine 负责滚动区域和状态行位置，不再手写 `\n`、`moveUp`、`CLEAR_TO_EOS` 或绝对光标行号；dock 上层展示 YOLO/HITL 与 MCP/Skill 摘要，下层展示 model、phase、ctx、token、cost、elapsed 与 cwd
+- 重定向输入默认 UTF-8；`DEVCLI_TERMINAL_ENCODING` 可覆盖旧式控制台编码，`DEVCLI_TERMINAL_FORCE_ANSI=true` 可为误判终端启用 xterm-256color
+- plain / inline 的 HITL 后续文本复用主 LineReader；inline 首选项继续通过 raw mode 单键读取，避免独立 BufferedReader 抢读残留换行
 - InlineRenderer 不使用独立 JLine `Display.update()` 维护 thinking 临时区；真实终端验证发现独立 Display 会在 transcript/status 输出后从错误位置向上清屏。当前实现用固定高度 live 区重写自身行，content/tool 边界先清理 live 区再追加 transcript。
 - 交互期输出优先走 `Renderer.stream()`；`Main`、`PlanExecuteAgent`、`Planner`、`AgentOrchestrator` 都可接收同一个 renderer 输出流，避免绕过 inline renderer 直接写 stdout
 - `CodeIndex` 通过 `ProgressListener` 上报索引开始 / 文件数量 / 进度 / 完成或失败，`/index` 绑定当前 renderer 输出流；索引阶段按文件批量生成 chunk embedding，批量失败或返回数量异常时逐条降级并保留成功 chunk；内部异常细节写 logger
@@ -336,7 +338,9 @@ EMBEDDING_MODEL=nomic-embed-text:latest
 EMBEDDING_BASE_URL=http://localhost:11434
 # EMBEDDING_API_KEY=your_api_key_here
 # DEVCLI_LOG_LEVEL=INFO
-# DEVCLI_LOG_DIR=/Users/yourname/.devcli/logs
+# DEVCLI_LOG_DIR=~/.devcli/logs
+# DEVCLI_TERMINAL_ENCODING=UTF-8
+# DEVCLI_TERMINAL_FORCE_ANSI=false
 # DEVCLI_LOG_MAX_HISTORY=7
 # DEVCLI_LOG_MAX_FILE_SIZE=10MB
 # DEVCLI_LOG_TOTAL_SIZE_CAP=100MB

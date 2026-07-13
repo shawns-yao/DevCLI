@@ -556,7 +556,7 @@ RAG 检索流程：
 
 MCP server 启动后会动态刷新工具和 resources：
 
-- `stdio` server 通过本地命令启动。
+- `stdio` server 通过本地命令启动；Windows 会按 `PATH` / `PATHEXT` 解析 `npx.cmd` 等命令包装器。
 - `streamable_http` server 通过远程 HTTP 地址连接。
 - server 启动默认不阻塞首屏超过配置的等待时间；超时 server 会保持 `STARTING` 并在后台继续初始化。
 - MCP 工具快照按 server 记录工具数量、schema 指纹和生命周期版本；server 启动成功或 tools/list_changed 刷新会推进生命周期版本。
@@ -642,8 +642,10 @@ LLM tool call
 默认 inline renderer 面向日常终端使用：
 
 - 启动首屏展示模型、MCP、Skill、ReAct 状态和 getting-started tips。
-- 输入行支持 slash 命令、`@path`、`@image:`、敏感词和危险 shell 片段高亮。
-- 底部状态栏显示当前 phase、模型、上下文百分比、token、cost、elapsed、cwd。
+- 输入行支持 slash 命令、`@path`、`@image:`、敏感词和危险 shell 片段高亮；`/help` 直接显示完整命令列表。
+- 底部状态栏显示当前 phase、模型、上下文百分比、token、cost、elapsed、cwd。终端误判为 dumb 时可用 `DEVCLI_TERMINAL_FORCE_ANSI=true` 强制启用。
+- 重定向输入默认使用 UTF-8，旧式 Windows 控制台可通过 `DEVCLI_TERMINAL_ENCODING=GBK` 覆盖。
+- plain 与 inline 审批都复用主 LineReader，避免审批输入与主提示符争抢标准输入。
 - LLM reasoning 会进入 live thinking 区，正文输出前会收敛为完整引用块。
 - 工具调用以紧凑块展示，文件写入会展示 diff。
 
