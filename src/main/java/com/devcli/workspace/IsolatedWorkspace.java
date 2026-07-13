@@ -22,16 +22,19 @@ public final class IsolatedWorkspace implements AutoCloseable {
     private final Path workspacePath;
     private final Map<String, String> baselineHashes;
     private final WorkspaceCleanupPolicy.Lease lease;
+    private final WorkspaceBackend backend;
     private boolean closed;
 
     private IsolatedWorkspace(Path projectRoot, Path workspaceBase,
                               Path workspacePath, Map<String, String> baselineHashes,
-                              WorkspaceCleanupPolicy.Lease lease) {
+                              WorkspaceCleanupPolicy.Lease lease,
+                              WorkspaceBackend backend) {
         this.projectRoot = projectRoot;
         this.workspaceBase = workspaceBase;
         this.workspacePath = workspacePath;
         this.baselineHashes = Map.copyOf(baselineHashes);
         this.lease = lease;
+        this.backend = backend;
     }
 
     public static IsolatedWorkspace create(Path projectRoot, String stepId) throws IOException {
@@ -40,13 +43,14 @@ public final class IsolatedWorkspace implements AutoCloseable {
         Path base = override == null || override.isBlank()
                 ? root.resolve("Temp").resolve("devcli-workspaces")
                 : Path.of(override);
-        return create(root, base, stepId, new CopyWorkspaceBackend(),
+        return create(root, base, stepId, WorkspaceBackendFactory.create(root),
                 new WorkspaceCleanupPolicy());
     }
 
     public static IsolatedWorkspace create(Path projectRoot, Path workspaceBase,
                                            String stepId) throws IOException {
-        return create(projectRoot, workspaceBase, stepId, new CopyWorkspaceBackend(),
+        Path root = normalize(projectRoot);
+        return create(root, workspaceBase, stepId, WorkspaceBackendFactory.create(root),
                 new WorkspaceCleanupPolicy());
     }
 
@@ -70,10 +74,10 @@ public final class IsolatedWorkspace implements AutoCloseable {
             WorkspaceBackend.Materialization materialization =
                     backend.materialize(root, base, workspace);
             return new IsolatedWorkspace(root, base, workspace,
-                    materialization.baselineHashes(), lease);
+                    materialization.baselineHashes(), lease, backend);
         } catch (IOException | RuntimeException e) {
             try {
-                deleteWorkspace(base, workspace);
+                backend.cleanup(root, base, workspace);
             } catch (IOException cleanupFailure) {
                 e.addSuppressed(cleanupFailure);
             }
@@ -169,7 +173,7 @@ public final class IsolatedWorkspace implements AutoCloseable {
         closed = true;
         IOException failure = null;
         try {
-            deleteWorkspace(workspaceBase, workspacePath);
+            backend.cleanup(projectRoot, workspaceBase, workspacePath);
         } catch (IOException e) {
             failure = e;
         }
@@ -187,7 +191,4 @@ public final class IsolatedWorkspace implements AutoCloseable {
         }
     }
 
-    private static void deleteWorkspace(Path base, Path workspace) throws IOException {
-        WorkspaceCleanupPolicy.deleteWorkspace(base, workspace);
-    }
 }

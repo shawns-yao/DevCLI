@@ -10,6 +10,10 @@ import java.util.Map;
 public interface WorkspaceBackend {
     Materialization materialize(Path projectRoot, Path workspaceBase, Path workspacePath) throws IOException;
 
+    default void cleanup(Path projectRoot, Path workspaceBase, Path workspacePath) throws IOException {
+        WorkspaceCleanupPolicy.deleteWorkspace(workspaceBase, workspacePath);
+    }
+
     record Materialization(Map<String, String> baselineHashes) {
         public Materialization {
             baselineHashes = baselineHashes == null ? Map.of() : Map.copyOf(baselineHashes);

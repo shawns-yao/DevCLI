@@ -11,6 +11,10 @@ final class WorkspacePathPolicy {
     private WorkspacePathPolicy() {
     }
 
+    static Set<String> excludedRoots() {
+        return EXCLUDED_ROOTS;
+    }
+
     static boolean isExcluded(Path root, Path workspaceBase, Path path) {
         Path normalizedRoot = normalize(root);
         Path normalized = normalize(path);
