@@ -1,14 +1,19 @@
 package com.devcli.snapshot;
 
+import org.eclipse.jgit.lib.ObjectId;
+import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SideGitManagerTest {
@@ -84,5 +89,55 @@ class SideGitManagerTest {
         assertEquals("turn-3", all.get(1).turnId());
         assertEquals(SnapshotPhase.POST_TURN, all.get(2).phase());
         assertEquals("turn-2", all.get(2).turnId());
+    }
+
+    @Test
+    void collectsUnreachableObjectsOnlyAfterConfiguredThreshold() throws Exception {
+        Path project = tempDir.resolve("gc-project");
+        Path snapshots = tempDir.resolve("gc-snapshots");
+        Files.createDirectories(project);
+        SnapshotConfig config = new SnapshotConfig(true, snapshots, 2,
+                List.of(".git", "target"), true, 2, 1000, 30);
+        SideGitManager manager = new SideGitManager(project, config);
+
+        Files.writeString(project.resolve("data.txt"), "one");
+        TurnSnapshot oldest = manager.preTurnSnapshot("turn-1", "one");
+        Files.writeString(project.resolve("data.txt"), "two");
+        manager.postTurnSnapshot("turn-1", "two");
+        Files.writeString(project.resolve("data.txt"), "three");
+        manager.preTurnSnapshot("turn-2", "three");
+
+        assertEquals(0, manager.gcRunCount());
+
+        Files.writeString(project.resolve("data.txt"), "four");
+        manager.postTurnSnapshot("turn-2", "four");
+
+        assertEquals(1, manager.gcRunCount(), manager.lastGcError());
+        try (var repository = new FileRepositoryBuilder()
+                .setGitDir(manager.gitDir().toFile())
+                .setWorkTree(project.toFile())
+                .build()) {
+            assertFalse(repository.getObjectDatabase().has(ObjectId.fromString(oldest.commitId())));
+        }
+
+        Files.writeString(project.resolve("data.txt"), "five");
+        manager.preTurnSnapshot("turn-3", "five");
+        assertEquals(1, manager.gcRunCount(), "GC 不能在每次快照时执行");
+    }
+
+    @Test
+    void objectCollectionStopsWhenReachabilityScanExceedsDeadline() throws Exception {
+        Path project = tempDir.resolve("gc-timeout-project");
+        Path snapshots = tempDir.resolve("gc-timeout-snapshots");
+        Files.createDirectories(project);
+        Files.writeString(project.resolve("data.txt"), "content");
+        SideGitManager manager = new SideGitManager(project,
+                new SnapshotConfig(true, snapshots, 2, List.of(".git")));
+        manager.preTurnSnapshot("turn-1", "snapshot");
+
+        IOException failure = assertThrows(IOException.class,
+                () -> new SideGitObjectGc().collect(manager.gitDir(), Duration.ZERO));
+
+        assertTrue(failure.getMessage().contains("超时"));
     }
 }

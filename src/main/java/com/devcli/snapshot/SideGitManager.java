@@ -14,6 +14,8 @@ import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
 import org.eclipse.jgit.treewalk.TreeWalk;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -23,6 +25,7 @@ import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.PathMatcher;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -31,13 +34,19 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class SideGitManager {
+    private static final Logger log = LoggerFactory.getLogger(SideGitManager.class);
     private static final PersonIdent SNAPSHOT_IDENT = new PersonIdent("DevCLI Snapshot", "snapshot@devcli.local");
 
     private final Path projectRoot;
     private final SnapshotConfig config;
     private final Path gitDir;
+    private final SnapshotGcPolicy gcPolicy;
+    private final SideGitObjectGc objectGc = new SideGitObjectGc();
+    private final AtomicInteger gcRunCount = new AtomicInteger();
+    private volatile String lastGcError = "";
 
     public SideGitManager(Path projectRoot) {
         this(projectRoot, SnapshotConfig.fromEnvironment());
@@ -50,6 +59,7 @@ public class SideGitManager {
                 .resolve(hash(parentKey(this.projectRoot)))
                 .resolve(hash(this.projectRoot.toString()))
                 .resolve(".git");
+        this.gcPolicy = new SnapshotGcPolicy(this.gitDir, this.config);
     }
 
     public synchronized TurnSnapshot preTurnSnapshot(String turnId, String summary) throws IOException, GitAPIException {
@@ -69,6 +79,8 @@ public class SideGitManager {
         if (!config.enabled()) {
             return null;
         }
+        TurnSnapshot snapshot;
+        int pruned;
         try (Git git = openGit()) {
             git.add().addFilepattern(".").call();
             git.add().setUpdate(true).addFilepattern(".").call();
@@ -80,9 +92,11 @@ public class SideGitManager {
                     .setCommitter(SNAPSHOT_IDENT)
                     .setMessage(message)
                     .call();
-            pruneSnapshotsIfNeeded(git);
-            return toSnapshot(commit);
+            pruned = pruneSnapshotsIfNeeded(git);
+            snapshot = toSnapshot(commit);
         }
+        maybeCollectGarbage(pruned);
+        return snapshot;
     }
 
     public synchronized List<TurnSnapshot> listSnapshots(int limit) throws IOException, GitAPIException {
@@ -189,6 +203,14 @@ public class SideGitManager {
         return config;
     }
 
+    int gcRunCount() {
+        return gcRunCount.get();
+    }
+
+    String lastGcError() {
+        return lastGcError;
+    }
+
     private Git openGit() throws IOException, GitAPIException {
         Files.createDirectories(gitDir.getParent());
         if (!Files.exists(gitDir.resolve("config"))) {
@@ -203,6 +225,8 @@ public class SideGitManager {
                 .setGitDir(gitDir.toFile())
                 .setWorkTree(projectRoot.toFile())
                 .build();
+        repository.getConfig().setBoolean("core", null, "logAllRefUpdates", false);
+        repository.getConfig().save();
         return new Git(repository);
     }
 
@@ -334,6 +358,34 @@ public class SideGitManager {
         return false;
     }
 
+    private void maybeCollectGarbage(int prunedSnapshots) {
+        if (prunedSnapshots <= 0 || !config.gcEnabled()) {
+            return;
+        }
+        Instant now = Instant.now();
+        try {
+            if (!gcPolicy.recordPrunedAndShouldRun(prunedSnapshots, now)) {
+                return;
+            }
+            SideGitObjectGc.Result result = objectGc.collect(
+                    gitDir, Duration.ofSeconds(config.gcMaxSeconds()));
+            if (result.timedOut() || result.failedDeletes() > 0) {
+                lastGcError = "timedOut=" + result.timedOut()
+                        + ", failedDeletes=" + result.failedDeletes()
+                        + ", deleted=" + result.deletedLooseObjects();
+                log.warn("Side-Git 垃圾回收未完整结束，删除失败 {}，保留累计计数等待后续重试",
+                        result.failedDeletes());
+                return;
+            }
+            gcPolicy.markCompleted(Instant.now());
+            gcRunCount.incrementAndGet();
+            lastGcError = "";
+        } catch (Exception e) {
+            lastGcError = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            log.warn("Side-Git 垃圾回收失败，保留累计计数等待后续重试: {}", e.getMessage());
+        }
+    }
+
     private int pruneSnapshotsIfNeeded(Git git) throws IOException, GitAPIException {
         int max = Math.max(1, config.maxSnapshots());
         List<RevCommit> snapshots = new ArrayList<>();
@@ -376,6 +428,7 @@ public class SideGitManager {
             refName = Constants.HEAD;
         }
         RefUpdate update = repository.updateRef(refName);
+        update.disableRefLog();
         update.setNewObjectId(parent);
         update.setForceUpdate(true);
         update.update();
@@ -426,4 +479,5 @@ public class SideGitManager {
             throw new IllegalStateException("SHA-256 unavailable", e);
         }
     }
+
 }

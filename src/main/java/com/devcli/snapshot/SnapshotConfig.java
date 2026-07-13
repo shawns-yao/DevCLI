@@ -11,8 +11,23 @@ public record SnapshotConfig(
         boolean enabled,
         Path snapshotsRoot,
         int maxSnapshots,
-        List<String> excludes
+        List<String> excludes,
+        boolean gcEnabled,
+        int gcPrunedThreshold,
+        int gcMinIntervalHours,
+        int gcMaxSeconds
 ) {
+    public SnapshotConfig {
+        snapshotsRoot = snapshotsRoot == null
+                ? Path.of(System.getProperty("user.home"), ".devcli", "snapshots")
+                : snapshotsRoot.toAbsolutePath().normalize();
+        maxSnapshots = Math.max(1, maxSnapshots);
+        excludes = excludes == null ? List.of() : List.copyOf(excludes);
+        gcPrunedThreshold = Math.max(1, gcPrunedThreshold);
+        gcMinIntervalHours = Math.max(1, gcMinIntervalHours);
+        gcMaxSeconds = Math.max(1, gcMaxSeconds);
+    }
+
     private static final List<String> DEFAULT_EXCLUDES = List.of(
             ".git",
             ".devcli/snapshots",
@@ -30,11 +45,27 @@ public record SnapshotConfig(
                 Path.of(System.getProperty("user.home"), ".devcli", "snapshots").toString()));
         int max = readInt("devcli.snapshot.max", "DEVCLI_SNAPSHOT_MAX", 50);
         List<String> excludes = mergeExcludes(readString("devcli.snapshot.excludes", "DEVCLI_SNAPSHOT_EXCLUDES", ""));
-        return new SnapshotConfig(enabled, root, Math.max(1, max), excludes);
+        boolean gcEnabled = readBoolean("devcli.snapshot.gc.enabled", "DEVCLI_SNAPSHOT_GC_ENABLED", true);
+        int gcThreshold = readInt("devcli.snapshot.gc.pruned.threshold",
+                "DEVCLI_SNAPSHOT_GC_PRUNED_THRESHOLD", 100);
+        int gcIntervalHours = readInt("devcli.snapshot.gc.min.interval.hours",
+                "DEVCLI_SNAPSHOT_GC_MIN_INTERVAL_HOURS", 24);
+        int gcMaxSeconds = readInt("devcli.snapshot.gc.max.seconds",
+                "DEVCLI_SNAPSHOT_GC_MAX_SECONDS", 30);
+        return new SnapshotConfig(enabled, root, Math.max(1, max), excludes,
+                gcEnabled, Math.max(1, gcThreshold), Math.max(1, gcIntervalHours),
+                Math.max(1, gcMaxSeconds));
+    }
+
+    public SnapshotConfig(boolean enabled, Path snapshotsRoot, int maxSnapshots,
+                          List<String> excludes) {
+        this(enabled, snapshotsRoot, maxSnapshots, excludes,
+                true, 100, 24, 30);
     }
 
     public SnapshotConfig withEnabled(boolean enabled) {
-        return new SnapshotConfig(enabled, snapshotsRoot, maxSnapshots, excludes);
+        return new SnapshotConfig(enabled, snapshotsRoot, maxSnapshots, excludes,
+                gcEnabled, gcPrunedThreshold, gcMinIntervalHours, gcMaxSeconds);
     }
 
     private static boolean readBoolean(String property, String env, boolean fallback) {
