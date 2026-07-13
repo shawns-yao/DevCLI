@@ -406,6 +406,14 @@ public class ConversationHistoryCompactor {
             summary = attempt.summary();
         }
         summary = capSummarySize(summary);
+        CompactionSemanticGuard.Validation semanticValidation =
+                CompactionSemanticGuard.validateAndRepair(oldMsgs, summary, MAX_SUMMARY_CHARS);
+        if (!semanticValidation.validBeforeRepair()) {
+            log.warn("compaction semantic guard restored {}/{} protected constraints",
+                    semanticValidation.missingConstraints().size(),
+                    semanticValidation.protectedConstraintCount());
+        }
+        summary = semanticValidation.repairedSummary();
 
         // 5) 重建：[system] + [user(摘要)] + [assistant("好的")] + 保留尾部
         int originalMessages = history.size();
@@ -439,7 +447,10 @@ public class ConversationHistoryCompactor {
                 runtimeState.loadedSkills(),
                 runtimeState.ragEpoch(),
                 runtimeState.mcpToolSnapshot(),
-                runtimeState.postCompactRestoreEnabled());
+                runtimeState.postCompactRestoreEnabled(),
+                semanticValidation.protectedConstraintCount(),
+                semanticValidation.missingConstraints().size(),
+                semanticValidation.validBeforeRepair() ? "pass" : "repaired");
         rebuilt.set(systemEnd, LlmClient.Message.user(
                 SUMMARY_MARKER + metadata.renderBoundaryBlock() + "\n" + summary.trim()));
         history.clear();

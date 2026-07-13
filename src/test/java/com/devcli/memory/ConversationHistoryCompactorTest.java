@@ -84,6 +84,25 @@ class ConversationHistoryCompactorTest {
     }
 
     @Test
+    void runtimeCompactionRestoresMissingCriticalConstraintsBeforeCommit() {
+        StubCompactor c = new StubCompactor("摘要遗漏了所有约束", 3_000, true);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("SYSTEM_PROMPT"));
+        history.add(LlmClient.Message.user("必须使用 Java 17，禁止修改 public API。" + longText(5_000)));
+        history.add(LlmClient.Message.assistant(longText(5_000)));
+        for (int i = 1; i < 6; i++) {
+            history.add(LlmClient.Message.user("Q" + i + ": " + longText(5_000)));
+            history.add(LlmClient.Message.assistant("A" + i + ": " + longText(5_000)));
+        }
+
+        assertTrue(c.compactIfNeeded(history, 100));
+        String committedSummary = history.get(1).content();
+        assertTrue(committedSummary.contains("压缩语义守卫恢复的关键约束"));
+        assertTrue(committedSummary.contains("Java 17"));
+        assertTrue(committedSummary.contains("禁止修改 public API"));
+    }
+
+    @Test
     void microcompactClearsOldToolResultsByToolCallIdAndKeepsRecentRounds(@TempDir Path tempDir) throws IOException {
         StubCompactor c = new StubCompactor("SUMMARY", 3_000, true);
         c.setMicrocompactOutputRoot(tempDir);

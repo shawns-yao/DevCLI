@@ -21,7 +21,10 @@ public record CompactBoundaryMetadata(
         List<String> loadedSkills,
         String ragEpoch,
         String mcpToolSnapshot,
-        boolean postCompactRestoreEnabled
+        boolean postCompactRestoreEnabled,
+        int protectedConstraints,
+        int restoredConstraints,
+        String semanticGuardStatus
 ) {
     private static final String START = "<compact_boundary>";
     private static final String END = "</compact_boundary>";
@@ -30,6 +33,9 @@ public record CompactBoundaryMetadata(
         loadedSkills = loadedSkills == null ? List.of() : List.copyOf(loadedSkills);
         ragEpoch = blankToNone(ragEpoch);
         mcpToolSnapshot = blankToNone(mcpToolSnapshot);
+        protectedConstraints = Math.max(0, protectedConstraints);
+        restoredConstraints = Math.max(0, restoredConstraints);
+        semanticGuardStatus = blankToNone(semanticGuardStatus);
     }
 
     public CompactBoundaryMetadata(
@@ -43,7 +49,27 @@ public record CompactBoundaryMetadata(
             int retainedMessages,
             int summaryChars) {
         this(compactType, trigger, mode, preTokens, postTokens, originalMessages, rebuiltMessages,
-                retainedMessages, summaryChars, List.of(), "none", "none", false);
+                retainedMessages, summaryChars, List.of(), "none", "none", false,
+                0, 0, "none");
+    }
+
+    public CompactBoundaryMetadata(
+            String compactType,
+            String trigger,
+            String mode,
+            int preTokens,
+            int postTokens,
+            int originalMessages,
+            int rebuiltMessages,
+            int retainedMessages,
+            int summaryChars,
+            List<String> loadedSkills,
+            String ragEpoch,
+            String mcpToolSnapshot,
+            boolean postCompactRestoreEnabled) {
+        this(compactType, trigger, mode, preTokens, postTokens, originalMessages, rebuiltMessages,
+                retainedMessages, summaryChars, loadedSkills, ragEpoch, mcpToolSnapshot,
+                postCompactRestoreEnabled, 0, 0, "none");
     }
 
     public String renderBoundaryBlock() {
@@ -61,6 +87,9 @@ public record CompactBoundaryMetadata(
                 + "ragEpoch=" + ragEpoch + "\n"
                 + "mcpToolSnapshot=" + mcpToolSnapshot + "\n"
                 + "postCompactRestore=" + (postCompactRestoreEnabled ? "enabled" : "disabled") + "\n"
+                + "protectedConstraints=" + protectedConstraints + "\n"
+                + "restoredConstraints=" + restoredConstraints + "\n"
+                + "semanticGuard=" + semanticGuardStatus + "\n"
                 + END;
     }
 
@@ -104,7 +133,10 @@ public record CompactBoundaryMetadata(
                     parseList(values.get("loadedSkills")),
                     blankToNone(values.get("ragEpoch")),
                     blankToNone(values.get("mcpToolSnapshot")),
-                    "enabled".equalsIgnoreCase(values.getOrDefault("postCompactRestore", "disabled"))
+                    "enabled".equalsIgnoreCase(values.getOrDefault("postCompactRestore", "disabled")),
+                    parseIntOrDefault(values.get("protectedConstraints"), 0),
+                    parseIntOrDefault(values.get("restoredConstraints"), 0),
+                    blankToNone(values.get("semanticGuard"))
             ));
         } catch (RuntimeException e) {
             return Optional.empty();
@@ -131,6 +163,15 @@ public record CompactBoundaryMetadata(
             throw new IllegalArgumentException("missing integer metadata");
         }
         return Integer.parseInt(value);
+    }
+
+    private static int parseIntOrDefault(String value, int fallback) {
+        if (value == null || value.isBlank()) return fallback;
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
     }
 
     private static String renderList(List<String> values) {
