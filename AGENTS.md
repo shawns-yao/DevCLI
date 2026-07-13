@@ -62,7 +62,7 @@ Multi-Agent 的 WorkingMemory 按角色注入隔离视图：Planner 只看任务
 
 Multi-Agent 并行批次使用 `SubAgent.ForkContext` 共享冻结 system prompt 前缀、exact tool definitions 快照、skill body 快照和 fork fingerprint；每个子任务只追加自己的 user 后缀，避免并行 Worker / Reviewer 因历史或动态工具差异破坏 prompt cache 命中。
 
-并行 Worker 写文件时，隔离 ToolRegistry 内的 `write_file` 仍进入运行时资源租约检查：每个 `/plan` task 或 `/team` step 以自己的 id 持有写租约，同一隔离工作区文件只能被一个运行中步骤写入；冲突返回策略拒绝，不做 last-writer-wins 覆盖或 LLM 自动合并。`/plan` task 和 `/team` Worker 尝试结束后都会在 finally 中释放本步骤租约。设计说明见 `docs/runtime-resource-lease-design.md`。
+并行 Worker 写文件时，隔离 ToolRegistry 内的 `write_file` 仍进入运行时资源租约检查：每个 `/plan` task 或 `/team` step 以自己的 id 持有写租约，同一隔离工作区文件只能被一个运行中步骤写入；冲突返回策略拒绝，不做 last-writer-wins 覆盖或 LLM 自动合并。`/plan` task 和 `/team` Worker 尝试结束后都会在 finally 中释放本步骤租约。ToolRegistry 共享后台清理器，project fork 不重复创建线程，最后一个注册表关闭后终止；默认周期 60 秒，可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` / `-Ddevcli.resource.lease.cleanup.interval.seconds` 调整。设计说明见 `docs/runtime-resource-lease-design.md`。
 
 副作用执行协议：工具通过 `ToolEffect` 声明 READ_ONLY / LOCAL_CONTEXT / PROJECT_MUTATION / HOST_PROCESS / EXTERNAL_MUTATION，执行管线按 `ToolAccessScope` 强制能力范围；非隔离任务只能使用只读和本地上下文工具，隔离任务允许项目写入与受限命令，但禁止外部副作用。隔离任务的 `execute_command` 与 Pre-Review 强制进入 Docker，不可用时失败且禁止回退主机；默认镜像 `maven:3.9.9-eclipse-temurin-17` 必须提前拉取，容器禁网、只读根文件系统并限制能力与资源。MCP 服务端 readOnly 注解默认不可信，只有本地 `trustReadOnlyAnnotations` 或 `readOnlyTools` 才可授权只读，`deniedTools` 不注册，destructive/openWorld 始终视为外部副作用。`/plan` 副作用任务与 `/team` 副作用步骤使用 `WorkspaceExecutionSession`；工作区后端默认 `auto`，Git 项目使用原生 worktree 并叠加当前未提交、删除、未跟踪和被忽略文件，非 Git 目录使用有界复制，可通过 `DEVCLI_WORKSPACE_BACKEND` 指定。worktree 物化后删除排除目录和符号链接，关闭时通过 Git 注销，崩溃残留元数据会在后续创建前 prune。批准后逐文件流式哈希生成 `PatchSet`，只读取变更文件内容；JVM 公平锁和跨进程文件锁共同串行化写前准备、全量冲突预检、应用和 checkpoint 终态。应用中途失败会回滚并报告未恢复路径。工作区创建前清理超过 TTL 且没有活动文件租约的孤儿目录，默认 24 小时，可通过 `DEVCLI_WORKSPACE_ORPHAN_TTL_HOURS` / `-Ddevcli.workspace.orphan.ttl.hours` 调整。
 
@@ -74,7 +74,7 @@ Final integration 只做入口/API/默认参数/跨模块联动胶水；普通�
 
 失败步骤支持有界在位重做（默认 1 次）：失败步骤保持原 id/依赖在 DAG 原位换思路重做，redo 用尽后保持 FAILED。checkpoint 协议版本 3 保存共享 `ExecutionArtifact` 和 pending PatchSet 写前日志；应用前记录 before/after 哈希与原文件备份，恢复时在项目提交锁内按最终哈希提升 COMPLETED、继续 PENDING 或自动回滚。写前日志目录和备份限制为当前所有者访问，超过 TTL 且没有对应 checkpoint 的孤儿日志会清理。对账保存失败、回滚不完整时停止 resume；高于当前版本的 checkpoint 明确报告不兼容，版本 1/2 保持兼容。计划、依赖、验收点和执行产物原子写入 `~/.devcli/checkpoints/`，全部成功后删除；resume 不恢复 WorkingMemory / 会话记忆。
 
-Side-Git 快照按 `devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX` 保留最近快照；每次新建快照后会重写 side-history，只保留最新 N 条，避免长会话快照无限增长。
+Side-Git 快照按 `devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX` 保留最近快照；每次新建快照后会重写 side-history，只保留最新 N 条。裁剪累计达到阈值或超过最小间隔后，会在时间上限内回收不可达松散对象；默认阈值 100、间隔 24 小时、上限 30 秒，可通过 `DEVCLI_SNAPSHOT_GC_ENABLED`、`DEVCLI_SNAPSHOT_GC_PRUNED_THRESHOLD`、`DEVCLI_SNAPSHOT_GC_MIN_INTERVAL_HOURS`、`DEVCLI_SNAPSHOT_GC_MAX_SECONDS` 调整。
 
 副作用横向信息流：write_file/execute_command 等副作用工具的证据在 `WorkingMemory.recentToolResults` 中优先保留、不被只读操作（read_file/search）的 FIFO 淘汰挤出，使后续步骤/轮次持续看到"本会话改过哪些文件"。这是改进既有工具证据淘汰策略实现的，未新增重复的文件账本维度。
 

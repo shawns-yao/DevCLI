@@ -58,6 +58,9 @@ Implemented now:
 - `/plan` task execution binds `task_id` as the lease owner.
 - `/team` Worker step execution binds `step_id` as the lease owner.
 - `/plan` task leases and `/team` Worker leases are released in a `finally` path when each attempt finishes.
+- `ToolRegistry` owns the maintenance registration; project forks share one daemon scheduler rather than creating one thread per fork.
+- The scheduler calls `pruneExpiredLeases()` every 60 seconds by default. `devcli.resource.lease.cleanup.interval.seconds` / `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` overrides the interval.
+- Closing a registry removes only its manager. The final registration closes the scheduler; explicit close and late registration close are idempotent.
 
 Still future work:
 

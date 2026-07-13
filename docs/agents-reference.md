@@ -27,7 +27,7 @@ For the primary entry point, see `/AGENTS.md`.
 
 ### Snapshot Config
 
-系统属性 > 环境变量 > 默认值：`devcli.snapshot.enabled`(true) / `devcli.snapshot.max`(50，自动保留最近 N 条快照) / `devcli.snapshot.excludes`(.git,.devcli/snapshots,target,node_modules,dist,.idea,*.class,*.jar) / `devcli.snapshot.dir`(~/.devcli/snapshots)
+系统属性 > 环境变量 > 默认值：`devcli.snapshot.enabled`(true) / `devcli.snapshot.max`(50，自动保留最近 N 条快照) / `devcli.snapshot.excludes`(.git,.devcli/snapshots,target,node_modules,dist,.idea,*.class,*.jar) / `devcli.snapshot.dir`(~/.devcli/snapshots) / `devcli.snapshot.gc.enabled`(true) / `devcli.snapshot.gc.pruned.threshold`(100) / `devcli.snapshot.gc.min.interval.hours`(24) / `devcli.snapshot.gc.max.seconds`(30)
 
 ### Embedding Config
 
@@ -110,7 +110,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - Planner 共享主 ToolRegistry；副作用 Worker 使用 `WorkspaceExecutionSession` 创建隔离 ToolRegistry，Pre-Review 与 Reviewer 在同一隔离目录读取真实产物，MemoryManager 继续共享角色裁剪视图。
 - Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用 `ExecutionArtifact`，统一保存 state、output、summary、modifiedResources、error、attempt、startedAt、finishedAt。
 - checkpoint 协议版本 3 通过 `RecoveryState` 恢复共享 artifact，并增加 pending PatchSet 写前日志；旧 completed/failed map 和版本 1/2 继续兼容，高于当前版本明确拒绝。
-- `/team` Worker 每次尝试都通过隔离 ToolRegistry 的 `runWithResourceLease(stepId, ...)` 绑定资源租约上下文，并在 finally 中释放；并行工具线程显式继承步骤租约归属。
+- `/team` Worker 每次尝试都通过隔离 ToolRegistry 的 `runWithResourceLease(stepId, ...)` 绑定资源租约上下文，并在 finally 中释放；并行工具线程显式继承步骤租约归属。ToolRegistry 统一托管 `ResourceLeaseMaintenance`，project fork 共享同一个定时线程；最后一个注册关闭后停止。默认每 60 秒清理过期租约，可通过 `devcli.resource.lease.cleanup.interval.seconds` / `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
 - `/plan` 副作用任务与 `/team` 副作用步骤在隔离工作区执行；`ToolEffect` / `ToolAccessScope` 在工具管线中强制限制非隔离任务只能使用只读能力。隔离命令和 Pre-Review 强制通过受限 Docker 执行，无网络且禁止回退主机。PatchSet 逐文件流式哈希，只保留变更内容；JVM 公平锁与跨进程文件锁共同串行提交，锁缓存按活跃使用者计数退役。应用前保存 before/after 哈希和原文件备份；备份限制为当前所有者访问，孤儿日志按 TTL 清理，恢复时提升完成、继续待执行或回滚，失败回滚会报告具体路径。
 - `PreReviewVerifier` 独立负责 Maven/javac 选择、Java 文件扫描、超时、进程输出解码和失败摘要；无 Maven 时使用 UTF-8 javac 参数文件并在执行后清理。
 - `Planner.replan()` 不是 Agent 循环，没有工具调用权，因此失败后重规划只读取 ExecutionArtifact 的最小结构化产物事实，不读取完整任务 result 作为主要依据。
@@ -217,6 +217,8 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - side-git 在 ~/.devcli/snapshots/ 维护独立仓库（JGit，不依赖系统 git）
 - pre-turn 同步，post-turn 异步
 - 每次新建快照后按 `devcli.snapshot.max` 重写 side-history，只保留最新 N 条快照
+- 裁剪数量持久化到 Side-Git 仓库内；达到阈值或超过最小间隔后，关闭仓库句柄再扫描所有 refs 的可达对象，只删除不可达松散对象，不重打包可达对象
+- GC 有独立时间上限；超时或删除失败时保留累计计数，后续快照继续重试，避免每次快照执行重型回收
 - revert_turn 纳入 HITL/AuditLog，恢复前先创建 pre-restore 快照
 
 ### Prompt Layering (Phase 19)
@@ -342,6 +344,11 @@ EMBEDDING_BASE_URL=http://localhost:11434
 # DEVCLI_SNAPSHOT_MAX=50
 # DEVCLI_SNAPSHOT_EXCLUDES=.git,.devcli/snapshots,target,node_modules,dist,.idea,*.class,*.jar
 # DEVCLI_SNAPSHOT_DIR=/Users/yourname/.devcli/snapshots
+# DEVCLI_SNAPSHOT_GC_ENABLED=true
+# DEVCLI_SNAPSHOT_GC_PRUNED_THRESHOLD=100
+# DEVCLI_SNAPSHOT_GC_MIN_INTERVAL_HOURS=24
+# DEVCLI_SNAPSHOT_GC_MAX_SECONDS=30
+# DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS=60
 # DEVCLI_TUI=true
 # NO_TUI=true
 ```

@@ -72,7 +72,7 @@ Main
 - `LongTermMemory（长期记忆）` 只保存跨会话稳定事实，默认不把临时任务请求写入长期层。`SymbolInvalidation（符号失效）` 会在索引替换时记录变更和删除的旧/新符号版本差异，并通过 `NegativeFact（负向事实）` 告诉模型哪些旧事实不可用；`search_code` 会输出与查询相关的失效事实，供 WorkingMemory 清理旧 RAG 证据。长期记忆注入时会抑制与 WorkingMemory 临时事实语义重复的条目。
 - `PathGuard（路径围栏）` 负责限制文件访问不逃逸项目根。
 - `ToolEffect + ToolAccessScope（工具副作用能力）` 由执行管线强制：非隔离分析任务只获得只读能力，隔离任务才允许项目写入和主机命令；MCP 缺失只读注解或声明 destructive/openWorld 时按外部副作用处理。工具定义、`search_tools` 缓存和并行工具线程使用同一能力范围。
-- `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 和 `/team` 并行执行时拦截 `write_file`，同一文件只能被一个运行中 task / step 写入；并行工具线程会继承步骤租约归属，任务结束后释放租约。
+- `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 和 `/team` 并行执行时拦截 `write_file`，同一文件只能被一个运行中 task / step 写入；并行工具线程会继承步骤租约归属，任务结束后释放租约。`ToolRegistry` 托管共享后台清理器，project fork 复用同一线程，最后一个注册表关闭后停止；周期可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
 - `PatchSet（补丁集）` 是隔离结果进入主项目的唯一文件回写边界：JVM 公平锁和 `~/.devcli/locks/project-commit/` 下的跨进程文件锁覆盖预检、应用和 checkpoint 终态；构建阶段流式计算哈希，未变化文件不读取完整内容。协议版本 3 在应用前保存目标哈希与原文件备份，恢复时按最终哈希提升完成、继续待执行或自动回滚。Reviewer 拒绝、任务失败、用户取消、前置哈希冲突、非普通文件覆盖或路径/链接逃逸都会阻止整批应用。
 - `CommandGuard（命令防线）` 是危险命令快速拒绝层，不替代 HITL 和路径策略。
 - `HitlToolRegistry（审批工具注册表）` 位于真实工具执行前，保证危险操作先经过审批和策略判定。
@@ -635,7 +635,7 @@ LLM tool call
 - 参数不合法时不会进入审批，更不会执行。
 - 用户不能批准策略层已经拒绝的操作。
 - 文件写入和命令执行会留下审计记录。
-- Side-Git snapshot 可用于回滚最近 turn 的文件改动，并按保留上限自动裁剪旧快照。
+- Side-Git snapshot 可用于回滚最近 turn 的文件改动，并按保留上限自动裁剪旧快照；累计裁剪达到阈值或超过最小间隔后，会在时间上限内回收不可达松散对象。
 
 ## Renderer And Interaction
 

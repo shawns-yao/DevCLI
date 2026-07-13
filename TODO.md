@@ -50,8 +50,8 @@
 - 来源：资源租约边界检查发现 `/team` Worker 只绑定 `runWithResourceLease` 上下文，步骤尝试结束后没有显式释放 step 租约；异常、Reviewer 打回或在位重做路径可能依赖超时抢占回收
 - 影响范围：`src/main/java/com/devcli/agent/AgentOrchestrator.java`、`src/test/java/com/devcli/agent/AgentOrchestratorTest.java`、`README.md`、`AGENTS.md`、`docs/agents-reference.md`、`docs/runtime-resource-lease-design.md`
 - 已实现：`AgentOrchestrator.executeWorkerOnce` 在 finally 中调用 `releaseResourceLeases(stepId)`；新增测试覆盖 Worker 尝试结束后释放资源租约
-- 未实现：未新增后台定时清理；现有 `pruneExpiredLeases` 仍作为超时残留的主动清理入口
-- 验证建议：`mvn -Dtest=AgentOrchestratorTest#shouldReleaseWorkerResourceLeaseAfterStepCompletes -DskipTests=false test`
+- 后续实现（2026-07-13）：ToolRegistry 托管共享 `ResourceLeaseMaintenance`，project fork 复用单个后台线程；默认每 60 秒清理过期租约，最后一个注册关闭后可靠终止，周期支持系统属性和环境变量配置
+- 验证建议：`mvn -Dtest=AgentOrchestratorTest#shouldReleaseWorkerResourceLeaseAfterStepCompletes,ResourceLeaseMaintenanceTest,ResourceLeaseManagerTest,ToolRegistryForkTest -DskipTests=false test`
 - 风险：并发 Worker 如果仍在同一毫秒级窗口写同一文件，冲突策略仍是拒绝后交给现有重试/审查流程处理，不做自动合并
 
 ## 2026-07-09 Side-Git 快照自动裁剪
@@ -60,9 +60,9 @@
 - 来源：长会话下 turn 级快照持续增长，`devcli.snapshot.max` 之前只限制展示/查询数量，没有真正裁剪 side-history
 - 影响范围：`src/main/java/com/devcli/snapshot/SideGitManager.java`、`src/test/java/com/devcli/snapshot/SideGitManagerTest.java`、`README.md`、`AGENTS.md`、`docs/agents-reference.md`
 - 已实现：每次新建快照后按 `SnapshotConfig.maxSnapshots` 重写 Side-Git 历史，只保留最新 N 条快照；新增测试覆盖超过保留上限时旧快照被裁剪
-- 未实现：未对 unreachable Git object 做额外磁盘压缩；后续可评估 JGit GC 的稳定触发策略
-- 验证建议：`mvn -Dtest=SideGitManagerTest -DskipTests=false test`
-- 风险：历史重写会改变保留快照的 commit id；恢复功能按当前保留列表工作，不依赖旧 commit id
+- 后续实现（2026-07-13）：裁剪计数持久化后按阈值或最小间隔触发有界回收；关闭 JGit 仓库句柄后扫描 refs 可达集合，只删除不可达松散对象，不在每次快照时执行完整 GC；超时或删除失败保留累计计数等待重试
+- 验证建议：`mvn -Dtest=SideGitManagerTest,SnapshotGcPolicyTest -DskipTests=false test`
+- 风险：当前只回收不可达松散对象，不重打包可达对象和既有 pack；单次回收受时间上限约束，大仓库可能需要多次触发完成
 
 ## 2026-07-09 独立 grep_code 精确检索工具
 
