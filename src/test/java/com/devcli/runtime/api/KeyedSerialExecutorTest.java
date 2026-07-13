@@ -181,6 +181,42 @@ class KeyedSerialExecutorTest {
         }
     }
 
+    @Test
+    void stopsSameKeyLaneAndRejectsQueuedTasksAfterJvmError() throws Exception {
+        CountDownLatch fatalObserved = new CountDownLatch(1);
+        ExecutorService pool = Executors.newSingleThreadExecutor(task -> {
+            Thread thread = new Thread(task, "keyed-serial-fatal-test");
+            thread.setUncaughtExceptionHandler((ignored, failure) -> fatalObserved.countDown());
+            return thread;
+        });
+        try {
+            KeyedSerialExecutor executor = new KeyedSerialExecutor(pool, 8);
+            CountDownLatch firstStarted = new CountDownLatch(1);
+            CountDownLatch releaseFirst = new CountDownLatch(1);
+            CountDownLatch secondAborted = new CountDownLatch(1);
+            AtomicInteger secondRuns = new AtomicInteger();
+
+            executor.execute("thread-fatal", () -> {
+                firstStarted.countDown();
+                await(releaseFirst);
+                throw new AssertionError("fatal");
+            });
+            assertTrue(firstStarted.await(3, TimeUnit.SECONDS));
+            executor.execute("thread-fatal", secondRuns::incrementAndGet,
+                    ignored -> secondAborted.countDown());
+
+            releaseFirst.countDown();
+
+            assertTrue(secondAborted.await(3, TimeUnit.SECONDS));
+            assertTrue(fatalObserved.await(3, TimeUnit.SECONDS));
+            assertEquals(0, secondRuns.get());
+            assertEquals(0, executor.pendingCount());
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+
     private static void await(CountDownLatch started, CountDownLatch release, CountDownLatch done) {
         started.countDown();
         try {

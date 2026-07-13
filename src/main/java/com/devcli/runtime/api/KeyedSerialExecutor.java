@@ -2,12 +2,15 @@ package com.devcli.runtime.api;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 
 /**
  * 相同 key 串行、不同 key 可并行的有界执行器。
@@ -27,15 +30,20 @@ final class KeyedSerialExecutor {
     }
 
     void execute(String key, Runnable task) {
+        execute(key, task, ignored -> { });
+    }
+
+    void execute(String key, Runnable task, Consumer<Error> fatalFailureHandler) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(task, "task");
+        Objects.requireNonNull(fatalFailureHandler, "fatalFailureHandler");
         reserve();
 
         AtomicBoolean schedule = new AtomicBoolean();
         Lane lane = lanes.compute(key, (ignored, current) -> {
             Lane selected = current == null ? new Lane() : current;
             synchronized (selected) {
-                selected.tasks.addLast(task);
+                selected.tasks.addLast(new TaskEntry(task, fatalFailureHandler));
                 if (!selected.running) {
                     selected.running = true;
                     selected.scheduling = true;
@@ -75,7 +83,7 @@ final class KeyedSerialExecutor {
         completeScheduling(lane);
         Throwable taskFailure = null;
         while (true) {
-            Runnable task;
+            TaskEntry task;
             synchronized (lane) {
                 task = lane.tasks.pollFirst();
             }
@@ -87,7 +95,10 @@ final class KeyedSerialExecutor {
                 continue;
             }
             try {
-                task.run();
+                task.runnable().run();
+            } catch (Error fatal) {
+                abortLane(key, lane, fatal);
+                throw fatal;
             } catch (Throwable failure) {
                 if (taskFailure == null) {
                     taskFailure = failure;
@@ -111,6 +122,32 @@ final class KeyedSerialExecutor {
             throw error;
         }
         throw new IllegalStateException("serial task failed", failure);
+    }
+
+    private void abortLane(String key, Lane lane, Error fatal) {
+        List<TaskEntry> aborted = new ArrayList<>();
+        lanes.compute(key, (ignored, current) -> {
+            if (current != lane) {
+                return current;
+            }
+            synchronized (lane) {
+                while (!lane.tasks.isEmpty()) {
+                    aborted.add(lane.tasks.removeFirst());
+                }
+                lane.running = false;
+                lane.scheduling = false;
+                lane.notifyAll();
+                return null;
+            }
+        });
+        pending.addAndGet(-aborted.size());
+        for (TaskEntry entry : aborted) {
+            try {
+                entry.fatalFailureHandler().accept(fatal);
+            } catch (Throwable callbackFailure) {
+                fatal.addSuppressed(callbackFailure);
+            }
+        }
     }
 
     private boolean retireLane(String key, Lane lane) {
@@ -183,8 +220,11 @@ final class KeyedSerialExecutor {
         }
     }
 
+    private record TaskEntry(Runnable runnable, Consumer<Error> fatalFailureHandler) {
+    }
+
     private static final class Lane {
-        private final Deque<Runnable> tasks = new ArrayDeque<>();
+        private final Deque<TaskEntry> tasks = new ArrayDeque<>();
         private boolean running;
         private boolean scheduling;
         private RejectedExecutionException schedulingFailure;

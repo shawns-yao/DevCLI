@@ -117,7 +117,11 @@ public class RuntimeApiServer implements AutoCloseable {
         }
         String turnId = "turn_" + Long.toHexString(System.nanoTime());
         try {
-            serialTurnExecutor.execute(threadId, () -> runTurn(threadId, turnId, input));
+            serialTurnExecutor.execute(threadId,
+                    () -> runTurn(threadId, turnId, input),
+                    fatal -> store.appendEvent(threadId, "turn.failed",
+                            "{\"turn_id\":\"" + turnId
+                                    + "\",\"error\":\"fatal_runtime_error\"}"));
         } catch (RejectedExecutionException e) {
             store.appendEvent(threadId, "turn.rejected",
                     "{\"turn_id\":\"" + turnId + "\",\"error\":\"runtime_busy\"}");
