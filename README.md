@@ -651,6 +651,14 @@ LLM tool call
 
 Lanterna renderer 保留为全屏三栏 TUI；plain renderer 适合 CI、日志或不支持 ANSI 的终端。
 
+## Benchmark Evaluation
+
+项目提供 RAG、Agent、Memory 和 Context Compression 四类量化评测。RAG 支持 CodeSearchNet Java 公共 test split，并输出 Recall@5、MRR@5、nDCG@5；其余三类当前使用项目内受控任务，分别输出任务成功率、记忆写入与召回指标、压缩事实保真率。
+
+评测原始报告默认写入 `target/benchmark-reports/` 和 `target/agent-benchmark/`。聚合器会生成可提交的 JSON、CSV 与数据清单到 `Data/processed/` 和 `Data/manifest/`。完整方法、命令、基线结果和适用边界见 `docs/benchmark-evaluation.md`。
+
+2026-07-13 的 50 条 CodeSearchNet Java 样本结果：Recall@5 1.0000、MRR@5 0.9900、nDCG@5 0.9926；Memory 写入准确率 96.0%、Recall@5 91.7%；230k token 阈值下经过 5 次真实压缩，18 条事实保真率 94.4%。Agent 受控任务中单 Agent 成功率为 20.0%，Planner/Worker/Reviewer 为 0.0%，该结果暴露出计划 JSON 协议与空工作区前置步骤问题，不作为能力宣传数据。
+
 ## Tests
 
 常规快速回归：

@@ -114,20 +114,22 @@
 
 ## 2026-06-16 公开数据集评测框架
 
-- 状态：未实现
+- 状态：阶段一已实现（2026-07-13）
 - 来源：用户希望围绕 Multi-Agent、Memory、Context Compression、RAG 四条链路进行公开数据集测试和量化
-- 影响范围：`src/test/java/com/devcli/benchmark/`、`src/test/java/com/devcli/rag/eval/`、未来可选 `eval/` 数据与报告目录
-- 目标：接入或适配 CodeSearchNet Java、Defects4J、SWE-bench Lite、LongMemEval、RULER/LongBench 等公开集合，形成可复现实验命令和指标报告
-- 初步方案：优先复用现有 `RagRetrievalBenchmarkIT`、`AgentCollaborationBenchmarkIT`、`RealLlmMemoryBenchmarkIT`、`RealLlmCompressionRetentionIT`，再补数据集下载/采样/转换脚本与固定 CSV/JSON 报告格式
-- 风险：公开数据集与 DevCLI 的 Java Agent CLI 场景不完全匹配；真实 LLM、embedding、rerank、Defects4J/SWE-bench 环境会引入成本、耗时和复现波动
+- 影响范围：`src/test/java/com/devcli/benchmark/`、`src/test/java/com/devcli/rag/`、`Data/processed/`、`Data/manifest/`、README、AGENTS 和详细架构文档
+- 已实现：RAG 统一输出 Recall@5、MRR@5、nDCG@5；Agent 输出任务成功率；Memory 输出写入准确率、低价值拦截率、Recall@5 和注入命中率；Compression 输出事实保真率；聚合器生成固定 JSON、CSV 和数据清单
+- 已验证：CodeSearchNet Java 公共 test split 50 条；Memory 25 条策略样本与 12 条召回查询；230k token 阈值、18 条事实、5 次真实压缩；Agent 使用 5 个项目内隐藏检查任务，单 Agent 成功率 20.0%，Planner/Worker/Reviewer 成功率 0.0%
+- 未实现：Agent、Memory、Compression 尚未接入 SWE-bench Lite、LongMemEval、RULER/LongBench 官方集合；当前三类结果必须标记为项目内受控评测；Multi-Agent 仍需修复 Planner 非 JSON 输出和空工作区检查步骤阻断实现的问题
+- 风险：真实 LLM、Embedding、Reranker 和公开数据集端点会引入费用、耗时、网络依赖和结果波动；50 条 RAG 样本与单次 Agent 运行不代表统计稳定结论
 
 ## 2026-06-16 CodeSearchNet Java RAG 评测适配
 
-- 状态：部分实现
-- 影响范围：`src/test/java/com/devcli/benchmark/CodeSearchNetJavaDatasetAdapter.java`、`src/test/java/com/devcli/benchmark/CodeSearchNetJavaDatasetAdapterTest.java`
-- 已实现：将 HuggingFace datasets-server 返回的 CodeSearchNet Java rows 转为 DevCLI 可索引的 synthetic Java source cases
-- 未实现：从 HuggingFace API 自动分页下载、接入 `RagRetrievalBenchmarkIT` 聚合公开数据集指标、输出 MRR/nDCG
-- 建议验证命令：`mvn test -Dtest=CodeSearchNetJavaDatasetAdapterTest -DskipTests=false`
+- 状态：已实现（2026-07-13）
+- 影响范围：`src/test/java/com/devcli/benchmark/CodeSearchNetJavaDatasetAdapter.java`、`RagRetrievalBenchmarkIT`、`CodeRetriever` 及评测报告
+- 已实现：通过 HuggingFace datasets-server 自动读取指定区间，将 CodeSearchNet Java rows 转为可索引源码，接入 RAG benchmark 并输出 Recall@5、MRR@5、nDCG@5
+- 架构调整：长文档型 definition 查询直接进入 semantic route，避免 keyword fusion 与 reranker 排序噪声；短符号查询保留 precise-first 路由
+- 验证结果：Java test split 50 条，Recall@5 1.0000、MRR@5 0.9900、nDCG@5 0.9926
+- 建议验证命令：`mvn test -Dtest=CodeSearchNetJavaDatasetAdapterTest,RetrievalMetricsTest -DskipTests=false`
 
 ## 2026-06-19 对标 cc 的长会话上下文治理改造
 

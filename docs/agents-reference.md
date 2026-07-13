@@ -359,10 +359,18 @@ EMBEDDING_BASE_URL=http://localhost:11434
 
 ---
 
+## Benchmark Evaluation
+
+评测入口位于 `src/test/java/com/devcli/benchmark/`，默认不进入快速回归。RAG benchmark 支持 CodeSearchNet Java 公共 test split，并统一计算 Recall@5、MRR@5、nDCG@5；长文档型 definition 查询直接走 semantic route，短符号和调用链查询继续使用 keyword、semantic、graph、RRF 与可选 rerank。
+
+Agent benchmark 对同一组隐藏检查任务比较单 Agent 与 Planner/Worker/Reviewer，任务成功要求 LLM 流程完成且隐藏检查全部通过。Memory benchmark 统计写入策略准确率、低价值拦截率、Recall@5 和注入命中率。Compression benchmark 在 230k token 生产阈值下执行多次真实摘要，再通过分层事实问答统计保真率。
+
+原始报告默认写入 `target/benchmark-reports/` 和 `target/agent-benchmark/`。`BenchmarkReportAggregatorIT` 将最新结果汇总为 `Data/processed/` 下的 JSON、CSV，并在 `Data/manifest/` 记录来源。评测方法、复现命令和结果边界见 `docs/benchmark-evaluation.md`。
+
 ## Test Coverage Summary
 
-测试覆盖偏向：解析、计划结构、RAG 核心、Multi-Agent 编排、HITL 策略、策略层拦截、MCP 协议、资源输入层、长上下文策略与 Skill 加载。
+常规测试覆盖偏向：解析、计划结构、RAG 核心、Multi-Agent 编排、HITL 策略、策略层拦截、MCP 协议、资源输入层、长上下文策略与 Skill 加载。
 
-不覆盖：真实 LLM 联调、真实 Embedding API、真实 MCP server 联调、终端完整手工体验。
+常规测试不覆盖真实 LLM、真实 Embedding API、真实 MCP server 和终端完整手工体验；对应真实链路通过显式启用的 benchmark 或手工验收执行。
 
 完整测试类列表：CliCommandParserTest / MainBrowserCommandTest / PlanReviewInputParserTest / MainInputNormalizationTest / ExecutionPlanTest / MemoryEntryTest / ConversationMemoryTest / LongTermMemoryTest / MemoryRetrieverTest / MemoryManagerTest / ExplicitMemoryHintsTest / ContextProfileTest / PlanExecuteAgentTest / AgentMemoryHintTest / AgentRoleTest / AgentMessageTest / AgentOrchestratorTest / EmbeddingClientTest / SearchResultTest / NetworkPolicyTest / HtmlExtractorTest / WebFetcherTest / SearchProviderFactoryTest / ZhipuSearchProviderTest / VectorStoreTest / CodeChunkerTest / CodeAnalyzerTest / CodeIndexTest / ApprovalPolicyTest / ApprovalResultTest / HitlToolRegistryTest / TerminalHitlHandlerTest / ToolRegistryTest / BrowserSessionTest / BrowserConnectivityCheckTest / SensitivePagePolicyTest / BrowserGuardTest / McpSchemaSanitizerTest / McpConfigLoaderTest / JsonRpcClientTest / McpToolBridgeTest / McpResourceCacheTest / AtMentionParserTest / AtMentionExpanderTest / AtMentionCompleterTest / NotificationRouterTest / PathGuardTest / CommandGuardTest / AuditLogTest / SkillFrontmatterParserTest / SkillRegistryTest / SkillStateStoreTest / SkillBuiltinExtractorTest / SkillContextBufferTest / SkillIndexFormatterTest / LoadSkillToolTest / SkillCommandHandlerTest
