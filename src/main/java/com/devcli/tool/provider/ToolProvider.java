@@ -31,6 +31,8 @@ public interface ToolProvider {
 
         long commandTimeoutSeconds();
 
+        String executeCommand(String command);
+
         Consumer<String> memorySaver();
 
         ToolRegistry.MemorySaver memorySaveHandler();

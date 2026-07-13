@@ -12,6 +12,7 @@ import com.devcli.browser.BrowserGuard;
 import com.devcli.context.ContextProfile;
 import com.devcli.lsp.LspDiagnosticReport;
 import com.devcli.lsp.LspManager;
+import com.devcli.mcp.config.McpToolTrustPolicy;
 import com.devcli.mcp.protocol.McpSchemaValidator;
 import com.devcli.mcp.protocol.McpToolDescriptor;
 import com.devcli.rag.VectorStore;
@@ -22,6 +23,8 @@ import com.devcli.runtime.CancellationContext;
 import com.devcli.snapshot.SnapshotService;
 import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillRegistry;
+import com.devcli.tool.command.CommandExecutionService;
+import com.devcli.tool.command.DefaultCommandExecutionService;
 import com.devcli.tool.provider.BrowserToolProvider;
 import com.devcli.tool.provider.FileToolProvider;
 import com.devcli.tool.provider.GrepToolProvider;
@@ -63,6 +66,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private static final String PIPELINE_BROWSER_AUDIT = "browserAuditMetadata";
     private final Map<String, Tool> tools = new ConcurrentHashMap<>();
     private final Map<String, McpRegisteredTool> mcpTools = new ConcurrentHashMap<>();
+    private final Map<String, McpToolTrustPolicy> mcpTrustPolicies = new ConcurrentHashMap<>();
     private final Map<String, Long> mcpServerLifecycleVersions = new ConcurrentHashMap<>();
     private final Set<String> activatedMcpToolDefinitions = ConcurrentHashMap.newKeySet();
     private final AtomicLong toolCatalogVersion = new AtomicLong();
@@ -70,6 +74,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private final ToolSearchProvider toolSearchProvider = new ToolSearchProvider();
     private final long commandTimeoutSeconds;
     private final long toolBatchTimeoutSeconds;
+    private CommandExecutionService commandExecutionService =
+            new DefaultCommandExecutionService();
     private String projectPath = System.getProperty("user.dir");
     private PathGuard pathGuard = new PathGuard(projectPath);
     private final AuditLog auditLog = new AuditLog();
@@ -170,6 +176,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         fork.memoryListHandler = memoryListHandler;
         fork.skillRegistry = skillRegistry;
         fork.skillContextBuffer = skillContextBuffer == null ? null : skillContextBuffer.copy();
+        fork.commandExecutionService = commandExecutionService;
+        fork.mcpTrustPolicies.putAll(mcpTrustPolicies);
         mcpTools.values().forEach(registered ->
                 fork.registerMcpToolOutput(registered.descriptor(), registered.invoker()));
         fork.mcpServerLifecycleVersions.putAll(mcpServerLifecycleVersions);
@@ -201,6 +209,11 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     public void setBrowserConnector(BrowserConnector browserConnector) {
         this.browserConnector = browserConnector;
+    }
+
+    public void setCommandExecutionService(CommandExecutionService commandExecutionService) {
+        this.commandExecutionService = Objects.requireNonNull(
+                commandExecutionService, "commandExecutionService");
     }
 
     public void setMemorySaver(java.util.function.Consumer<String> memorySaver) {
@@ -373,6 +386,12 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     @Override
     public long commandTimeoutSeconds() { return commandTimeoutSeconds; }
     @Override
+    public String executeCommand(String command) {
+        boolean sandboxRequired = currentToolAccessScope() == ToolAccessScope.ISOLATED_PROJECT;
+        return commandExecutionService.execute(new CommandExecutionService.Request(
+                command, Path.of(projectPath), commandTimeoutSeconds, sandboxRequired)).toToolText();
+    }
+    @Override
     public java.util.function.Consumer<String> memorySaver() { return memorySaver; }
     @Override
     public MemorySaver memorySaveHandler() { return memorySaveHandler; }
@@ -514,6 +533,13 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         return false;
     }
 
+    public void setMcpToolTrustPolicy(String serverName, McpToolTrustPolicy policy) {
+        String normalized = normalizeMcpServerName(serverName);
+        mcpTrustPolicies.put(normalized,
+                policy == null ? McpToolTrustPolicy.untrusted() : policy);
+        invalidateToolSearchIndex();
+    }
+
     /**
      * 注册一个 MCP 工具到 ToolRegistry。
      *
@@ -531,6 +557,13 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         Objects.requireNonNull(descriptor, "descriptor");
         Objects.requireNonNull(invoker, "invoker");
         String toolName = descriptor.namespacedName();
+        McpToolTrustPolicy policy = mcpTrustPolicies.getOrDefault(
+                normalizeMcpServerName(descriptor.serverName()),
+                McpToolTrustPolicy.untrusted());
+        if (policy.isDenied(descriptor.name())) {
+            unregisterMcpTool(toolName);
+            return;
+        }
         McpRegisteredTool registered = new McpRegisteredTool(descriptor, invoker);
         mcpTools.put(toolName, registered);
         tools.put(toolName, new Tool(
@@ -538,7 +571,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                 mcpDescription(descriptor),
                 descriptor.inputSchema(),
                 args -> "MCP 工具不应通过 Map<String,String> 入口执行",
-                ToolEffect.fromMcp(descriptor.annotations())
+                ToolEffect.fromMcp(descriptor, policy)
         ));
         invalidateToolSearchIndex();
     }
@@ -1105,12 +1138,12 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         HOST_PROCESS,
         EXTERNAL_MUTATION;
 
-        static ToolEffect fromMcp(McpToolDescriptor.Annotations annotations) {
-            if (annotations != null && annotations.readOnly()
-                    && !annotations.destructive() && !annotations.openWorld()) {
-                return READ_ONLY;
-            }
-            return EXTERNAL_MUTATION;
+        static ToolEffect fromMcp(McpToolDescriptor descriptor,
+                                  McpToolTrustPolicy trustPolicy) {
+            McpToolTrustPolicy policy = trustPolicy == null
+                    ? McpToolTrustPolicy.untrusted()
+                    : trustPolicy;
+            return policy.isReadOnly(descriptor) ? READ_ONLY : EXTERNAL_MUTATION;
         }
 
         static ToolEffect builtIn(String name) {

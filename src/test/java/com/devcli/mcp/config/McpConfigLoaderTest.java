@@ -33,6 +33,27 @@ class McpConfigLoaderTest {
     }
 
     @Test
+    void loadsLocalMcpTrustPolicy(@TempDir Path tempDir) throws Exception {
+        Path user = tempDir.resolve("user-mcp.json");
+        Files.writeString(user, """
+                {"mcpServers":{"fs":{
+                  "command":"npx",
+                  "trustReadOnlyAnnotations":true,
+                  "readOnlyTools":["read_file"],
+                  "deniedTools":["delete_file"]
+                }}}
+                """);
+
+        McpConfigLoader loader = new McpConfigLoader(
+                user, tempDir.resolve("missing.json"), tempDir);
+        McpServerConfig config = loader.load().get("fs");
+
+        assertTrue(config.isTrustReadOnlyAnnotations());
+        assertEquals(java.util.List.of("read_file"), config.getReadOnlyTools());
+        assertEquals(java.util.List.of("delete_file"), config.getDeniedTools());
+    }
+
+    @Test
     void prepareExpandsProjectDirAndHomeBuiltins(@TempDir Path tempDir) throws Exception {
         Path user = tempDir.resolve("user-mcp.json");
         Files.writeString(user, """

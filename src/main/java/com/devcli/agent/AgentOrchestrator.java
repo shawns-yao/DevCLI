@@ -97,7 +97,7 @@ public class AgentOrchestrator {
     private Map<String, ExecutionArtifact> restoredFailedArtifacts = new HashMap<>();
     private final ThreadLocal<ToolRegistry> activeStepToolRegistry = new ThreadLocal<>();
     private final ThreadLocal<StepUpdateBuffer> activeStepUpdate = new ThreadLocal<>();
-    private final PreReviewVerifier preReviewVerifier = new PreReviewVerifier();
+    private PreReviewVerifier preReviewVerifier = new PreReviewVerifier();
     private final WorkspaceCommitCoordinator workspaceCommitCoordinator =
             new WorkspaceCommitCoordinator();
 
@@ -308,6 +308,11 @@ public class AgentOrchestrator {
      * 每个角色拿到 SkillContextBuffer 的独立副本，避免并行 Worker / Reviewer 互相消费 skill body。
      * SubAgent 调用 load_skill 时会通过 ToolRegistry 的线程本地覆盖写回自己的 buffer。
      */
+    void setPreReviewVerifier(PreReviewVerifier preReviewVerifier) {
+        this.preReviewVerifier = Objects.requireNonNull(preReviewVerifier, "preReviewVerifier");
+    }
+
+
     public void setSkillSystem(com.devcli.skill.SkillRegistry skillRegistry,
                                com.devcli.skill.SkillContextBuffer skillContextBuffer) {
         this.skillRegistry = skillRegistry;

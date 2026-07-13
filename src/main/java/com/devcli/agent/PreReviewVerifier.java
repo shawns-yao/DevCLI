@@ -1,15 +1,16 @@
 package com.devcli.agent;
 
+import com.devcli.tool.command.CommandExecutionService;
+import com.devcli.tool.command.DefaultCommandExecutionService;
+
 import java.io.IOException;
-import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Locale;
-import java.util.concurrent.TimeUnit;
+
 
 /**
  * 在 Reviewer 运行前执行项目级硬验证。
@@ -19,13 +20,20 @@ final class PreReviewVerifier {
     private static final int MAX_FAILURE_OUTPUT_LENGTH = 3000;
 
     private final int timeoutSeconds;
+    private final CommandExecutionService commandExecutionService;
 
     PreReviewVerifier() {
-        this(DEFAULT_TIMEOUT_SECONDS);
+        this(DEFAULT_TIMEOUT_SECONDS, new DefaultCommandExecutionService());
     }
 
     PreReviewVerifier(int timeoutSeconds) {
+        this(timeoutSeconds, new DefaultCommandExecutionService());
+    }
+
+    PreReviewVerifier(int timeoutSeconds, CommandExecutionService commandExecutionService) {
         this.timeoutSeconds = Math.max(1, timeoutSeconds);
+        this.commandExecutionService = java.util.Objects.requireNonNull(
+                commandExecutionService, "commandExecutionService");
     }
 
     Result verify(Path projectRoot, String stepId) {
@@ -36,7 +44,7 @@ final class PreReviewVerifier {
         }
 
         if (Files.isRegularFile(normalizedRoot.resolve("pom.xml"))) {
-            return runCommand(normalizedRoot, mavenTestCompileCommand(),
+            return runCommand(normalizedRoot, "mvn -q -DskipTests test-compile",
                     "mvn -q -DskipTests test-compile");
         }
 
@@ -69,8 +77,10 @@ final class PreReviewVerifier {
         try {
             argumentFile = Files.createTempFile(outputBase, "javac-", ".args");
             writeJavacArguments(argumentFile, normalizedRoot, outputDir, javaFiles);
+            String relativeArgumentFile = normalizedRoot.relativize(argumentFile)
+                    .toString().replace('\\', '/').replace("\"", "\\\"");
             return runCommand(normalizedRoot,
-                    List.of("javac", "@" + argumentFile.toAbsolutePath().normalize()),
+                    "javac @\"" + relativeArgumentFile + "\"",
                     "javac -encoding UTF-8");
         } catch (IOException e) {
             return Result.failed("Pre-review hard check failed: 无法创建 javac 参数文件：" + e.getMessage());
@@ -104,50 +114,26 @@ final class PreReviewVerifier {
         return "\"" + normalized + "\"";
     }
 
-    private List<String> mavenTestCompileCommand() {
-        if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")) {
-            return List.of("cmd.exe", "/c", "mvn", "-q", "-DskipTests", "test-compile");
-        }
-        return List.of("mvn", "-q", "-DskipTests", "test-compile");
-    }
-
-    private Result runCommand(Path projectRoot, List<String> command, String displayCommand) {
-        Path outputFile = null;
+    private Result runCommand(Path projectRoot, String command, String displayCommand) {
         try {
-            outputFile = Files.createTempFile("devcli-pre-review-", ".log");
-            ProcessBuilder processBuilder = new ProcessBuilder(command);
-            processBuilder.directory(projectRoot.toFile());
-            processBuilder.redirectErrorStream(true);
-            processBuilder.redirectOutput(outputFile.toFile());
-
-            Process process = processBuilder.start();
-            boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
-            if (!finished) {
-                process.destroyForcibly();
-                process.waitFor(5, TimeUnit.SECONDS);
+            CommandExecutionService.Result execution = commandExecutionService.execute(
+                    new CommandExecutionService.Request(
+                            command, projectRoot, timeoutSeconds, true));
+            if (execution.succeeded()) {
+                return Result.ok();
+            }
+            if (execution.timedOut()) {
                 return Result.failed("Pre-review hard check failed: " + displayCommand
                         + " 超过 " + timeoutSeconds + "s");
             }
-            String output = decodeProcessOutput(Files.readAllBytes(outputFile));
-            if (process.exitValue() == 0) {
-                return Result.ok();
+            if (execution.cancelled()) {
+                return Result.failed("Pre-review hard check failed: " + displayCommand + " 被中断");
             }
             return Result.failed("Pre-review hard check failed: " + displayCommand
-                    + "\n" + summarizeFailure(output));
-        } catch (IOException e) {
-            return Result.failed("Pre-review hard check failed: 无法执行 " + displayCommand
-                    + "：" + e.getMessage());
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return Result.failed("Pre-review hard check failed: " + displayCommand + " 被中断");
-        } finally {
-            if (outputFile != null) {
-                try {
-                    Files.deleteIfExists(outputFile);
-                } catch (IOException ignored) {
-                    // 临时验证日志清理失败不改变验证结论。
-                }
-            }
+                    + "\n" + summarizeFailure(execution.output()));
+        } catch (RuntimeException e) {
+            return Result.failed("Pre-review hard check failed: 无法在命令沙箱执行 "
+                    + displayCommand + "：" + e.getMessage());
         }
     }
 
@@ -188,32 +174,6 @@ final class PreReviewVerifier {
         return summary.toString();
     }
 
-    private String decodeProcessOutput(byte[] bytes) {
-        String utf8 = new String(bytes, StandardCharsets.UTF_8);
-        if (!looksMojibake(utf8)) {
-            return utf8;
-        }
-        String platform = new String(bytes, Charset.defaultCharset());
-        if (!looksMojibake(platform)) {
-            return platform;
-        }
-        try {
-            String gbk = new String(bytes, Charset.forName("GBK"));
-            if (!looksMojibake(gbk)) {
-                return gbk;
-            }
-        } catch (Exception ignored) {
-            // 不支持 GBK 时保留 UTF-8 解码结果。
-        }
-        return utf8;
-    }
-
-    private boolean looksMojibake(String text) {
-        if (text == null || text.isEmpty()) {
-            return false;
-        }
-        return text.indexOf('\uFFFD') >= 0 || text.contains("????");
-    }
 
     private String safeStepId(String stepId) {
         if (stepId == null || stepId.isBlank()) {

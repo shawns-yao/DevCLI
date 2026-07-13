@@ -15,6 +15,9 @@ public class McpServerConfig {
     private String url;
     private Map<String, String> headers = new LinkedHashMap<>();
     private boolean disabled;
+    private boolean trustReadOnlyAnnotations;
+    private List<String> readOnlyTools = new ArrayList<>();
+    private List<String> deniedTools = new ArrayList<>();
 
     public String getCommand() {
         return command;
@@ -62,6 +65,30 @@ public class McpServerConfig {
 
     public void setDisabled(boolean disabled) {
         this.disabled = disabled;
+    }
+
+    public boolean isTrustReadOnlyAnnotations() {
+        return trustReadOnlyAnnotations;
+    }
+
+    public void setTrustReadOnlyAnnotations(boolean trustReadOnlyAnnotations) {
+        this.trustReadOnlyAnnotations = trustReadOnlyAnnotations;
+    }
+
+    public List<String> getReadOnlyTools() {
+        return readOnlyTools;
+    }
+
+    public void setReadOnlyTools(List<String> readOnlyTools) {
+        this.readOnlyTools = readOnlyTools == null ? new ArrayList<>() : readOnlyTools;
+    }
+
+    public List<String> getDeniedTools() {
+        return deniedTools;
+    }
+
+    public void setDeniedTools(List<String> deniedTools) {
+        this.deniedTools = deniedTools == null ? new ArrayList<>() : deniedTools;
     }
 
     public boolean isStdio() {

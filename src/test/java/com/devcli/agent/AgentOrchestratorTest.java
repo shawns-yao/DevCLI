@@ -827,6 +827,8 @@ class AgentOrchestratorTest {
                     isolatedToolRegistry(tempDir),
                     mm
             );
+            orchestrator.setPreReviewVerifier(new PreReviewVerifier(30, request ->
+                    com.devcli.tool.command.CommandExecutionService.Result.completed(0, "")));
 
             String finalResult = orchestrator.run("验证最终集成 reviewer 瞬时失败降级");
 

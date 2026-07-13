@@ -1,6 +1,8 @@
 package com.devcli.tool;
 
+import com.devcli.mcp.config.McpToolTrustPolicy;
 import com.devcli.mcp.protocol.McpToolDescriptor;
+import com.devcli.tool.command.CommandExecutionService;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -8,6 +10,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -116,7 +119,27 @@ class ToolCapabilityTest {
     }
 
     @Test
-    void readOnlyMcpAnnotationIsAllowedInReadOnlyScope() {
+    void isolatedCommandRequiresSandboxBackend(@TempDir Path tempDir) {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        AtomicReference<CommandExecutionService.Request> captured = new AtomicReference<>();
+        registry.setCommandExecutionService(request -> {
+            captured.set(request);
+            return CommandExecutionService.Result.completed(0, "sandbox");
+        });
+
+        ToolOutput output = registry.runWithToolAccess(
+                ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+                () -> registry.executeToolOutput(
+                        "execute_command", "{\"command\":\"pwd\"}"));
+
+        assertTrue(output.isSuccess(), output.text());
+        assertTrue(captured.get().sandboxRequired());
+        assertEquals(tempDir.toAbsolutePath().normalize(), captured.get().projectRoot());
+    }
+
+    @Test
+    void selfDeclaredReadOnlyMcpIsRejectedUntilServerIsTrusted() {
         ToolRegistry registry = new ToolRegistry();
         McpToolDescriptor descriptor = descriptor("inspect",
                 new McpToolDescriptor.Annotations(true, false, false));
@@ -124,9 +147,32 @@ class ToolCapabilityTest {
 
         registry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY, () -> {
             ToolOutput output = registry.executeToolOutput(descriptor.namespacedName(), "{}");
+            assertEquals(ToolErrorCode.CAPABILITY_DENIED, output.errorCode());
+            return null;
+        });
+
+        registry.setMcpToolTrustPolicy("test",
+                new McpToolTrustPolicy(true, java.util.Set.of(), java.util.Set.of()));
+        registry.registerMcpToolOutput(descriptor, arguments -> ToolOutput.success("read"));
+        registry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY, () -> {
+            ToolOutput output = registry.executeToolOutput(descriptor.namespacedName(), "{}");
             assertTrue(output.isSuccess(), output.text());
             return null;
         });
+    }
+
+    @Test
+    void localMcpDenyListPreventsToolRegistration() {
+        ToolRegistry registry = new ToolRegistry();
+        McpToolDescriptor descriptor = descriptor("blocked",
+                new McpToolDescriptor.Annotations(true, false, false));
+        registry.setMcpToolTrustPolicy("test",
+                new McpToolTrustPolicy(true, java.util.Set.of(), java.util.Set.of("blocked")));
+
+        registry.registerMcpToolOutput(descriptor, arguments -> ToolOutput.success("called"));
+
+        ToolOutput output = registry.executeToolOutput(descriptor.namespacedName(), "{}");
+        assertEquals(ToolErrorCode.UNKNOWN_TOOL, output.errorCode());
     }
 
     private static McpToolDescriptor descriptor(String name, McpToolDescriptor.Annotations annotations) {

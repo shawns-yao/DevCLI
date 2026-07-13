@@ -2,6 +2,7 @@ package com.devcli.mcp;
 
 import com.devcli.mcp.config.McpConfigLoader;
 import com.devcli.mcp.config.McpServerConfig;
+import com.devcli.mcp.config.McpToolTrustPolicy;
 import com.devcli.mcp.notifications.NotificationRouter;
 import com.devcli.mcp.protocol.McpToolDescriptor;
 import com.devcli.mcp.resources.McpResourceCache;
@@ -558,6 +559,11 @@ public class McpServerManager implements AutoCloseable {
     }
 
     private void replaceTools(McpServer server, McpClient client, List<McpToolDescriptor> tools) {
+        McpToolTrustPolicy trustPolicy = McpToolTrustPolicy.from(server.config())
+                .withReadOnlyTools(
+                        McpResourceTool.LIST_RESOURCES,
+                        McpResourceTool.READ_RESOURCE);
+        toolRegistry.setMcpToolTrustPolicy(server.name(), trustPolicy);
         toolRegistry.replaceMcpToolOutputsForServer(server.name(), tools,
                 server.lifecycleVersion(),
                 descriptor -> isResourceVirtualTool(descriptor)
