@@ -1,5 +1,15 @@
 # TODO
 
+## 2026-07-13 副作用隔离与补丁恢复事务补强
+
+- 状态：已实现
+- 来源：架构复查发现任务标签无法约束真实工具副作用、并行 PatchSet 可同时通过哈希预检、PatchSet 与 checkpoint 之间存在崩溃窗口、Runtime 同会话通道退役存在竞态，隔离工作区和预审编译还存在生命周期边界
+- 影响范围：ToolRegistry 与执行管线、Plan、Multi-Agent、Runtime API、checkpoint、workspace、Pre-Review、Skill fork、README、AGENTS、详细架构文档和配置模板
+- 已实现：新增 `ToolEffect` 与 `ToolAccessScope`，非隔离任务强制只读，隔离任务禁止外部副作用；MCP 缺失安全注解时保守拒绝；工具定义、`search_tools` 缓存和并行工具线程保持同一能力范围，并行线程继承资源租约归属；项目级 ToolRegistry fork 复制 SkillContextBuffer；新增项目级公平提交锁；checkpoint 协议升级为版本 3，PatchSet 应用前保存 before/after 哈希和原文件备份，resume 在同一项目锁内完成提升、继续或回滚，对账保存失败和回滚不完整时停止；未来 checkpoint 版本明确报告不兼容；PatchSet 回滚失败返回具体路径；Runtime keyed 串行器原子管理通道生命周期，调度拒绝通知等待者，单任务异常不阻塞后续 turn；隔离工作区新增后端接口、有界并行复制、TTL 孤儿清理和跨进程活动租约；无 Maven 的 Java 预审改用 javac 参数文件；从 Plan 和 Multi-Agent 大类抽离工作区执行与补丁提交协调职责
+- 未实现：容器或 VM 命令沙箱、Git worktree/写时复制/增量基线后端未实现；默认复制后端仍复制排除目录之外的整个项目
+- 验证建议：运行 `ToolCapabilityTest`、`ToolRegistryForkTest`、`ToolExecutionPipelineTest`、`PlanExecuteAgentTest`、`AgentOrchestratorTest`、`AgentCheckpointTest`、`WorkspaceExecutionSessionTest`、`PatchSetTest`、`IsolatedWorkspaceTest`、`KeyedSerialExecutorTest`、`RuntimeApiServerTest`、`PreReviewVerifierTest`，并执行 `mvn -q -DskipTests test-compile`
+- 风险：文件系统隔离不能限制命令通过绝对路径或脚本访问主机资源；外部进程不受项目级 JVM 锁约束；复制大型仓库仍会消耗与并行副作用步骤数量近似成比例的磁盘空间
+
 ## 2026-07-12 Agent Runtime 架构统一改造
 
 - 状态：已实现（架构主线）

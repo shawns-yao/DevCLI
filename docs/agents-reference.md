@@ -109,10 +109,10 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - SubAgent IOException 返回 ERROR 类型
 - Planner 共享主 ToolRegistry；副作用 Worker 使用 `WorkspaceExecutionSession` 创建隔离 ToolRegistry，Pre-Review 与 Reviewer 在同一隔离目录读取真实产物，MemoryManager 继续共享角色裁剪视图。
 - Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用 `ExecutionArtifact`，统一保存 state、output、summary、modifiedResources、error、attempt、startedAt、finishedAt。
-- checkpoint 协议版本 2 通过 `RecoveryState` 恢复共享 artifact；旧 completed/failed map 会转换为统一产物，保留旧 JSON 兼容构造器与访问方法。
-- `/team` Worker 每次尝试都通过隔离 ToolRegistry 的 `runWithResourceLease(stepId, ...)` 绑定资源租约上下文，并在 finally 中释放；Reviewer 打回、Worker 异常或在位重做不会遗留租约。
-- `/plan` 的 FILE_WRITE / COMMAND / VERIFICATION 与 `/team` 副作用步骤在隔离工作区执行；批准后生成 PatchSet，先做 SHA-256 前置版本和全量冲突校验，再原子写回主项目。拒绝、失败、取消和冲突不应用，应用中途失败回滚。
-- `PreReviewVerifier` 独立负责 Maven/javac 选择、Java 文件扫描、超时、进程输出解码和失败摘要；`AgentOrchestrator.runPreReviewHook` 保留兼容入口并委托验证器。
+- checkpoint 协议版本 3 通过 `RecoveryState` 恢复共享 artifact，并增加 pending PatchSet 写前日志；旧 completed/failed map 和版本 1/2 继续兼容，高于当前版本明确拒绝。
+- `/team` Worker 每次尝试都通过隔离 ToolRegistry 的 `runWithResourceLease(stepId, ...)` 绑定资源租约上下文，并在 finally 中释放；并行工具线程显式继承步骤租约归属。
+- `/plan` 副作用任务与 `/team` 副作用步骤在隔离工作区执行；`ToolEffect` / `ToolAccessScope` 在工具管线中强制限制非隔离任务只能使用只读能力。PatchSet 通过项目级公平锁串行提交，应用前保存 before/after 哈希和原文件备份；恢复时提升完成、继续待执行或回滚，失败回滚会报告具体路径。
+- `PreReviewVerifier` 独立负责 Maven/javac 选择、Java 文件扫描、超时、进程输出解码和失败摘要；无 Maven 时使用 UTF-8 javac 参数文件并在执行后清理。
 - `Planner.replan()` 不是 Agent 循环，没有工具调用权，因此失败后重规划只读取 ExecutionArtifact 的最小结构化产物事实，不读取完整任务 result 作为主要依据。
 
 ### HITL System
@@ -132,8 +132,9 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 ### Parallel Tool Execution
 
-- `executeTools()` 固定线程池并行，默认最多 4 个并发
-- 返回结果保持原始顺序
+- `executeTools()` 固定线程池并行，默认最多 4 个并发，返回结果保持原始顺序
+- 并行执行线程显式继承调用方的 `ToolAccessScope`、资源租约步骤和 SkillContextBuffer 快照，避免 ThreadLocal 回退到 FULL 或丢失修改文件归属
+- `search_tools` 缓存键包含当前能力范围，不能从 FULL 缓存泄露副作用工具到只读任务
 - Agent/PlanExecuteAgent/SubAgent 三条路径都走 executeTools()
 
 ### Web Capabilities
@@ -174,7 +175,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - paths 使用项目相对路径匹配当前用户输入或任务文本中的路径；未声明 paths 的 Skill 始终可见，声明 paths 的 Skill 只在路径命中时进入索引
 - load_skill 工具把 SKILL.md 正文(5KB 截断)写入 SkillContextBuffer，并记录本进程内使用次数
 - buffer 正文一次性消费，最多 3 个 skill body；已加载 Skill 名称、context、allowedTools 和内容摘要保留给压缩后恢复，直到 clear
-- allowedTools 为空表示不启用工具限制；声明 allowedTools 的已加载 Skill 会把后续工具调用限制在当前 SkillContextBuffer 白名单内，主 Agent、Plan 和 SubAgent 通过各自 buffer 隔离，/clear 清空白名单状态
+- allowedTools 为空表示不启用工具限制；声明 allowedTools 的已加载 Skill 会把后续工具调用限制在当前 SkillContextBuffer 白名单内。项目级 ToolRegistry fork 使用 `SkillContextBuffer.copy()` 冻结副本，并行任务不会互相消费正文或污染允许工具集合；/clear 清空当前实例状态
 
 ### Post-Compact Restore
 
@@ -229,7 +230,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - DurableTaskManager(SQLite) / CLI: /task, /task list, /task add, /task cancel, /task log
 - Runtime API: `serve --http --port 8080`，仅 127.0.0.1，需 API Key
 - 端点：POST /v1/threads / POST /v1/threads/{id}/turns / GET /v1/threads/{id}/events
-- Runtime API 的 turn 通过 `KeyedSerialExecutor` 调度：同一 thread 串行，不同 thread 并行，容量仍受 turn threads + queue 上限约束
+- Runtime API 的 turn 通过 `KeyedSerialExecutor` 调度：同 key 的通道创建、入队和空通道删除使用原子 compute，杜绝旧通道与新通道并存；底层调度拒绝会通知全部等待者，单个 turn 异常不会阻塞同通道后续任务
 - 每次交互、后台任务和无头 turn 绑定独立 `RunContext`，其中包含项目路径与取消令牌；预先创建的线程池不读取其他运行的取消状态，线程中断也进入取消语义
 - `HeadlessAgentRunner` 统一管理无头 Agent、ToolRegistry 和 MemoryManager 生命周期；后台任务取消时同时取消对应 RunContext 并中断执行线程
 - ToolResultSizeManager 的落盘项目路径来自执行该工具的 ToolRegistry 实例，不再通过静态活动路径跨运行共享
@@ -253,10 +254,10 @@ CLI 入口 / Banner / .env 读取 / 日志初始化 / 模式切换 / JLine raw m
 ReAct 主循环 / 对话历史 / 工具调用与结果回灌
 
 ### PlanExecuteAgent.java
-规划后执行 / 计划审阅 / DAG 任务执行 / 并行批次 / 失败重规划
+规划后执行 / 计划审阅 / DAG 任务执行 / 并行批次 / 失败重规划；任务能力范围、隔离工作区、资源租约和 PatchSet 生命周期委托给 `PlanTaskWorkspaceExecutor`
 
 ### AgentOrchestrator.java
-Multi-Agent 编排器 / 三角色管理 / 按依赖分配 / 审查重试
+Multi-Agent 编排器 / 三角色管理 / 按依赖分配 / 审查重试；PatchSet、checkpoint 写前日志、终态持久化和恢复对账委托给 `WorkspaceCommitCoordinator`
 
 ### AgentExecutionEngine.java
 ReAct / Plan task / SubAgent 共用循环；统一取消和预算检查、LLM 调用、assistant/tool 消息协议、结构化工具错误记录与 IOException 出口；路径差异通过 Delegate 钩子注入
@@ -277,16 +278,16 @@ Plan Task / Multi-Agent ExecutionStep / checkpoint 共用任务产物；统一�
 任务状态 / 进度可视化；可执行任务判定和拓扑排序委托给 ExecutionGraph
 
 ### AgentCheckpoint.java
-checkpoint 协议版本 2；通过 RecoveryState 恢复共享 ExecutionArtifact，并兼容旧 completed / failed JSON 结构
+checkpoint 协议版本 3；通过 RecoveryState 恢复共享 ExecutionArtifact，保存 PatchSet 写前日志和原文件备份，恢复时按文件哈希对账；兼容旧结构并返回明确的未来版本不兼容状态
 
 ### PreReviewVerifier.java
-Reviewer 前 Java 硬验证；封装 Maven/javac 命令、扫描、超时、输出解码和失败摘要，避免编排器承担进程执行细节
+Reviewer 前 Java 硬验证；封装 Maven/javac 命令、扫描、超时、输出解码和失败摘要，无 Maven 时使用 javac 参数文件避免命令行过长
 
 ### ToolRegistry.java
-12 个内置核心工具（含 `grep_code` 实时精确文本搜索）+ MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult；`ToolExecutionPipeline` 按阶段执行取消、存在性、Skill 权限、参数校验、HITL、审计、策略和结果治理；`ToolOutput` / `ToolExecutionResult` 携带 status、errorCode、retryable、imageParts 和 modifiedResources；HITL 作为管线中间件，不再覆写 executeTool；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会返回 `search_tools` 引导和 query 示例
+12 个内置核心工具（含 `grep_code` 实时精确文本搜索）+ MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult；`ToolExecutionPipeline` 按阶段执行取消、存在性、能力范围、Skill 权限、参数校验、HITL、审计、策略和结果治理；`ToolOutput` / `ToolExecutionResult` 携带 status、errorCode、retryable、imageParts 和 modifiedResources；HITL 作为管线中间件，不再覆写 executeTool；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会返回 `search_tools` 引导和 query 示例
 
 ### Workspace Package
-IsolatedWorkspace 复制并清理步骤级工作区；WorkspaceExecutionSession 管理隔离 ToolRegistry 生命周期；PatchSet 负责哈希冲突预检、路径与链接边界、原子应用和失败回滚
+`WorkspaceBackend` 定义物化后端，默认 `CopyWorkspaceBackend` 使用有界并行复制与哈希；`WorkspaceCleanupPolicy` 通过 TTL 和跨进程文件租约清理孤儿目录；`WorkspaceExecutionSession` 管理隔离 ToolRegistry 生命周期；`ProjectCommitCoordinator` 串行化同项目提交；PatchSet 负责哈希冲突预检、路径与链接边界、原子应用和可观测回滚
 
 ### MCP Package
 McpServerManager / McpClient / JsonRpcClient / StdioTransport / StreamableHttpTransport / McpSchemaSanitizer / resources/ / mention/ / notifications/

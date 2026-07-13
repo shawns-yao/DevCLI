@@ -64,15 +64,15 @@ Multi-Agent 并行批次使用 `SubAgent.ForkContext` 共享冻结 system prompt
 
 并行 Worker 写文件时，隔离 ToolRegistry 内的 `write_file` 仍进入运行时资源租约检查：每个 `/plan` task 或 `/team` step 以自己的 id 持有写租约，同一隔离工作区文件只能被一个运行中步骤写入；冲突返回策略拒绝，不做 last-writer-wins 覆盖或 LLM 自动合并。`/plan` task 和 `/team` Worker 尝试结束后都会在 finally 中释放本步骤租约。设计说明见 `docs/runtime-resource-lease-design.md`。
 
-副作用执行协议：`/plan` 的 FILE_WRITE / COMMAND / VERIFICATION 与 `/team` 的副作用步骤使用 `WorkspaceExecutionSession` 创建隔离工作区和项目级 ToolRegistry；Worker、Pre-Review、Reviewer 读取同一隔离目录。批准后生成 `PatchSet`，先做 SHA-256 前置版本校验和全量冲突预检，再以原子替换写回主项目；冲突、Reviewer 拒绝、执行失败或取消时不应用。PatchSet 拒绝非普通文件覆盖、相对路径逃逸和符号链接/重解析点逃逸，应用中途失败会回滚已改文件。隔离默认开启，`DEVCLI_WORKSPACE_ISOLATION_ENABLED=false` / `-Ddevcli.workspace.isolation.enabled=false` 可临时关闭，`-Ddevcli.workspace.dir` 可覆盖隔离目录；这不是容器或 VM 沙箱。
+副作用执行协议：工具通过 `ToolEffect` 声明 READ_ONLY / LOCAL_CONTEXT / PROJECT_MUTATION / HOST_PROCESS / EXTERNAL_MUTATION，执行管线按 `ToolAccessScope` 强制能力范围；非隔离任务只能使用只读和本地上下文工具，隔离任务允许项目写入与主机命令，但禁止外部副作用。MCP 只有明确 readOnly 且非 destructive/openWorld 才按只读处理。`/plan` 副作用任务与 `/team` 副作用步骤使用 `WorkspaceExecutionSession`；默认复制后端采用有界并行复制和哈希，可替换为其他工作区后端。批准后生成 `PatchSet`，项目级公平锁串行化写前准备、全量冲突预检、应用和 checkpoint 终态。应用中途失败会回滚并报告未恢复路径。工作区创建前清理超过 TTL 且没有活动文件租约的孤儿目录，默认 24 小时，可通过 `DEVCLI_WORKSPACE_ORPHAN_TTL_HOURS` / `-Ddevcli.workspace.orphan.ttl.hours` 调整。隔离不是容器或 VM 沙箱，命令仍可访问操作系统允许的外部资源。
 
-Reviewer 前置硬约束：Worker 产物进入 Reviewer LLM 前，`AgentOrchestrator` 委托 `PreReviewVerifier` 执行 Pre-Review Hook；Java 项目优先 `mvn -q -DskipTests test-compile`，无 Maven 时用 `javac -encoding UTF-8` 编译 `src/main/java`。验证器独立负责 Java 文件扫描、命令选择、超时、进程输出解码和失败摘要。失败时直接生成 `approved=false` 反馈打回 Worker，不唤醒 Reviewer LLM。
+Reviewer 前置硬约束：Worker 产物进入 Reviewer LLM 前，`AgentOrchestrator` 委托 `PreReviewVerifier` 执行 Pre-Review Hook；Java 项目优先 `mvn -q -DskipTests test-compile`，无 Maven 时使用 UTF-8 javac 参数文件传递源码清单，避免 Windows 命令行长度限制。验证器独立负责 Java 文件扫描、命令选择、超时、进程输出解码、参数文件清理和失败摘要。失败时直接生成 `approved=false` 反馈打回 Worker，不唤醒 Reviewer LLM。
 
 Reviewer 输出必须是可解析 JSON，并包含三层评分：`functional_correctness`、`integration_completeness`、`code_quality`。任一分数低于 `0.6`，或 `functional_correctness < 1.0`，Orchestrator 强制判不通过；非 JSON 文本不再凭“通过”等关键词放行。
 
 Final integration 只做入口/API/默认参数/跨模块联动胶水；普通步骤失败比例达到 `50%` 时熔断，不让最终步骤强行修补。
 
-失败步骤支持有界在位重做（默认 1 次）：正常步骤走完仍有失败时，失败步骤保持原 id/依赖在 DAG 原位换思路重做（buildStepContext 注入上次失败反馈），而非生成平行恢复计划；redo 用尽仍失败则保持 FAILED 终态，由熔断与汇总处理。在位重做的状态与决策由 `StepRedoTracker` 承载。checkpoint 协议版本 2 保存共享 `ExecutionArtifact`，通过 `RecoveryState` 统一恢复 completed / failed 产物；旧 checkpoint 的 completed / failed map 会先归一化。计划、依赖、验收点和执行产物原子写入 `~/.devcli/checkpoints/`，全部成功后删除；`/team resume [id]` 保留已完成产物，其余节点重置为 PENDING，resume 不恢复 WorkingMemory / 会话记忆。
+失败步骤支持有界在位重做（默认 1 次）：失败步骤保持原 id/依赖在 DAG 原位换思路重做，redo 用尽后保持 FAILED。checkpoint 协议版本 3 保存共享 `ExecutionArtifact` 和 pending PatchSet 写前日志；应用前记录 before/after 哈希与原文件备份，恢复时在项目提交锁内按最终哈希提升 COMPLETED、继续 PENDING 或自动回滚。对账保存失败、回滚不完整时停止 resume；高于当前版本的 checkpoint 明确报告不兼容，版本 1/2 保持兼容。计划、依赖、验收点和执行产物原子写入 `~/.devcli/checkpoints/`，全部成功后删除；resume 不恢复 WorkingMemory / 会话记忆。
 
 Side-Git 快照按 `devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX` 保留最近快照；每次新建快照后会重写 side-history，只保留最新 N 条，避免长会话快照无限增长。
 
@@ -86,13 +86,13 @@ Code RAG 检索链路当前为 keyword + semantic + bounded graph → `RRF（倒
 
 MCP 动态工具：`mcp__{server}__{tool}`（+ resources 虚拟工具）
 
-工具调用可靠性链路：LLM 先按 reasoning 说明目标、工具选择和参数来源；工具定义使用 JSON Schema 强约束类型、必填项、枚举值和未知字段；`ToolRegistry` 通过 `ToolExecutionPipeline` 分阶段执行取消、工具存在性、Skill 权限、参数校验、HITL、审计、策略和结果尺寸治理，HITL 不再覆写执行入口；工具结果使用 `ToolStatus`、`ToolErrorCode` 和 retryable 结构化表达，ReAct、Plan、SubAgent 的重复错误熔断不再依赖结果文本关键词；执行前通过 `json-schema-validator` + 本地兜底校验内置工具和 MCP 工具参数，失败以 `工具参数校验失败` 回传模型修正；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会提示先调用 `search_tools`；危险工具继续走 HITL / Policy / AuditLog；MCP 工具结果被截断或落盘预览时会标记折叠分类；工具结果进入 WorkingMemory，最终回答必须用工具证据闭环。
+工具调用可靠性链路：LLM 先按 reasoning 说明目标、工具选择和参数来源；工具定义使用 JSON Schema 强约束类型、必填项、枚举值和未知字段；`ToolRegistry` 通过 `ToolExecutionPipeline` 分阶段执行取消、工具存在性、能力范围、Skill 权限、参数校验、HITL、审计、策略和结果尺寸治理；并行工具线程显式继承能力范围、资源租约和 Skill buffer 快照，项目 fork 复制 `SkillContextBuffer`，不共享可变状态；工具结果使用 `ToolStatus`、`ToolErrorCode` 和 retryable 结构化表达，ReAct、Plan、SubAgent 的重复错误熔断不再依赖结果文本关键词；执行前通过 `json-schema-validator` + 本地兜底校验内置工具和 MCP 工具参数，失败以 `工具参数校验失败` 回传模型修正；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会提示先调用 `search_tools`；危险工具继续走 HITL / Policy / AuditLog；MCP 工具结果被截断或落盘预览时会标记折叠分类；工具结果进入 WorkingMemory，最终回答必须用工具证据闭环。
 
 ## 仓库结构
 
 ```
 src/main/java/com/devcli/
-├── agent/       Agent.java, PlanExecuteAgent.java, SubAgent.java, AgentOrchestrator.java
+├── agent/       Agent.java, PlanExecuteAgent.java, SubAgent.java, AgentOrchestrator.java, PlanTaskWorkspaceExecutor.java, WorkspaceCommitCoordinator.java
 ├── cli/         Main.java, CliCommandParser.java, PlanReviewInputParser.java
 ├── browser/     BrowserSession, BrowserGuard, SensitivePagePolicy
 ├── llm/         AnthropicClient, GLMClient, DeepSeekClient, StepClient, KimiClient, OpenAiClient
@@ -105,7 +105,7 @@ src/main/java/com/devcli/
 ├── image/       ImageReferenceParser
 ├── runtime/     api/ (RuntimeApiServer) + task/ (DurableTaskManager)
 ├── snapshot/    SideGitManager, SnapshotService
-├── workspace/   IsolatedWorkspace, WorkspaceExecutionSession, PatchSet
+├── workspace/   IsolatedWorkspace, WorkspaceExecutionSession, PatchSet, WorkspaceBackend, ProjectCommitCoordinator
 ├── tool/        ToolRegistry
 ├── mcp/         McpClient, McpServerManager, transport/, resources/, mention/
 ├── hitl/        HitlToolRegistry, ApprovalPolicy, TerminalHitlHandler
@@ -115,7 +115,7 @@ src/main/java/com/devcli/
 └── render/      Renderer, InlineRenderer, PlainRenderer, RendererFactory
 ```
 
-Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔离；turn 执行池默认 2 线程 / 64 队列，过载返回 `429 runtime_busy`；`KeyedSerialExecutor` 保证同一 thread 的 turn 按提交顺序串行，不同 thread 可并行。同一 thread 的 turn 有上下文延续（存储即状态）：每 turn 新建 Agent，执行前经 `RuntimeThreadStore.turnHistory` 重放该 thread 最近 20 轮的输入/输出对（`TurnRunner` 接口带 threadId；失败/被拒 turn 不进历史）。交互、后台任务和无头 turn 使用运行级 `RunContext` 隔离项目路径、取消令牌和资源生命周期；取消状态不再回退到进程级全局 token，线程中断也视为取消。`HeadlessAgentRunner` 统一创建并关闭无头 Agent 使用的 ToolRegistry / MemoryManager，工具大结果落盘使用所属 ToolRegistry 的实例项目路径，不使用跨实例静态路径。
+Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔离；turn 执行池默认 2 线程 / 64 队列，过载返回 `429 runtime_busy`；`KeyedSerialExecutor` 通过同 key 原子创建、入队和退役保证同一 thread 永远串行，底层调度拒绝会传递给全部等待提交者，单个 turn 异常不会阻塞同通道后续任务。同一 thread 的 turn 有上下文延续（存储即状态）：每 turn 新建 Agent，执行前经 `RuntimeThreadStore.turnHistory` 重放该 thread 最近 20 轮的输入/输出对（`TurnRunner` 接口带 threadId；失败/被拒 turn 不进历史）。交互、后台任务和无头 turn 使用运行级 `RunContext` 隔离项目路径、取消令牌和资源生命周期；取消状态不再回退到进程级全局 token，线程中断也视为取消。`HeadlessAgentRunner` 统一创建并关闭无头 Agent 使用的 ToolRegistry / MemoryManager，工具大结果落盘使用所属 ToolRegistry 的实例项目路径，不使用跨实例静态路径。
 
 启动与 inline 渲染当前约定：
 
