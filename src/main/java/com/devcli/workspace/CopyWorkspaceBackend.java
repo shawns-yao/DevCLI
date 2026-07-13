@@ -24,20 +24,31 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 使用普通文件复制物化隔离工作区的默认后端。
  */
 public class CopyWorkspaceBackend implements WorkspaceBackend {
+    static final String COPY_TIMEOUT_PROPERTY = "devcli.workspace.copy.timeout.seconds";
+    static final String COPY_TIMEOUT_ENV = "DEVCLI_WORKSPACE_COPY_TIMEOUT_SECONDS";
     private static final int MAX_DEFAULT_PARALLELISM = 8;
+    private static final long DEFAULT_COPY_TIMEOUT_SECONDS = 300;
+    private static final long SHUTDOWN_TIMEOUT_SECONDS = 5;
 
     private final int parallelism;
+    private final long copyTimeoutMillis;
 
     public CopyWorkspaceBackend() {
         this(Math.max(1, Math.min(MAX_DEFAULT_PARALLELISM,
-                Runtime.getRuntime().availableProcessors())));
+                        Runtime.getRuntime().availableProcessors())),
+                resolveCopyTimeoutMillis(System.getProperties(), System.getenv()));
     }
 
     CopyWorkspaceBackend(int parallelism) {
+        this(parallelism, resolveCopyTimeoutMillis(System.getProperties(), System.getenv()));
+    }
+
+    CopyWorkspaceBackend(int parallelism, long copyTimeoutMillis) {
         if (parallelism < 1) {
             throw new IllegalArgumentException("parallelism must be positive");
         }
         this.parallelism = parallelism;
+        this.copyTimeoutMillis = Math.max(1, copyTimeoutMillis);
     }
 
     @Override
@@ -67,13 +78,19 @@ public class CopyWorkspaceBackend implements WorkspaceBackend {
         Map<String, String> baseline = new HashMap<>();
         int submitted = 0;
         int completed = 0;
+        long deadline = System.nanoTime()
+                + TimeUnit.MILLISECONDS.toNanos(copyTimeoutMillis);
         try {
             while (completed < sources.size()) {
                 while (submitted < sources.size() && submitted - completed < parallelism) {
                     Path source = sources.get(submitted++);
                     completion.submit(() -> copyFile(root, workspace, source));
                 }
-                FileSnapshot snapshot = await(completion);
+                long remainingNanos = deadline - System.nanoTime();
+                if (remainingNanos <= 0) {
+                    throw new IOException("workspace copy timed out");
+                }
+                FileSnapshot snapshot = await(completion, remainingNanos);
                 completed++;
                 if (snapshot != null) {
                     baseline.put(snapshot.relativePath(), snapshot.hash());
@@ -85,19 +102,15 @@ public class CopyWorkspaceBackend implements WorkspaceBackend {
         }
     }
 
-    private static void shutdownAndAwait(ExecutorService executor) {
+    private static void shutdownAndAwait(ExecutorService executor) throws IOException {
         executor.shutdownNow();
-        boolean interrupted = false;
-        while (!executor.isTerminated()) {
-            try {
-                executor.awaitTermination(1, TimeUnit.DAYS);
-            } catch (InterruptedException e) {
-                interrupted = true;
-                executor.shutdownNow();
+        try {
+            if (!executor.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                throw new IOException("workspace copy workers did not terminate");
             }
-        }
-        if (interrupted) {
+        } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            throw new IOException("workspace copy shutdown interrupted", e);
         }
     }
 
@@ -145,9 +158,15 @@ public class CopyWorkspaceBackend implements WorkspaceBackend {
         return sources;
     }
 
-    private static FileSnapshot await(CompletionService<FileSnapshot> completion) throws IOException {
+    private static FileSnapshot await(CompletionService<FileSnapshot> completion,
+                                      long timeoutNanos) throws IOException {
         try {
-            return completion.take().get();
+            java.util.concurrent.Future<FileSnapshot> future =
+                    completion.poll(timeoutNanos, TimeUnit.NANOSECONDS);
+            if (future == null) {
+                throw new IOException("workspace copy timed out");
+            }
+            return future.get();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IOException("workspace copy interrupted", e);
@@ -157,6 +176,25 @@ public class CopyWorkspaceBackend implements WorkspaceBackend {
                 throw ioException;
             }
             throw new IOException("workspace copy failed", cause);
+        }
+    }
+
+    static long resolveCopyTimeoutMillis(java.util.Properties properties,
+                                         Map<String, String> environment) {
+        String value = properties == null ? null : properties.getProperty(COPY_TIMEOUT_PROPERTY);
+        if (value == null || value.isBlank()) {
+            value = environment == null ? null : environment.get(COPY_TIMEOUT_ENV);
+        }
+        if (value == null || value.isBlank()) {
+            return TimeUnit.SECONDS.toMillis(DEFAULT_COPY_TIMEOUT_SECONDS);
+        }
+        try {
+            long seconds = Long.parseLong(value.trim());
+            return seconds <= 0
+                    ? TimeUnit.SECONDS.toMillis(DEFAULT_COPY_TIMEOUT_SECONDS)
+                    : Math.multiplyExact(seconds, 1000L);
+        } catch (NumberFormatException | ArithmeticException ignored) {
+            return TimeUnit.SECONDS.toMillis(DEFAULT_COPY_TIMEOUT_SECONDS);
         }
     }
 

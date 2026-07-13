@@ -64,9 +64,21 @@ class WorkspaceExecutionSessionTest {
             if (child != null && child.isAlive()) {
                 child.destroyForcibly();
             }
+
             executor.shutdownNow();
         }
     }
+
+    @Test
+    void releasesProjectLockCacheAfterLastUser(@TempDir Path tempDir) throws Exception {
+        for (int index = 0; index < 50; index++) {
+            Path project = Files.createDirectories(tempDir.resolve("project-" + index));
+            ProjectCommitCoordinator.withProjectLock(project, () -> null);
+        }
+
+        assertEquals(0, ProjectCommitCoordinator.cachedLockCount());
+    }
+
 
     @Test
     void serializesPatchCommitAndDecisionForSameProject(@TempDir Path project) throws Exception {

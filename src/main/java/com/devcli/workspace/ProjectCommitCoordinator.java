@@ -22,16 +22,23 @@ import java.util.concurrent.locks.ReentrantLock;
 public final class ProjectCommitCoordinator {
     static final String LOCK_DIR_PROPERTY = "devcli.project.commit.lock.dir";
     static final String LOCK_DIR_ENV = "DEVCLI_PROJECT_COMMIT_LOCK_DIR";
-    private static final ConcurrentHashMap<Path, ReentrantLock> LOCKS = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<Path, LockEntry> LOCKS = new ConcurrentHashMap<>();
 
     private ProjectCommitCoordinator() {
     }
 
     public static <T> T withProjectLock(Path projectRoot, CheckedSupplier<T> action) throws Exception {
         Path root = normalizeProjectRoot(projectRoot);
-        ReentrantLock lock = LOCKS.computeIfAbsent(root, ignored -> new ReentrantLock(true));
-        lock.lockInterruptibly();
+        LockEntry entry = LOCKS.compute(root, (ignored, current) -> {
+            LockEntry selected = current == null ? new LockEntry() : current;
+            selected.users++;
+            return selected;
+        });
+        ReentrantLock lock = entry.lock;
+        boolean acquired = false;
         try {
+            lock.lockInterruptibly();
+            acquired = true;
             if (lock.getHoldCount() > 1) {
                 return action.get();
             }
@@ -43,8 +50,26 @@ public final class ProjectCommitCoordinator {
                 return action.get();
             }
         } finally {
-            lock.unlock();
+            if (acquired) {
+                lock.unlock();
+            }
+            LOCKS.computeIfPresent(root, (ignored, current) -> {
+                if (current != entry) {
+                    return current;
+                }
+                current.users--;
+                return current.users == 0 ? null : current;
+            });
         }
+    }
+
+    static int cachedLockCount() {
+        return LOCKS.size();
+    }
+
+    private static final class LockEntry {
+        private final ReentrantLock lock = new ReentrantLock(true);
+        private int users;
     }
 
     static Path lockFile(Path projectRoot, java.util.Properties properties,

@@ -21,6 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class IsolatedWorkspaceTest {
@@ -192,6 +193,37 @@ class IsolatedWorkspaceTest {
             releaseSlow.countDown();
             caller.shutdownNow();
         }
+    }
+
+    @Test
+    void boundsWorkspaceCopyWait(@TempDir Path tempDir) throws Exception {
+        Path project = Files.createDirectories(tempDir.resolve("project"));
+        Path workspaceBase = Files.createDirectories(tempDir.resolve("workspaces"));
+        Path workspace = Files.createDirectories(workspaceBase.resolve("workspace"));
+        Files.writeString(project.resolve("slow.txt"), "slow");
+        CopyWorkspaceBackend backend = new CopyWorkspaceBackend(1, 50) {
+            @Override
+            FileSnapshot copyFile(Path root, Path workspacePath, Path source) throws Exception {
+                Thread.sleep(TimeUnit.SECONDS.toMillis(30));
+                return null;
+            }
+        };
+
+        long started = System.nanoTime();
+        java.io.IOException failure = assertThrows(java.io.IOException.class,
+                () -> backend.materialize(project, workspaceBase, workspace));
+
+        assertTrue(failure.getMessage().contains("timed out"), failure.getMessage());
+        assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 3000);
+    }
+
+    @Test
+    void resolvesCopyTimeoutFromPropertyBeforeEnvironment() {
+        java.util.Properties properties = new java.util.Properties();
+        properties.setProperty(CopyWorkspaceBackend.COPY_TIMEOUT_PROPERTY, "2");
+
+        assertEquals(2000L, CopyWorkspaceBackend.resolveCopyTimeoutMillis(
+                properties, Map.of(CopyWorkspaceBackend.COPY_TIMEOUT_ENV, "9")));
     }
 
     @Test
