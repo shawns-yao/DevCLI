@@ -4,6 +4,7 @@ import com.devcli.browser.BrowserCheckResult;
 import com.devcli.policy.AuditLog;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolExecutionPipeline;
+import com.devcli.tool.ResourceLeaseMaintenance;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
 
@@ -18,6 +19,13 @@ public class HitlToolRegistry extends ToolRegistry {
 
     public HitlToolRegistry(HitlHandler hitlHandler) {
         super();
+        this.hitlHandler = hitlHandler;
+        registerExecutionMiddleware(ToolExecutionPipeline.Stage.HITL, this::applyHitl);
+    }
+
+    private HitlToolRegistry(HitlHandler hitlHandler,
+                             ResourceLeaseMaintenance maintenance) {
+        super(maintenance);
         this.hitlHandler = hitlHandler;
         registerExecutionMiddleware(ToolExecutionPipeline.Stage.HITL, this::applyHitl);
     }
@@ -92,8 +100,8 @@ public class HitlToolRegistry extends ToolRegistry {
     }
 
     @Override
-    protected ToolRegistry createProjectForkRegistry() {
-        return new HitlToolRegistry(hitlHandler);
+    protected ToolRegistry createProjectForkRegistry(ResourceLeaseMaintenance maintenance) {
+        return new HitlToolRegistry(hitlHandler, maintenance);
     }
 
     public HitlHandler getHitlHandler() {

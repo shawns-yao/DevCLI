@@ -90,6 +90,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private final ThreadLocal<SkillContextBuffer> skillContextBufferOverride = new ThreadLocal<>();
     private final ThreadLocal<ToolAccessScope> toolAccessScope = new ThreadLocal<>();
     private final ResourceLeaseManager resourceLeaseManager = new ResourceLeaseManager();
+    private final ResourceLeaseMaintenance resourceLeaseMaintenance;
+    private final ResourceLeaseMaintenance.Registration resourceLeaseMaintenanceRegistration;
     private final ThreadLocal<String> resourceLeaseStep = new ThreadLocal<>();
     private final ToolExecutionPipeline executionPipeline = new ToolExecutionPipeline(this::executeResolvedTool);
     private java.util.function.BiConsumer<String, String[]> writeFileObserver = (p, ba) -> {};
@@ -99,18 +101,33 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private LspManager lspManager = new LspManager(projectPath);
     private SnapshotService snapshotService = SnapshotService.forProject(Path.of(projectPath));
     private boolean customSnapshotService;
+    private boolean closed;
 
     public ToolRegistry() {
-        this(DEFAULT_COMMAND_TIMEOUT_SECONDS, DEFAULT_TOOL_BATCH_TIMEOUT_SECONDS);
+        this(DEFAULT_COMMAND_TIMEOUT_SECONDS, DEFAULT_TOOL_BATCH_TIMEOUT_SECONDS,
+                new ResourceLeaseMaintenance());
+    }
+
+    protected ToolRegistry(ResourceLeaseMaintenance maintenance) {
+        this(DEFAULT_COMMAND_TIMEOUT_SECONDS, DEFAULT_TOOL_BATCH_TIMEOUT_SECONDS, maintenance);
     }
 
     ToolRegistry(long commandTimeoutSeconds) {
-        this(commandTimeoutSeconds, Math.max(commandTimeoutSeconds + 5, DEFAULT_TOOL_BATCH_TIMEOUT_SECONDS));
+        this(commandTimeoutSeconds,
+                Math.max(commandTimeoutSeconds + 5, DEFAULT_TOOL_BATCH_TIMEOUT_SECONDS),
+                new ResourceLeaseMaintenance());
     }
 
     ToolRegistry(long commandTimeoutSeconds, long toolBatchTimeoutSeconds) {
+        this(commandTimeoutSeconds, toolBatchTimeoutSeconds, new ResourceLeaseMaintenance());
+    }
+
+    ToolRegistry(long commandTimeoutSeconds, long toolBatchTimeoutSeconds,
+                 ResourceLeaseMaintenance maintenance) {
         this.commandTimeoutSeconds = commandTimeoutSeconds;
         this.toolBatchTimeoutSeconds = toolBatchTimeoutSeconds;
+        this.resourceLeaseMaintenance = Objects.requireNonNull(maintenance, "maintenance");
+        this.resourceLeaseMaintenanceRegistration = maintenance.attach(resourceLeaseManager);
         configureExecutionPipeline();
         // 租约抢占（空闲超时回收他人租约）接入审计链：被回收的慢步骤可事后排查
         resourceLeaseManager.setPreemptionListener((path, evictedStepId, newStepId, heldMs) ->
@@ -147,9 +164,38 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     @Override
-    public void close() {
-        ragToolProvider.close();
-        snapshotService.close();
+    public synchronized void close() {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        RuntimeException failure = null;
+        try {
+            ragToolProvider.close();
+        } catch (RuntimeException e) {
+            failure = e;
+        }
+        try {
+            snapshotService.close();
+        } catch (RuntimeException e) {
+            if (failure == null) {
+                failure = e;
+            } else {
+                failure.addSuppressed(e);
+            }
+        }
+        try {
+            resourceLeaseMaintenanceRegistration.close();
+        } catch (RuntimeException e) {
+            if (failure == null) {
+                failure = e;
+            } else {
+                failure.addSuppressed(e);
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
     }
 
     /**
@@ -166,7 +212,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public ToolRegistry forkForProject(Path projectRoot) {
         Path root = Objects.requireNonNull(projectRoot, "projectRoot")
                 .toAbsolutePath().normalize();
-        ToolRegistry fork = createProjectForkRegistry();
+        ToolRegistry fork = createProjectForkRegistry(resourceLeaseMaintenance);
         fork.setProjectPath(root.toString());
         fork.contextProfile = contextProfile;
         fork.browserGuard = browserGuard;
@@ -185,8 +231,12 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         return fork;
     }
 
-    protected ToolRegistry createProjectForkRegistry() {
-        return new ToolRegistry(commandTimeoutSeconds, toolBatchTimeoutSeconds);
+    protected ToolRegistry createProjectForkRegistry(ResourceLeaseMaintenance maintenance) {
+        return new ToolRegistry(commandTimeoutSeconds, toolBatchTimeoutSeconds, maintenance);
+    }
+
+    ResourceLeaseMaintenance resourceLeaseMaintenance() {
+        return resourceLeaseMaintenance;
     }
 
     public void setContextProfile(ContextProfile contextProfile) {

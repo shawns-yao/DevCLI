@@ -133,6 +133,10 @@ public class ResourceLeaseManager {
         writeOwners.clear();
     }
 
+    int leaseCount() {
+        return writeOwners.size();
+    }
+
     /**
      * 主动清理超时租约（可选，定时任务调用）
      */
