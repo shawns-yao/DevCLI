@@ -192,7 +192,7 @@ class AgentCheckpointTest {
         AgentCheckpoint.PatchReconcileResult result = loaded.reconcilePendingPatchCommits(project);
 
         assertEquals(AgentCheckpoint.PatchReconcileAction.ROLLED_BACK,
-                result.actions().get("step-1"));
+                result.actions().get("step-1"), result.failures().toString());
         assertEquals("a-before", Files.readString(project.resolve("a.txt")));
         assertEquals("b-before", Files.readString(project.resolve("b.txt")));
         assertFalse(loaded.recoveryState().artifacts().containsKey("step-1"));

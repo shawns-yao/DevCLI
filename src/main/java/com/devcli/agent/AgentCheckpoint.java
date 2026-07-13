@@ -131,6 +131,7 @@ public class AgentCheckpoint {
     public record CriterionRecord(String id, String category, String description, String testSignal, String severity) {}
 
     public AgentCheckpoint() {
+        PatchJournalPolicy.maintain(getCheckpointDir());
         this.completedSteps = new ArrayList<>();
         this.artifacts = new HashMap<>();
         this.failedArtifacts = new HashMap<>();
@@ -201,7 +202,7 @@ public class AgentCheckpoint {
         Path root = normalizeProjectRoot(projectRoot);
         Path journal = patchJournalDir(stepId);
         deleteTree(journal);
-        Files.createDirectories(journal);
+        PatchJournalPolicy.secureDirectory(journal);
 
         List<PendingPatchEntry> entries = new ArrayList<>();
         try {
@@ -214,8 +215,9 @@ public class AgentCheckpoint {
                 boolean backupPresent = !PatchSet.isMissingHash(change.beforeHash());
                 if (backupPresent) {
                     Path backup = resolveSafe(journal, change.relativePath());
-                    Files.createDirectories(backup.getParent());
+                    PatchJournalPolicy.secureDirectory(backup.getParent());
                     Files.copy(target, backup, StandardCopyOption.REPLACE_EXISTING);
+                    PatchJournalPolicy.secureFile(backup);
                 }
                 entries.add(new PendingPatchEntry(
                         change.relativePath(), change.type(), change.beforeHash(),
