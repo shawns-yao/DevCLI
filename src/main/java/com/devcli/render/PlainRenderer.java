@@ -7,6 +7,9 @@ import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.llm.LlmClient;
 import com.devcli.util.AnsiStyle;
+import org.jline.reader.EndOfFileException;
+import org.jline.reader.LineReader;
+import org.jline.reader.UserInterruptException;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -29,6 +32,7 @@ public final class PlainRenderer implements Renderer {
 
     private final PrintStream out;
     private final BufferedReader in;
+    private volatile LineReader lineReader;
 
     public PlainRenderer() {
         this(System.out, new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)));
@@ -47,6 +51,11 @@ public final class PlainRenderer implements Renderer {
     @Override
     public void close() {
         // no-op：不接管 System.out / System.in，启动者自己管生命周期
+    }
+
+    @Override
+    public void bindLineReader(LineReader lineReader) {
+        this.lineReader = lineReader;
     }
 
     @Override
@@ -121,7 +130,7 @@ public final class PlainRenderer implements Renderer {
 
             String input;
             try {
-                input = in.readLine();
+                input = readInputLine();
             } catch (IOException e) {
                 out.println("  [HITL] 读取用户输入失败，保守处理为拒绝");
                 return ApprovalResult.reject("读取输入失败: " + e.getMessage());
@@ -149,7 +158,7 @@ public final class PlainRenderer implements Renderer {
                     out.flush();
                     String reason;
                     try {
-                        reason = in.readLine();
+                        reason = readInputLine();
                     } catch (IOException e) {
                         reason = "";
                     }
@@ -172,6 +181,18 @@ public final class PlainRenderer implements Renderer {
         return ApprovalResult.reject("连续多次无效输入");
     }
 
+    private String readInputLine() throws IOException {
+        LineReader reader = lineReader;
+        if (reader == null) {
+            return in.readLine();
+        }
+        try {
+            return reader.readLine("");
+        } catch (UserInterruptException | EndOfFileException e) {
+            return null;
+        }
+    }
+
     @Override
     public int openPalette(String title, List<String> items) {
         if (items == null || items.isEmpty()) {
@@ -185,7 +206,7 @@ public final class PlainRenderer implements Renderer {
         out.print("> ");
         out.flush();
         try {
-            String line = in.readLine();
+            String line = readInputLine();
             if (line == null || line.isBlank()) {
                 return -1;
             }
@@ -210,7 +231,7 @@ public final class PlainRenderer implements Renderer {
         out.flush();
         String scope;
         try {
-            scope = in.readLine();
+            scope = readInputLine();
         } catch (IOException e) {
             out.println("  读取范围失败，默认按工具维度放行");
             scope = "";
@@ -231,7 +252,7 @@ public final class PlainRenderer implements Renderer {
 
         String modified;
         try {
-            modified = in.readLine();
+            modified = readInputLine();
         } catch (IOException e) {
             out.println("  读取失败，回到主菜单");
             return null;

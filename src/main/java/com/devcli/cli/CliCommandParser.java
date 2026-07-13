@@ -5,6 +5,7 @@ final class CliCommandParser {
     enum CommandType {
         NONE,
         UNKNOWN_COMMAND,
+        HELP,
         CANCEL,
         EXIT,
         CLEAR,
@@ -59,6 +60,10 @@ final class CliCommandParser {
         String trimmed = input.trim();
         if (trimmed.isEmpty()) {
             return ParsedCommand.none();
+        }
+
+        if (trimmed.equalsIgnoreCase("/help")) {
+            return new ParsedCommand(CommandType.HELP, null);
         }
 
         if (trimmed.equalsIgnoreCase("/exit")

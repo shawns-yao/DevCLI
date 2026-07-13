@@ -3,6 +3,7 @@ package com.devcli.render;
 import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.llm.LlmClient;
+import org.jline.reader.LineReader;
 import org.junit.jupiter.api.Test;
 
 import java.io.BufferedReader;
@@ -15,6 +16,8 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class PlainRendererTest {
 
@@ -101,6 +104,23 @@ class PlainRendererTest {
         renderer.appendToolCalls(List.of(call));
         String text = sink.toString(StandardCharsets.UTF_8);
         assertTrue(text.contains("🔌 调用 MCP 工具 chrome-devtools.navigate_page"), text);
+    }
+
+    @Test
+    void boundLineReaderOwnsHitlInputInsteadOfStaleSystemReader() {
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+        PlainRenderer renderer = new PlainRenderer(
+                new PrintStream(sink, true, StandardCharsets.UTF_8),
+                new BufferedReader(new StringReader("\n")));
+        LineReader lineReader = mock(LineReader.class);
+        when(lineReader.readLine("")).thenReturn("n", "manual rejection");
+        renderer.bindLineReader(lineReader);
+
+        ApprovalResult result = renderer.promptApproval(
+                ApprovalRequest.of("write_file", "{\"path\":\"a.txt\"}", "Test"));
+
+        assertEquals(ApprovalResult.Decision.REJECTED, result.decision());
+        assertEquals("manual rejection", result.reason());
     }
 
     @Test

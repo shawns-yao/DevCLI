@@ -2,6 +2,7 @@ package com.devcli.render.inline;
 
 import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
+import org.jline.reader.LineReader;
 import org.jline.terminal.Terminal;
 import org.jline.utils.NonBlockingReader;
 import org.junit.jupiter.api.Test;
@@ -41,6 +42,24 @@ class InlineApprovalPrompterTest {
                 new BufferedReader(new StringReader("")));
         ApprovalResult result = p.prompt(ApprovalRequest.of("write_file", "{}", "test"));
         assertEquals(ApprovalResult.Decision.SKIPPED, result.decision());
+    }
+
+    @Test
+    void followUpReasonUsesBoundLineReader() throws Exception {
+        Terminal terminal = mockTerminalReturning('n');
+        LineReader lineReader = Mockito.mock(LineReader.class);
+        Mockito.when(lineReader.readLine("")).thenReturn("line-reader reason");
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+        InlineApprovalPrompter p = new InlineApprovalPrompter(
+                new PrintStream(sink, true, StandardCharsets.UTF_8),
+                terminal,
+                new BufferedReader(new StringReader("stale input\n")),
+                lineReader);
+
+        ApprovalResult result = p.prompt(ApprovalRequest.of("write_file", "{}", "test"));
+
+        assertEquals(ApprovalResult.Decision.REJECTED, result.decision());
+        assertEquals("line-reader reason", result.reason());
     }
 
     @Test

@@ -18,6 +18,10 @@ public final class TerminalCapabilities {
         if (terminal == null) {
             return false;
         }
+        if (Boolean.parseBoolean(System.getProperty("devcli.terminal.force.ansi"))
+                || Boolean.parseBoolean(System.getenv("DEVCLI_TERMINAL_FORCE_ANSI"))) {
+            return true;
+        }
         String type = terminal.getType();
         if (type != null && type.equalsIgnoreCase("dumb")) {
             return false;

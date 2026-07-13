@@ -14,10 +14,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class TerminalCapabilitiesTest {
 
     private String savedSysProp;
+    private String savedForceAnsi;
 
     @BeforeEach
     void save() {
         savedSysProp = System.getProperty("devcli.no.statusbar");
+        savedForceAnsi = System.getProperty("devcli.terminal.force.ansi");
     }
 
     @AfterEach
@@ -26,6 +28,11 @@ class TerminalCapabilitiesTest {
             System.clearProperty("devcli.no.statusbar");
         } else {
             System.setProperty("devcli.no.statusbar", savedSysProp);
+        }
+        if (savedForceAnsi == null) {
+            System.clearProperty("devcli.terminal.force.ansi");
+        } else {
+            System.setProperty("devcli.terminal.force.ansi", savedForceAnsi);
         }
     }
 
@@ -39,6 +46,15 @@ class TerminalCapabilitiesTest {
         Terminal terminal = Mockito.mock(Terminal.class);
         Mockito.when(terminal.getType()).thenReturn("dumb");
         assertFalse(TerminalCapabilities.supportsAnsi(terminal));
+    }
+
+    @Test
+    void explicitOverrideEnablesAnsiForMisdetectedTerminal() {
+        System.setProperty("devcli.terminal.force.ansi", "true");
+        Terminal terminal = Mockito.mock(Terminal.class);
+        Mockito.when(terminal.getType()).thenReturn("dumb");
+
+        assertTrue(TerminalCapabilities.supportsAnsi(terminal));
     }
 
     @Test

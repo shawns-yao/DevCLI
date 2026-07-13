@@ -256,9 +256,7 @@ public class Main {
             Renderer renderer = RendererFactory.create(RendererFactory.resolveMode(), terminal);
             RendererHitlHandler rendererHitl = new RendererHitlHandler(renderer, hitlHandler.isEnabled());
             hitlHandler.setDelegate(rendererHitl);
-            if (renderer instanceof InlineRenderer inline) {
-                inline.bindLineReader(lineReader);
-            }
+            renderer.bindLineReader(lineReader);
             PrintStream ui = renderer.stream();
             renderer.start();
             renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, null));
@@ -418,6 +416,10 @@ public class Main {
                 switch (command.type()) {
                     case UNKNOWN_COMMAND -> {
                         ui.println("❌ 未知命令: " + command.payload());
+                        printSlashCommandHelp(ui);
+                        continue;
+                    }
+                    case HELP -> {
                         printSlashCommandHelp(ui);
                         continue;
                     }
@@ -1092,14 +1094,19 @@ public class Main {
 
     static Terminal buildTerminal() throws IOException {
         Charset consoleCharset = consoleCharset();
-        return TerminalBuilder.builder()
-                .system(true)
+        boolean forceAnsi = Boolean.parseBoolean(System.getProperty("devcli.terminal.force.ansi"))
+                || Boolean.parseBoolean(System.getenv("DEVCLI_TERMINAL_FORCE_ANSI"));
+        TerminalBuilder builder = TerminalBuilder.builder()
+                .system(!forceAnsi)
                 .dumb(true)
                 .encoding(consoleCharset)
                 .stdinEncoding(consoleCharset)
                 .stdoutEncoding(consoleCharset)
-                .stderrEncoding(consoleCharset)
-                .build();
+                .stderrEncoding(consoleCharset);
+        if (forceAnsi) {
+            builder.streams(System.in, System.out).type("xterm-256color");
+        }
+        return builder.build();
     }
 
     static Charset consoleCharset() {
@@ -1117,15 +1124,8 @@ public class Main {
             return System.console().charset();
         }
 
-        String nativeEncoding = System.getProperty("native.encoding");
-        if (nativeEncoding != null && !nativeEncoding.isBlank()) {
-            try {
-                return Charset.forName(nativeEncoding);
-            } catch (Exception ignored) {
-                // Fall through to UTF-8.
-            }
-        }
-
+        // 重定向输入由现代 PowerShell、CI 和管道普遍按 UTF-8 写入。
+        // Windows 的 native.encoding 仍可能是 GBK，使用它会把 UTF-8 管道内容解码成乱码。
         return StandardCharsets.UTF_8;
     }
 
@@ -1429,6 +1429,7 @@ public class Main {
                 new SlashCommandHint("/skill on ", "/skill on <name>", "启用 skill"),
                 new SlashCommandHint("/skill off ", "/skill off <name>", "禁用 skill"),
                 new SlashCommandHint("/skill reload", "/skill reload", "重新扫描 skill 目录"),
+                new SlashCommandHint("/help", "/help", "查看命令帮助"),
                 new SlashCommandHint("/exit", "/exit", "退出 DevCLI"),
                 new SlashCommandHint("/quit", "/quit", "退出 DevCLI")
         );

@@ -3,6 +3,7 @@ package com.devcli.render;
 import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.llm.LlmClient;
+import org.jline.reader.LineReader;
 
 import java.io.PrintStream;
 import java.util.List;
@@ -52,6 +53,10 @@ public interface Renderer extends AutoCloseable {
 
     /** 结束并清理模型思考面板。 */
     default void endThinking() {
+    }
+
+    /** 绑定交互循环使用的 LineReader，审批等嵌套输入必须复用同一读取入口。 */
+    default void bindLineReader(LineReader lineReader) {
     }
 
     /** 当前渲染器希望 LineReader 使用的左侧输入提示。 */

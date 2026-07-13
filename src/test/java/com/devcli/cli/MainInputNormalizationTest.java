@@ -172,6 +172,7 @@ class MainInputNormalizationTest {
                 .map(Main.SlashCommandHint::display)
                 .toList();
 
+        assertTrue(commands.contains("/help"));
         assertTrue(commands.contains("/index [路径]"));
         assertTrue(commands.contains("/search <查询>"));
         assertTrue(commands.contains("/graph <类名>"));
@@ -272,6 +273,29 @@ class MainInputNormalizationTest {
             assertEquals(StandardCharsets.UTF_8, terminal.encoding());
             assertEquals(StandardCharsets.UTF_8, terminal.inputEncoding());
             assertEquals(StandardCharsets.UTF_8, terminal.outputEncoding());
+        } finally {
+            restoreProperty("devcli.terminal.encoding", previous);
+        }
+    }
+
+    @Test
+    void forceAnsiUsesXtermTypeForMisdetectedTerminal() throws Exception {
+        String previous = System.getProperty("devcli.terminal.force.ansi");
+        System.setProperty("devcli.terminal.force.ansi", "true");
+        try (Terminal terminal = Main.buildTerminal()) {
+            assertEquals("xterm-256color", terminal.getType());
+        } finally {
+            restoreProperty("devcli.terminal.force.ansi", previous);
+        }
+    }
+
+    @Test
+    void redirectedInputDefaultsToUtf8() {
+        String previous = System.getProperty("devcli.terminal.encoding");
+        try {
+            System.clearProperty("devcli.terminal.encoding");
+
+            assertEquals(StandardCharsets.UTF_8, Main.consoleCharset());
         } finally {
             restoreProperty("devcli.terminal.encoding", previous);
         }

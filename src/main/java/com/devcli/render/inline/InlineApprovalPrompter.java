@@ -5,6 +5,9 @@ import com.devcli.hitl.ApprovalPolicy;
 import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.util.AnsiStyle;
+import org.jline.reader.EndOfFileException;
+import org.jline.reader.LineReader;
+import org.jline.reader.UserInterruptException;
 import org.jline.terminal.Attributes;
 import org.jline.terminal.Terminal;
 
@@ -31,15 +34,26 @@ public final class InlineApprovalPrompter {
     private final PrintStream out;
     private final Terminal terminal;
     private final BufferedReader stdinReader;
+    private final LineReader lineReader;
 
     public InlineApprovalPrompter(PrintStream out, Terminal terminal) {
-        this(out, terminal, new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)));
+        this(out, terminal, new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)), null);
+    }
+
+    public InlineApprovalPrompter(PrintStream out, Terminal terminal, LineReader lineReader) {
+        this(out, terminal, new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)), lineReader);
     }
 
     InlineApprovalPrompter(PrintStream out, Terminal terminal, BufferedReader stdinReader) {
+        this(out, terminal, stdinReader, null);
+    }
+
+    InlineApprovalPrompter(PrintStream out, Terminal terminal, BufferedReader stdinReader,
+                           LineReader lineReader) {
         this.out = out;
         this.terminal = terminal;
         this.stdinReader = stdinReader;
+        this.lineReader = lineReader;
     }
 
     public ApprovalResult prompt(ApprovalRequest request) {
@@ -122,7 +136,7 @@ public final class InlineApprovalPrompter {
         out.print("  拒绝原因（可直接回车跳过）: ");
         out.flush();
         try {
-            String line = stdinReader.readLine();
+            String line = readFollowUpLine();
             return line == null ? "" : line.trim();
         } catch (IOException e) {
             return "";
@@ -140,7 +154,7 @@ public final class InlineApprovalPrompter {
         out.flush();
         String scope;
         try {
-            scope = stdinReader.readLine();
+            scope = readFollowUpLine();
         } catch (IOException e) {
             scope = "";
         }
@@ -153,13 +167,24 @@ public final class InlineApprovalPrompter {
         return ApprovalResult.approveAll();
     }
 
+    private String readFollowUpLine() throws IOException {
+        if (lineReader == null) {
+            return stdinReader.readLine();
+        }
+        try {
+            return lineReader.readLine("");
+        } catch (UserInterruptException | EndOfFileException e) {
+            return null;
+        }
+    }
+
     private ApprovalResult promptForModifiedArgs(ApprovalRequest request) {
         out.println("  当前参数: " + request.arguments());
         out.print("  修改后的 JSON（空行 = 保留原参数）: ");
         out.flush();
         String modified;
         try {
-            modified = stdinReader.readLine();
+            modified = readFollowUpLine();
         } catch (IOException e) {
             return null;
         }

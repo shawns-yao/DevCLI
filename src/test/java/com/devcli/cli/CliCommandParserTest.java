@@ -100,6 +100,14 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesHelpSlashCommand() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/help");
+
+        assertEquals(CliCommandParser.CommandType.HELP, command.type());
+        assertNull(command.payload());
+    }
+
+    @Test
     void parsesExitSlashCommand() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/exit");
 

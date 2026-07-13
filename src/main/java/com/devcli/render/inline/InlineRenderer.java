@@ -178,6 +178,7 @@ public final class InlineRenderer implements Renderer {
      * {@link LineReader#printAbove(String)} 显示在输入行上方；非读取态和
      * 测试/降级路径继续使用构造时注入的 {@link PrintStream}。
      */
+    @Override
     public void bindLineReader(LineReader lineReader) {
         this.lineReader = lineReader;
     }
@@ -279,7 +280,7 @@ public final class InlineRenderer implements Renderer {
         if (terminal == null) {
             return fallback.promptApproval(request);
         }
-        return new InlineApprovalPrompter(out, terminal).prompt(request);
+        return new InlineApprovalPrompter(out, terminal, lineReader).prompt(request);
     }
 
     @Override
