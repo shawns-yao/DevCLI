@@ -4,6 +4,7 @@ import com.devcli.tool.ToolRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.CountDownLatch;
@@ -11,11 +12,61 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WorkspaceExecutionSessionTest {
+
+    @Test
+    void serializesCommitAcrossProcesses(@TempDir Path tempDir) throws Exception {
+        Path project = Files.createDirectories(tempDir.resolve("project"));
+        Path childMarker = tempDir.resolve("child-acquired.txt");
+        CountDownLatch parentLocked = new CountDownLatch(1);
+        CountDownLatch releaseParent = new CountDownLatch(1);
+        var executor = Executors.newSingleThreadExecutor();
+        Process child = null;
+        try {
+            var parent = executor.submit(() -> ProjectCommitCoordinator.withProjectLock(project, () -> {
+                parentLocked.countDown();
+                releaseParent.await(5, TimeUnit.SECONDS);
+                return null;
+            }));
+            assertTrue(parentLocked.await(5, TimeUnit.SECONDS));
+
+            String javaExecutable = Path.of(System.getProperty("java.home"), "bin",
+                    System.getProperty("os.name", "").toLowerCase().contains("win")
+                            ? "java.exe" : "java").toString();
+            String classpath = Path.of("target", "test-classes").toAbsolutePath()
+                    + File.pathSeparator
+                    + Path.of("target", "classes").toAbsolutePath();
+            child = new ProcessBuilder(
+                    javaExecutable,
+                    "-cp", classpath,
+                    ProjectCommitLockProcess.class.getName(),
+                    project.toString(),
+                    childMarker.toString())
+                    .redirectErrorStream(true)
+                    .start();
+
+            Thread.sleep(300L);
+            assertFalse(Files.exists(childMarker),
+                    "另一个进程不能在当前进程持锁时进入提交临界区");
+
+            releaseParent.countDown();
+            parent.get(5, TimeUnit.SECONDS);
+            assertTrue(child.waitFor(5, TimeUnit.SECONDS));
+            assertEquals(0, child.exitValue(), new String(child.getInputStream().readAllBytes()));
+            assertTrue(Files.exists(childMarker));
+        } finally {
+            releaseParent.countDown();
+            if (child != null && child.isAlive()) {
+                child.destroyForcibly();
+            }
+            executor.shutdownNow();
+        }
+    }
 
     @Test
     void serializesPatchCommitAndDecisionForSameProject(@TempDir Path project) throws Exception {
