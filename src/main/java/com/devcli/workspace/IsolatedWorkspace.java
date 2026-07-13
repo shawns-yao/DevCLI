@@ -7,7 +7,6 @@ import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -97,37 +96,13 @@ public final class IsolatedWorkspace implements AutoCloseable {
 
     public PatchSet createPatchSet() throws IOException {
         ensureOpen();
-        Map<String, byte[]> current = scanFiles(workspacePath, null);
-        Set<String> paths = new HashSet<>(baselineHashes.keySet());
-        paths.addAll(current.keySet());
+        Set<String> seen = new HashSet<>();
         List<PatchSet.FileChange> changes = new ArrayList<>();
-        for (String relativePath : paths) {
-            String beforeHash = baselineHashes.getOrDefault(relativePath, PatchSet.MISSING_HASH);
-            byte[] content = current.get(relativePath);
-            if (content == null) {
-                changes.add(new PatchSet.FileChange(relativePath, PatchSet.ChangeType.DELETE,
-                        beforeHash, PatchSet.MISSING_HASH, new byte[0]));
-                continue;
-            }
-            String afterHash = PatchSet.hash(content);
-            if (beforeHash.equals(afterHash)) {
-                continue;
-            }
-            PatchSet.ChangeType type = PatchSet.MISSING_HASH.equals(beforeHash)
-                    ? PatchSet.ChangeType.ADD
-                    : PatchSet.ChangeType.MODIFY;
-            changes.add(new PatchSet.FileChange(
-                    relativePath, type, beforeHash, afterHash, content));
-        }
-        return new PatchSet(changes);
-    }
-
-    private static Map<String, byte[]> scanFiles(Path root, Path ignoredBase) throws IOException {
-        Map<String, byte[]> result = new HashMap<>();
-        Files.walkFileTree(root, new SimpleFileVisitor<>() {
+        Files.walkFileTree(workspacePath, new SimpleFileVisitor<>() {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                if (!dir.equals(root) && WorkspacePathPolicy.isExcluded(root, ignoredBase, dir)) {
+                if (!dir.equals(workspacePath)
+                        && WorkspacePathPolicy.isExcluded(workspacePath, null, dir)) {
                     return FileVisitResult.SKIP_SUBTREE;
                 }
                 return FileVisitResult.CONTINUE;
@@ -135,14 +110,40 @@ public final class IsolatedWorkspace implements AutoCloseable {
 
             @Override
             public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                if (attrs.isRegularFile() && !Files.isSymbolicLink(file)
-                        && !WorkspacePathPolicy.isExcluded(root, ignoredBase, file)) {
-                    result.put(WorkspacePathPolicy.relativePath(root, file), Files.readAllBytes(file));
+                if (!attrs.isRegularFile() || Files.isSymbolicLink(file)
+                        || WorkspacePathPolicy.isExcluded(workspacePath, null, file)) {
+                    return FileVisitResult.CONTINUE;
                 }
+                String relativePath = WorkspacePathPolicy.relativePath(workspacePath, file);
+                seen.add(relativePath);
+                String beforeHash = baselineHashes.getOrDefault(
+                        relativePath, PatchSet.MISSING_HASH);
+                String observedHash = PatchSet.hash(file);
+                if (beforeHash.equals(observedHash)) {
+                    return FileVisitResult.CONTINUE;
+                }
+                byte[] content = Files.readAllBytes(file);
+                String contentHash = PatchSet.hash(content);
+                if (beforeHash.equals(contentHash)) {
+                    return FileVisitResult.CONTINUE;
+                }
+                PatchSet.ChangeType type = PatchSet.MISSING_HASH.equals(beforeHash)
+                        ? PatchSet.ChangeType.ADD
+                        : PatchSet.ChangeType.MODIFY;
+                changes.add(new PatchSet.FileChange(
+                        relativePath, type, beforeHash, contentHash, content));
                 return FileVisitResult.CONTINUE;
             }
         });
-        return result;
+
+        for (Map.Entry<String, String> baseline : baselineHashes.entrySet()) {
+            if (!seen.contains(baseline.getKey())) {
+                changes.add(new PatchSet.FileChange(
+                        baseline.getKey(), PatchSet.ChangeType.DELETE,
+                        baseline.getValue(), PatchSet.MISSING_HASH, new byte[0]));
+            }
+        }
+        return new PatchSet(changes);
     }
 
     private static Path normalize(Path path) {

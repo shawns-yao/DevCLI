@@ -3,6 +3,7 @@ package com.devcli.workspace;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
@@ -23,6 +24,28 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class IsolatedWorkspaceTest {
+
+    @Test
+    void buildsUnchangedLargeWorkspaceWithinBoundedHeap(@TempDir Path tempDir) throws Exception {
+        String javaExecutable = Path.of(System.getProperty("java.home"), "bin",
+                System.getProperty("os.name", "").toLowerCase().contains("win")
+                        ? "java.exe" : "java").toString();
+        String classpath = Path.of("target", "test-classes").toAbsolutePath()
+                + File.pathSeparator
+                + Path.of("target", "classes").toAbsolutePath();
+        Process process = new ProcessBuilder(
+                javaExecutable,
+                "-Xmx32m",
+                "-cp", classpath,
+                PatchSetMemoryProcess.class.getName(),
+                tempDir.toString())
+                .redirectErrorStream(true)
+                .start();
+
+        assertTrue(process.waitFor(20, TimeUnit.SECONDS));
+        assertEquals(0, process.exitValue(),
+                new String(process.getInputStream().readAllBytes()));
+    }
 
     @Test
     void usesBoundedParallelCopyBackend(@TempDir Path tempDir) throws Exception {

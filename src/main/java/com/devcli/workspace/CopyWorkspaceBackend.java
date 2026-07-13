@@ -115,7 +115,7 @@ public class CopyWorkspaceBackend implements WorkspaceBackend {
         Files.createDirectories(target.getParent());
         Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING,
                 StandardCopyOption.COPY_ATTRIBUTES);
-        return new FileSnapshot(relative, PatchSet.hash(Files.readAllBytes(target)));
+        return new FileSnapshot(relative, PatchSet.hash(target));
     }
 
     private static List<Path> collectSources(Path root, Path workspaceBase) throws IOException {

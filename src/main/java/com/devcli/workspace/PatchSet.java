@@ -1,6 +1,7 @@
 package com.devcli.workspace;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -204,16 +205,38 @@ public final class PatchSet {
     }
 
     public static String hash(byte[] bytes) {
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes);
-            StringBuilder result = new StringBuilder(digest.length * 2);
-            for (byte value : digest) {
-                result.append(String.format("%02x", value));
+        MessageDigest digest = newSha256();
+        return formatHash(digest.digest(bytes));
+    }
+
+    public static String hash(Path path) throws IOException {
+        MessageDigest digest = newSha256();
+        byte[] buffer = new byte[64 * 1024];
+        try (InputStream input = Files.newInputStream(path)) {
+            int read;
+            while ((read = input.read(buffer)) >= 0) {
+                if (read > 0) {
+                    digest.update(buffer, 0, read);
+                }
             }
-            return result.toString();
+        }
+        return formatHash(digest.digest());
+    }
+
+    private static MessageDigest newSha256() {
+        try {
+            return MessageDigest.getInstance("SHA-256");
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 unavailable", e);
         }
+    }
+
+    private static String formatHash(byte[] digest) {
+        StringBuilder result = new StringBuilder(digest.length * 2);
+        for (byte value : digest) {
+            result.append(String.format("%02x", value));
+        }
+        return result.toString();
     }
 
     private static Path normalizeRoot(Path root) {
