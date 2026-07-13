@@ -212,6 +212,61 @@ class CodeRetrieverTest {
     }
 
     @Test
+    void documentationLengthDefinitionUsesSemanticRouteWithoutRerankerNoise() throws Exception {
+        CodeChunk target = CodeChunk.methodChunk(
+                "src/main/java/example/Target.java", "Target.any()",
+                "public boolean any() { return true; }", 1, 1);
+        List<VectorStore.CodeChunkEntry> entries = new java.util.ArrayList<>();
+        entries.add(new VectorStore.CodeChunkEntry(target, new float[]{1.0f, 0.0f}));
+        for (int index = 0; index < 6; index++) {
+            CodeChunk noise = CodeChunk.methodChunk(
+                    "src/main/java/example/Noise" + index + ".java",
+                    "Noise" + index + ".contains()",
+                    "public boolean contains() { return false; }", 1, 1);
+            entries.add(new VectorStore.CodeChunkEntry(noise, new float[]{0.0f, 1.0f}));
+        }
+        store.insertChunks(entries);
+
+        EmbeddingClient stubClient = new EmbeddingClient("ollama", "stub", "http://localhost", "") {
+            @Override
+            public float[] embed(String text) {
+                return new float[]{1.0f, 0.0f};
+            }
+        };
+        java.util.concurrent.atomic.AtomicInteger rerankCalls = new java.util.concurrent.atomic.AtomicInteger();
+        CodeReranker noisyReranker = new CodeReranker() {
+            @Override
+            public List<VectorStore.SearchResult> rerank(String query,
+                                                         List<VectorStore.SearchResult> candidates,
+                                                         int limit) {
+                rerankCalls.incrementAndGet();
+                return candidates.reversed();
+            }
+
+            @Override
+            public boolean enabled() {
+                return true;
+            }
+
+            @Override
+            public String description() {
+                return "test-noise";
+            }
+        };
+        String documentationQuery = "Returns true when any item emitted by the source satisfies the supplied predicate. "
+                .repeat(4);
+
+        try (CodeRetriever retriever = new CodeRetriever(testProject, stubClient, noisyReranker)) {
+            List<VectorStore.SearchResult> results = retriever.search(
+                    documentationQuery, 5, "definition", null);
+
+            assertFalse(results.isEmpty());
+            assertEquals("Target.any()", results.get(0).name());
+            assertEquals(0, rerankCalls.get());
+        }
+    }
+
+    @Test
     void preciseModeFallsBackToEmbeddingWhenKeywordMisses() throws Exception {
         CodeChunk service = CodeChunk.classChunk(
                 "src/main/java/com/example/UserService.java",

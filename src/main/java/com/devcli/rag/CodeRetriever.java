@@ -77,6 +77,10 @@ public class CodeRetriever implements AutoCloseable {
 
     public List<VectorStore.SearchResult> search(String query, int topK, CodeSearchOptions options) throws Exception {
         lastSemanticDegraded = false;
+        if (usesDocumentationSemanticRoute(query, options)) {
+            List<VectorStore.SearchResult> semantic = safeSemanticResults(query, Math.max(topK * 3, topK));
+            return limitPerFile(semantic, topK, 2);
+        }
         RetrievalFusion fusion = new RetrievalFusion();
 
         switch (options.mode()) {
@@ -89,6 +93,12 @@ public class CodeRetriever implements AutoCloseable {
         List<VectorStore.SearchResult> fused = fusion.rank(query, Math.max(topK * 3, topK));
         List<VectorStore.SearchResult> reranked = rerankOrFallback(query, fused, Math.max(topK * 3, topK));
         return limitPerFile(reranked, topK, 2);
+    }
+
+    private boolean usesDocumentationSemanticRoute(String query, CodeSearchOptions options) {
+        return options.mode() == CodeSearchMode.DEFINITION
+                && query != null
+                && (query.length() >= 160 || query.indexOf('\n') >= 0);
     }
 
     /**
