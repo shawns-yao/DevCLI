@@ -48,6 +48,20 @@ class AgentBudgetTest {
     }
 
     @Test
+    void semanticEquivalentArgumentsTriggerStagnation() {
+        AgentBudget budget = new AgentBudget(1_000_000, 3, 50);
+
+        budget.recordToolCalls(List.of(toolCall("search_code",
+                "{\"query\":\"  User   Service \",\"top_k\":5}")));
+        budget.recordToolCalls(List.of(toolCall("search_code",
+                "{\"top_k\":5,\"query\":\"user service\"}")));
+        budget.recordToolCalls(List.of(toolCall("search_code",
+                "{\"query\":\"USER SERVICE\",\"top_k\":5}")));
+
+        assertEquals(AgentBudget.ExitReason.STAGNATION_DETECTED, budget.check());
+    }
+
+    @Test
     void stagnationResetsWhenToolCallsDiffer() {
         AgentBudget budget = new AgentBudget(1_000_000, 3, 50);
         budget.recordToolCalls(List.of(toolCall("read_file", "{\"path\":\"a.txt\"}")));

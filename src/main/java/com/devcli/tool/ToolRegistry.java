@@ -94,6 +94,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private final ResourceLeaseMaintenance.Registration resourceLeaseMaintenanceRegistration;
     private final ThreadLocal<String> resourceLeaseStep = new ThreadLocal<>();
     private final ToolExecutionPipeline executionPipeline = new ToolExecutionPipeline(this::executeResolvedTool);
+    private final ToolResultCache toolResultCache = new ToolResultCache();
     private java.util.function.BiConsumer<String, String[]> writeFileObserver = (p, ba) -> {};
     /** 按 step 归集 write_file 实际写过的文件（key 为 resourceLeaseStep 的 stepId），供 checkpoint 记录产物。 */
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.Set<String>> stepModifiedFiles =
@@ -154,6 +155,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
      */
     public void setProjectPath(String projectPath) {
         ragToolProvider.closeCachedCodeRetriever();
+        toolResultCache.clear();
         this.projectPath = projectPath;
         this.pathGuard = new PathGuard(projectPath);
         this.lspManager.setProjectPath(projectPath);
@@ -522,6 +524,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     private void invalidateToolSearchIndex() {
         toolCatalogVersion.incrementAndGet();
+        toolResultCache.clear();
     }
 
     /**
@@ -852,6 +855,21 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                 }
             }
             return chain.proceed(context);
+        });
+        executionPipeline.register(ToolExecutionPipeline.Stage.RESULT_CACHE, (context, chain) -> {
+            Tool tool = tools.get(context.name());
+            if (tool == null) return chain.proceed(context);
+            if (tool.effect() != ToolEffect.READ_ONLY) {
+                toolResultCache.clear();
+                return chain.proceed(context);
+            }
+            String fingerprint = currentToolAccessScope().name() + "|"
+                    + ToolInvocationFingerprint.of(context.name(), context.argumentsJson());
+            ToolOutput cached = toolResultCache.get(fingerprint);
+            if (cached != null) return cached;
+            ToolOutput output = chain.proceed(context);
+            toolResultCache.put(fingerprint, output);
+            return output;
         });
         executionPipeline.register(ToolExecutionPipeline.Stage.RESULT_GOVERNANCE, (context, chain) ->
                 governToolOutput(context.name(), context.invocationId(), chain.proceed(context)));

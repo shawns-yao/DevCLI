@@ -22,6 +22,7 @@ public final class ToolExecutionPipeline {
         HITL,
         AUDIT,
         POLICY,
+        RESULT_CACHE,
         RESULT_GOVERNANCE
     }
 

@@ -2,6 +2,7 @@ package com.devcli.agent;
 
 import com.devcli.llm.LlmClient;
 import com.devcli.context.ContextProfile;
+import com.devcli.tool.ToolInvocationFingerprint;
 import com.devcli.tool.ToolRegistry;
 
 import java.util.ArrayDeque;
@@ -235,7 +236,8 @@ public class AgentBudget {
     private static String signatureOf(List<LlmClient.ToolCall> toolCalls) {
         StringBuilder sb = new StringBuilder();
         for (LlmClient.ToolCall tc : toolCalls) {
-            sb.append(tc.function().name()).append('|').append(tc.function().arguments()).append(';');
+            sb.append(ToolInvocationFingerprint.of(
+                    tc.function().name(), tc.function().arguments())).append(';');
         }
         return sb.toString();
     }
