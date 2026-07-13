@@ -67,7 +67,7 @@ class RagRetrievalBenchmarkIT {
                     }
                 }
 
-                Path report = writeReport(tempDir.resolve("rag-benchmark").resolve(dataset.name()),
+                Path report = writeReport(benchmarkReportRoot().resolve("rag").resolve(dataset.name()),
                         embeddingClient, dataset, rerankStrategy, indexResult, scores);
                 System.out.println("RAG retrieval benchmark report: " + report);
                 System.out.println(Files.readString(report));
@@ -290,6 +290,11 @@ class RagRetrievalBenchmarkIT {
                 """, StandardCharsets.UTF_8);
     }
 
+    private static Path benchmarkReportRoot() {
+        String configured = System.getProperty("devcli.benchmark.report.dir", "target/benchmark-reports");
+        return Path.of(configured).toAbsolutePath().normalize();
+    }
+
     private static Path writeReport(Path reportDir, EmbeddingClient embeddingClient,
                                     BenchmarkDataset dataset,
                                     String rerankStrategy,
@@ -316,24 +321,49 @@ class RagRetrievalBenchmarkIT {
             node.put("mode", score.queryCase().mode());
             node.put("graph_depth", score.queryCase().graphDepth());
             node.putPOJO("gold_chain", score.queryCase().goldNames());
-            node.put("baseline_recall_at_5", recall(score.baseline(), score.queryCase().goldNames()));
-            node.put("improved_recall_at_5", recall(score.improved(), score.queryCase().goldNames()));
-            node.put("baseline_chain_coverage", recall(score.baseline(), score.queryCase().goldNames()));
-            node.put("improved_chain_coverage", recall(score.improved(), score.queryCase().goldNames()));
-            node.putPOJO("baseline_top5", resultNames(score.baseline()));
-            node.putPOJO("improved_top5", resultNames(score.improved()));
+            List<String> baselineNames = resultNames(score.baseline());
+            List<String> improvedNames = resultNames(score.improved());
+            node.put("baseline_recall_at_5", recall(baselineNames, score.queryCase().goldNames()));
+            node.put("improved_recall_at_5", recall(improvedNames, score.queryCase().goldNames()));
+            node.put("baseline_mrr_at_5", reciprocalRank(baselineNames, score.queryCase().goldNames()));
+            node.put("improved_mrr_at_5", reciprocalRank(improvedNames, score.queryCase().goldNames()));
+            node.put("baseline_ndcg_at_5", ndcg(baselineNames, score.queryCase().goldNames()));
+            node.put("improved_ndcg_at_5", ndcg(improvedNames, score.queryCase().goldNames()));
+            node.put("baseline_chain_coverage", recall(baselineNames, score.queryCase().goldNames()));
+            node.put("improved_chain_coverage", recall(improvedNames, score.queryCase().goldNames()));
+            node.putPOJO("baseline_top5", baselineNames);
+            node.putPOJO("improved_top5", improvedNames);
         }
 
         double baselineRecall = average(scores.stream()
-                .mapToDouble(score -> recall(score.baseline(), score.queryCase().goldNames()))
+                .mapToDouble(score -> recall(resultNames(score.baseline()), score.queryCase().goldNames()))
                 .toArray());
         double improvedRecall = average(scores.stream()
-                .mapToDouble(score -> recall(score.improved(), score.queryCase().goldNames()))
+                .mapToDouble(score -> recall(resultNames(score.improved()), score.queryCase().goldNames()))
+                .toArray());
+        double baselineMrr = average(scores.stream()
+                .mapToDouble(score -> reciprocalRank(resultNames(score.baseline()), score.queryCase().goldNames()))
+                .toArray());
+        double improvedMrr = average(scores.stream()
+                .mapToDouble(score -> reciprocalRank(resultNames(score.improved()), score.queryCase().goldNames()))
+                .toArray());
+        double baselineNdcg = average(scores.stream()
+                .mapToDouble(score -> ndcg(resultNames(score.baseline()), score.queryCase().goldNames()))
+                .toArray());
+        double improvedNdcg = average(scores.stream()
+                .mapToDouble(score -> ndcg(resultNames(score.improved()), score.queryCase().goldNames()))
                 .toArray());
         ObjectNode aggregate = root.putObject("aggregate");
+        aggregate.put("query_count", scores.size());
         aggregate.put("baseline_recall_at_5", baselineRecall);
         aggregate.put("improved_recall_at_5", improvedRecall);
         aggregate.put("recall_at_5_delta_pct_points", pctPoints(improvedRecall - baselineRecall));
+        aggregate.put("baseline_mrr_at_5", baselineMrr);
+        aggregate.put("improved_mrr_at_5", improvedMrr);
+        aggregate.put("mrr_at_5_delta_pct_points", pctPoints(improvedMrr - baselineMrr));
+        aggregate.put("baseline_ndcg_at_5", baselineNdcg);
+        aggregate.put("improved_ndcg_at_5", improvedNdcg);
+        aggregate.put("ndcg_at_5_delta_pct_points", pctPoints(improvedNdcg - baselineNdcg));
         aggregate.put("baseline_chain_coverage", baselineRecall);
         aggregate.put("improved_chain_coverage", improvedRecall);
         aggregate.put("chain_coverage_delta_pct_points", pctPoints(improvedRecall - baselineRecall));
@@ -343,14 +373,19 @@ class RagRetrievalBenchmarkIT {
         return report;
     }
 
-    private static double recall(List<VectorStore.SearchResult> results, List<String> goldNames) {
-        if (goldNames.isEmpty()) {
-            return 0.0;
-        }
-        long hits = goldNames.stream()
-                .filter(gold -> results.stream().anyMatch(result -> matches(result.name(), gold)))
-                .count();
-        return round4((double) hits / goldNames.size());
+    private static double recall(List<String> rankedNames, List<String> goldNames) {
+        return RetrievalMetrics.recallAtK(rankedNames, goldNames, TOP_K,
+                RagRetrievalBenchmarkIT::matches);
+    }
+
+    private static double reciprocalRank(List<String> rankedNames, List<String> goldNames) {
+        return RetrievalMetrics.reciprocalRankAtK(rankedNames, goldNames, TOP_K,
+                RagRetrievalBenchmarkIT::matches);
+    }
+
+    private static double ndcg(List<String> rankedNames, List<String> goldNames) {
+        return RetrievalMetrics.ndcgAtK(rankedNames, goldNames, TOP_K,
+                RagRetrievalBenchmarkIT::matches);
     }
 
     private static boolean matches(String resultName, String goldName) {

@@ -1589,6 +1589,10 @@ class AgentCollaborationBenchmarkIT {
         node.put("avg_hidden_failure_rate", average(runs.stream().mapToDouble(run -> run.evaluation.hiddenFailureRate()).toArray()));
         node.put("avg_unique_bug_rate", average(runs.stream().mapToDouble(run -> run.evaluation.uniqueBugRate()).toArray()));
         node.put("avg_elapsed_ms", Math.round(average(runs.stream().mapToDouble(run -> run.elapsedMs).toArray())));
+        long successfulTasks = runs.stream().filter(AgentCollaborationBenchmarkIT::taskSucceeded).count();
+        node.put("task_success_rate", runs.isEmpty() ? 0.0 : average(runs.stream()
+                .mapToDouble(run -> taskSucceeded(run) ? 1.0 : 0.0).toArray()));
+        node.put("task_success_count", successfulTasks);
         node.put("llm_completed_count", runs.stream().filter(RunResult::llmRunCompleted).count());
         node.put("task_count", runs.size());
         return node;
@@ -1607,14 +1611,25 @@ class AgentCollaborationBenchmarkIT {
                 .mapToDouble(comparison -> comparison.single().evaluation.uniqueBugRate()).toArray());
         double teamUniqueBug = average(comparisons.stream()
                 .mapToDouble(comparison -> comparison.team().evaluation.uniqueBugRate()).toArray());
+        double singleTaskSuccess = average(comparisons.stream()
+                .mapToDouble(comparison -> taskSucceeded(comparison.single()) ? 1.0 : 0.0).toArray());
+        double teamTaskSuccess = average(comparisons.stream()
+                .mapToDouble(comparison -> taskSucceeded(comparison.team()) ? 1.0 : 0.0).toArray());
 
         ObjectNode node = JSON.createObjectNode();
         node.put("task_count", comparisons.size());
+        node.put("task_success_rate_delta_pct_points", roundPctPoints(teamTaskSuccess - singleTaskSuccess));
         node.put("avg_completion_rate_delta_pct_points", roundPctPoints(teamCompletion - singleCompletion));
         node.put("avg_hidden_failure_rate_reduction_pct", reduction(singleFailure, teamFailure));
         node.put("avg_unique_bug_rate_reduction_pct", reduction(singleUniqueBug, teamUniqueBug));
         node.put("note", "execution time intentionally excluded from quality claim");
         return node;
+    }
+
+    private static boolean taskSucceeded(RunResult run) {
+        return run.llmRunCompleted()
+                && run.evaluation().completionTotal() > 0
+                && run.evaluation().completionPassed() == run.evaluation().completionTotal();
     }
 
     private static double average(double[] values) {

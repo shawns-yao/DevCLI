@@ -207,7 +207,8 @@ class RealLlmMemoryBenchmarkIT {
                              double lowValueBlockRate,
                              double recallAt5,
                              double injectionHitRate) throws Exception {
-        Path dir = Path.of("target", "benchmark-reports");
+        Path dir = Path.of(System.getProperty("devcli.benchmark.report.dir",
+                Path.of("target", "benchmark-reports").toString()));
         Files.createDirectories(dir);
         Path report = dir.resolve("real-llm-memory-benchmark.json");
 

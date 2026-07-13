@@ -630,13 +630,16 @@ class RealLlmCompressionRetentionIT {
                              List<CompactionPhase> phases, List<QaResult> qaResults,
                              int initialTokens, double retention,
                              long compactMs, long qaMs) throws IOException {
-        Path dir = Path.of("target", "benchmark");
+        Path dir = Path.of(System.getProperty("devcli.benchmark.report.dir",
+                Path.of("target", "benchmark-reports").toString()));
         Files.createDirectories(dir);
         Path file = dir.resolve("real-llm-compression-retention.json");
         ObjectNode root = JSON.createObjectNode();
         root.put("model", llm.getModelName());
         root.put("provider", llm.getProviderName());
         root.put("initial_tokens", initialTokens);
+        root.put("fact_count", facts.size());
+        root.put("compaction_count", phases.size());
         root.put("compactions", phases.size());
         root.put("retention_ratio", retention);
         root.put("compact_ms", compactMs);
