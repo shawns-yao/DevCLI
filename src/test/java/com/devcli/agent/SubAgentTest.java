@@ -46,6 +46,18 @@ class SubAgentTest {
     }
 
     @Test
+    void workerPromptShouldRequireConcreteToolExecutionBeforeCompletion() {
+        SubAgent worker = new SubAgent("worker", AgentRole.WORKER,
+                new GLMClient("test-key"), new ToolRegistry());
+
+        String systemPrompt = worker.createForkContext().sharedPrefix().get(0).content();
+
+        assertTrue(systemPrompt.contains("先调用第一个具体工具"), systemPrompt);
+        assertTrue(systemPrompt.contains("write_file"), systemPrompt);
+        assertTrue(systemPrompt.contains("不能以空 content 结束"), systemPrompt);
+    }
+
+    @Test
     void shouldRouteLateReasoningToSupplementalSection() {
         // 模拟服务器先下发 content、再追加 reasoning 的情况
         ScriptedStreamClient llm = new ScriptedStreamClient(listener -> {

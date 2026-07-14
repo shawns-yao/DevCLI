@@ -1664,18 +1664,40 @@ public class AgentOrchestrator {
                                                          String context, PrintStream out,
                                                          SubAgent.ForkContext workerForkContext,
                                                          String label) {
-        AgentMessage result = executeWorkerOnce(step, worker, taskMsg, context, out, workerForkContext);
+        String executionContext = context;
+        AgentMessage result = executeWorkerOnce(
+                step, worker, taskMsg, executionContext, out, workerForkContext);
         int transientRetries = 0;
-        while (result.type() == AgentMessage.Type.ERROR
-                && isTransientLlmError(result.content())
-                && transientRetries < MAX_RETRIES_PER_STEP) {
-            transientRetries++;
-            out.println("⚠️ 步骤 [" + step.id() + "] " + label
-                    + "LLM 瞬时错误，正在重新调用 Worker (" + transientRetries
-                    + "/" + MAX_RETRIES_PER_STEP + ")...");
-            result = executeWorkerOnce(step, worker, taskMsg, context, out, workerForkContext);
+        int protocolRepairs = 0;
+        while (true) {
+            if (result.type() == AgentMessage.Type.ERROR
+                    && isTransientLlmError(result.content())
+                    && transientRetries < MAX_RETRIES_PER_STEP) {
+                transientRetries++;
+                out.println("⚠️ 步骤 [" + step.id() + "] " + label
+                        + "LLM 瞬时错误，正在重新调用 Worker (" + transientRetries
+                        + "/" + MAX_RETRIES_PER_STEP + ")...");
+                result = executeWorkerOnce(
+                        step, worker, taskMsg, executionContext, out, workerForkContext);
+                continue;
+            }
+
+            if (TeamWorkerProtocol.needsMandatoryToolRepair(
+                    result, worker.getLastExecutionEvidence())
+                    && protocolRepairs < TeamWorkerProtocol.MAX_EMPTY_RESULT_REPAIRS) {
+                protocolRepairs++;
+                out.println("⚠️ 步骤 [" + step.id() + "] " + label
+                        + "Worker 未产生成功工具证据，正在强制执行修复 ("
+                        + protocolRepairs + "/" + TeamWorkerProtocol.MAX_EMPTY_RESULT_REPAIRS + ")...");
+                worker.clearHistory();
+                executionContext = TeamWorkerProtocol.buildMandatoryToolContext(
+                        context, step.description(), protocolRepairs);
+                result = executeWorkerOnce(
+                        step, worker, taskMsg, executionContext, out, workerForkContext);
+                continue;
+            }
+            return result;
         }
-        return result;
     }
 
     private AgentMessage executeWorkerOnce(ExecutionStep step, SubAgent worker, AgentMessage taskMsg,

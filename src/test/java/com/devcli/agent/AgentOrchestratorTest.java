@@ -662,6 +662,53 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    void blankWorkerWithoutEvidenceShouldReceiveMandatoryToolRepair(@TempDir Path tempDir) {
+        AtomicInteger repairPrompts = new AtomicInteger();
+        AtomicInteger reviewerCalls = new AtomicInteger();
+        AtomicInteger fallbackWorkerTurns = new AtomicInteger();
+
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                return response("""
+                        {
+                          "summary": "执行并验证",
+                          "steps": [
+                            {"id": "s1", "description": "检查目录并形成结果", "type": "ANALYSIS", "dependencies": []}
+                          ]
+                        }
+                        """);
+            }
+            if (body.startsWith("原始任务：")) {
+                reviewerCalls.incrementAndGet();
+                return response(approvedReviewJson());
+            }
+            if (body.contains("最终集成")) {
+                return response("integration result");
+            }
+            if (body.contains("上一次 Worker 未产生可验收结果")) {
+                if (repairPrompts.incrementAndGet() == 1) {
+                    return toolResponse("call-repair-list", "list_dir", "{\"path\":\".\"}");
+                }
+                return response("");
+            }
+            fallbackWorkerTurns.incrementAndGet();
+            return response("");
+        };
+
+        DispatchingStubGLMClient llmClient = new DispatchingStubGLMClient(dispatcher);
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(llmClient, isolatedToolRegistry(tempDir), mm);
+
+            String result = orchestrator.run("检查目录并形成结果");
+
+            assertFalse(result.contains("执行结果为空"), result);
+            assertTrue(repairPrompts.get() >= 2, "repair context should persist through the tool-result turn");
+            assertTrue(fallbackWorkerTurns.get() >= 1, "initial blank worker turn should occur");
+            assertTrue(reviewerCalls.get() >= 1, "repaired tool evidence should reach reviewer");
+        }
+    }
+
+    @Test
     void blankWorkerContentWithoutSuccessfulToolEvidenceShouldStillFail(@TempDir Path tempDir) {
         AtomicInteger reviewerCalls = new AtomicInteger();
         Function<String, LlmClient.ChatResponse> dispatcher = body -> {
