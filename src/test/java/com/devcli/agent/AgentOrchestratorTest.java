@@ -216,6 +216,14 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    void mandatoryWorkerRepairShouldChooseToolFromStepType() {
+        assertEquals("write_file", TeamWorkerProtocol.requiredToolChoice("FILE_WRITE").toolName());
+        assertEquals("write_file", TeamWorkerProtocol.requiredToolChoice("INTEGRATION").toolName());
+        assertEquals("execute_command", TeamWorkerProtocol.requiredToolChoice("COMMAND").toolName());
+        assertEquals("list_dir", TeamWorkerProtocol.requiredToolChoice("ANALYSIS").toolName());
+    }
+
+    @Test
     void mandatoryWorkerRepairShouldEndWithImmediateToolInstruction() {
         String repairTask = TeamWorkerProtocol.buildMandatoryToolTask("实现功能", 1);
 

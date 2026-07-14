@@ -298,8 +298,14 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                 functionNode.put("description", tool.description());
                 functionNode.set("parameters", tool.parameters());
             }
-            if (toolChoice == ToolChoice.REQUIRED) {
-                requestBody.put("tool_choice", "required");
+            if (toolChoice != null && toolChoice.required()) {
+                if (toolChoice.hasSpecificTool()) {
+                    ObjectNode choiceNode = requestBody.putObject("tool_choice");
+                    choiceNode.put("type", "function");
+                    choiceNode.putObject("function").put("name", toolChoice.toolName());
+                } else {
+                    requestBody.put("tool_choice", "required");
+                }
             }
         }
         customizeRequestBody(requestBody);

@@ -34,9 +34,13 @@ class LlmToolChoiceTest {
         AnthropicClient client = new AnthropicClient("test-key", "test-model", "https://example.com");
 
         ObjectNode required = client.buildRequestBody(MESSAGES, TOOLS, LlmClient.ToolChoice.REQUIRED);
+        ObjectNode specific = client.buildRequestBody(
+                MESSAGES, TOOLS, LlmClient.ToolChoice.required("write_file"));
         ObjectNode automatic = client.buildRequestBody(MESSAGES, TOOLS, LlmClient.ToolChoice.AUTO);
 
         assertEquals("any", required.path("tool_choice").path("type").asText());
+        assertEquals("tool", specific.path("tool_choice").path("type").asText());
+        assertEquals("write_file", specific.path("tool_choice").path("name").asText());
         assertTrue(automatic.path("tool_choice").isMissingNode());
     }
 
@@ -45,9 +49,13 @@ class LlmToolChoiceTest {
         TestOpenAiClient client = new TestOpenAiClient();
 
         ObjectNode required = client.requestBody(LlmClient.ToolChoice.REQUIRED);
+        ObjectNode specific = client.requestBody(LlmClient.ToolChoice.required("write_file"));
         ObjectNode automatic = client.requestBody(LlmClient.ToolChoice.AUTO);
 
         assertEquals("required", required.path("tool_choice").asText());
+        assertEquals("function", specific.path("tool_choice").path("type").asText());
+        assertEquals("write_file",
+                specific.path("tool_choice").path("function").path("name").asText());
         assertTrue(automatic.path("tool_choice").isMissingNode());
     }
 

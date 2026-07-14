@@ -172,8 +172,14 @@ public class AnthropicClient implements LlmClient {
                 toolNode.put("description", tool.description());
                 toolNode.set("input_schema", tool.parameters());
             }
-            if (toolChoice == ToolChoice.REQUIRED) {
-                requestBody.putObject("tool_choice").put("type", "any");
+            if (toolChoice != null && toolChoice.required()) {
+                ObjectNode choiceNode = requestBody.putObject("tool_choice");
+                if (toolChoice.hasSpecificTool()) {
+                    choiceNode.put("type", "tool");
+                    choiceNode.put("name", toolChoice.toolName());
+                } else {
+                    choiceNode.put("type", "any");
+                }
             }
         }
         return requestBody;

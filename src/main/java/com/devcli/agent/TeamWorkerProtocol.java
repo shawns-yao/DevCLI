@@ -1,5 +1,8 @@
 package com.devcli.agent;
 
+import com.devcli.llm.LlmClient;
+
+import java.util.Locale;
 import java.util.Objects;
 
 /** Multi-Agent Worker 的执行协议守卫。 */
@@ -17,6 +20,17 @@ final class TeamWorkerProtocol {
             return false;
         }
         return evidence == null || !evidence.hasSuccessfulToolCall();
+    }
+
+    static LlmClient.ToolChoice requiredToolChoice(String stepType) {
+        String normalized = Objects.toString(stepType, "").toUpperCase(Locale.ROOT);
+        if (normalized.contains("WRITE") || normalized.contains("INTEGRATION")) {
+            return LlmClient.ToolChoice.required("write_file");
+        }
+        if (normalized.contains("COMMAND")) {
+            return LlmClient.ToolChoice.required("execute_command");
+        }
+        return LlmClient.ToolChoice.required("list_dir");
     }
 
     static String buildMandatoryToolTask(String stepDescription, int attempt) {

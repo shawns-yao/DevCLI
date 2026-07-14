@@ -17,9 +17,27 @@ public interface LlmClient {
         return LlmToolChoiceContext.call(toolChoice, () -> chat(messages, tools, listener));
     }
 
-    enum ToolChoice {
-        AUTO,
-        REQUIRED
+    record ToolChoice(boolean required, String toolName) {
+        public static final ToolChoice AUTO = new ToolChoice(false, "");
+        public static final ToolChoice REQUIRED = new ToolChoice(true, "");
+
+        public ToolChoice {
+            toolName = toolName == null ? "" : toolName.trim();
+            if (!required) {
+                toolName = "";
+            }
+        }
+
+        public static ToolChoice required(String toolName) {
+            if (toolName == null || toolName.isBlank()) {
+                return REQUIRED;
+            }
+            return new ToolChoice(true, toolName);
+        }
+
+        public boolean hasSpecificTool() {
+            return required && !toolName.isBlank();
+        }
     }
 
     String getModelName();

@@ -1695,7 +1695,7 @@ public class AgentOrchestrator {
                                 step.description(), protocolRepairs));
                 result = executeWorkerOnce(
                         step, worker, repairTask, executionContext, out, workerForkContext,
-                        LlmClient.ToolChoice.REQUIRED);
+                        TeamWorkerProtocol.requiredToolChoice(step.type()));
                 continue;
             }
             return result;
