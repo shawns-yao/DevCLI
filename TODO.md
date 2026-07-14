@@ -2,13 +2,13 @@
 
 ## 2026-07-14 Multi-Agent 计划协议与空结果可靠性
 
-- 状态：代码与针对性测试已实现，真实受控评测待复跑
+- 状态：代码与针对性测试已实现，logops 真实受控任务已通过，完整 5 任务待复跑
 - 来源：Agent 受控评测中单 Agent 成功率 20%，Planner/Worker/Reviewer 成功率 0%；主要失败来自 Planner 非 JSON 输出、空工作区纯检查步骤阻塞实现，以及 Worker 最终文本为空。首次修复后真实复跑确认 Planner 已生成直接实现步骤，但 Worker 连续两次只描述准备写入、没有调用工具，仍被空结果阻断
 - 影响范围：Multi-Agent 编排、Planner 与 Worker 协议守卫、SubAgent 单次执行证据、角色提示词、受控 Agent benchmark、配置模板、README、AGENTS、详细架构文档和 Agent 测试
-- 已实现：Planner 支持从前后说明中提取完整 JSON；解析失败、DAG 无效或阻塞性空工作区纯检查步骤触发有界协议修复；修复请求携带原始任务、失败原因、无效输出预览和固定 schema；空工作区检查必须并入实现步骤；Worker 空文本但存在结构化成功工具证据时合成有界摘要进入 Reviewer；没有成功证据时追加一次强制执行协议，并按步骤类型指定首轮工具，FILE_WRITE / INTEGRATION 选择 `write_file`，COMMAND 选择 `execute_command`，其他类型选择 `list_dir`；Anthropic 与 OpenAI-compatible 均映射为命名工具选择，工具结果后恢复 AUTO；受控 benchmark 不暴露 execute_command，并把 Pre-Review 编译交给运行后的隐藏验证器，避免 Docker daemon 状态污染模型指标，生产沙箱策略不变
-- 已验证：覆盖说明文本包裹 JSON、非 JSON 修复、合法 JSON 中阻塞性检查步骤修复、成功工具证据放行、失败工具证据可见、空结果强制工具修复、修复后仍无证据保持失败、首轮命名工具选择后恢复 AUTO、步骤类型映射和两类 Provider 请求体映射，以及 Planner / Worker 提示词约束
-- 未验证：加入 Worker 强制执行协议后的 5 个真实模型 Agent 受控任务尚未复跑完成，旧报告中的 Planner/Worker/Reviewer 成功率仍为 0%，不能作为修复后结果
-- 风险：阻塞性检查识别当前采用窄范围语义规则，覆盖空工作区、项目结构、目录和文件存在性；复杂自然语言计划仍依赖修复请求中的模型服从性。强制执行协议只有 1 次，避免无限消耗；最终结果仍必须经过 Pre-Review 与 Reviewer
+- 已实现：Planner 支持从前后说明中提取完整 JSON；解析失败、DAG 无效或阻塞性空工作区纯检查步骤触发有界协议修复；修复请求携带原始任务、失败原因、无效输出预览和固定 schema；空工作区检查必须并入实现步骤；Worker 空文本但存在结构化成功工具证据时合成有界摘要进入 Reviewer；没有成功证据时追加一次强制执行协议，并按步骤类型指定首轮工具，FILE_WRITE / INTEGRATION 选择 `write_file`，COMMAND 选择 `execute_command`，其他类型选择 `list_dir`；Anthropic 与 OpenAI-compatible 均映射为命名工具选择；FILE_WRITE / INTEGRATION 步骤在成功 `write_file` 批次后直接以结构化证据结束 Worker，强制修复中的指定工具采用同一规则，不再发起收尾 LLM 请求，失败时才恢复 AUTO 纠正；Provider 忽略命名工具选择时追加一次严格 JSON 工具信封请求，只接受目标工具、对象参数和无尾随内容的完整 JSON，并继续走原工具安全管线；SubAgent 错误保留标准错误码和 retryable 标记；Pre-Review 区分跳过与硬检查实际通过，Reviewer 可重试故障或达到默认 2 轮上限时只有后者允许普通步骤降级接受；受控 benchmark 不暴露 execute_command，并把 Pre-Review 编译交给运行后的隐藏验证器，避免 Docker daemon 状态污染模型指标，生产沙箱策略不变
+- 已验证：覆盖说明文本包裹 JSON、非 JSON 修复、合法 JSON 中阻塞性检查步骤修复、成功工具证据放行、失败工具证据可见、空结果强制工具修复、修复后仍无证据保持失败、文件写入步骤成功批次后结束、命名工具成功后单轮结束、失败后继续纠正、步骤类型映射、严格工具信封解析与拒绝规则、两类 Provider 请求体映射、Reviewer 轮数边界以及 Planner / Worker 提示词约束；2026-07-14 真实 logops 任务中单 Agent 0/10，Planner/Worker/Reviewer 10/10，任务成功率从 0% 提升到 100%
+- 未验证：完整 5 个真实模型受控任务尚未复跑，当前 100% 结果只证明 logops 单任务链路，不代表整套任务成功率或统计稳定性
+- 风险：阻塞性检查识别当前采用窄范围语义规则，覆盖空工作区、项目结构、目录和文件存在性；复杂自然语言计划仍依赖修复请求中的模型服从性。强制执行协议只有 1 次，避免无限消耗；最终结果仍必须经过 Pre-Review 与 Reviewer，只有硬检查实际通过且 Reviewer 属于可重试故障时允许安全降级
 
 ## 2026-07-13 运行时可靠性与记忆治理补强
 

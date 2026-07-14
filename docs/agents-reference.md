@@ -108,14 +108,14 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 流程：规划 → 按依赖分配 Worker → Reviewer 审查 → 未通过重试(最多 2 次)
 - Planner 输出先做协议与结构校验：支持从前后说明中提取完整 JSON；解析失败、DAG 无效或阻塞性空工作区纯检查步骤会触发有界修复。修复前清空 Planner 历史，并把原始任务、失败原因、无效输出预览和固定 schema 放入新请求。默认修复 2 次，可通过 `devcli.team.planner.repair.max.attempts` / `DEVCLI_TEAM_PLANNER_REPAIR_MAX_ATTEMPTS` 调整到 `[0, 3]`。
 - Planner 不调用工具；空工作区属于合法状态。目录和文件存在性检查不能成为阻塞实现的独立步骤，必要检查并入首个实现步骤并采用“若不存在则创建”语义。
-- SubAgent 按单次执行保存结构化工具证据。Worker 最终 content 为空但存在 `ToolStatus.SUCCESS` 时，由 Orchestrator 合成有界证据摘要进入 Pre-Review / Reviewer；没有成功证据时由独立 Worker 协议守卫追加一次强制执行上下文，要求文件任务调用 `write_file`、分析任务调用读取工具，并在该请求首轮设置命名 `LlmClient.ToolChoice`：FILE_WRITE / INTEGRATION 选择 `write_file`，COMMAND 选择 `execute_command`，其他类型选择 `list_dir`。Anthropic Messages 请求映射为 `tool_choice: {"type":"tool","name":"..."}`，OpenAI-compatible 请求映射为命名 function choice；工具结果进入下一轮后恢复 AUTO。修复后仍无成功证据才返回“执行结果为空”。
+- SubAgent 按单次执行保存结构化工具证据。Worker 最终 content 为空但存在 `ToolStatus.SUCCESS` 时，由 Orchestrator 合成有界证据摘要进入 Pre-Review / Reviewer；没有成功证据时由独立 Worker 协议守卫追加一次强制执行上下文，要求文件任务调用 `write_file`、分析任务调用读取工具，并在该请求首轮设置命名 `LlmClient.ToolChoice`：FILE_WRITE / INTEGRATION 选择 `write_file`，COMMAND 选择 `execute_command`，其他类型选择 `list_dir`。Anthropic Messages 请求映射为 `tool_choice: {"type":"tool","name":"..."}`，OpenAI-compatible 请求映射为命名 function choice。FILE_WRITE / INTEGRATION 步骤出现成功 `write_file` 批次后直接以结构化证据结束当前 Worker 执行；强制修复中的指定工具也采用同一完成策略，避免再发起无必要的 LLM 收尾请求。Provider 忽略命名工具选择时，`AgentExecutionEngine` 追加一次严格 JSON 工具信封请求；SubAgent 只接受单一完整 JSON 对象、目标工具名及对象参数，拒绝 reasoning、Markdown、代码围栏、尾随文本和未知字段，解析后仍通过原有工具参数校验、能力范围、HITL 与策略管线。工具失败时才恢复 AUTO 进入下一轮纠正，最终仍无成功证据才返回“执行结果为空”。
 - SubAgent IOException 返回 ERROR 类型
 - Planner 共享主 ToolRegistry；副作用 Worker 使用 `WorkspaceExecutionSession` 创建隔离 ToolRegistry，Pre-Review 与 Reviewer 在同一隔离目录读取真实产物，MemoryManager 继续共享角色裁剪视图。
 - Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用 `ExecutionArtifact`，统一保存 state、output、summary、modifiedResources、error、attempt、startedAt、finishedAt。
 - checkpoint 协议版本 3 通过 `RecoveryState` 恢复共享 artifact，并增加 pending PatchSet 写前日志；旧 completed/failed map 和版本 1/2 继续兼容，高于当前版本明确拒绝。
 - `/team` Worker 每次尝试都通过隔离 ToolRegistry 的 `runWithResourceLease(stepId, ...)` 绑定资源租约上下文，并在 finally 中释放；并行工具线程显式继承步骤租约归属。ToolRegistry 统一托管 `ResourceLeaseMaintenance`，project fork 共享同一个定时线程；最后一个注册关闭后停止。默认每 60 秒清理过期租约，可通过 `devcli.resource.lease.cleanup.interval.seconds` / `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
 - `/plan` 副作用任务与 `/team` 副作用步骤在隔离工作区执行；`ToolEffect` / `ToolAccessScope` 在工具管线中强制限制非隔离任务只能使用只读能力。隔离命令和 Pre-Review 强制通过受限 Docker 执行，无网络且禁止回退主机。PatchSet 逐文件流式哈希，只保留变更内容；JVM 公平锁与跨进程文件锁共同串行提交，锁缓存按活跃使用者计数退役。应用前保存 before/after 哈希和原文件备份；备份限制为当前所有者访问，孤儿日志按 TTL 清理，恢复时提升完成、继续待执行或回滚，失败回滚会报告具体路径。
-- `PreReviewVerifier` 独立负责 Maven/javac 选择、Java 文件扫描、超时、进程输出解码和失败摘要；无 Maven 时使用 UTF-8 javac 参数文件并在执行后清理。
+- `PreReviewVerifier` 独立负责 Maven/javac 选择、Java 文件扫描、超时、进程输出解码和失败摘要；无 Maven 时使用 UTF-8 javac 参数文件并在执行后清理。结果区分“未执行硬检查”和“硬检查实际通过”；Reviewer 遇到可重试 LLM 故障时，普通步骤只有后者允许降级接受，未执行检查继续失败关闭。Reviewer 默认最多 2 轮，可通过 `devcli.team.reviewer.max.iterations` / `DEVCLI_TEAM_REVIEWER_MAX_ITERATIONS` 调整到 `[1, 8]`；达到硬轮数上限视为可恢复 Reviewer 故障，仍受同一硬检查条件约束。
 - `Planner.replan()` 不是 Agent 循环，没有工具调用权，因此失败后重规划只读取 ExecutionArtifact 的最小结构化产物事实，不读取完整任务 result 作为主要依据。
 
 ### HITL System
@@ -364,7 +364,7 @@ EMBEDDING_BASE_URL=http://localhost:11434
 
 ## Runtime Reliability And Memory Lifecycle
 
-模型调用统一通过 `LlmException` 表达错误，`LlmErrorCode` 区分认证、限流、过载、超时、网络、参数、上下文超限、内容过滤、服务端和响应格式错误。Anthropic 与 OpenAI-compatible 基类复用同一 `LlmRetryExecutor`；限流、过载、超时、网络和 5xx 使用指数退避与 jitter，其他错误立即返回。流式 listener 已收到任何 reasoning/content delta 后，当前调用转为不可重试，避免重复输出和重复工具调用。
+模型调用统一通过 `LlmException` 表达错误，`LlmErrorCode` 区分认证、限流、过载、超时、网络、参数、上下文超限、内容过滤、服务端和响应格式错误。Anthropic 与 OpenAI-compatible 基类复用同一 `LlmRetryExecutor`；限流、过载、超时、网络和 5xx 使用指数退避与 jitter，其他错误立即返回。流式 listener 已收到任何 reasoning/content delta 后，当前调用转为不可重试，避免重复输出和重复工具调用。SubAgent 返回错误时保留 `code` 与 `retryable`，Orchestrator 优先读取标准重试标记，旧文本规则只用于兼容。
 
 `ConversationHistoryCompactor` 在摘要尺寸治理后、重建 history 前调用 `CompactionSemanticGuard`。守卫从待压缩原消息中提取必须、禁止、默认值、命令、版本、端口、目录、验收和配置赋值等关键约束，通过规范化文本与标识符锚点判断保留情况；缺失约束直接以提取式恢复段补回，并在摘要上限内优先保留。
 
