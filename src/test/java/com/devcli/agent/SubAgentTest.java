@@ -2,6 +2,8 @@ package com.devcli.agent;
 
 import com.devcli.llm.GLMClient;
 import com.devcli.llm.LlmClient;
+import com.devcli.llm.LlmErrorCode;
+import com.devcli.llm.LlmException;
 import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.skill.SkillStateStore;
@@ -22,6 +24,66 @@ import java.util.function.Consumer;
 import static org.junit.jupiter.api.Assertions.*;
 
 class SubAgentTest {
+
+    @Test
+    void reviewerIterationLimitShouldBeBoundedAndConfigurable() {
+        String previous = System.getProperty("devcli.team.reviewer.max.iterations");
+        try {
+            System.setProperty("devcli.team.reviewer.max.iterations", "5");
+            assertEquals(5, SubAgent.resolveReviewerMaxIterations());
+            System.setProperty("devcli.team.reviewer.max.iterations", "99");
+            assertEquals(SubAgent.MAX_REVIEWER_MAX_ITERATIONS,
+                    SubAgent.resolveReviewerMaxIterations());
+            System.setProperty("devcli.team.reviewer.max.iterations", "invalid");
+            assertEquals(SubAgent.DEFAULT_REVIEWER_MAX_ITERATIONS,
+                    SubAgent.resolveReviewerMaxIterations());
+        } finally {
+            if (previous == null) {
+                System.clearProperty("devcli.team.reviewer.max.iterations");
+            } else {
+                System.setProperty("devcli.team.reviewer.max.iterations", previous);
+            }
+        }
+    }
+
+    @Test
+    void shouldAdaptStrictRequiredToolEnvelope() {
+        LlmClient.ChatResponse response = new LlmClient.ChatResponse(
+                "assistant",
+                "{\"name\":\"write_file\",\"arguments\":{\"path\":\"A.java\",\"content\":\"class A {}\"}}",
+                null, null, 10, 5);
+
+        LlmClient.ChatResponse adapted = SubAgent.adaptRequiredToolEnvelope(
+                response, LlmClient.ToolChoice.required("write_file"));
+
+        assertTrue(adapted.hasToolCalls());
+        assertEquals("write_file", adapted.toolCalls().get(0).function().name());
+        assertTrue(adapted.toolCalls().get(0).function().arguments().contains("A.java"));
+    }
+
+    @Test
+    void shouldRejectNonStrictToolEnvelope() {
+        LlmClient.ChatResponse response = new LlmClient.ChatResponse(
+                "assistant",
+                "```json\n{\"name\":\"write_file\",\"arguments\":{}}\n```",
+                null, null, 10, 5);
+
+        LlmClient.ChatResponse adapted = SubAgent.adaptRequiredToolEnvelope(
+                response, LlmClient.ToolChoice.required("write_file"));
+
+        assertFalse(adapted.hasToolCalls());
+    }
+
+    @Test
+    void shouldPreserveStructuredLlmErrorMetadata() {
+        String message = SubAgent.describeLlmFailure(new LlmException(
+                LlmErrorCode.NETWORK, "anthropic", "test-model", 0,
+                "connection reset", true, 0L, null));
+
+        assertTrue(message.contains("code=NETWORK"), message);
+        assertTrue(message.contains("retryable=true"), message);
+        assertTrue(message.contains("connection reset"), message);
+    }
 
     @Test
     void shouldEnableToolsForWorkerAndReviewer() throws Exception {

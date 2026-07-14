@@ -1,8 +1,10 @@
 package com.devcli.agent;
 
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.llm.LlmClient;
+import com.devcli.llm.LlmException;
 import com.devcli.llm.LlmTraceLogger;
 import com.devcli.lsp.LspDiagnosticReport;
 import com.devcli.memory.CompactBoundaryRuntimeState;
@@ -32,10 +34,12 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
@@ -48,6 +52,8 @@ import java.util.function.Supplier;
 public class SubAgent {
     private static final Logger log = LoggerFactory.getLogger(SubAgent.class);
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
+    static final int DEFAULT_REVIEWER_MAX_ITERATIONS = 2;
+    static final int MAX_REVIEWER_MAX_ITERATIONS = 8;
 
     /**
      * Forked SubAgent execution starts from a frozen shared prefix, then appends a task-specific suffix.
@@ -395,12 +401,19 @@ public class SubAgent {
     }
 
     private AgentMessage execute(AgentMessage task, PrintStream out, LlmClient.ToolChoice toolChoice) {
+        return execute(task, out, toolChoice, "");
+    }
+
+    private AgentMessage execute(AgentMessage task, PrintStream out,
+                                 LlmClient.ToolChoice toolChoice,
+                                 String completionToolName) {
         log.info("[{}] executing task from {}: type={}", name, task.fromAgent(), task.type());
         executionEvidence.set(new ExecutionEvidenceAccumulator());
         currentSkillActivationText = task == null || task.content() == null ? "" : task.content();
         pruneHistoricalImagePayloads();
         refreshSystemPrompt();
-        return executeWithHistory(task, out, conversationHistory, null, toolChoice);
+        return executeWithHistory(task, out, conversationHistory, null, toolChoice,
+                completionToolName);
     }
 
     public AgentMessage executeForked(AgentMessage task, ForkContext forkContext, PrintStream out) {
@@ -409,17 +422,25 @@ public class SubAgent {
 
     private AgentMessage executeForked(AgentMessage task, ForkContext forkContext, PrintStream out,
                                        LlmClient.ToolChoice toolChoice) {
+        return executeForked(task, forkContext, out, toolChoice, "");
+    }
+
+    private AgentMessage executeForked(AgentMessage task, ForkContext forkContext, PrintStream out,
+                                       LlmClient.ToolChoice toolChoice,
+                                       String completionToolName) {
         executionEvidence.set(new ExecutionEvidenceAccumulator());
         currentSkillActivationText = task == null || task.content() == null ? "" : task.content();
         ForkContext context = forkContext == null ? createForkContext() : forkContext;
         List<LlmClient.Message> forkedHistory = new ArrayList<>(context.sharedPrefix());
-        return executeWithHistory(task, out, forkedHistory, context, toolChoice);
+        return executeWithHistory(task, out, forkedHistory, context, toolChoice,
+                completionToolName);
     }
 
     private AgentMessage executeWithHistory(AgentMessage task, PrintStream out,
                                             List<LlmClient.Message> history,
                                             ForkContext forkContext,
-                                            LlmClient.ToolChoice initialToolChoice) {
+                                            LlmClient.ToolChoice initialToolChoice,
+                                            String completionToolName) {
         String taskContent = forkContext == null
                 ? prependSkillBodies(task.content(), true)
                 : prependSkillBodies(task.content(), forkContext.skillBodySnapshot());
@@ -431,7 +452,7 @@ public class SubAgent {
 
         SubAgentStreamRenderer streamRenderer = new SubAgentStreamRenderer(name, role, out);
 
-        AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
+        AgentBudget budget = createExecutionBudget();
         return new AgentExecutionEngine<AgentMessage>(llmClient, budget).run(
                 new AgentExecutionEngine.Delegate<>() {
                     @Override
@@ -478,6 +499,27 @@ public class SubAgent {
                     }
 
                     @Override
+                    public LlmClient.ChatResponse normalizeResponse(
+                            LlmClient.ChatResponse response,
+                            int iteration,
+                            AgentBudget currentBudget) {
+                        return adaptRequiredToolEnvelope(response, initialToolChoice);
+                    }
+
+                    @Override
+                    public String retryInstructionAfterResponseWithoutTools(
+                            LlmClient.ChatResponse response,
+                            int iteration,
+                            AgentBudget currentBudget) {
+                        if (iteration == 1 && initialToolChoice != null
+                                && initialToolChoice.hasSpecificTool()) {
+                            return TeamWorkerProtocol.buildToolEnvelopeRepairPrompt(
+                                    initialToolChoice.toolName());
+                        }
+                        return "";
+                    }
+
+                    @Override
                     public void beforeToolExecution(LlmClient.ChatResponse response, int iteration,
                                                     AgentBudget currentBudget) {
                         printToolCalls(out, response.toolCalls());
@@ -504,9 +546,32 @@ public class SubAgent {
                     }
 
                     @Override
+                    public Optional<AgentMessage> completedAfterToolResults(
+                            LlmClient.ChatResponse response,
+                            List<ToolExecutionResult> toolResults,
+                            int iteration,
+                            AgentBudget currentBudget) {
+                        if (completionToolName == null || completionToolName.isBlank()) {
+                            return Optional.empty();
+                        }
+                        for (ToolExecutionResult toolResult : toolResults) {
+                            if (completionToolName.equals(toolResult.name())
+                                    && toolResult.status() == ToolStatus.SUCCESS) {
+                                streamRenderer.finish();
+                                return Optional.of(AgentMessage.result(name, role, ""));
+                            }
+                        }
+                        return Optional.empty();
+                    }
+
+                    @Override
                     public AgentMessage completed(LlmClient.ChatResponse response,
                                                   AgentBudget currentBudget) {
                         streamRenderer.finish();
+                        if (initialToolChoice != null && initialToolChoice.hasSpecificTool()
+                                && !executionEvidence.get().snapshot().hasSuccessfulToolCall()) {
+                            return AgentMessage.result(name, role, "");
+                        }
                         return AgentMessage.result(name, role, response.content());
                     }
 
@@ -538,9 +603,85 @@ public class SubAgent {
                     public AgentMessage failed(IOException error, AgentBudget currentBudget) {
                         log.error("[{}] LLM call failed", name, error);
                         streamRenderer.finish();
-                        return AgentMessage.error(name, role, "LLM 调用失败: " + error.getMessage());
+                        return AgentMessage.error(name, role, describeLlmFailure(error));
                     }
                 });
+    }
+
+    private AgentBudget createExecutionBudget() {
+        AgentBudget base = AgentBudget.fromLlmClient(llmClient);
+        if (role != AgentRole.REVIEWER) {
+            return base;
+        }
+        return new AgentBudget(
+                base.tokenBudget(), base.stagnationWindow(), resolveReviewerMaxIterations());
+    }
+
+    static int resolveReviewerMaxIterations() {
+        String raw = System.getProperty("devcli.team.reviewer.max.iterations");
+        if (raw == null || raw.isBlank()) {
+            raw = System.getenv("DEVCLI_TEAM_REVIEWER_MAX_ITERATIONS");
+        }
+        try {
+            int parsed = raw == null || raw.isBlank()
+                    ? DEFAULT_REVIEWER_MAX_ITERATIONS
+                    : Integer.parseInt(raw.trim());
+            return Math.max(1, Math.min(MAX_REVIEWER_MAX_ITERATIONS, parsed));
+        } catch (NumberFormatException ignored) {
+            return DEFAULT_REVIEWER_MAX_ITERATIONS;
+        }
+    }
+
+    static LlmClient.ChatResponse adaptRequiredToolEnvelope(
+            LlmClient.ChatResponse response, LlmClient.ToolChoice toolChoice) {
+        if (response == null || response.hasToolCalls() || toolChoice == null
+                || !toolChoice.hasSpecificTool() || response.content() == null
+                || response.content().isBlank()) {
+            return response;
+        }
+        try (JsonParser parser = JSON_MAPPER.getFactory().createParser(response.content().trim())) {
+            JsonNode root = JSON_MAPPER.readTree(parser);
+            if (root == null || !root.isObject() || parser.nextToken() != null) {
+                return response;
+            }
+            Iterator<String> fields = root.fieldNames();
+            while (fields.hasNext()) {
+                String field = fields.next();
+                if (!"name".equals(field) && !"tool".equals(field) && !"arguments".equals(field)) {
+                    return response;
+                }
+            }
+            boolean hasName = root.has("name");
+            boolean hasTool = root.has("tool");
+            if (hasName == hasTool) {
+                return response;
+            }
+            String name = hasName
+                    ? root.path("name").asText("")
+                    : root.path("tool").asText("");
+            JsonNode arguments = root.get("arguments");
+            if (!toolChoice.toolName().equals(name) || arguments == null || !arguments.isObject()) {
+                return response;
+            }
+            String callId = "fallback_" + Integer.toUnsignedString(
+                    response.content().hashCode(), 16);
+            LlmClient.ToolCall toolCall = new LlmClient.ToolCall(
+                    callId,
+                    new LlmClient.ToolCall.Function(name, JSON_MAPPER.writeValueAsString(arguments)));
+            return new LlmClient.ChatResponse(
+                    response.role(), "", response.reasoningContent(), List.of(toolCall),
+                    response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
+        } catch (IOException ignored) {
+            return response;
+        }
+    }
+
+    static String describeLlmFailure(IOException error) {
+        if (error instanceof LlmException llmError) {
+            return "LLM 调用失败 [code=" + llmError.code()
+                    + ",retryable=" + llmError.retryable() + "]: " + llmError.getMessage();
+        }
+        return "LLM 调用失败: " + (error == null ? "unknown" : error.getMessage());
     }
 
     /**
@@ -556,13 +697,20 @@ public class SubAgent {
 
     AgentMessage executeWithContext(AgentMessage task, String context, PrintStream out,
                                     LlmClient.ToolChoice toolChoice) {
+        return executeWithContext(task, context, out, toolChoice, "");
+    }
+
+    AgentMessage executeWithContext(AgentMessage task, String context, PrintStream out,
+                                    LlmClient.ToolChoice toolChoice,
+                                    String completionToolName) {
         String enrichedContent = task.content();
         if (context != null && !context.isEmpty()) {
             enrichedContent = context + "\n\n当前任务：" + task.content();
         }
         AgentMessage enrichedTask = new AgentMessage(task.fromAgent(), task.fromRole(),
                 enrichedContent, task.type());
-        return execute(enrichedTask, out, toolChoice);
+        return execute(enrichedTask, out, toolChoice,
+                completionToolName);
     }
 
     public AgentMessage executeForkedWithContext(AgentMessage task, String context,
@@ -574,13 +722,21 @@ public class SubAgent {
     AgentMessage executeForkedWithContext(AgentMessage task, String context,
                                           ForkContext forkContext, PrintStream out,
                                           LlmClient.ToolChoice toolChoice) {
+        return executeForkedWithContext(task, context, forkContext, out, toolChoice, "");
+    }
+
+    AgentMessage executeForkedWithContext(AgentMessage task, String context,
+                                          ForkContext forkContext, PrintStream out,
+                                          LlmClient.ToolChoice toolChoice,
+                                          String completionToolName) {
         String enrichedContent = task.content();
         if (context != null && !context.isEmpty()) {
             enrichedContent = context + "\n\n当前任务：" + task.content();
         }
         AgentMessage enrichedTask = new AgentMessage(task.fromAgent(), task.fromRole(),
                 enrichedContent, task.type());
-        return executeForked(enrichedTask, forkContext, out, toolChoice);
+        return executeForked(enrichedTask, forkContext, out, toolChoice,
+                completionToolName);
     }
 
     /**

@@ -7,6 +7,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 import com.devcli.llm.GLMClient;
 import com.devcli.llm.LlmClient;
+import com.devcli.llm.LlmErrorCode;
+import com.devcli.llm.LlmException;
 import com.devcli.memory.LongTermMemory;
 import com.devcli.memory.MemoryManager;
 import com.devcli.skill.SkillContextBuffer;
@@ -221,13 +223,29 @@ class AgentOrchestratorTest {
         assertEquals("write_file", TeamWorkerProtocol.requiredToolChoice("INTEGRATION").toolName());
         assertEquals("execute_command", TeamWorkerProtocol.requiredToolChoice("COMMAND").toolName());
         assertEquals("list_dir", TeamWorkerProtocol.requiredToolChoice("ANALYSIS").toolName());
+        assertEquals("write_file", TeamWorkerProtocol.completionToolName(
+                "FILE_WRITE", LlmClient.ToolChoice.AUTO));
+        assertEquals("", TeamWorkerProtocol.completionToolName(
+                "ANALYSIS", LlmClient.ToolChoice.AUTO));
+        assertEquals("list_dir", TeamWorkerProtocol.completionToolName(
+                "ANALYSIS", LlmClient.ToolChoice.required("list_dir")));
+    }
+
+    @Test
+    void reviewerFailureDegradationShouldRequireHardCheckForRegularSteps() {
+        assertFalse(AgentOrchestrator.canDegradeReviewerFailure(false, true, false));
+        assertTrue(AgentOrchestrator.canDegradeReviewerFailure(false, true, true));
+        assertTrue(AgentOrchestrator.canDegradeReviewerFailure(true, true, false));
+        assertFalse(AgentOrchestrator.canDegradeReviewerFailure(false, false, true));
     }
 
     @Test
     void mandatoryWorkerRepairShouldEndWithImmediateToolInstruction() {
-        String repairTask = TeamWorkerProtocol.buildMandatoryToolTask("实现功能", 1);
+        String repairTask = TeamWorkerProtocol.buildMandatoryToolTask(
+                "实现功能", 1, "write_file");
 
         assertTrue(repairTask.indexOf("原始步骤") < repairTask.indexOf("Worker 执行协议修复"));
+        assertTrue(repairTask.contains("\"name\":\"write_file\""), repairTask);
         assertTrue(repairTask.strip().endsWith("现在立即调用工具。"), repairTask);
     }
 
@@ -682,6 +700,7 @@ class AgentOrchestratorTest {
         AtomicInteger repairPrompts = new AtomicInteger();
         AtomicInteger reviewerCalls = new AtomicInteger();
         AtomicInteger fallbackWorkerTurns = new AtomicInteger();
+        AtomicInteger envelopeRepairs = new AtomicInteger();
 
         Function<String, LlmClient.ChatResponse> dispatcher = body -> {
             if (body.contains("请为以下任务制定执行计划")) {
@@ -701,10 +720,12 @@ class AgentOrchestratorTest {
             if (body.contains("最终集成")) {
                 return response("integration result");
             }
+            if (body.startsWith("Provider 未生成原生工具调用。只输出严格 JSON")) {
+                envelopeRepairs.incrementAndGet();
+                return response("{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}}");
+            }
             if (body.contains("上一次 Worker 未产生可验收结果")) {
-                if (repairPrompts.incrementAndGet() == 1) {
-                    return toolResponse("call-repair-list", "list_dir", "{\"path\":\".\"}");
-                }
+                repairPrompts.incrementAndGet();
                 return response("");
             }
             fallbackWorkerTurns.incrementAndGet();
@@ -718,7 +739,10 @@ class AgentOrchestratorTest {
             String result = orchestrator.run("检查目录并形成结果");
 
             assertFalse(result.contains("执行结果为空"), result);
-            assertTrue(repairPrompts.get() >= 2, "repair context should persist through the tool-result turn");
+            assertEquals(1, repairPrompts.get(),
+                    "successful forced tool call should complete without a second LLM turn");
+            assertEquals(1, envelopeRepairs.get(),
+                    "ignored native tool choice should receive one strict envelope retry");
             assertTrue(fallbackWorkerTurns.get() >= 1, "initial blank worker turn should occur");
             assertTrue(reviewerCalls.get() >= 1, "repaired tool evidence should reach reviewer");
         }
@@ -1545,6 +1569,59 @@ class AgentOrchestratorTest {
                 .map(DispatchingStubGLMClient::findLastUser)
                 .anyMatch(body -> body.contains("必须调用工具检查真实产物"));
         assertFalse(reviewerCalled, "compile failure should be blocked before Reviewer LLM");
+    }
+
+    @Test
+    void hardCheckShouldPreserveWorkerPatchWhenReviewerHasTransientFailure(@TempDir Path tempDir)
+            throws Exception {
+        AtomicInteger workerTurns = new AtomicInteger();
+        GLMClient llmClient = new GLMClient("test-key") {
+            @Override
+            public ChatResponse chat(List<Message> messages, List<Tool> tools,
+                                     StreamListener listener) throws IOException {
+                String body = DispatchingStubGLMClient.findLastUser(messages);
+                if (body.contains("请为以下任务制定执行计划")) {
+                    return response("""
+                            {
+                              "summary": "写入并验证",
+                              "steps": [
+                                {"id": "s1", "description": "写入 src/main/java/Result.java", "type": "FILE_WRITE", "dependencies": []}
+                              ]
+                            }
+                            """);
+                }
+                if (body.startsWith("原始任务：")) {
+                    throw new LlmException(LlmErrorCode.NETWORK, "anthropic", "test-model", 0,
+                            "connection reset", true, 0L, null);
+                }
+                if (body.contains("最终集成验收")) {
+                    return response("integration complete");
+                }
+                if (body.contains("写入 src/main/java/Result.java")) {
+                    if (workerTurns.getAndIncrement() == 0) {
+                        return toolResponse("worker-write", "write_file",
+                                "{\"path\":\"src/main/java/Result.java\","
+                                        + "\"content\":\"public class Result {}\"}");
+                    }
+                    return response("write complete");
+                }
+                return response("");
+            }
+        };
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    llmClient, isolatedToolRegistry(tempDir), mm);
+            orchestrator.setPreReviewVerifier(new PreReviewVerifier(30,
+                    request -> com.devcli.tool.command.CommandExecutionService.Result.completed(0, "ok")));
+
+            String result = orchestrator.run("写入 src/main/java/Result.java");
+
+            Path resultFile = tempDir.resolve("src/main/java/Result.java");
+            assertTrue(Files.isRegularFile(resultFile), result);
+            assertEquals("public class Result {}", Files.readString(resultFile));
+            assertTrue(result.contains("多 Agent 协作任务完成"), result);
+        }
     }
 
     private static LlmClient.ChatResponse awaitBarrierThenReturn(CountDownLatch latch,

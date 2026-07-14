@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -39,9 +40,38 @@ class AgentExecutionEngineTest {
         assertEquals(List.of(LlmClient.ToolChoice.REQUIRED, LlmClient.ToolChoice.AUTO), llm.toolChoices);
     }
 
+    @Test
+    void canCompleteImmediatelyAfterSuccessfulToolResults() {
+        LlmClient.ToolCall call = new LlmClient.ToolCall(
+                "call_1", new LlmClient.ToolCall.Function("read_file", "{\"path\":\"a.txt\"}"));
+        ScriptedClient llm = new ScriptedClient(List.of(
+                new LlmClient.ChatResponse("assistant", "", "reasoning", List.of(call), 10, 2)
+        ));
+        AgentBudget budget = new AgentBudget(1_000, 3, 10);
+        RecordingDelegate delegate = new RecordingDelegate(true);
+
+        String result = new AgentExecutionEngine<String>(llm, budget).run(delegate);
+
+        assertEquals("tool-complete", result);
+        assertEquals(1, budget.iteration());
+        assertEquals(List.of("before:1", "tools:1", "tool-complete"), delegate.events);
+        assertEquals(List.of("system", "assistant", "tool"),
+                delegate.history.stream().map(LlmClient.Message::role).toList());
+        assertEquals(List.of(LlmClient.ToolChoice.REQUIRED), llm.toolChoices);
+    }
+
     private static final class RecordingDelegate implements AgentExecutionEngine.Delegate<String> {
         private final List<LlmClient.Message> history = new ArrayList<>(List.of(LlmClient.Message.system("system")));
         private final List<String> events = new ArrayList<>();
+        private final boolean completeAfterTools;
+
+        private RecordingDelegate() {
+            this(false);
+        }
+
+        private RecordingDelegate(boolean completeAfterTools) {
+            this.completeAfterTools = completeAfterTools;
+        }
 
         @Override
         public List<LlmClient.Message> history() {
@@ -75,6 +105,19 @@ class AgentExecutionEngineTest {
             return List.of(new ToolRegistry.ToolExecutionResult(
                     "call_1", "read_file", "{\"path\":\"a.txt\"}", "content",
                     1, ToolStatus.SUCCESS, ToolErrorCode.NONE, false, List.of()));
+        }
+
+        @Override
+        public Optional<String> completedAfterToolResults(
+                LlmClient.ChatResponse response,
+                List<ToolRegistry.ToolExecutionResult> toolResults,
+                int iteration,
+                AgentBudget budget) {
+            if (!completeAfterTools) {
+                return Optional.empty();
+            }
+            events.add("tool-complete");
+            return Optional.of("tool-complete");
         }
 
         @Override

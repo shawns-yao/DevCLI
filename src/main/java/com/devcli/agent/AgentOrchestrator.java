@@ -187,13 +187,14 @@ public class AgentOrchestrator {
         PENDING, RUNNING, COMPLETED, FAILED
     }
 
-    record PreReviewResult(boolean passed, String feedback) {
-        static PreReviewResult ok() {
-            return new PreReviewResult(true, "");
+    record PreReviewResult(boolean passed, boolean hardCheckExecuted, String feedback) {
+        static PreReviewResult skipped() {
+            return new PreReviewResult(true, false, "");
         }
 
         static PreReviewResult failed(String feedback) {
-            return new PreReviewResult(false, feedback == null ? "Pre-review hard check failed" : feedback);
+            return new PreReviewResult(false, true,
+                    feedback == null ? "Pre-review hard check failed" : feedback);
         }
     }
 
@@ -1548,12 +1549,14 @@ public class AgentOrchestrator {
         int retries = retryCount.getOrDefault(step.id(), 0);
         String issues = reviewDecision.issues();
         if (reviewDecision.reviewerError()) {
-            if (shouldAcceptFinalIntegrationAfterTransientReviewerFailure(step, issues)) {
+            if (shouldAcceptAfterRecoverableReviewerFailure(
+                    step, issues, reviewDecision.hardCheckExecuted())) {
                 String degradedResult = acceptedResult
-                        + "\n\nFinal integration Reviewer 瞬时失败；Pre-Review 硬检查已通过，按降级策略接受。\n"
+                        + "\n\nReviewer 可恢复故障；Pre-Review 硬检查已通过，按降级策略接受。\n"
                         + issues;
                 updateStep(steps, step.id(), step.withResult(degradedResult));
-                out.println("✅ 步骤 [" + step.id() + "] Pre-Review 已通过，Reviewer 瞬时失败降级接受\n");
+                out.println("✅ 步骤 [" + step.id()
+                        + "] Pre-Review 硬检查已通过，Reviewer 可恢复故障降级接受\n");
                 return;
             }
             updateStep(steps, step.id(), step.withFailed(issues));
@@ -1589,6 +1592,13 @@ public class AgentOrchestrator {
             ReviewDecision retryReview = reviewWorkerResult(step, reviewer, acceptedResult, out, reviewerForkContext);
             if (retryReview.reviewerError()) {
                 issues = retryReview.issues();
+                if (shouldAcceptAfterRecoverableReviewerFailure(
+                        step, issues, retryReview.hardCheckExecuted())) {
+                    acceptedResult = acceptedResult
+                            + "\n\nReviewer 可恢复故障；Pre-Review 硬检查已通过，按降级策略接受。\n"
+                            + issues;
+                    approved = true;
+                }
                 break;
             }
             approved = retryReview.approved();
@@ -1690,12 +1700,15 @@ public class AgentOrchestrator {
                         + "Worker 未产生成功工具证据，正在强制执行修复 ("
                         + protocolRepairs + "/" + TeamWorkerProtocol.MAX_EMPTY_RESULT_REPAIRS + ")...");
                 worker.clearHistory();
+                LlmClient.ToolChoice requiredToolChoice =
+                        TeamWorkerProtocol.requiredToolChoice(step.type());
                 AgentMessage repairTask = AgentMessage.task("orchestrator",
                         TeamWorkerProtocol.buildMandatoryToolTask(
-                                step.description(), protocolRepairs));
+                                step.description(), protocolRepairs,
+                                requiredToolChoice.toolName()));
                 result = executeWorkerOnce(
                         step, worker, repairTask, executionContext, out, workerForkContext,
-                        TeamWorkerProtocol.requiredToolChoice(step.type()));
+                        requiredToolChoice);
                 continue;
             }
             return result;
@@ -1715,24 +1728,42 @@ public class AgentOrchestrator {
                                            LlmClient.ToolChoice toolChoice) {
         try {
             ToolRegistry registry = activeToolRegistry();
+            String completionToolName = TeamWorkerProtocol.completionToolName(
+                    step.type(), toolChoice);
             return registry.runWithResourceLease(step.id(), () -> workerForkContext == null
-                    ? worker.executeWithContext(taskMsg, context, out, toolChoice)
+                    ? worker.executeWithContext(taskMsg, context, out, toolChoice,
+                            completionToolName)
                     : worker.executeForkedWithContext(
-                            taskMsg, context, workerForkContext, out, toolChoice));
+                            taskMsg, context, workerForkContext, out, toolChoice,
+                            completionToolName));
         } finally {
             activeToolRegistry().releaseResourceLeases(step.id());
         }
     }
 
-    private boolean shouldAcceptFinalIntegrationAfterTransientReviewerFailure(ExecutionStep step, String issues) {
-        return isFinalIntegrationStep(step) && isTransientLlmError(issues);
+    private boolean shouldAcceptAfterRecoverableReviewerFailure(
+            ExecutionStep step, String issues, boolean hardCheckExecuted) {
+        return canDegradeReviewerFailure(
+                isFinalIntegrationStep(step), isRecoverableReviewerFailure(issues), hardCheckExecuted);
     }
+
+    static boolean canDegradeReviewerFailure(
+            boolean finalIntegration, boolean recoverableFailure, boolean hardCheckExecuted) {
+        return recoverableFailure && (hardCheckExecuted || finalIntegration);
+    }
+
+    private boolean isRecoverableReviewerFailure(String content) {
+        return isTransientLlmError(content)
+                || (content != null && content.contains("达到硬轮数上限"));
+    }
+
     private boolean isTransientLlmError(String content) {
         if (content == null) {
             return false;
         }
         String lower = content.toLowerCase(Locale.ROOT);
-        return lower.contains("api请求失败: 500")
+        return lower.contains("retryable=true")
+                || lower.contains("api请求失败: 500")
                 || lower.contains("server_error")
                 || lower.contains("internal_server_error")
                 || lower.contains("oauth2.googleapis.com/token")
@@ -1750,7 +1781,8 @@ public class AgentOrchestrator {
         if (!preReview.passed()) {
             out.println("⛔ 步骤 [" + step.id() + "] Pre-Review Hook 未通过，跳过 Reviewer LLM");
             out.println("   反馈: " + preReview.feedback() + "\n");
-            return new ReviewDecision(false, preReview.feedback(), false);
+            return new ReviewDecision(false, preReview.feedback(), false,
+                    preReview.hardCheckExecuted());
         }
 
         out.println("🔍 " + reviewer.getName() + " 正在审查步骤 [" + step.id() + "] 的结果...");
@@ -1767,32 +1799,38 @@ public class AgentOrchestrator {
 
         if (reviewResult.type() == AgentMessage.Type.ERROR) {
             log.warn("Reviewer failed for step {}: {}", step.id(), reviewResult.content());
-            out.println("❌ 步骤 [" + step.id() + "] 审查阶段 LLM 调用失败，阻止下游步骤继续执行\n");
-            return new ReviewDecision(false, "审查 LLM 故障：" + reviewResult.content(), true);
+            out.println("❌ 步骤 [" + step.id()
+                    + "] 审查阶段 LLM 调用失败，正在检查 Pre-Review 降级条件\n");
+            return new ReviewDecision(false, "审查 LLM 故障：" + reviewResult.content(), true,
+                    preReview.hardCheckExecuted());
         }
         if (requiresConcreteVerification(step) && reviewToolCalls.isEmpty()) {
             if (isVerificationStepWithPreReview(step)) {
                 log.info("Reviewer did not call tools for verification step {}, accepting Pre-Review hard check as concrete verification", step.id());
             } else {
                 return new ReviewDecision(false,
-                        "Reviewer 未调用工具验证真实产物；文件/代码/命令类任务不能只根据 Worker 文字说明批准。", false);
+                        "Reviewer 未调用工具验证真实产物；文件/代码/命令类任务不能只根据 Worker 文字说明批准。",
+                        false, preReview.hardCheckExecuted());
             }
         }
 
         return new ReviewDecision(parseReviewApproval(reviewResult.content()),
-                parseReviewIssues(reviewResult.content()), false);
+                parseReviewIssues(reviewResult.content()), false,
+                preReview.hardCheckExecuted());
     }
 
-    record ReviewDecision(boolean approved, String issues, boolean reviewerError) {
+    record ReviewDecision(boolean approved, String issues, boolean reviewerError,
+                          boolean hardCheckExecuted) {
     }
 
     PreReviewResult runPreReviewHook(ExecutionStep step) {
         if (!requiresConcreteVerification(step) || !requiresJavaHardCheck(step)) {
-            return PreReviewResult.ok();
+            return PreReviewResult.skipped();
         }
         Path projectRoot = Path.of(activeToolRegistry().getProjectPath()).toAbsolutePath().normalize();
         PreReviewVerifier.Result result = preReviewVerifier.verify(projectRoot, step.id());
-        return new PreReviewResult(result.passed(), result.feedback());
+        return new PreReviewResult(
+                result.passed(), result.hardCheckExecuted(), result.feedback());
     }
 
     private boolean requiresJavaHardCheck(ExecutionStep step) {

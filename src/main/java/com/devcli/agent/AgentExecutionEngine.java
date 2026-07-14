@@ -7,6 +7,7 @@ import com.devcli.tool.ToolRegistry;
 import java.io.IOException;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * ReAct、Plan task 和 SubAgent 共用的单轮 LLM/工具循环。
@@ -37,6 +38,16 @@ final class AgentExecutionEngine<R> {
         default void afterResponse(LlmClient.ChatResponse response, int iteration, AgentBudget budget) {
         }
 
+        default LlmClient.ChatResponse normalizeResponse(
+                LlmClient.ChatResponse response, int iteration, AgentBudget budget) {
+            return response;
+        }
+
+        default String retryInstructionAfterResponseWithoutTools(
+                LlmClient.ChatResponse response, int iteration, AgentBudget budget) {
+            return "";
+        }
+
         default void beforeToolExecution(LlmClient.ChatResponse response, int iteration,
                                          AgentBudget budget) {
         }
@@ -48,6 +59,14 @@ final class AgentExecutionEngine<R> {
                                       List<ToolRegistry.ToolExecutionResult> toolResults,
                                       int iteration,
                                       AgentBudget budget) {
+        }
+
+        default Optional<R> completedAfterToolResults(
+                LlmClient.ChatResponse response,
+                List<ToolRegistry.ToolExecutionResult> toolResults,
+                int iteration,
+                AgentBudget budget) {
+            return Optional.empty();
         }
 
         R completed(LlmClient.ChatResponse response, AgentBudget budget);
@@ -103,6 +122,8 @@ final class AgentExecutionEngine<R> {
                         response.outputTokens(),
                         response.cachedInputTokens());
                 delegate.afterResponse(response, iteration, budget);
+                response = Objects.requireNonNullElse(
+                        delegate.normalizeResponse(response, iteration, budget), response);
 
                 if (response.hasToolCalls()) {
                     budget.recordToolCalls(response.toolCalls());
@@ -123,6 +144,20 @@ final class AgentExecutionEngine<R> {
                                 toolResult.id(), toolResult.result()));
                     }
                     delegate.afterToolResults(response, toolResults, iteration, budget);
+                    Optional<R> completed = delegate.completedAfterToolResults(
+                            response, toolResults, iteration, budget);
+                    if (completed.isPresent()) {
+                        return completed.get();
+                    }
+                    continue;
+                }
+
+                String retryInstruction = delegate.retryInstructionAfterResponseWithoutTools(
+                        response, iteration, budget);
+                if (retryInstruction != null && !retryInstruction.isBlank()) {
+                    delegate.history().add(LlmClient.Message.assistant(
+                            response.reasoningContent(), response.content()));
+                    delegate.history().add(LlmClient.Message.user(retryInstruction));
                     continue;
                 }
 

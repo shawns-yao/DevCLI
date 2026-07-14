@@ -26,6 +26,7 @@ class PreReviewVerifierTest {
         PreReviewVerifier.Result result = verifierWithHostBackend().verify(tempDir, "step-a");
 
         assertTrue(result.passed());
+        assertFalse(result.hardCheckExecuted());
     }
 
     @Test
@@ -39,6 +40,7 @@ class PreReviewVerifierTest {
         PreReviewVerifier.Result result = verifierWithHostBackend().verify(tempDir, "step-b");
 
         assertTrue(result.passed(), result.feedback());
+        assertTrue(result.hardCheckExecuted());
         assertTrue(Files.isRegularFile(tempDir.resolve(
                 "target/devcli-pre-review-classes/step-b/Hello.class")));
     }
@@ -54,6 +56,7 @@ class PreReviewVerifierTest {
         PreReviewVerifier.Result result = verifierWithHostBackend().verify(tempDir, "step-c");
 
         assertFalse(result.passed());
+        assertTrue(result.hardCheckExecuted());
         assertTrue(result.feedback().contains("javac -encoding UTF-8"), result.feedback());
         assertTrue(result.feedback().contains("Broken.java"), result.feedback());
     }
@@ -76,6 +79,7 @@ class PreReviewVerifierTest {
         PreReviewVerifier.Result result = verifierWithHostBackend().verify(tempDir, "step-large");
 
         assertTrue(result.passed(), result.feedback());
+        assertTrue(result.hardCheckExecuted());
         assertTrue(Files.isRegularFile(tempDir.resolve(
                 "target/devcli-pre-review-classes/step-large/" + lastClassName + ".class")));
     }
@@ -96,6 +100,7 @@ class PreReviewVerifierTest {
         PreReviewVerifier.Result result = verifier.verify(tempDir, "step-maven");
 
         assertTrue(result.passed(), result.feedback());
+        assertTrue(result.hardCheckExecuted());
         assertTrue(captured.get().sandboxRequired());
         assertEquals("mvn -q -DskipTests test-compile", captured.get().command());
     }

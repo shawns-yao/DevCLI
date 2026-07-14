@@ -40,7 +40,7 @@ final class PreReviewVerifier {
         Path normalizedRoot = projectRoot.toAbsolutePath().normalize();
         Path javaRoot = normalizedRoot.resolve("src/main/java");
         if (!Files.isDirectory(javaRoot)) {
-            return Result.ok();
+            return Result.skipped();
         }
 
         if (Files.isRegularFile(normalizedRoot.resolve("pom.xml"))) {
@@ -59,7 +59,7 @@ final class PreReviewVerifier {
             return Result.failed("Pre-review hard check failed: 无法扫描 Java 文件：" + e.getMessage());
         }
         if (javaFiles.isEmpty()) {
-            return Result.ok();
+            return Result.skipped();
         }
 
         Path outputBase = normalizedRoot.resolve("target/devcli-pre-review-classes");
@@ -120,7 +120,7 @@ final class PreReviewVerifier {
                     new CommandExecutionService.Request(
                             command, projectRoot, timeoutSeconds, true));
             if (execution.succeeded()) {
-                return Result.ok();
+                return Result.verified();
             }
             if (execution.timedOut()) {
                 return Result.failed("Pre-review hard check failed: " + displayCommand
@@ -189,17 +189,21 @@ final class PreReviewVerifier {
         return text.substring(0, maxLength) + "\n...<truncated>";
     }
 
-    record Result(boolean passed, String feedback) {
+    record Result(boolean passed, boolean hardCheckExecuted, String feedback) {
         Result {
             feedback = feedback == null ? "" : feedback;
         }
 
-        static Result ok() {
-            return new Result(true, "");
+        static Result skipped() {
+            return new Result(true, false, "");
+        }
+
+        static Result verified() {
+            return new Result(true, true, "");
         }
 
         static Result failed(String feedback) {
-            return new Result(false,
+            return new Result(false, true,
                     feedback == null ? "Pre-review hard check failed" : feedback);
         }
     }
