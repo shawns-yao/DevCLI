@@ -1694,7 +1694,8 @@ public class AgentOrchestrator {
                         TeamWorkerProtocol.buildMandatoryToolTask(
                                 step.description(), protocolRepairs));
                 result = executeWorkerOnce(
-                        step, worker, repairTask, executionContext, out, workerForkContext);
+                        step, worker, repairTask, executionContext, out, workerForkContext,
+                        LlmClient.ToolChoice.REQUIRED);
                 continue;
             }
             return result;
@@ -1704,11 +1705,20 @@ public class AgentOrchestrator {
     private AgentMessage executeWorkerOnce(ExecutionStep step, SubAgent worker, AgentMessage taskMsg,
                                            String context, PrintStream out,
                                            SubAgent.ForkContext workerForkContext) {
+        return executeWorkerOnce(step, worker, taskMsg, context, out,
+                workerForkContext, LlmClient.ToolChoice.AUTO);
+    }
+
+    private AgentMessage executeWorkerOnce(ExecutionStep step, SubAgent worker, AgentMessage taskMsg,
+                                           String context, PrintStream out,
+                                           SubAgent.ForkContext workerForkContext,
+                                           LlmClient.ToolChoice toolChoice) {
         try {
             ToolRegistry registry = activeToolRegistry();
             return registry.runWithResourceLease(step.id(), () -> workerForkContext == null
-                    ? worker.executeWithContext(taskMsg, context, out)
-                    : worker.executeForkedWithContext(taskMsg, context, workerForkContext, out));
+                    ? worker.executeWithContext(taskMsg, context, out, toolChoice)
+                    : worker.executeForkedWithContext(
+                            taskMsg, context, workerForkContext, out, toolChoice));
         } finally {
             activeToolRegistry().releaseResourceLeases(step.id());
         }

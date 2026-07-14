@@ -391,29 +391,35 @@ public class SubAgent {
      * 避免多个 Agent 同时写入 System.out 造成输出交错。
      */
     public AgentMessage execute(AgentMessage task, PrintStream out) {
+        return execute(task, out, LlmClient.ToolChoice.AUTO);
+    }
+
+    private AgentMessage execute(AgentMessage task, PrintStream out, LlmClient.ToolChoice toolChoice) {
         log.info("[{}] executing task from {}: type={}", name, task.fromAgent(), task.type());
         executionEvidence.set(new ExecutionEvidenceAccumulator());
         currentSkillActivationText = task == null || task.content() == null ? "" : task.content();
         pruneHistoricalImagePayloads();
         refreshSystemPrompt();
-        return executeWithHistory(task, out, conversationHistory);
+        return executeWithHistory(task, out, conversationHistory, null, toolChoice);
     }
 
     public AgentMessage executeForked(AgentMessage task, ForkContext forkContext, PrintStream out) {
+        return executeForked(task, forkContext, out, LlmClient.ToolChoice.AUTO);
+    }
+
+    private AgentMessage executeForked(AgentMessage task, ForkContext forkContext, PrintStream out,
+                                       LlmClient.ToolChoice toolChoice) {
         executionEvidence.set(new ExecutionEvidenceAccumulator());
         currentSkillActivationText = task == null || task.content() == null ? "" : task.content();
         ForkContext context = forkContext == null ? createForkContext() : forkContext;
         List<LlmClient.Message> forkedHistory = new ArrayList<>(context.sharedPrefix());
-        return executeWithHistory(task, out, forkedHistory, context);
-    }
-
-    private AgentMessage executeWithHistory(AgentMessage task, PrintStream out, List<LlmClient.Message> history) {
-        return executeWithHistory(task, out, history, null);
+        return executeWithHistory(task, out, forkedHistory, context, toolChoice);
     }
 
     private AgentMessage executeWithHistory(AgentMessage task, PrintStream out,
                                             List<LlmClient.Message> history,
-                                            ForkContext forkContext) {
+                                            ForkContext forkContext,
+                                            LlmClient.ToolChoice initialToolChoice) {
         String taskContent = forkContext == null
                 ? prependSkillBodies(task.content(), true)
                 : prependSkillBodies(task.content(), forkContext.skillBodySnapshot());
@@ -441,6 +447,13 @@ public class SubAgent {
                     @Override
                     public LlmClient.StreamListener streamListener() {
                         return streamRenderer;
+                    }
+
+                    @Override
+                    public LlmClient.ToolChoice toolChoice(int iteration) {
+                        return iteration == 1 && initialToolChoice != null
+                                ? initialToolChoice
+                                : LlmClient.ToolChoice.AUTO;
                     }
 
                     @Override
@@ -538,24 +551,36 @@ public class SubAgent {
     }
 
     public AgentMessage executeWithContext(AgentMessage task, String context, PrintStream out) {
+        return executeWithContext(task, context, out, LlmClient.ToolChoice.AUTO);
+    }
+
+    AgentMessage executeWithContext(AgentMessage task, String context, PrintStream out,
+                                    LlmClient.ToolChoice toolChoice) {
         String enrichedContent = task.content();
         if (context != null && !context.isEmpty()) {
             enrichedContent = context + "\n\n当前任务：" + task.content();
         }
         AgentMessage enrichedTask = new AgentMessage(task.fromAgent(), task.fromRole(),
                 enrichedContent, task.type());
-        return execute(enrichedTask, out);
+        return execute(enrichedTask, out, toolChoice);
     }
 
     public AgentMessage executeForkedWithContext(AgentMessage task, String context,
                                                  ForkContext forkContext, PrintStream out) {
+        return executeForkedWithContext(
+                task, context, forkContext, out, LlmClient.ToolChoice.AUTO);
+    }
+
+    AgentMessage executeForkedWithContext(AgentMessage task, String context,
+                                          ForkContext forkContext, PrintStream out,
+                                          LlmClient.ToolChoice toolChoice) {
         String enrichedContent = task.content();
         if (context != null && !context.isEmpty()) {
             enrichedContent = context + "\n\n当前任务：" + task.content();
         }
         AgentMessage enrichedTask = new AgentMessage(task.fromAgent(), task.fromRole(),
                 enrichedContent, task.type());
-        return executeForked(enrichedTask, forkContext, out);
+        return executeForked(enrichedTask, forkContext, out, toolChoice);
     }
 
     /**

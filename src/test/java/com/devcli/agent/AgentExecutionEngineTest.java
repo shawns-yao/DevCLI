@@ -36,6 +36,7 @@ class AgentExecutionEngineTest {
         assertEquals(List.of("before:1", "tools:1", "before:2", "complete"), delegate.events);
         assertEquals(List.of("system", "assistant", "tool", "assistant"),
                 delegate.history.stream().map(LlmClient.Message::role).toList());
+        assertEquals(List.of(LlmClient.ToolChoice.REQUIRED, LlmClient.ToolChoice.AUTO), llm.toolChoices);
     }
 
     private static final class RecordingDelegate implements AgentExecutionEngine.Delegate<String> {
@@ -55,6 +56,11 @@ class AgentExecutionEngineTest {
         @Override
         public LlmClient.StreamListener streamListener() {
             return LlmClient.StreamListener.NO_OP;
+        }
+
+        @Override
+        public LlmClient.ToolChoice toolChoice(int iteration) {
+            return iteration == 1 ? LlmClient.ToolChoice.REQUIRED : LlmClient.ToolChoice.AUTO;
         }
 
         @Override
@@ -100,6 +106,7 @@ class AgentExecutionEngineTest {
 
     private static final class ScriptedClient extends GLMClient {
         private final Iterator<LlmClient.ChatResponse> responses;
+        private final List<LlmClient.ToolChoice> toolChoices = new ArrayList<>();
 
         private ScriptedClient(List<LlmClient.ChatResponse> responses) {
             super("test-key");
@@ -108,6 +115,13 @@ class AgentExecutionEngineTest {
 
         @Override
         public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {
+            return chat(messages, tools, listener, LlmClient.ToolChoice.AUTO);
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools,
+                                 StreamListener listener, LlmClient.ToolChoice toolChoice) throws IOException {
+            toolChoices.add(toolChoice);
             if (!responses.hasNext()) {
                 throw new IOException("script exhausted");
             }

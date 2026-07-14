@@ -20,6 +20,10 @@ final class AgentExecutionEngine<R> {
 
         LlmClient.StreamListener streamListener();
 
+        default LlmClient.ToolChoice toolChoice(int iteration) {
+            return LlmClient.ToolChoice.AUTO;
+        }
+
         default int maxIterations() {
             return Integer.MAX_VALUE;
         }
@@ -88,7 +92,8 @@ final class AgentExecutionEngine<R> {
                         delegate.toolDefinitions(iteration),
                         delegate.streamListener() == null
                                 ? LlmClient.StreamListener.NO_OP
-                                : delegate.streamListener());
+                                : delegate.streamListener(),
+                        delegate.toolChoice(iteration));
                 if (delegate.isCancelled()) {
                     return delegate.cancelled(budget);
                 }

@@ -59,6 +59,7 @@ public class AnthropicClient implements LlmClient {
 
     @Override
     public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {
+        ToolChoice toolChoice = LlmToolChoiceContext.current();
         StreamListener delegate = listener == null ? StreamListener.NO_OP : listener;
         java.util.concurrent.atomic.AtomicBoolean streamed = new java.util.concurrent.atomic.AtomicBoolean();
         StreamListener tracking = new StreamListener() {
@@ -77,7 +78,7 @@ public class AnthropicClient implements LlmClient {
         return LlmRetryExecutor.execute(getProviderName(), getModelName(),
                 LlmRetryPolicy.fromSystemProperties(), Thread::sleep, () -> {
                     try {
-                        return chatOnce(messages, tools, tracking);
+                        return chatOnce(messages, tools, tracking, toolChoice);
                     } catch (IOException error) {
                         LlmException normalized = LlmErrors.normalize(getProviderName(), getModelName(), error);
                         throw streamed.get() ? normalized.withoutRetry() : normalized;
@@ -86,9 +87,10 @@ public class AnthropicClient implements LlmClient {
     }
 
     private ChatResponse chatOnce(List<Message> messages, List<Tool> tools,
-                                  StreamListener streamListener) throws IOException {
+                                  StreamListener streamListener,
+                                  ToolChoice toolChoice) throws IOException {
         RequestBody body = RequestBody.create(
-                buildRequestBody(messages, tools).toString(),
+                buildRequestBody(messages, tools, toolChoice).toString(),
                 MediaType.parse("application/json")
         );
 
@@ -144,7 +146,7 @@ public class AnthropicClient implements LlmClient {
         return "anthropic-messages";
     }
 
-    private ObjectNode buildRequestBody(List<Message> messages, List<Tool> tools) {
+    ObjectNode buildRequestBody(List<Message> messages, List<Tool> tools, ToolChoice toolChoice) {
         ObjectNode requestBody = mapper.createObjectNode();
         requestBody.put("model", model);
         requestBody.put("max_tokens", maxOutputTokens());
@@ -169,6 +171,9 @@ public class AnthropicClient implements LlmClient {
                 toolNode.put("name", tool.name());
                 toolNode.put("description", tool.description());
                 toolNode.set("input_schema", tool.parameters());
+            }
+            if (toolChoice == ToolChoice.REQUIRED) {
+                requestBody.putObject("tool_choice").put("type", "any");
             }
         }
         return requestBody;

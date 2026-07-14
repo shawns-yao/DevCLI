@@ -12,6 +12,16 @@ public interface LlmClient {
 
     ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException;
 
+    default ChatResponse chat(List<Message> messages, List<Tool> tools,
+                              StreamListener listener, ToolChoice toolChoice) throws IOException {
+        return LlmToolChoiceContext.call(toolChoice, () -> chat(messages, tools, listener));
+    }
+
+    enum ToolChoice {
+        AUTO,
+        REQUIRED
+    }
+
     String getModelName();
 
     String getProviderName();

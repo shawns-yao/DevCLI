@@ -57,6 +57,7 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
 
     @Override
     public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {
+        ToolChoice toolChoice = LlmToolChoiceContext.current();
         StreamListener delegate = listener == null ? StreamListener.NO_OP : listener;
         java.util.concurrent.atomic.AtomicBoolean streamed = new java.util.concurrent.atomic.AtomicBoolean();
         StreamListener tracking = new StreamListener() {
@@ -75,7 +76,7 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
         return LlmRetryExecutor.execute(getProviderName(), getModelName(),
                 LlmRetryPolicy.fromSystemProperties(), Thread::sleep, () -> {
                     try {
-                        return chatOnce(messages, tools, tracking);
+                        return chatOnce(messages, tools, tracking, toolChoice);
                     } catch (IOException error) {
                         LlmException normalized = LlmErrors.normalize(getProviderName(), getModelName(), error);
                         throw streamed.get() ? normalized.withoutRetry() : normalized;
@@ -84,9 +85,10 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
     }
 
     private ChatResponse chatOnce(List<Message> messages, List<Tool> tools,
-                                  StreamListener streamListener) throws IOException {
+                                  StreamListener streamListener,
+                                  ToolChoice toolChoice) throws IOException {
         RequestBody body = RequestBody.create(
-                buildRequestBody(messages, tools).toString(),
+                buildRequestBody(messages, tools, toolChoice).toString(),
                 MediaType.parse("application/json")
         );
 
@@ -252,7 +254,8 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
         return cached;
     }
 
-    private ObjectNode buildRequestBody(List<Message> messages, List<Tool> tools) {
+    protected final ObjectNode buildRequestBody(List<Message> messages, List<Tool> tools,
+                                                ToolChoice toolChoice) {
         ObjectNode requestBody = mapper.createObjectNode();
         requestBody.put("model", getModel());
         requestBody.put("stream", true);
@@ -294,6 +297,9 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                 functionNode.put("name", tool.name());
                 functionNode.put("description", tool.description());
                 functionNode.set("parameters", tool.parameters());
+            }
+            if (toolChoice == ToolChoice.REQUIRED) {
+                requestBody.put("tool_choice", "required");
             }
         }
         customizeRequestBody(requestBody);
