@@ -16,6 +16,7 @@ import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillIndexFormatter;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.tool.ToolRegistry;
+import com.devcli.tool.ToolStatus;
 import com.devcli.tool.ToolRegistry.ToolExecutionResult;
 import com.devcli.tool.ToolRegistry.ToolInvocation;
 import com.devcli.util.AnsiStyle;
@@ -70,6 +71,46 @@ public class SubAgent {
         }
     }
 
+    record ToolEvidence(String name, ToolStatus status, String result) {
+        public ToolEvidence {
+            name = name == null ? "unknown" : name;
+            status = status == null ? ToolStatus.ERROR : status;
+            result = result == null ? "" : result;
+        }
+    }
+
+    record ExecutionEvidence(List<ToolEvidence> toolResults) {
+        public ExecutionEvidence {
+            toolResults = List.copyOf(toolResults == null ? List.of() : toolResults);
+        }
+
+        public static ExecutionEvidence empty() {
+            return new ExecutionEvidence(List.of());
+        }
+
+        public long successfulToolCalls() {
+            return toolResults.stream().filter(result -> result.status() == ToolStatus.SUCCESS).count();
+        }
+
+        public boolean hasSuccessfulToolCall() {
+            return successfulToolCalls() > 0;
+        }
+    }
+
+    private static final class ExecutionEvidenceAccumulator {
+        private final List<ToolEvidence> toolResults = new ArrayList<>();
+
+        private void add(ToolExecutionResult result) {
+            if (result != null) {
+                toolResults.add(new ToolEvidence(result.name(), result.status(), result.result()));
+            }
+        }
+
+        private ExecutionEvidence snapshot() {
+            return new ExecutionEvidence(toolResults);
+        }
+    }
+
     private final String name;
     private final AgentRole role;
     private final LlmClient llmClient;
@@ -85,6 +126,8 @@ public class SubAgent {
     private SkillContextBuffer skillContextBuffer;
     private final ConversationHistoryCompactor historyCompactor;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
+    private final AtomicReference<ExecutionEvidenceAccumulator> executionEvidence =
+            new AtomicReference<>(new ExecutionEvidenceAccumulator());
     private String currentSkillActivationText = "";
 
     public SubAgent(String name, AgentRole role, LlmClient llmClient, ToolRegistry toolRegistry) {
@@ -349,6 +392,7 @@ public class SubAgent {
      */
     public AgentMessage execute(AgentMessage task, PrintStream out) {
         log.info("[{}] executing task from {}: type={}", name, task.fromAgent(), task.type());
+        executionEvidence.set(new ExecutionEvidenceAccumulator());
         currentSkillActivationText = task == null || task.content() == null ? "" : task.content();
         pruneHistoricalImagePayloads();
         refreshSystemPrompt();
@@ -356,6 +400,7 @@ public class SubAgent {
     }
 
     public AgentMessage executeForked(AgentMessage task, ForkContext forkContext, PrintStream out) {
+        executionEvidence.set(new ExecutionEvidenceAccumulator());
         currentSkillActivationText = task == null || task.content() == null ? "" : task.content();
         ForkContext context = forkContext == null ? createForkContext() : forkContext;
         List<LlmClient.Message> forkedHistory = new ArrayList<>(context.sharedPrefix());
@@ -438,6 +483,7 @@ public class SubAgent {
                                                  int iteration,
                                                  AgentBudget currentBudget) {
                         for (ToolExecutionResult toolResult : toolResults) {
+                            executionEvidence.get().add(toolResult);
                             toolResultConsumer.accept(
                                     toolResult.name(), toolResult.argumentsJson(), toolResult.result());
                         }
@@ -749,6 +795,11 @@ public class SubAgent {
         } catch (Exception e) {
             return argsJson.length() > 80 ? argsJson.substring(0, 77) + "..." : argsJson;
         }
+    }
+
+    ExecutionEvidence getLastExecutionEvidence() {
+        ExecutionEvidenceAccumulator accumulator = executionEvidence.get();
+        return accumulator == null ? ExecutionEvidence.empty() : accumulator.snapshot();
     }
 
     public String getName() {

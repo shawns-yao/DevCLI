@@ -11,9 +11,12 @@ import com.devcli.memory.LongTermMemory;
 import com.devcli.memory.MemoryManager;
 import com.devcli.skill.SkillContextBuffer;
 import com.devcli.tool.ToolRegistry;
+import com.devcli.tool.ToolStatus;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -81,6 +84,27 @@ class AgentOrchestratorTest {
         } finally {
             if (prev == null) System.clearProperty("devcli.team.workers");
             else System.setProperty("devcli.team.workers", prev);
+        }
+    }
+
+    @Test
+    void resolvePlannerRepairAttemptsReadsAndClampsSystemProperty() {
+        String previous = System.getProperty("devcli.team.planner.repair.max.attempts");
+        try {
+            System.setProperty("devcli.team.planner.repair.max.attempts", "1");
+            assertEquals(1, TeamPlannerProtocol.resolveRepairAttempts());
+            System.setProperty("devcli.team.planner.repair.max.attempts", "99");
+            assertEquals(TeamPlannerProtocol.MAX_REPAIR_ATTEMPTS,
+                    TeamPlannerProtocol.resolveRepairAttempts());
+            System.setProperty("devcli.team.planner.repair.max.attempts", "invalid");
+            assertEquals(TeamPlannerProtocol.DEFAULT_REPAIR_ATTEMPTS,
+                    TeamPlannerProtocol.resolveRepairAttempts());
+        } finally {
+            if (previous == null) {
+                System.clearProperty("devcli.team.planner.repair.max.attempts");
+            } else {
+                System.setProperty("devcli.team.planner.repair.max.attempts", previous);
+            }
         }
     }
 
@@ -171,6 +195,58 @@ class AgentOrchestratorTest {
 
         List<AgentOrchestrator.ExecutionStep> steps = orchestrator.parsePlan(planJson);
         assertEquals(1, steps.size());
+    }
+
+    @Test
+    void workspaceDiscoveryValidationShouldDependOnUserDeliveryIntent() {
+        List<AgentOrchestrator.ExecutionStep> steps = List.of(
+                AgentOrchestrator.ExecutionStep.pending(
+                        "step_1", "检查空工作区目录是否存在", "ANALYSIS", List.of()));
+
+        assertNull(TeamPlannerProtocol.validate(
+                steps, "检查空工作区目录是否存在",
+                AgentOrchestrator.ExecutionStep::id,
+                AgentOrchestrator.ExecutionStep::description,
+                AgentOrchestrator.ExecutionStep::dependencies));
+        assertNotNull(TeamPlannerProtocol.validate(
+                steps, "在空工作区实现核心功能",
+                AgentOrchestrator.ExecutionStep::id,
+                AgentOrchestrator.ExecutionStep::description,
+                AgentOrchestrator.ExecutionStep::dependencies));
+    }
+
+    @Test
+    void workerEvidenceSummaryShouldExposeSuccessfulAndFailedTools() {
+        SubAgent.ExecutionEvidence evidence = new SubAgent.ExecutionEvidence(List.of(
+                new SubAgent.ToolEvidence("list_dir", ToolStatus.SUCCESS, ""),
+                new SubAgent.ToolEvidence("write_file", ToolStatus.ERROR, "策略拒绝")));
+
+        String summary = AgentOrchestrator.resolveWorkerResultContent("", evidence);
+
+        assertTrue(summary.contains("成功工具：1/2"), summary);
+        assertTrue(summary.contains("list_dir"), summary);
+        assertTrue(summary.contains("未成功 write_file [ERROR]"), summary);
+        assertTrue(summary.contains("策略拒绝"), summary);
+    }
+
+    @Test
+    void shouldParsePlanJsonSurroundedByExplanationText() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        String planJson = """
+                下面是执行计划：
+                {
+                  "summary": "实现功能",
+                  "steps": [
+                    {"id": "s1", "description": "实现核心功能", "type": "FILE_WRITE", "dependencies": []}
+                  ]
+                }
+                请按计划执行。
+                """;
+
+        List<AgentOrchestrator.ExecutionStep> steps = orchestrator.parsePlan(planJson);
+
+        assertEquals(1, steps.size());
+        assertEquals("实现核心功能", steps.get(0).description());
     }
 
     @Test
@@ -431,6 +507,189 @@ class AgentOrchestratorTest {
                     "worker context should include the original user task");
             assertTrue(reviewerInputs.get(0).contains(fullRequirement),
                     "reviewer context should include the original user task");
+        }
+    }
+
+    @Test
+    void plannerInvalidProtocolShouldBeRepairedBeforeExecution(@TempDir Path tempDir) {
+        AtomicInteger plannerCalls = new AtomicInteger();
+        AtomicInteger workerCalls = new AtomicInteger();
+        List<String> plannerInputs = new CopyOnWriteArrayList<>();
+
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                plannerCalls.incrementAndGet();
+                plannerInputs.add(body);
+                return response("我先检查项目结构，再制定计划。");
+            }
+            if (body.contains("上次规划输出无法解析")) {
+                plannerCalls.incrementAndGet();
+                plannerInputs.add(body);
+                return response("""
+                        {
+                          "summary": "直接实现",
+                          "steps": [
+                            {"id": "s1", "description": "实现核心功能", "type": "ANALYSIS", "dependencies": []}
+                          ]
+                        }
+                        """);
+            }
+            if (body.contains("原始任务")) {
+                return response(approvedReviewJson());
+            }
+            if (body.contains("实现核心功能") || body.contains("最终集成")) {
+                workerCalls.incrementAndGet();
+                return response("worker result");
+            }
+            return response("fallback");
+        };
+
+        RecordingDispatchingStubGLMClient llmClient = new RecordingDispatchingStubGLMClient(dispatcher);
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(llmClient, isolatedToolRegistry(tempDir), mm);
+
+            String result = orchestrator.run("在空工作区实现核心功能");
+
+            assertFalse(result.contains("规划失败"), result);
+            assertEquals(2, plannerCalls.get());
+            assertTrue(workerCalls.get() >= 1, "repaired plan should reach worker execution");
+            assertTrue(plannerInputs.get(1).contains("只输出 JSON"));
+            assertTrue(plannerInputs.get(1).contains("工作区可能为空"));
+        }
+    }
+
+    @Test
+    void plannerBlockingWorkspaceDiscoveryShouldBeRepairedBeforeExecution(@TempDir Path tempDir) {
+        AtomicInteger plannerCalls = new AtomicInteger();
+        AtomicInteger blockedStepExecutions = new AtomicInteger();
+        AtomicInteger implementationExecutions = new AtomicInteger();
+
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                plannerCalls.incrementAndGet();
+                return response("""
+                        {
+                          "summary": "先检查再实现",
+                          "steps": [
+                            {"id": "s1", "description": "检查空工作区目录是否存在", "type": "ANALYSIS", "dependencies": []},
+                            {"id": "s2", "description": "实现核心功能", "type": "ANALYSIS", "dependencies": ["s1"]}
+                          ]
+                        }
+                        """);
+            }
+            if (body.contains("阻塞性纯检查步骤")) {
+                plannerCalls.incrementAndGet();
+                return response("""
+                        {
+                          "summary": "直接实现",
+                          "steps": [
+                            {"id": "s1", "description": "实现核心功能，若目标不存在则创建", "type": "ANALYSIS", "dependencies": []}
+                          ]
+                        }
+                        """);
+            }
+            if (body.startsWith("原始任务：")) {
+                return response(approvedReviewJson());
+            }
+            if (body.contains("检查空工作区目录是否存在")) {
+                blockedStepExecutions.incrementAndGet();
+                return response("checked");
+            }
+            if (body.contains("实现核心功能") || body.contains("最终集成")) {
+                implementationExecutions.incrementAndGet();
+                return response("implemented");
+            }
+            return response("fallback");
+        };
+
+        DispatchingStubGLMClient llmClient = new DispatchingStubGLMClient(dispatcher);
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(llmClient, isolatedToolRegistry(tempDir), mm);
+
+            String result = orchestrator.run("在空工作区实现核心功能");
+
+            assertFalse(result.contains("规划失败"), result);
+            assertEquals(2, plannerCalls.get());
+            assertEquals(0, blockedStepExecutions.get(), "blocking discovery step must not execute");
+            assertTrue(implementationExecutions.get() >= 1);
+        }
+    }
+
+    @Test
+    void blankWorkerContentWithSuccessfulToolEvidenceShouldReachReviewer(@TempDir Path tempDir) {
+        AtomicInteger workerTurns = new AtomicInteger();
+        AtomicInteger reviewerCalls = new AtomicInteger();
+
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                return response("""
+                        {
+                          "summary": "检查空工作区",
+                          "steps": [
+                            {"id": "s1", "description": "检查空工作区状态", "type": "ANALYSIS", "dependencies": []}
+                          ]
+                        }
+                        """);
+            }
+            if (body.contains("原始任务")) {
+                reviewerCalls.incrementAndGet();
+                return response(approvedReviewJson());
+            }
+            if (body.contains("最终集成")) {
+                return response("integration result");
+            }
+            if (workerTurns.getAndIncrement() == 0) {
+                return toolResponse("call-list", "list_dir", "{\"path\":\".\"}");
+            }
+            return response("");
+        };
+
+        RecordingDispatchingStubGLMClient llmClient = new RecordingDispatchingStubGLMClient(dispatcher);
+        ByteArrayOutputStream stdout = new ByteArrayOutputStream();
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    llmClient,
+                    isolatedToolRegistry(tempDir),
+                    mm,
+                    new PrintStream(stdout, true, StandardCharsets.UTF_8));
+
+            String result = orchestrator.run("检查空工作区后继续执行");
+
+            assertFalse(result.contains("执行结果为空"), result);
+            assertFalse(stdout.toString(StandardCharsets.UTF_8).contains("步骤 [step_1] 执行失败：结果为空"));
+            assertTrue(reviewerCalls.get() >= 1, "successful tool evidence should be reviewed");
+        }
+    }
+
+    @Test
+    void blankWorkerContentWithoutSuccessfulToolEvidenceShouldStillFail(@TempDir Path tempDir) {
+        AtomicInteger reviewerCalls = new AtomicInteger();
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                return response("""
+                        {
+                          "summary": "无工具结果",
+                          "steps": [
+                            {"id": "s1", "description": "直接分析", "type": "ANALYSIS", "dependencies": []}
+                          ]
+                        }
+                        """);
+            }
+            if (body.contains("原始任务")) {
+                reviewerCalls.incrementAndGet();
+                return response(approvedReviewJson());
+            }
+            return response("");
+        };
+
+        DispatchingStubGLMClient llmClient = new DispatchingStubGLMClient(dispatcher);
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(llmClient, isolatedToolRegistry(tempDir), mm);
+
+            String result = orchestrator.run("执行无工具分析");
+
+            assertTrue(result.contains("执行结果为空"), result);
+            assertEquals(0, reviewerCalls.get(), "empty result without evidence must not reach reviewer");
         }
     }
 

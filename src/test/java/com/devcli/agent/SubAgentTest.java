@@ -34,6 +34,18 @@ class SubAgentTest {
     }
 
     @Test
+    void plannerPromptShouldTreatEmptyWorkspaceAsValidAndAvoidBlockingDiscoverySteps() {
+        SubAgent planner = new SubAgent("planner", AgentRole.PLANNER,
+                new GLMClient("test-key"), new ToolRegistry());
+
+        String systemPrompt = planner.createForkContext().sharedPrefix().get(0).content();
+
+        assertTrue(systemPrompt.contains("空工作区"), systemPrompt);
+        assertTrue(systemPrompt.contains("阻塞性独立步骤"), systemPrompt);
+        assertTrue(systemPrompt.contains("若不存在则创建"), systemPrompt);
+    }
+
+    @Test
     void shouldRouteLateReasoningToSupplementalSection() {
         // 模拟服务器先下发 content、再追加 reasoning 的情况
         ScriptedStreamClient llm = new ScriptedStreamClient(listener -> {

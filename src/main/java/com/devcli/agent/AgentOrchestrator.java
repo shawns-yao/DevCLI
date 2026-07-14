@@ -337,6 +337,54 @@ public class AgentOrchestrator {
         agent.setSkillContextBuffer(skillContextBuffer == null ? null : skillContextBuffer.copy());
     }
 
+    private record PlanGenerationResult(AgentMessage message, List<ExecutionStep> steps) {
+        private PlanGenerationResult {
+            steps = steps == null ? new ArrayList<>() : new ArrayList<>(steps);
+        }
+    }
+
+    private PlanGenerationResult requestValidatedPlan(String userInput) {
+        AgentMessage result = executePlanner(AgentMessage.task("orchestrator",
+                "请为以下任务制定执行计划：\n" + Objects.toString(userInput, "")));
+        if (result.type() == AgentMessage.Type.ERROR) {
+            return new PlanGenerationResult(result, List.of());
+        }
+
+        List<ExecutionStep> steps = parsePlan(result.content());
+        String planIssue = TeamPlannerProtocol.validate(
+                steps, userInput, ExecutionStep::id, ExecutionStep::description, ExecutionStep::dependencies);
+        int maxRepairAttempts = TeamPlannerProtocol.resolveRepairAttempts();
+        for (int attempt = 1; planIssue != null && attempt <= maxRepairAttempts; attempt++) {
+            if (CancellationContext.isCancelled()) {
+                break;
+            }
+            out.println("⚠️ 规划输出未通过协议或结构校验，正在请求修复 (" + attempt
+                    + "/" + maxRepairAttempts + ")...\n");
+            result = executePlanner(AgentMessage.task("orchestrator",
+                    TeamPlannerProtocol.buildRepairPrompt(
+                            userInput, result.content(), planIssue, attempt)));
+            if (result.type() == AgentMessage.Type.ERROR) {
+                return new PlanGenerationResult(result, List.of());
+            }
+            steps = parsePlan(result.content());
+            planIssue = TeamPlannerProtocol.validate(
+                    steps, userInput, ExecutionStep::id, ExecutionStep::description, ExecutionStep::dependencies);
+        }
+        if (planIssue != null) {
+            log.warn("Planner output remained invalid after repair attempts: {}", planIssue);
+            return new PlanGenerationResult(result, List.of());
+        }
+        return new PlanGenerationResult(result, steps);
+    }
+
+    private AgentMessage executePlanner(AgentMessage message) {
+        try {
+            return planner.execute(message, out);
+        } finally {
+            planner.clearHistory();
+        }
+    }
+
     /**
      * 运行多 Agent 协作任务
      */
@@ -363,10 +411,8 @@ public class AgentOrchestrator {
             out.println(AnsiStyle.heading("📋 第一阶段：规划"));
             out.println("🧑‍💼 规划者正在分析任务...\n");
 
-            AgentMessage planMessage = AgentMessage.task("orchestrator",
-                    "请为以下任务制定执行计划：\n" + userInput);
-            AgentMessage planResult = planner.execute(planMessage, out);
-            planner.clearHistory();
+            PlanGenerationResult planGeneration = requestValidatedPlan(userInput);
+            AgentMessage planResult = planGeneration.message();
             if (CancellationContext.isCancelled()) {
                 finalResultForSummary = "⏹️ 已取消当前多 Agent 任务。";
                 return finalResultForSummary;
@@ -376,15 +422,12 @@ public class AgentOrchestrator {
                 finalResultForSummary = "❌ 规划阶段失败，规划者 LLM 调用出错：" + planResult.content();
                 return finalResultForSummary;
             }
-            if (planResult.content() == null || planResult.content().isBlank()) {
-                finalResultForSummary = "❌ 规划失败：规划者未能生成有效计划";
-                return finalResultForSummary;
-            }
 
-            // 2. 解析计划（parsePlan 内部已做超步数粗化）
-            List<ExecutionStep> steps = parsePlan(planResult.content());
+            // 2. 解析计划（requestValidatedPlan 已完成协议校验和超步数粗化）
+            List<ExecutionStep> steps = planGeneration.steps();
             if (steps.isEmpty()) {
-                finalResultForSummary = "❌ 规划失败：无法解析执行计划\n原始输出:\n" + planResult.content();
+                finalResultForSummary = "❌ 规划失败：无法解析执行计划\n原始输出:\n"
+                        + Objects.toString(planResult.content(), "");
                 return finalResultForSummary;
             }
             steps = appendFinalIntegrationStep(steps);
@@ -672,17 +715,18 @@ public class AgentOrchestrator {
                 log.debug("Plan JSON last 500 chars:\n{}", planJson.substring(Math.max(0, planJson.length() - 500)));
             }
 
-            String cleaned = planJson.replaceAll("```json\\s*", "")
+            String cleaned = Objects.toString(planJson, "")
+                    .replaceAll("```json\\s*", "")
                     .replaceAll("```\\s*", "")
                     .trim();
 
             log.debug("After cleaning, JSON length={}", cleaned.length());
-            if (!cleaned.startsWith("{")) {
-                log.warn("Cleaned JSON does NOT start with '{{', first 100 chars:\n{}",
-                        cleaned.substring(0, Math.min(100, cleaned.length())));
+            JsonNode root = TeamPlannerProtocol.parsePlanRoot(mapper, cleaned);
+            if (root == null) {
+                log.warn("Planner output does not contain a complete plan JSON object");
+                currentAcceptanceCriteria = List.of();
+                return List.of();
             }
-
-            JsonNode root = mapper.readTree(cleaned);
             currentAcceptanceCriteria = parseAcceptanceCriteria(firstPresent(root,
                     "acceptance_criteria", "acceptanceCriteria", "acceptancecriteria"));
             log.debug("Parsed acceptance criteria: {} items", currentAcceptanceCriteria.size());
@@ -1485,15 +1529,15 @@ public class AgentOrchestrator {
             out.println("❌ 步骤 [" + step.id() + "] 执行失败：" + result.content() + "\n");
             return;
         }
-        if (result.content() == null || result.content().isBlank()) {
+        String acceptedResult = resolveWorkerResultContent(result.content(), worker.getLastExecutionEvidence());
+        if (acceptedResult.isBlank()) {
             updateStep(steps, step.id(), step.withFailed("执行结果为空"));
             out.println("❌ 步骤 [" + step.id() + "] 执行失败：结果为空\n");
             return;
         }
 
-        ReviewDecision reviewDecision = reviewWorkerResult(step, reviewer, result.content(), out, reviewerForkContext);
+        ReviewDecision reviewDecision = reviewWorkerResult(step, reviewer, acceptedResult, out, reviewerForkContext);
         boolean approved = reviewDecision.approved();
-        String acceptedResult = result.content();
 
         if (approved) {
             updateStep(steps, step.id(), step.withResult(acceptedResult));
@@ -1532,15 +1576,16 @@ public class AgentOrchestrator {
                 approved = false;
                 continue;
             }
-            if (retryResult.content() == null || retryResult.content().isBlank()) {
-                acceptedResult = "执行结果为空";
+            acceptedResult = resolveWorkerResultContent(
+                    retryResult.content(), worker.getLastExecutionEvidence());
+            if (acceptedResult.isBlank()) {
                 approved = false;
                 issues = "执行结果为空";
-                log.info("Step {} retry {} returned empty result", step.id(), retries);
+                log.info("Step {} retry {} returned empty result without successful tool evidence",
+                        step.id(), retries);
                 continue;
             }
 
-            acceptedResult = retryResult.content();
             ReviewDecision retryReview = reviewWorkerResult(step, reviewer, acceptedResult, out, reviewerForkContext);
             if (retryReview.reviewerError()) {
                 issues = retryReview.issues();
@@ -1557,6 +1602,62 @@ public class AgentOrchestrator {
             updateStep(steps, step.id(), step.withFailed(issues));
             out.println("❌ 步骤 [" + step.id() + "] 审查未通过，阻止下游步骤继续执行\n");
         }
+    }
+
+    static String resolveWorkerResultContent(String content, SubAgent.ExecutionEvidence evidence) {
+        if (content != null && !content.isBlank()) {
+            return content;
+        }
+        if (evidence == null || !evidence.hasSuccessfulToolCall()) {
+            return "";
+        }
+
+        List<SubAgent.ToolEvidence> successful = evidence.toolResults().stream()
+                .filter(result -> result.status() == com.devcli.tool.ToolStatus.SUCCESS)
+                .toList();
+        List<SubAgent.ToolEvidence> unsuccessful = evidence.toolResults().stream()
+                .filter(result -> result.status() != com.devcli.tool.ToolStatus.SUCCESS)
+                .toList();
+        StringBuilder summary = new StringBuilder()
+                .append("Worker 未返回文字总结，但本轮存在结构化工具执行证据。\n")
+                .append("成功工具：")
+                .append(successful.size())
+                .append('/')
+                .append(evidence.toolResults().size());
+        int previewCount = Math.min(4, successful.size());
+        for (int i = 0; i < previewCount; i++) {
+            SubAgent.ToolEvidence tool = successful.get(i);
+            summary.append("\n- ").append(tool.name()).append(": ");
+            if (tool.result().isBlank()) {
+                summary.append("执行成功，无文本结果");
+            } else {
+                summary.append(previewToolEvidence(tool.result(), 600));
+            }
+        }
+        if (successful.size() > previewCount) {
+            summary.append("\n- 其余成功工具：").append(successful.size() - previewCount).append(" 个");
+        }
+        int failurePreviewCount = Math.min(2, unsuccessful.size());
+        for (int i = 0; i < failurePreviewCount; i++) {
+            SubAgent.ToolEvidence tool = unsuccessful.get(i);
+            summary.append("\n- 未成功 ").append(tool.name())
+                    .append(" [").append(tool.status()).append("]: ")
+                    .append(tool.result().isBlank()
+                            ? "无文本结果"
+                            : previewToolEvidence(tool.result(), 300));
+        }
+        if (unsuccessful.size() > failurePreviewCount) {
+            summary.append("\n- 其余未成功工具：")
+                    .append(unsuccessful.size() - failurePreviewCount).append(" 个");
+        }
+        return summary.toString();
+    }
+
+    private static String previewToolEvidence(String result, int maxLength) {
+        String normalized = result.replace("\r\n", "\n").replace('\r', '\n').trim();
+        return normalized.length() <= maxLength
+                ? normalized
+                : normalized.substring(0, maxLength) + "...";
     }
 
     private AgentMessage executeWorkerWithTransientRetry(ExecutionStep step, SubAgent worker, AgentMessage taskMsg,
