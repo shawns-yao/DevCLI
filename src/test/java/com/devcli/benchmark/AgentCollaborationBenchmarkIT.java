@@ -3,6 +3,7 @@ package com.devcli.benchmark;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.devcli.agent.Agent;
+import com.devcli.agent.AgentBenchmarkTestSupport;
 import com.devcli.agent.AgentOrchestrator;
 import com.devcli.config.DevCliConfig;
 import com.devcli.llm.LlmClient;
@@ -52,7 +53,7 @@ class AgentCollaborationBenchmarkIT {
     private static final int ORDER_MVC_HIDDEN_TOTAL = 15;
     private static final int BANKING_HIDDEN_TOTAL = 20;
     private static final Set<String> ALLOWED_TOOLS = Set.of(
-            "read_file", "write_file", "list_dir", "execute_command"
+            "read_file", "write_file", "list_dir"
     );
 
     @Test
@@ -191,6 +192,7 @@ class AgentCollaborationBenchmarkIT {
         String output;
         try (NoOpMemoryManager memory = new NoOpMemoryManager(workspace.resolve(".memory"))) {
             AgentOrchestrator orchestrator = new AgentOrchestrator(llm, registry, memory, out);
+            AgentBenchmarkTestSupport.deferPreReviewToHiddenValidator(orchestrator);
             output = orchestrator.run(promptFor("planner-worker-reviewer", task));
         } catch (Exception e) {
             return result("planner-worker-reviewer", task, workspace, started, false,
@@ -571,7 +573,14 @@ class AgentCollaborationBenchmarkIT {
     }
 
     private static String promptFor(String mode, BenchmarkTask task) {
-        return task.prompt().replace("${mode}", mode);
+        return task.prompt().replace("${mode}", mode) + """
+
+                Benchmark execution contract:
+                - execute_command is intentionally unavailable in this controlled benchmark.
+                - Do not attempt shell, javac, Maven, Gradle, Docker, or command execution.
+                - Finish production file changes with write_file and report static verification evidence.
+                - After the Agent run, the benchmark hidden validator compiles the workspace and executes behavior checks.
+                """;
     }
 
     private static Evaluation evaluate(Path workspace, BenchmarkTask task) {
