@@ -108,7 +108,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 流程：规划 → 按依赖分配 Worker → Reviewer 审查 → 未通过重试(最多 2 次)
 - Planner 输出先做协议与结构校验：支持从前后说明中提取完整 JSON；解析失败、DAG 无效或阻塞性空工作区纯检查步骤会触发有界修复。修复前清空 Planner 历史，并把原始任务、失败原因、无效输出预览和固定 schema 放入新请求。默认修复 2 次，可通过 `devcli.team.planner.repair.max.attempts` / `DEVCLI_TEAM_PLANNER_REPAIR_MAX_ATTEMPTS` 调整到 `[0, 3]`。
 - Planner 不调用工具；空工作区属于合法状态。目录和文件存在性检查不能成为阻塞实现的独立步骤，必要检查并入首个实现步骤并采用“若不存在则创建”语义。
-- SubAgent 按单次执行保存结构化工具证据。Worker 最终 content 为空但存在 `ToolStatus.SUCCESS` 时，由 Orchestrator 合成有界证据摘要进入 Pre-Review / Reviewer；没有成功证据时由独立 Worker 协议守卫追加一次强制执行上下文，要求文件任务调用 `write_file`、分析任务调用读取工具。修复后仍无成功证据才返回“执行结果为空”。
+- SubAgent 按单次执行保存结构化工具证据。Worker 最终 content 为空但存在 `ToolStatus.SUCCESS` 时，由 Orchestrator 合成有界证据摘要进入 Pre-Review / Reviewer；没有成功证据时由独立 Worker 协议守卫追加一次强制执行上下文，要求文件任务调用 `write_file`、分析任务调用读取工具，并在该请求首轮设置 `LlmClient.ToolChoice.REQUIRED`。Anthropic Messages 请求映射为 `tool_choice: {"type":"any"}`，OpenAI-compatible 请求映射为 `tool_choice: "required"`；工具结果进入下一轮后恢复 AUTO。修复后仍无成功证据才返回“执行结果为空”。
 - SubAgent IOException 返回 ERROR 类型
 - Planner 共享主 ToolRegistry；副作用 Worker 使用 `WorkspaceExecutionSession` 创建隔离 ToolRegistry，Pre-Review 与 Reviewer 在同一隔离目录读取真实产物，MemoryManager 继续共享角色裁剪视图。
 - Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用 `ExecutionArtifact`，统一保存 state、output、summary、modifiedResources、error、attempt、startedAt、finishedAt。

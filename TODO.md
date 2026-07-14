@@ -5,8 +5,8 @@
 - 状态：代码与针对性测试已实现，真实受控评测待复跑
 - 来源：Agent 受控评测中单 Agent 成功率 20%，Planner/Worker/Reviewer 成功率 0%；主要失败来自 Planner 非 JSON 输出、空工作区纯检查步骤阻塞实现，以及 Worker 最终文本为空。首次修复后真实复跑确认 Planner 已生成直接实现步骤，但 Worker 连续两次只描述准备写入、没有调用工具，仍被空结果阻断
 - 影响范围：Multi-Agent 编排、Planner 与 Worker 协议守卫、SubAgent 单次执行证据、角色提示词、配置模板、README、AGENTS、详细架构文档和 Agent 测试
-- 已实现：Planner 支持从前后说明中提取完整 JSON；解析失败、DAG 无效或阻塞性空工作区纯检查步骤触发有界协议修复；修复请求携带原始任务、失败原因、无效输出预览和固定 schema；空工作区检查必须并入实现步骤；Worker 空文本但存在结构化成功工具证据时合成有界摘要进入 Reviewer；没有成功证据时追加一次强制执行协议，代码任务必须调用 write_file 并验证，分析任务必须调用读取工具，修复后仍无证据才失败
-- 已验证：覆盖说明文本包裹 JSON、非 JSON 修复、合法 JSON 中阻塞性检查步骤修复、成功工具证据放行、失败工具证据可见、空结果强制工具修复、修复后仍无证据保持失败，以及 Planner / Worker 提示词约束
+- 已实现：Planner 支持从前后说明中提取完整 JSON；解析失败、DAG 无效或阻塞性空工作区纯检查步骤触发有界协议修复；修复请求携带原始任务、失败原因、无效输出预览和固定 schema；空工作区检查必须并入实现步骤；Worker 空文本但存在结构化成功工具证据时合成有界摘要进入 Reviewer；没有成功证据时追加一次强制执行协议，并通过 Provider 原生 required tool choice 强制首轮工具调用，Anthropic 映射为 tool_choice.type=any，OpenAI-compatible 映射为 tool_choice=required，工具结果后恢复 AUTO
+- 已验证：覆盖说明文本包裹 JSON、非 JSON 修复、合法 JSON 中阻塞性检查步骤修复、成功工具证据放行、失败工具证据可见、空结果强制工具修复、修复后仍无证据保持失败、首轮 REQUIRED 后恢复 AUTO、两类 Provider 请求体映射，以及 Planner / Worker 提示词约束
 - 未验证：加入 Worker 强制执行协议后的 5 个真实模型 Agent 受控任务尚未复跑完成，旧报告中的 Planner/Worker/Reviewer 成功率仍为 0%，不能作为修复后结果
 - 风险：阻塞性检查识别当前采用窄范围语义规则，覆盖空工作区、项目结构、目录和文件存在性；复杂自然语言计划仍依赖修复请求中的模型服从性。强制执行协议只有 1 次，避免无限消耗；最终结果仍必须经过 Pre-Review 与 Reviewer
 
