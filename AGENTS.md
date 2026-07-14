@@ -86,7 +86,7 @@ Side-Git 快照按 `devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX` 保留最近快
 
 Code RAG 检索链路当前为 keyword + semantic + bounded graph → `RRF（倒数排名融合）` → symbol-aware boost → `CrossEncoderReranker（交叉编码器重排）`。Rerank 默认开启，默认指向本地 Docker 暴露的 OpenAI-compatible `/rerank` endpoint；不可用时自动降级回 RRF 结果，不阻断检索。`/index` 按文件批量生成 chunk embedding；批量请求失败或返回数量异常时逐条降级并保留成功 chunk。`ToolRegistry` 会按项目路径复用 `CodeRetriever` / SQLite 连接，项目路径切换时关闭旧连接。索引替换会为变更和删除的 symbol 生成 `negativeFact`，`search_code` 会输出相关失效事实，并附带结构化 `RAG_EVIDENCE_JSON` 载荷供 WorkingMemory 清理旧 RAG 证据，展示文本变化不应影响证据提取。keyword 通道保持 SQLite 索引实现，`grep_code` 作为独立实时精确检索工具存在，不替代 `search_code`，用于类名、方法名、配置键、错误文本和固定字符串片段定位。长文档型 definition 查询直接使用 semantic route，避免 keyword fusion 与 reranker 对文档描述引入排序噪声；短符号查询仍保留 precise-first 链路。
 
-量化评测覆盖 RAG、Agent、Memory 和 Context Compression。RAG 可接入 CodeSearchNet Java 公共 test split，统一输出 Recall@5、MRR@5、nDCG@5；Agent 输出任务成功率，Memory 输出写入准确率与 Recall@5，Compression 输出事实保真率。原始报告位于 `target/benchmark-reports/` 和 `target/agent-benchmark/`，聚合报告写入 `Data/processed/` 与 `Data/manifest/`；详细方法见 `docs/benchmark-evaluation.md`。
+量化评测覆盖 RAG、Agent、Memory 和 Context Compression。RAG 可接入 CodeSearchNet Java 公共 test split，统一输出 Recall@5、MRR@5、nDCG@5；Agent 输出任务成功率，Memory 输出写入准确率与 Recall@5，Compression 输出事实保真率。受控 Agent benchmark 不暴露 `execute_command`，由隐藏验证器在运行后统一编译和执行行为检查，避免 Docker daemon 状态污染模型指标；生产 Pre-Review 仍强制 Docker。原始报告位于 `target/benchmark-reports/` 和 `target/agent-benchmark/`，聚合报告写入 `Data/processed/` 与 `Data/manifest/`；详细方法见 `docs/benchmark-evaluation.md`。
 
 MCP 动态工具：`mcp__{server}__{tool}`（+ resources 虚拟工具）
 

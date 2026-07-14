@@ -55,7 +55,7 @@ CodeSearchNet Java 公共 test split 采样 50 条，Top-K 固定为 5：
 
 ### Agent
 
-每个模式执行同一组 5 个任务，任务成功要求 LLM 执行完成且全部隐藏检查通过：
+每个模式执行同一组 5 个任务，任务成功要求 LLM 执行完成且全部隐藏检查通过。为避免本机 Docker daemon 状态污染模型能力指标，受控 Agent benchmark 不向模型暴露 `execute_command`，Multi-Agent 的 Pre-Review 编译交由测试侧隐藏验证器统一执行；生产运行时仍保持隔离命令和 Pre-Review 强制 Docker、禁止主机回退：
 
 | 模式 | 任务成功率 | 隐藏检查平均完成率 | 平均隐藏失败率 |
 | --- | ---: | ---: | ---: |

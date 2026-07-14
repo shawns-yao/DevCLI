@@ -660,7 +660,7 @@ Lanterna renderer 保留为全屏三栏 TUI；plain renderer 适合 CI、日志�
 
 ## Benchmark Evaluation
 
-项目提供 RAG、Agent、Memory 和 Context Compression 四类量化评测。RAG 支持 CodeSearchNet Java 公共 test split，并输出 Recall@5、MRR@5、nDCG@5；其余三类当前使用项目内受控任务，分别输出任务成功率、记忆写入与召回指标、压缩事实保真率。
+项目提供 RAG、Agent、Memory 和 Context Compression 四类量化评测。RAG 支持 CodeSearchNet Java 公共 test split，并输出 Recall@5、MRR@5、nDCG@5；其余三类当前使用项目内受控任务，分别输出任务成功率、记忆写入与召回指标、压缩事实保真率。受控 Agent benchmark 不暴露 `execute_command`，统一由隐藏验证器在 Agent 运行后编译并执行行为检查，避免本机 Docker 状态污染模型能力指标；生产沙箱策略不变。
 
 评测原始报告默认写入 `target/benchmark-reports/` 和 `target/agent-benchmark/`。聚合器会生成可提交的 JSON、CSV 与数据清单到 `Data/processed/` 和 `Data/manifest/`。完整方法、命令、基线结果和适用边界见 `docs/benchmark-evaluation.md`。
 
