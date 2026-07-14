@@ -216,6 +216,14 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    void mandatoryWorkerRepairShouldEndWithImmediateToolInstruction() {
+        String repairTask = TeamWorkerProtocol.buildMandatoryToolTask("实现功能", 1);
+
+        assertTrue(repairTask.indexOf("原始步骤") < repairTask.indexOf("Worker 执行协议修复"));
+        assertTrue(repairTask.strip().endsWith("现在立即调用工具。"), repairTask);
+    }
+
+    @Test
     void workerEvidenceSummaryShouldExposeSuccessfulAndFailedTools() {
         SubAgent.ExecutionEvidence evidence = new SubAgent.ExecutionEvidence(List.of(
                 new SubAgent.ToolEvidence("list_dir", ToolStatus.SUCCESS, ""),

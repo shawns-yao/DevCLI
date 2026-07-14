@@ -1690,10 +1690,11 @@ public class AgentOrchestrator {
                         + "Worker 未产生成功工具证据，正在强制执行修复 ("
                         + protocolRepairs + "/" + TeamWorkerProtocol.MAX_EMPTY_RESULT_REPAIRS + ")...");
                 worker.clearHistory();
-                executionContext = TeamWorkerProtocol.buildMandatoryToolContext(
-                        context, step.description(), protocolRepairs);
+                AgentMessage repairTask = AgentMessage.task("orchestrator",
+                        TeamWorkerProtocol.buildMandatoryToolTask(
+                                step.description(), protocolRepairs));
                 result = executeWorkerOnce(
-                        step, worker, taskMsg, executionContext, out, workerForkContext);
+                        step, worker, repairTask, executionContext, out, workerForkContext);
                 continue;
             }
             return result;
