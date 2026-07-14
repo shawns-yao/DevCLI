@@ -379,6 +379,8 @@ Runtime API 默认仅绑定 `127.0.0.1`。HTTP 请求线程和 Agent 执行线�
 
 Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 在步骤级隔离工作区实现，`PreReviewVerifier` 在同一隔离目录通过强制 Docker 沙箱执行 Java 编译硬检查；无 Maven 项目通过 javac 参数文件传递源码清单，避免 Windows 命令行长度限制。Reviewer 再读取真实隔离产物做质量审查。验收点会前置注入 Worker，并由 Reviewer 用 `criteria_results` 逐条验证；Planner 给出的 `severity` 会随计划和 checkpoint 固化，critical/high 失败或缺少覆盖强制不通过。三角色注入 role-scoped WorkingMemory：Planner 看任务状态 + 关键事件，Worker 看完整上下文，Reviewer 看任务状态 + 工具证据。Reviewer 必须输出可解析 JSON，并采用 `functional_correctness` / `integration_completeness` / `code_quality` 三层评分，未达阈值强制不通过，非 JSON 文本不再凭关键词放行；审查通过后生成 PatchSet，只有全量冲突预检通过才一次性写回主项目。
 
+Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个完整计划对象；无法解析、DAG 无效或出现“检查空工作区后再实现”这类阻塞性纯检查步骤时，会清空 Planner 历史并携带失败原因请求结构化修复。默认最多修复 2 次，可通过 `DEVCLI_TEAM_PLANNER_REPAIR_MAX_ATTEMPTS` 或 `-Ddevcli.team.planner.repair.max.attempts` 调整，取值范围 `[0, 3]`。空工作区属于合法输入，必要检查必须并入实现步骤并采用“若不存在则创建”的语义。Worker 最终文本为空时不再直接判失败：本轮存在 `SUCCESS` 工具证据则生成结构化执行摘要进入 Reviewer；没有成功证据仍保持失败。
+
 并行 Worker 数量默认 `2`，可通过 `DEVCLI_TEAM_WORKERS` 环境变量或 `-Ddevcli.team.workers` 系统属性调整（取值夹在 `[1, 8]`，非法值回退默认）。同一依赖批次内相互独立的步骤会按 Worker 池大小并行执行。
 
 隔离工作区默认开启，可通过 `DEVCLI_WORKSPACE_ISOLATION_ENABLED=false` 或 `-Ddevcli.workspace.isolation.enabled=false` 临时关闭；默认目录为项目下的 `Temp/devcli-workspaces`，可用 `-Ddevcli.workspace.dir=/path/to/workspaces` 覆盖。物化后端默认 `auto`：项目根是 Git 仓库时使用原生 worktree，共享 Git 对象并叠加当前工作区状态；非 Git 目录使用复制后端。可通过 `DEVCLI_WORKSPACE_BACKEND=git|copy|auto` 显式选择。worktree 物化后会删除排除目录和符号链接，关闭时通过 Git 注销，崩溃残留元数据在后续创建前 prune。创建前会清理超过 24 小时且没有活动文件租约的孤儿目录，TTL 可用 `DEVCLI_WORKSPACE_ORPHAN_TTL_HOURS` 或 `-Ddevcli.workspace.orphan.ttl.hours` 调整。复制等待默认最多 300 秒，可用 `DEVCLI_WORKSPACE_COPY_TIMEOUT_SECONDS` 调整；超时或中断会取消复制线程，不再无限等待。隔离任务的 `execute_command` 和 Pre-Review 强制进入 Docker，使用无网络、只读根文件系统、能力清空和资源上限；Docker 不可用时明确失败，不回退主机。默认镜像为 `maven:3.9.9-eclipse-temurin-17`，必须提前拉取，可通过 `DEVCLI_COMMAND_SANDBOX_IMAGE` 覆盖；其他技术栈应配置包含所需工具的镜像。
@@ -662,7 +664,7 @@ Lanterna renderer 保留为全屏三栏 TUI；plain renderer 适合 CI、日志�
 
 评测原始报告默认写入 `target/benchmark-reports/` 和 `target/agent-benchmark/`。聚合器会生成可提交的 JSON、CSV 与数据清单到 `Data/processed/` 和 `Data/manifest/`。完整方法、命令、基线结果和适用边界见 `docs/benchmark-evaluation.md`。
 
-2026-07-13 的 50 条 CodeSearchNet Java 样本结果：Recall@5 1.0000、MRR@5 0.9900、nDCG@5 0.9926；Memory 写入准确率 96.0%、Recall@5 91.7%；230k token 阈值下经过 5 次真实压缩，18 条事实保真率 94.4%。Agent 受控任务中单 Agent 成功率为 20.0%，Planner/Worker/Reviewer 为 0.0%，该结果暴露出计划 JSON 协议与空工作区前置步骤问题，不作为能力宣传数据。
+2026-07-13 的 50 条 CodeSearchNet Java 样本结果：Recall@5 1.0000、MRR@5 0.9900、nDCG@5 0.9926；Memory 写入准确率 96.0%、Recall@5 91.7%；230k token 阈值下经过 5 次真实压缩，18 条事实保真率 94.4%。Agent 受控任务中单 Agent 成功率为 20.0%，Planner/Worker/Reviewer 为 0.0%；这是 2026-07-14 计划协议和空结果语义修复前的基线，修复后的真实模型评测尚未复跑，因此该旧结果不作为能力宣传数据。
 
 ## Tests
 
