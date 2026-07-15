@@ -124,6 +124,22 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesMemoryOrganizeDryRunCommand() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/memory organize");
+
+        assertEquals(CliCommandParser.CommandType.MEMORY_ORGANIZE, command.type());
+        assertEquals("dry-run", command.payload());
+    }
+
+    @Test
+    void parsesMemoryOrganizeApplyCommand() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/memory organize apply");
+
+        assertEquals(CliCommandParser.CommandType.MEMORY_ORGANIZE, command.type());
+        assertEquals("apply", command.payload());
+    }
+
+    @Test
     void parsesMemoryClearSlashCommand() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/memory clear");
 

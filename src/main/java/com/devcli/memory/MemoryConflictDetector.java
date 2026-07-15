@@ -22,7 +22,7 @@ final class MemoryConflictDetector {
         String inferred = subject.isBlank() ? inferSubject(candidate.getContent()) : subject;
         if (inferred.isBlank()) return Optional.empty();
         for (MemoryEntry existing : existingEntries) {
-            if (existing == null || !existing.isActive() || existing.isExpired(null)
+            if (existing == null || !existing.isRecallable() || existing.isExpired(null)
                     || existing.getId().equals(candidate.getId())) continue;
             String existingSubject = existing.getSubject().isBlank()
                     ? inferSubject(existing.getContent()) : existing.getSubject();

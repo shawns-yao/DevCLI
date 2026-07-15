@@ -54,6 +54,34 @@ class MemoryRetrieverTest {
     }
 
     @Test
+    void rejectedMemoryIsExcludedFromKeywordAndSemanticRecall() {
+        MemoryEntry rejected = new MemoryEntry(
+                "rejected",
+                "用户偏好使用过时框架",
+                MemoryEntry.MemoryType.FACT,
+                java.time.Instant.now(),
+                java.util.Map.of(),
+                10,
+                "user.framework",
+                true,
+                "",
+                MemoryEntry.CURRENT_SCHEMA_VERSION,
+                1,
+                null,
+                new MemoryEvidence(
+                        MemoryEvidence.Confidence.HIGH,
+                        "用户偏好使用过时框架",
+                        "user_rejected",
+                        MemoryEvidence.ReviewState.REJECTED,
+                        java.util.List.of()));
+        longTerm.store(rejected);
+        retriever.setSemanticSearch((query, topK) ->
+                java.util.List.of(new MemoryRetriever.SemanticHit("rejected", 0.99)));
+
+        assertTrue(retriever.retrieveLongTerm("过时框架", 5).isEmpty());
+    }
+
+    @Test
     void semanticSearchMergesWithKeywordAndReranks() {
         // PR-C：语义召回扩展候选，关键词召回保留精确命中，两路合并排序
         longTerm.store(new MemoryEntry("f1", "用户偏好 VSCode 编辑器", MemoryEntry.MemoryType.FACT, null, 10));

@@ -15,6 +15,7 @@ final class CliCommandParser {
         SWITCH_TEAM,
         SWITCH_HITL,
         MEMORY_STATUS,
+        MEMORY_ORGANIZE,
         MEMORY_CLEAR,
         MEMORY_SAVE,
         MEMORY_PIN,
@@ -123,6 +124,16 @@ final class CliCommandParser {
 
         if (trimmed.equalsIgnoreCase("/memory") || trimmed.equalsIgnoreCase("/mem")) {
             return new ParsedCommand(CommandType.MEMORY_STATUS, null);
+        }
+
+        if (trimmed.equalsIgnoreCase("/memory organize")
+                || trimmed.equalsIgnoreCase("/mem organize")) {
+            return new ParsedCommand(CommandType.MEMORY_ORGANIZE, "dry-run");
+        }
+
+        if (trimmed.equalsIgnoreCase("/memory organize apply")
+                || trimmed.equalsIgnoreCase("/mem organize apply")) {
+            return new ParsedCommand(CommandType.MEMORY_ORGANIZE, "apply");
         }
 
         if (trimmed.equalsIgnoreCase("/memory clear") || trimmed.equalsIgnoreCase("/mem clear")) {

@@ -27,6 +27,7 @@ class LongTermMemoryLifecycleTest {
             assertEquals(2, latest.getRevision());
             assertEquals(MemoryEntry.CURRENT_SCHEMA_VERSION, latest.getSchemaVersion());
             assertEquals("old", latest.getMetadata().get("conflict_with"));
+            assertEquals(java.util.List.of("old"), latest.getEvidence().conflictsWith());
             assertFalse(previous.isActive());
             assertEquals("new", previous.getSupersededBy());
         }
@@ -42,6 +43,7 @@ class LongTermMemoryLifecycleTest {
             MemoryEntry latest = memory.search("server.port", 5).getFirst();
             assertEquals(2, latest.getRevision());
             assertEquals("old", latest.getMetadata().get("conflict_with"));
+            assertEquals(java.util.List.of("old"), latest.getEvidence().conflictsWith());
             assertFalse(latest.getSubject().isBlank());
         }
     }
@@ -59,6 +61,59 @@ class LongTermMemoryLifecycleTest {
             assertEquals(2, latest.getRevision());
             assertEquals(expiresAt.toEpochMilli(), latest.getExpiresAt().toEpochMilli());
             assertEquals(MemoryEntry.CURRENT_SCHEMA_VERSION, latest.getSchemaVersion());
+            assertEquals(java.util.List.of("old"), latest.getEvidence().conflictsWith());
+        }
+    }
+
+    @Test
+    void rejectedMemoryIsPersistedButExcludedFromRecall() throws Exception {
+        try (LongTermMemory memory = new LongTermMemory(tempDir.toFile())) {
+            MemoryEntry candidate = entry("review", "用户偏好使用 Java", "user.language", null)
+                    .withEvidence(new MemoryEvidence(
+                            MemoryEvidence.Confidence.MEDIUM,
+                            "用户偏好使用 Java",
+                            "heuristic",
+                            MemoryEvidence.ReviewState.UNREVIEWED,
+                            java.util.List.of()));
+            memory.storeManaged(candidate);
+            assertTrue(memory.updateReviewState("review", MemoryEvidence.ReviewState.REJECTED));
+            assertTrue(memory.search("Java", 5).isEmpty());
+        }
+
+        try (LongTermMemory reloaded = new LongTermMemory(tempDir.toFile())) {
+            MemoryEntry rejected = reloaded.retrieve("review").orElseThrow();
+            assertEquals(MemoryEvidence.Confidence.MEDIUM, rejected.getEvidence().confidence());
+            assertEquals("用户偏好使用 Java", rejected.getEvidence().sourceQuote());
+            assertEquals("heuristic", rejected.getEvidence().reasoning());
+            assertEquals(MemoryEvidence.ReviewState.REJECTED, rejected.getEvidence().reviewState());
+            assertFalse(rejected.isRecallable());
+        }
+    }
+
+    @Test
+    void rejectedMemoryDoesNotBlockSameContentFromBeingSavedAgain() throws Exception {
+        try (LongTermMemory memory = new LongTermMemory(tempDir.toFile())) {
+            MemoryEntry rejected = entry("rejected", "用户偏好使用 Java", "user.language", null)
+                    .withEvidence(new MemoryEvidence(
+                            MemoryEvidence.Confidence.LOW,
+                            "用户偏好使用 Java",
+                            "heuristic",
+                            MemoryEvidence.ReviewState.REJECTED,
+                            java.util.List.of()));
+            memory.storeManaged(rejected);
+
+            MemoryEntry reviewed = entry("reviewed", "用户偏好使用 Java", "user.language", null)
+                    .withEvidence(new MemoryEvidence(
+                            MemoryEvidence.Confidence.HIGH,
+                            "用户偏好使用 Java",
+                            "explicit",
+                            MemoryEvidence.ReviewState.REVIEWED,
+                            java.util.List.of()));
+            memory.storeManaged(reviewed);
+
+            assertEquals("reviewed", memory.search("Java", 5).getFirst().getId());
+            assertEquals(MemoryEvidence.ReviewState.REJECTED,
+                    memory.retrieve("rejected").orElseThrow().getEvidence().reviewState());
         }
     }
 

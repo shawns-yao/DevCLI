@@ -453,9 +453,23 @@ public class Main {
                         ui.println("📋 记忆系统状态：");
                         ui.println(reactAgent.getMemoryManager().getSystemStatus());
                         ui.println(stickyMemory.getStatusSummary());
+                        ui.println("   /memory organize - 生成长期记忆整理计划");
+                        ui.println("   /memory organize apply - 应用低风险整理项");
                         ui.println("   /memory clear - 清空长期记忆");
                         ui.println("   /save <事实> - 手动保存到长期记忆（Retrievable）");
                         ui.println("   /save --pin <事实> - 永久 pin 到 Sticky 区，每轮注入 system prompt");
+                        ui.println();
+                        continue;
+                    }
+                    case MEMORY_ORGANIZE -> {
+                        com.devcli.memory.MemoryOrganizer.Mode organizerMode =
+                                "apply".equalsIgnoreCase(command.payload())
+                                        ? com.devcli.memory.MemoryOrganizer.Mode.APPLY_SAFE
+                                        : com.devcli.memory.MemoryOrganizer.Mode.DRY_RUN;
+                        ui.println("正在整理长期记忆...");
+                        com.devcli.memory.MemoryOrganizer.Report report =
+                                reactAgent.getMemoryManager().organizeLongTermMemory(organizerMode);
+                        ui.println(report.render());
                         ui.println();
                         continue;
                     }
@@ -1421,6 +1435,8 @@ public class Main {
                 new SlashCommandHint("/history clear", "/history clear", "清空本机输入历史"),
                 new SlashCommandHint("/context", "/context", "查看上下文和记忆状态"),
                 new SlashCommandHint("/memory", "/memory", "查看记忆状态"),
+                new SlashCommandHint("/memory organize", "/memory organize", "生成长期记忆整理计划"),
+                new SlashCommandHint("/memory organize apply", "/memory organize apply", "应用低风险整理项"),
                 new SlashCommandHint("/memory clear", "/memory clear", "清空长期记忆"),
                 new SlashCommandHint("/save ", "/save <事实内容>", "手动保存关键事实到长期记忆"),
                 new SlashCommandHint("/skill", "/skill", "查看 skill 列表"),

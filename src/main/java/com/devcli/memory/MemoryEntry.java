@@ -9,7 +9,7 @@ import java.util.Map;
  * 记忆条目 - Memory 系统的基础数据单元
  */
 public class MemoryEntry {
-    public static final int CURRENT_SCHEMA_VERSION = 1;
+    public static final int CURRENT_SCHEMA_VERSION = 2;
 
     private final String id;
     private final String content;
@@ -29,6 +29,8 @@ public class MemoryEntry {
     private final int revision;
     /** 过期时间；null 表示不过期。 */
     private final Instant expiresAt;
+    /** 结构化证据、置信度和审核状态。 */
+    private final MemoryEvidence evidence;
 
     public enum MemoryType {
         CONVERSATION,  // 对话记忆
@@ -45,7 +47,7 @@ public class MemoryEntry {
     public MemoryEntry(String id, String content, MemoryType type, Instant timestamp,
                        Map<String, String> metadata, int tokenCount) {
         this(id, content, type, timestamp, metadata, tokenCount, "", true, "",
-                CURRENT_SCHEMA_VERSION, 1, null);
+                CURRENT_SCHEMA_VERSION, 1, null, MemoryEvidence.legacy(metadata));
     }
 
     /**
@@ -56,13 +58,22 @@ public class MemoryEntry {
                        Map<String, String> metadata, int tokenCount,
                        String subject, boolean active, String supersededBy) {
         this(id, content, type, timestamp, metadata, tokenCount, subject, active, supersededBy,
-                CURRENT_SCHEMA_VERSION, 1, null);
+                CURRENT_SCHEMA_VERSION, 1, null, MemoryEvidence.legacy(metadata));
     }
 
     public MemoryEntry(String id, String content, MemoryType type, Instant timestamp,
                        Map<String, String> metadata, int tokenCount,
                        String subject, boolean active, String supersededBy,
                        int schemaVersion, int revision, Instant expiresAt) {
+        this(id, content, type, timestamp, metadata, tokenCount, subject, active, supersededBy,
+                schemaVersion, revision, expiresAt, MemoryEvidence.legacy(metadata));
+    }
+
+    public MemoryEntry(String id, String content, MemoryType type, Instant timestamp,
+                       Map<String, String> metadata, int tokenCount,
+                       String subject, boolean active, String supersededBy,
+                       int schemaVersion, int revision, Instant expiresAt,
+                       MemoryEvidence evidence) {
         this.id = id;
         this.content = content;
         this.type = type;
@@ -76,6 +87,7 @@ public class MemoryEntry {
         this.schemaVersion = Math.max(1, schemaVersion);
         this.revision = Math.max(1, revision);
         this.expiresAt = expiresAt;
+        this.evidence = evidence == null ? MemoryEvidence.legacy(this.metadata) : evidence;
     }
 
     public String getId() { return id; }
@@ -90,6 +102,11 @@ public class MemoryEntry {
     public int getSchemaVersion() { return schemaVersion; }
     public int getRevision() { return revision; }
     public Instant getExpiresAt() { return expiresAt; }
+    public MemoryEvidence getEvidence() { return evidence; }
+
+    public boolean isRecallable() {
+        return active && evidence.isRecallable();
+    }
 
     public boolean isExpired(Instant now) {
         return expiresAt != null && !expiresAt.isAfter(now == null ? Instant.now() : now);
@@ -97,15 +114,26 @@ public class MemoryEntry {
 
     public MemoryEntry withLifecycle(int nextRevision, Instant nextExpiresAt,
                                      Map<String, String> nextMetadata) {
-        return copy(subject, active, supersededBy, nextRevision, nextExpiresAt, nextMetadata);
+        return copy(subject, active, supersededBy, nextRevision, nextExpiresAt, nextMetadata, evidence);
+    }
+
+    public MemoryEntry withEvidence(MemoryEvidence nextEvidence) {
+        return copy(subject, active, supersededBy, revision, expiresAt, metadata, nextEvidence);
     }
 
     MemoryEntry copy(String nextSubject, boolean nextActive, String nextSupersededBy,
                      int nextRevision, Instant nextExpiresAt, Map<String, String> nextMetadata) {
+        return copy(nextSubject, nextActive, nextSupersededBy, nextRevision, nextExpiresAt,
+                nextMetadata, evidence);
+    }
+
+    MemoryEntry copy(String nextSubject, boolean nextActive, String nextSupersededBy,
+                     int nextRevision, Instant nextExpiresAt, Map<String, String> nextMetadata,
+                     MemoryEvidence nextEvidence) {
         return new MemoryEntry(id, content, type, timestamp,
                 nextMetadata == null ? metadata : nextMetadata, tokenCount,
                 nextSubject, nextActive, nextSupersededBy, CURRENT_SCHEMA_VERSION,
-                nextRevision, nextExpiresAt);
+                nextRevision, nextExpiresAt, nextEvidence);
     }
 
     /**

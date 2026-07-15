@@ -253,6 +253,7 @@ public class MemoryManager implements AutoCloseable {
         Map<String, String> effectiveMetadata =
                 metadata == null || metadata.isEmpty() ? Map.of("source", "fact") : metadata;
         String subject = MemorySubjectExtractor.extract(fact, effectiveMetadata);
+        MemoryEvidence evidence = MemoryEvidence.fromPolicy(effectiveMetadata, fact);
         MemoryEntry entry = new MemoryEntry(
                 "fact-" + UUID.randomUUID().toString().substring(0, 8),
                 fact,
@@ -262,7 +263,11 @@ public class MemoryManager implements AutoCloseable {
                 MemoryEntry.estimateTokens(fact),
                 subject,
                 true,
-                ""
+                "",
+                MemoryEntry.CURRENT_SCHEMA_VERSION,
+                1,
+                null,
+                evidence
         );
         longTermMemory.storeManaged(entry);
     }
@@ -291,7 +296,9 @@ public class MemoryManager implements AutoCloseable {
         StringBuilder sb = new StringBuilder("长期记忆（LongTermMemory）当前持久化条目：\n");
         for (MemoryEntry entry : entries) {
             sb.append("- id=").append(entry.getId())
-                    .append(", type=").append(entry.getType());
+                    .append(", type=").append(entry.getType())
+                    .append(", confidence=").append(entry.getEvidence().confidence())
+                    .append(", review=").append(entry.getEvidence().reviewState());
             if (!entry.getSubject().isBlank()) {
                 sb.append(", subject=").append(entry.getSubject());
             }
@@ -300,12 +307,30 @@ public class MemoryManager implements AutoCloseable {
             }
             sb.append(", created_at=").append(entry.getTimestamp())
                     .append("\n  content: ").append(entry.getContent());
+            if (!entry.getEvidence().sourceQuote().isBlank()) {
+                sb.append("\n  source_quote: ").append(truncateForPrompt(
+                        entry.getEvidence().sourceQuote(), 200));
+            }
+            if (!entry.getEvidence().reasoning().isBlank()) {
+                sb.append("\n  reasoning: ").append(entry.getEvidence().reasoning());
+            }
+            if (!entry.getEvidence().conflictsWith().isEmpty()) {
+                sb.append("\n  conflicts_with: ").append(entry.getEvidence().conflictsWith());
+            }
             if (!entry.getMetadata().isEmpty()) {
                 sb.append("\n  metadata: ").append(entry.getMetadata());
             }
             sb.append("\n");
         }
         return sb.toString().trim();
+    }
+
+    public boolean reviewLongTermMemory(String id, MemoryEvidence.ReviewState reviewState) {
+        return longTermMemory.updateReviewState(id, reviewState);
+    }
+
+    public MemoryOrganizer.Report organizeLongTermMemory(MemoryOrganizer.Mode mode) {
+        return new MemoryOrganizer(llmClient, longTermMemory).organize(mode);
     }
 
     // ─────────────────────────────────────────────────────────
@@ -349,7 +374,7 @@ public class MemoryManager implements AutoCloseable {
 
     private String buildLongTermMemoryInventorySnapshot(int limit, int maxTokens, List<String> suppressedFacts) {
         List<MemoryEntry> activeEntries = longTermMemory.getAll().stream()
-                .filter(MemoryEntry::isActive)
+                .filter(MemoryEntry::isRecallable)
                 .filter(entry -> !MemoryFactDeduper.duplicatesAny(entry.getContent(), suppressedFacts))
                 .sorted(java.util.Comparator.comparing(MemoryEntry::getTimestamp).reversed())
                 .toList();
@@ -365,7 +390,10 @@ public class MemoryManager implements AutoCloseable {
                 .toList();
         int usedTokens = MemoryEntry.estimateTokens(context.toString());
         for (MemoryEntry entry : entries) {
-            String line = "- [" + entry.getType() + "] " + truncateForPrompt(entry.getContent(), 120) + "\n";
+            String line = "- [" + entry.getType()
+                    + "; confidence=" + entry.getEvidence().confidence()
+                    + "; review=" + entry.getEvidence().reviewState()
+                    + "] " + truncateForPrompt(entry.getContent(), 120) + "\n";
             int lineTokens = MemoryEntry.estimateTokens(line);
             if (usedTokens + lineTokens > maxTokens && usedTokens > 0) {
                 context.append("- ...\n");

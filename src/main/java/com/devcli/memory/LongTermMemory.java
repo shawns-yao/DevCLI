@@ -152,7 +152,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
             if (subject.equals(existingSubject)) {
                 nextRevision = Math.max(nextRevision, existing.getRevision() + 1);
             }
-            if (existing.isActive()
+            if (existing.isRecallable()
                     && subject.equals(existingSubject)
                     && !existing.getId().equals(entry.getId())) {
                 supersededTargets.add(existing);
@@ -160,14 +160,18 @@ public class LongTermMemory implements Memory, AutoCloseable {
         }
 
         Map<String, String> metadata = new HashMap<>(entry.getMetadata());
-        conflict.ifPresent(value -> {
+        MemoryEvidence evidence = entry.getEvidence();
+        if (conflict.isPresent()) {
+            MemoryConflictDetector.Conflict value = conflict.get();
             metadata.put("conflict_detected", "true");
             metadata.put("conflict_with", value.existingId());
-        });
+            evidence = evidence.withConflict(value.existingId());
+        }
         Instant expiresAt = entry.getExpiresAt() != null
                 ? entry.getExpiresAt()
                 : MemoryLifecyclePolicy.expiresAt(entry.getType(), Instant.now());
-        MemoryEntry managedEntry = entry.copy(subject, true, "", nextRevision, expiresAt, metadata);
+        MemoryEntry managedEntry = entry.copy(
+                subject, true, "", nextRevision, expiresAt, metadata, evidence);
 
         for (MemoryEntry old : supersededTargets) {
             MemoryEntry inactive = asSuperseded(old, managedEntry.getId());
@@ -208,7 +212,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
         pruneExpired();
         Set<String> queryTokens = MemoryQueryTokenizer.tokenize(query);
         return entries.values().stream()
-                .filter(MemoryEntry::isActive)
+                .filter(MemoryEntry::isRecallable)
                 .filter(entry -> {
                     if (MemoryQueryTokenizer.matches(entry.getContent(), queryTokens)) {
                         return true;
@@ -224,6 +228,22 @@ public class LongTermMemory implements Memory, AutoCloseable {
     public synchronized List<MemoryEntry> getAll() {
         pruneExpired();
         return new ArrayList<>(entries.values());
+    }
+
+    public synchronized boolean updateReviewState(
+            String id, MemoryEvidence.ReviewState reviewState) {
+        if (id == null || id.isBlank() || reviewState == null) return false;
+        pruneExpired();
+        MemoryEntry existing = entries.get(id);
+        if (existing == null) return false;
+        MemoryEntry updated = existing.withEvidence(existing.getEvidence().withReviewState(reviewState));
+        boolean persisted = store.upsert(updated);
+        if (!persisted && persistentStore) {
+            log.warn("Failed to persist review state {} for {}", reviewState, id);
+            return false;
+        }
+        entries.put(id, updated);
+        return true;
     }
 
     @Override
@@ -274,8 +294,8 @@ public class LongTermMemory implements Memory, AutoCloseable {
             return null;
         }
         for (MemoryEntry existing : entries.values()) {
-            // 仅比对 active：被 supersede 的旧条 content 不应阻止同内容新事实重新写入
-            if (existing.isActive()
+            // 仅比对可召回条目：被 supersede 或已拒绝的旧条不应阻止同内容重新写入
+            if (existing.isRecallable()
                     && !existing.getId().equals(entry.getId())
                     && existing.getContent().equals(entry.getContent())) {
                 return existing;

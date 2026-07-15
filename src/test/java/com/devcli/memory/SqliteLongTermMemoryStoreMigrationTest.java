@@ -48,6 +48,10 @@ class SqliteLongTermMemoryStoreMigrationTest {
             assertTrue(old.isActive(), "旧行升级后应默认 active=true");
             assertTrue(old.getSubject().isBlank(), "旧行升级后 subject 默认空串");
             assertTrue(old.getSupersededBy().isBlank());
+            assertEquals(MemoryEvidence.Confidence.UNSPECIFIED, old.getEvidence().confidence());
+            assertEquals(MemoryEvidence.ReviewState.REVIEWED, old.getEvidence().reviewState());
+            assertTrue(old.getEvidence().sourceQuote().isBlank());
+            assertTrue(old.getEvidence().conflictsWith().isEmpty());
         }
     }
 }

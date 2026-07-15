@@ -39,12 +39,18 @@ import java.util.Map;
  *     subject TEXT NOT NULL DEFAULT '',        -- 主题键，冲突消解归并维度
  *     active INTEGER NOT NULL DEFAULT 1,       -- 1=当前有效，0=被同主题新事实取代
  *     superseded_by TEXT NOT NULL DEFAULT '',  -- 取代本条的新事实 id
+ *     confidence TEXT NOT NULL DEFAULT 'UNSPECIFIED',
+ *     source_quote TEXT NOT NULL DEFAULT '',
+ *     evidence_reasoning TEXT NOT NULL DEFAULT '',
+ *     review_state TEXT NOT NULL DEFAULT 'REVIEWED',
+ *     conflicts_with_json TEXT NOT NULL DEFAULT '[]',
  *     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
  *   )
  * </pre>
  *
- * <p>旧库升级：{@code subject / active / superseded_by} 通过 {@link #addColumnIfMissing} 幂等补列，
- * 旧行默认 {@code subject='' / active=1}，平滑兼容。
+ * <p>旧库升级：生命周期和结构化证据列通过 {@link #addColumnIfMissing} 幂等补齐，
+ * 旧行默认 {@code subject='' / active=1 / confidence=UNSPECIFIED / review_state=REVIEWED}，
+ * 保持既有记忆召回行为。
  *
  * <p>失败模式：构造器初始化 SQLite 失败时所有方法降级为 no-op（loadAll 返回空 list），
  * LongTermMemory 仍能在纯内存模式下工作，避免阻塞 DevCLI 启动。
@@ -83,6 +89,11 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
                             schema_version INTEGER NOT NULL DEFAULT 1,
                             revision INTEGER NOT NULL DEFAULT 1,
                             expires_at_ms INTEGER,
+                            confidence TEXT NOT NULL DEFAULT 'UNSPECIFIED',
+                            source_quote TEXT NOT NULL DEFAULT '',
+                            evidence_reasoning TEXT NOT NULL DEFAULT '',
+                            review_state TEXT NOT NULL DEFAULT 'REVIEWED',
+                            conflicts_with_json TEXT NOT NULL DEFAULT '[]',
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
                         """);
@@ -93,6 +104,11 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
                 addColumnIfMissing(stmt, "schema_version", "INTEGER NOT NULL DEFAULT 1");
                 addColumnIfMissing(stmt, "revision", "INTEGER NOT NULL DEFAULT 1");
                 addColumnIfMissing(stmt, "expires_at_ms", "INTEGER");
+                addColumnIfMissing(stmt, "confidence", "TEXT NOT NULL DEFAULT 'UNSPECIFIED'");
+                addColumnIfMissing(stmt, "source_quote", "TEXT NOT NULL DEFAULT ''");
+                addColumnIfMissing(stmt, "evidence_reasoning", "TEXT NOT NULL DEFAULT ''");
+                addColumnIfMissing(stmt, "review_state", "TEXT NOT NULL DEFAULT 'REVIEWED'");
+                addColumnIfMissing(stmt, "conflicts_with_json", "TEXT NOT NULL DEFAULT '[]'");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_memory_facts_type ON memory_facts(type)");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_memory_facts_subject_active "
                         + "ON memory_facts(subject, active)");
@@ -120,7 +136,8 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
         try (Statement stmt = connection.createStatement();
              ResultSet rs = stmt.executeQuery(
                      "SELECT id, content, type, timestamp_ms, metadata_json, token_count, "
-                             + "subject, active, superseded_by, schema_version, revision, expires_at_ms "
+                             + "subject, active, superseded_by, schema_version, revision, expires_at_ms, "
+                             + "confidence, source_quote, evidence_reasoning, review_state, conflicts_with_json "
                              + "FROM memory_facts ORDER BY timestamp_ms ASC")) {
             while (rs.next()) {
                 MemoryEntry entry = parseRow(rs);
@@ -139,8 +156,10 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
         if (!usable || entry == null) return false;
         String sql = """
                 INSERT INTO memory_facts(id, content, type, timestamp_ms, metadata_json, token_count,
-                                         subject, active, superseded_by, schema_version, revision, expires_at_ms)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                         subject, active, superseded_by, schema_version, revision, expires_at_ms,
+                                         confidence, source_quote, evidence_reasoning, review_state,
+                                         conflicts_with_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     content = excluded.content,
                     type = excluded.type,
@@ -152,7 +171,12 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
                     superseded_by = excluded.superseded_by,
                     schema_version = excluded.schema_version,
                     revision = excluded.revision,
-                    expires_at_ms = excluded.expires_at_ms
+                    expires_at_ms = excluded.expires_at_ms,
+                    confidence = excluded.confidence,
+                    source_quote = excluded.source_quote,
+                    evidence_reasoning = excluded.evidence_reasoning,
+                    review_state = excluded.review_state,
+                    conflicts_with_json = excluded.conflicts_with_json
                 """;
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setString(1, entry.getId());
@@ -171,6 +195,12 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
             } else {
                 ps.setLong(12, entry.getExpiresAt().toEpochMilli());
             }
+            MemoryEvidence evidence = entry.getEvidence();
+            ps.setString(13, evidence.confidence().name());
+            ps.setString(14, evidence.sourceQuote());
+            ps.setString(15, evidence.reasoning());
+            ps.setString(16, evidence.reviewState().name());
+            ps.setString(17, JSON.writeValueAsString(evidence.conflictsWith()));
             ps.executeUpdate();
             return true;
         } catch (SQLException | JsonProcessingException e) {
@@ -250,11 +280,36 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
             int revision = rs.getInt("revision");
             long expiresAtMillis = rs.getLong("expires_at_ms");
             Instant expiresAt = rs.wasNull() ? null : Instant.ofEpochMilli(expiresAtMillis);
+            MemoryEvidence evidence = new MemoryEvidence(
+                    MemoryEvidence.Confidence.parse(rs.getString("confidence")),
+                    rs.getString("source_quote"),
+                    rs.getString("evidence_reasoning"),
+                    MemoryEvidence.ReviewState.parse(rs.getString("review_state"),
+                            MemoryEvidence.ReviewState.REVIEWED),
+                    parseStringList(rs.getString("conflicts_with_json")));
             return new MemoryEntry(id, content, type, timestamp, metadata, tokenCount,
-                    subject, active, supersededBy, schemaVersion, revision, expiresAt);
+                    subject, active, supersededBy, schemaVersion, revision, expiresAt, evidence);
         } catch (IllegalArgumentException e) {
             log.warn("Skip corrupted row in memory_facts: {}", e.getMessage());
             return null;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> parseStringList(String json) {
+        if (json == null || json.isBlank() || "[]".equals(json)) return List.of();
+        try {
+            List<Object> raw = JSON.readValue(json, List.class);
+            List<String> result = new ArrayList<>();
+            for (Object value : raw) {
+                if (value != null && !String.valueOf(value).isBlank()) {
+                    result.add(String.valueOf(value));
+                }
+            }
+            return List.copyOf(result);
+        } catch (Exception e) {
+            log.debug("Bad conflicts_with_json, falling back to empty: {}", e.getMessage());
+            return List.of();
         }
     }
 

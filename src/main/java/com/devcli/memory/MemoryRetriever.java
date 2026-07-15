@@ -63,8 +63,8 @@ public class MemoryRetriever {
     public List<MemoryEntry> retrieveLongTerm(String query, int limit) {
         Map<String, MemoryEntry> byId = new HashMap<>();
         for (MemoryEntry entry : longTermMemory.getAll()) {
-            // 只把 active 事实纳入候选：被 supersede 的旧条即使被语义命中也不会注入 prompt
-            if (entry.isActive()) {
+            // 只把可召回事实纳入候选：被 supersede 或明确拒绝的条目不会注入 prompt
+            if (entry.isRecallable()) {
                 byId.put(entry.getId(), entry);
             }
         }
@@ -77,7 +77,8 @@ public class MemoryRetriever {
             for (SemanticHit hit : semanticHits) {
                 MemoryEntry entry = byId.get(hit.factId());
                 if (entry != null) {
-                    double semanticScore = Math.max(0, hit.similarity());
+                    double semanticScore = Math.max(0, hit.similarity())
+                            * entry.getEvidence().retrievalWeight();
                     mergeScore(scoredById, entry, semanticScore);
                 }
             }
@@ -89,7 +90,8 @@ public class MemoryRetriever {
 
         // 2. 关键词检索：与语义召回合并，避免语义命中覆盖精确关键词事实
         for (MemoryEntry entry : byId.values()) {
-            double keywordScore = computeRelevanceScore(entry, query) * 1.2;
+            double keywordScore = computeRelevanceScore(entry, query) * 1.2
+                    * entry.getEvidence().retrievalWeight();
             if (keywordScore > 0) {
                 mergeScore(scoredById, entry, keywordScore);
             }
@@ -128,8 +130,10 @@ public class MemoryRetriever {
             }
             if (usedTokens + entry.getTokenCount() > maxTokens) break;
 
-            context.append("- [").append(entry.getType()).append("] ")
-                    .append(entry.getContent()).append("\n");
+            context.append("- [").append(entry.getType())
+                    .append("; confidence=").append(entry.getEvidence().confidence())
+                    .append("; review=").append(entry.getEvidence().reviewState())
+                    .append("] ").append(entry.getContent()).append("\n");
             usedTokens += entry.getTokenCount();
             appended++;
         }

@@ -354,6 +354,10 @@ class MemoryManagerTest {
             assertEquals("explicit", entry.getMetadata().get("source"));
             assertEquals("EXPLICIT_STABLE_MEMORY", entry.getMetadata().get("reason_code"));
             assertEquals("HIGH", entry.getMetadata().get("confidence"));
+            assertEquals(MemoryEvidence.Confidence.HIGH, entry.getEvidence().confidence());
+            assertEquals(MemoryEvidence.ReviewState.REVIEWED, entry.getEvidence().reviewState());
+            assertEquals("记住：我默认使用 Java 17 开发", entry.getEvidence().sourceQuote());
+            assertEquals("EXPLICIT_STABLE_MEMORY", entry.getEvidence().reasoning());
             assertFalse(entry.getMetadata().containsKey("score"));
         }
     }
@@ -367,7 +371,9 @@ class MemoryManagerTest {
             MemoryManager.StoreResult result = memoryManager.storeFactWithPolicy("用户默认使用简体中文短句回答", true);
 
             assertTrue(result.stored(), result.message());
-            assertEquals("explicit", longTermMemory.getAll().get(0).getMetadata().get("source"));
+            MemoryEntry entry = longTermMemory.getAll().get(0);
+            assertEquals("explicit", entry.getMetadata().get("source"));
+            assertEquals(MemoryEvidence.ReviewState.REVIEWED, entry.getEvidence().reviewState());
         }
     }
 
