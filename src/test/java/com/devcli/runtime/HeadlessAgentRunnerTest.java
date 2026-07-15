@@ -1,10 +1,13 @@
 package com.devcli.runtime;
 
 import com.devcli.llm.LlmClient;
+import com.devcli.memory.CompactBoundaryMetadata;
+import com.devcli.runtime.event.RunEvent;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -61,6 +64,71 @@ class HeadlessAgentRunnerTest {
         assertSame(seed.get(0), messages.get(1));
         assertSame(seed.get(1), messages.get(2));
         assertEquals("now", messages.get(3).content());
+    }
+
+    @Test
+    void detailedRunReturnsFinalHistoryWithoutForcingCheckpointBelowThreshold(@TempDir Path projectRoot) {
+        LlmClient client = new RecordingLlmClient(new AtomicReference<>());
+
+        HeadlessAgentRunner.RunResult result = HeadlessAgentRunner.runDetailed(
+                client, projectRoot, "hello", List.of(), 100_000);
+
+        assertTrue(result.output().contains("done"));
+        assertTrue(result.history().stream().anyMatch(message ->
+                "user".equals(message.role()) && "hello".equals(message.content())));
+        assertTrue(result.history().stream().anyMatch(message ->
+                "assistant".equals(message.role()) && "done".equals(message.content())));
+        assertEquals(false, result.compacted());
+    }
+
+    @Test
+    void forwardsModelStreamAsTypedRunEvents(@TempDir Path projectRoot) {
+        List<RunEvent> events = new ArrayList<>();
+        LlmClient client = new RecordingLlmClient(new AtomicReference<>()) {
+            @Override
+            public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) {
+                listener.onReasoningDelta("analysis");
+                listener.onContentDelta("streamed answer");
+                return new ChatResponse("assistant", "streamed answer", List.of(), 1, 1);
+            }
+        };
+
+        HeadlessAgentRunner.runDetailed(
+                client, projectRoot, "hello", List.of(), 100_000, events::add);
+
+        assertEquals(List.of(RunEvent.ReasoningDelta.class, RunEvent.MessageDelta.class),
+                events.stream().map(Object::getClass).toList());
+    }
+
+    @Test
+    void keepsFinalAssistantOutputWhenOnlyReasoningWasStreamed(@TempDir Path projectRoot) {
+        LlmClient client = new RecordingLlmClient(new AtomicReference<>()) {
+            @Override
+            public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) {
+                listener.onReasoningDelta("analysis only");
+                return new ChatResponse("assistant", "final answer", List.of(), 1, 1);
+            }
+        };
+
+        HeadlessAgentRunner.RunResult result = HeadlessAgentRunner.runDetailed(
+                client, projectRoot, "hello", List.of(), 100_000, event -> { });
+
+        assertEquals("final answer", result.output());
+    }
+
+    @Test
+    void detectsCompactionCreatedDuringTurn() {
+        CompactBoundaryMetadata metadata = new CompactBoundaryMetadata(
+                "history", "token_threshold", "full",
+                40_000, 8_000, 30, 8, 4, 1_000);
+        List<LlmClient.Message> before = List.of(
+                LlmClient.Message.user("plain"));
+        List<LlmClient.Message> after = List.of(
+                LlmClient.Message.user("[已压缩的历史对话摘要]\n"
+                        + metadata.renderBoundaryBlock() + "\nsummary"));
+
+        assertTrue(HeadlessAgentRunner.hasNewCompactionBoundary(before, after));
+        assertEquals(false, HeadlessAgentRunner.hasNewCompactionBoundary(after, after));
     }
 
     private static class RecordingLlmClient implements LlmClient {

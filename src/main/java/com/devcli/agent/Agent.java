@@ -17,6 +17,8 @@ import com.devcli.render.PlainRenderer;
 import com.devcli.render.Renderer;
 import com.devcli.render.StatusInfo;
 import com.devcli.runtime.CancellationContext;
+import com.devcli.runtime.event.RunEvent;
+import com.devcli.runtime.event.RunEventSink;
 import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillIndexFormatter;
 import com.devcli.skill.SkillRegistry;
@@ -58,6 +60,7 @@ public class Agent implements AutoCloseable {
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private Renderer renderer;
+    private RunEventSink runEventSink = RunEventSink.NO_OP;
     private final TraceRecorder traceRecorder = new TraceRecorder();
     private Supplier<Boolean> hitlEnabledSupplier = () -> false;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
@@ -145,6 +148,10 @@ public class Agent implements AutoCloseable {
         this.renderer = renderer;
     }
 
+    public void setRunEventSink(RunEventSink runEventSink) {
+        this.runEventSink = runEventSink == null ? RunEventSink.NO_OP : runEventSink;
+    }
+
     /**
      * 注入 HITL 启用状态的快照源，用于状态栏 / StatusInfo 显示。
      * Main 启动后用 {@code reactAgent.setHitlEnabledSupplier(hitlHandler::isEnabled)} 接进来。
@@ -218,7 +225,12 @@ public class Agent implements AutoCloseable {
 
                     @Override
                     public LlmClient.StreamListener streamListener() {
-                        return streamRenderer;
+                        return LlmClient.StreamListener.NO_OP;
+                    }
+
+                    @Override
+                    public RunEventSink eventSink() {
+                        return RunEventSink.composite(runEventSink, streamRenderer);
                     }
 
                     @Override
@@ -251,7 +263,6 @@ public class Agent implements AutoCloseable {
                         log.info("LLM requested {} tool call(s) in iteration {}",
                                 response.toolCalls().size(), iteration);
                         streamRenderer.resetBetweenIterations();
-                        renderer().appendToolCalls(response.toolCalls());
                     }
 
                     @Override
@@ -538,6 +549,11 @@ public class Agent implements AutoCloseable {
      */
     public List<LlmClient.Message> getConversationHistory() {
         return new ArrayList<>(conversationHistory);
+    }
+
+    public boolean compactHistoryForPersistence(int triggerTokens) {
+        if (triggerTokens <= 0) return false;
+        return historyCompactor.compactIfNeeded(conversationHistory, triggerTokens);
     }
 
     /**
@@ -942,7 +958,7 @@ public class Agent implements AutoCloseable {
      * 4. 如果 content 启动之后又收到 reasoning（服务器把思考内容追加在答案之后），
      *    缓冲到 lateReasoning，最终在 finish() 用"🧠 补充思考"标题独立展示，不会污染回复区
      */
-    private static final class StreamRenderer implements LlmClient.StreamListener {
+    private static final class StreamRenderer implements LlmClient.StreamListener, RunEventSink {
         private final Renderer renderer;
         private final PrintStream boundOut;  // null 表示延迟读取 System.out（保持旧测试兼容）
         private final StringBuilder pendingReasoning = new StringBuilder();
@@ -989,6 +1005,17 @@ public class Agent implements AutoCloseable {
             if (hasThinkingPanel()) {
                 renderer.endThinking();
                 pendingReasoning.setLength(0);
+            }
+        }
+
+        @Override
+        public void emit(RunEvent event) {
+            if (event instanceof RunEvent.ReasoningDelta reasoning) {
+                onReasoningDelta(reasoning.content());
+            } else if (event instanceof RunEvent.MessageDelta message) {
+                onContentDelta(message.content());
+            } else if (event instanceof RunEvent.ToolCalls toolCalls && renderer != null) {
+                renderer.appendToolCalls(toolCalls.toLlmToolCalls());
             }
         }
 

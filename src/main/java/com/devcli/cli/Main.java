@@ -38,7 +38,11 @@ import com.devcli.runtime.CancellationToken;
 import com.devcli.runtime.HeadlessAgentRunner;
 import com.devcli.runtime.RunContext;
 import com.devcli.runtime.api.RuntimeApiServer;
+import com.devcli.runtime.api.RuntimeCheckpointCandidateFactory;
+import com.devcli.runtime.api.RuntimeCheckpointPolicy;
 import com.devcli.runtime.api.RuntimeThreadStore;
+import com.devcli.runtime.api.TurnRunner;
+import com.devcli.runtime.event.RunEventSink;
 import com.devcli.runtime.task.DurableTaskManager;
 import com.devcli.runtime.task.TaskCommandFormatter;
 import com.devcli.snapshot.RestoreResult;
@@ -831,7 +835,8 @@ public class Main {
             RuntimeThreadStore store = new RuntimeThreadStore(RuntimeThreadStore.defaultDbPath());
             RuntimeApiServer server = new RuntimeApiServer(
                     store,
-                    (threadId, input) -> runHeadlessTurn(threadId, input, client, store),
+                    (threadId, input, eventSink) ->
+                            runHeadlessTurn(threadId, input, eventSink, client, store),
                     port,
                     RuntimeApiServer.configuredApiKey());
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -874,30 +879,31 @@ public class Main {
                 List.of());
     }
 
-    /** 重放历史的 turn 上限：更早的 turn 直接丢弃，窗口内的超长治理交给 ConversationHistoryCompactor。 */
-    private static final int RUNTIME_TURN_HISTORY_LIMIT = 20;
-
     /**
      * Runtime API turn 执行（存储即状态）：每 turn 新建 Agent 保持隔离，
-     * 执行前从 RuntimeThreadStore 重放该 thread 已完成 turn 的输入/输出对，
-     * 让同一 thread 的多轮对话有上下文延续；进程重启后历史仍在 SQLite，不丢失。
+     * 执行前重放最近持久化检查点和检查点后的完整 turn。Agent 在 turn 完成后按阈值压缩，
+     * RuntimeApiServer 再用本轮 completed event id 固化覆盖边界，避免摘要与精确 turn 重复。
      */
-    private static String runHeadlessTurn(String threadId, String prompt,
-                                          LlmClient llmClient, RuntimeThreadStore store) {
-        List<RuntimeThreadStore.TurnRecord> history = store.turnHistory(threadId);
-        if (history.size() > RUNTIME_TURN_HISTORY_LIMIT) {
-            history = history.subList(history.size() - RUNTIME_TURN_HISTORY_LIMIT, history.size());
-        }
-        List<LlmClient.Message> seed = new ArrayList<>();
-        for (RuntimeThreadStore.TurnRecord turn : history) {
+    private static TurnRunner.TurnResult runHeadlessTurn(
+            String threadId, String prompt, RunEventSink eventSink,
+            LlmClient llmClient, RuntimeThreadStore store) {
+        RuntimeThreadStore.ContextView contextView = store.contextView(threadId);
+        List<LlmClient.Message> seed = new ArrayList<>(contextView.checkpointMessages());
+        for (RuntimeThreadStore.TurnRecord turn : contextView.turns()) {
             seed.add(LlmClient.Message.user(turn.input()));
             seed.add(LlmClient.Message.assistant(turn.output()));
         }
-        return HeadlessAgentRunner.run(
+        HeadlessAgentRunner.RunResult runResult = HeadlessAgentRunner.runDetailed(
                 llmClient,
                 Path.of("."),
                 prompt,
-                seed);
+                seed,
+                RuntimeCheckpointPolicy.configuredTriggerTokens(),
+                eventSink);
+        TurnRunner.CheckpointCandidate checkpoint = RuntimeCheckpointCandidateFactory
+                .fromHistory(runResult.history(), runResult.compacted())
+                .orElse(null);
+        return new TurnRunner.TurnResult(runResult.output(), checkpoint);
     }
 
     private static DurableTaskManager openTaskManager(AtomicReference<LlmClient> llmClientRef) {

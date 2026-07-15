@@ -2,6 +2,8 @@ package com.devcli.runtime;
 
 import com.devcli.agent.Agent;
 import com.devcli.llm.LlmClient;
+import com.devcli.memory.CompactBoundaryMetadata;
+import com.devcli.runtime.event.RunEventSink;
 import com.devcli.tool.ToolRegistry;
 
 import java.nio.file.Path;
@@ -17,6 +19,20 @@ public final class HeadlessAgentRunner {
 
     public static String run(LlmClient llmClient, Path projectPath, String prompt,
                              List<LlmClient.Message> seedHistory) {
+        return runDetailed(llmClient, projectPath, prompt, seedHistory, 0).output();
+    }
+
+    public static RunResult runDetailed(LlmClient llmClient, Path projectPath, String prompt,
+                                        List<LlmClient.Message> seedHistory,
+                                        int checkpointTriggerTokens) {
+        return runDetailed(llmClient, projectPath, prompt, seedHistory,
+                checkpointTriggerTokens, RunEventSink.NO_OP);
+    }
+
+    public static RunResult runDetailed(LlmClient llmClient, Path projectPath, String prompt,
+                                        List<LlmClient.Message> seedHistory,
+                                        int checkpointTriggerTokens,
+                                        RunEventSink eventSink) {
         Objects.requireNonNull(llmClient, "llmClient");
         Path normalizedProject = Objects.requireNonNull(projectPath, "projectPath")
                 .toAbsolutePath()
@@ -26,21 +42,74 @@ public final class HeadlessAgentRunner {
             if (!current.projectPath().equals(normalizedProject)) {
                 throw new IllegalArgumentException("当前运行上下文项目路径不一致");
             }
-            return runWithinContext(llmClient, normalizedProject, prompt, seedHistory);
+            return runWithinContext(
+                    llmClient, normalizedProject, prompt, seedHistory,
+                    checkpointTriggerTokens, eventSink);
         }
         try (RunContext ignored = CancellationContext.startRunContext(normalizedProject)) {
-            return runWithinContext(llmClient, normalizedProject, prompt, seedHistory);
+            return runWithinContext(
+                    llmClient, normalizedProject, prompt, seedHistory,
+                    checkpointTriggerTokens, eventSink);
         }
     }
 
-    private static String runWithinContext(LlmClient llmClient, Path projectPath, String prompt,
-                                           List<LlmClient.Message> seedHistory) {
+    private static RunResult runWithinContext(LlmClient llmClient, Path projectPath, String prompt,
+                                              List<LlmClient.Message> seedHistory,
+                                              int checkpointTriggerTokens,
+                                              RunEventSink eventSink) {
         try (ToolRegistry registry = new ToolRegistry()) {
             registry.setProjectPath(projectPath.toString());
             try (Agent agent = new Agent(llmClient, registry)) {
                 agent.seedHistory(seedHistory);
-                return agent.run(prompt);
+                agent.setRunEventSink(eventSink);
+                String output = agent.run(prompt);
+                boolean compactedAfterTurn = checkpointTriggerTokens > 0
+                        && agent.compactHistoryForPersistence(checkpointTriggerTokens);
+                List<LlmClient.Message> history = agent.getConversationHistory();
+                boolean compactedDuringTurn = hasNewCompactionBoundary(seedHistory, history);
+                String durableOutput = output == null || output.isBlank()
+                        ? latestAssistantContent(history)
+                        : output;
+                return new RunResult(
+                        durableOutput, history, compactedAfterTurn || compactedDuringTurn);
             }
+        }
+    }
+
+    private static String latestAssistantContent(List<LlmClient.Message> history) {
+        if (history == null || history.isEmpty()) return "";
+        for (int index = history.size() - 1; index >= 0; index--) {
+            LlmClient.Message message = history.get(index);
+            if (message != null && "assistant".equals(message.role())
+                    && message.content() != null && !message.content().isBlank()) {
+                return message.content();
+            }
+        }
+        return "";
+    }
+
+    static boolean hasNewCompactionBoundary(
+            List<LlmClient.Message> before,
+            List<LlmClient.Message> after) {
+        return !Objects.equals(latestCompactionBoundary(before), latestCompactionBoundary(after));
+    }
+
+    private static String latestCompactionBoundary(List<LlmClient.Message> messages) {
+        if (messages == null || messages.isEmpty()) return "";
+        String latest = "";
+        for (LlmClient.Message message : messages) {
+            if (message != null
+                    && CompactBoundaryMetadata.parseFromSummaryMessage(message.content()).isPresent()) {
+                latest = message.content();
+            }
+        }
+        return latest;
+    }
+
+    public record RunResult(String output, List<LlmClient.Message> history, boolean compacted) {
+        public RunResult {
+            output = output == null ? "" : output;
+            history = history == null ? List.of() : List.copyOf(history);
         }
     }
 }

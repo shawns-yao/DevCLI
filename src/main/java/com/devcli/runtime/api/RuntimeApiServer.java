@@ -1,5 +1,6 @@
 package com.devcli.runtime.api;
 
+import com.devcli.runtime.event.RunEvent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
@@ -119,12 +120,11 @@ public class RuntimeApiServer implements AutoCloseable {
         try {
             serialTurnExecutor.execute(threadId,
                     () -> runTurn(threadId, turnId, input),
-                    fatal -> store.appendEvent(threadId, "turn.failed",
-                            "{\"turn_id\":\"" + turnId
-                                    + "\",\"error\":\"fatal_runtime_error\"}"));
+                    fatal -> new RuntimeEventPublisher(store, threadId, turnId)
+                            .emit(new RunEvent.TurnFailed("fatal_runtime_error")));
         } catch (RejectedExecutionException e) {
-            store.appendEvent(threadId, "turn.rejected",
-                    "{\"turn_id\":\"" + turnId + "\",\"error\":\"runtime_busy\"}");
+            new RuntimeEventPublisher(store, threadId, turnId)
+                    .emit(new RunEvent.TurnRejected("runtime_busy"));
             writeJson(exchange, 429, "{\"error\":\"runtime_busy\"}");
             return;
         }
@@ -132,17 +132,36 @@ public class RuntimeApiServer implements AutoCloseable {
     }
 
     private void runTurn(String threadId, String turnId, String input) {
+        RuntimeEventPublisher events = new RuntimeEventPublisher(store, threadId, turnId);
         try {
-            store.appendEvent(threadId, "turn.started",
-                    "{\"turn_id\":\"" + turnId + "\",\"input\":\"" + escape(input) + "\"}");
-            String result = runner.run(threadId, input);
-            store.appendEvent(threadId, "message.delta",
-                    "{\"turn_id\":\"" + turnId + "\",\"content\":\"" + escape(result) + "\"}");
-            store.appendEvent(threadId, "turn.completed",
-                    "{\"turn_id\":\"" + turnId + "\",\"status\":\"completed\"}");
+            events.emit(new RunEvent.TurnStarted(input));
+            TurnRunner.TurnResult runResult = runner.run(threadId, input, events);
+            if (runResult == null) {
+                runResult = TurnRunner.TurnResult.completed("");
+            }
+            if (!events.hasMessageDelta()) {
+                events.emit(new RunEvent.MessageDelta(runResult.output()));
+            }
+            long completedEventId = events.publish(new RunEvent.TurnCompleted("completed"));
+            persistCheckpoint(events, threadId, completedEventId, runResult.checkpoint());
         } catch (Exception e) {
-            store.appendEvent(threadId, "turn.failed",
-                    "{\"turn_id\":\"" + turnId + "\",\"error\":\"" + escape(e.getMessage()) + "\"}");
+            events.emit(new RunEvent.TurnFailed(e.getMessage()));
+        }
+    }
+
+    private void persistCheckpoint(RuntimeEventPublisher events, String threadId,
+                                   long completedEventId,
+                                   TurnRunner.CheckpointCandidate checkpoint) {
+        if (checkpoint == null) return;
+        try {
+            store.saveCheckpoint(threadId, completedEventId, checkpoint);
+            events.emit(new RunEvent.CheckpointCreated(
+                    completedEventId,
+                    checkpoint.metadata().preTokens(),
+                    checkpoint.metadata().postTokens(),
+                    checkpoint.metadata().semanticGuardStatus()));
+        } catch (Exception e) {
+            events.emit(new RunEvent.CheckpointFailed(completedEventId, e.getMessage()));
         }
     }
 

@@ -2,6 +2,8 @@ package com.devcli.agent;
 
 import com.devcli.llm.GLMClient;
 import com.devcli.llm.LlmClient;
+import com.devcli.runtime.event.RunEvent;
+import com.devcli.runtime.event.RunEventSink;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.tool.ToolStatus;
@@ -38,6 +40,8 @@ class AgentExecutionEngineTest {
         assertEquals(List.of("system", "assistant", "tool", "assistant"),
                 delegate.history.stream().map(LlmClient.Message::role).toList());
         assertEquals(List.of(LlmClient.ToolChoice.REQUIRED, LlmClient.ToolChoice.AUTO), llm.toolChoices);
+        assertEquals(List.of(RunEvent.ToolCalls.class, RunEvent.ToolResults.class),
+                delegate.runEvents.stream().map(Object::getClass).toList());
     }
 
     @Test
@@ -63,6 +67,7 @@ class AgentExecutionEngineTest {
     private static final class RecordingDelegate implements AgentExecutionEngine.Delegate<String> {
         private final List<LlmClient.Message> history = new ArrayList<>(List.of(LlmClient.Message.system("system")));
         private final List<String> events = new ArrayList<>();
+        private final List<RunEvent> runEvents = new ArrayList<>();
         private final boolean completeAfterTools;
 
         private RecordingDelegate() {
@@ -86,6 +91,11 @@ class AgentExecutionEngineTest {
         @Override
         public LlmClient.StreamListener streamListener() {
             return LlmClient.StreamListener.NO_OP;
+        }
+
+        @Override
+        public RunEventSink eventSink() {
+            return runEvents::add;
         }
 
         @Override

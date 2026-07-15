@@ -1,5 +1,9 @@
 package com.devcli.runtime.api;
 
+import com.devcli.llm.LlmClient;
+import com.devcli.memory.CompactBoundaryMetadata;
+import com.devcli.runtime.event.RunEvent;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -13,6 +17,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 public class RuntimeThreadStore implements AutoCloseable {
@@ -22,7 +27,37 @@ public class RuntimeThreadStore implements AutoCloseable {
     private final Connection connection;
 
     /** 一次完整 turn 的输入/输出对，供后续 turn 重放历史上下文。 */
-    public record TurnRecord(String input, String output) {}
+    public record TurnRecord(String input, String output, long completedEventId) {
+        public TurnRecord(String input, String output) {
+            this(input, output, 0);
+        }
+    }
+
+    public record RuntimeCheckpoint(
+            long id,
+            String threadId,
+            long coveredThroughEventId,
+            List<LlmClient.Message> messages,
+            String summary,
+            CompactBoundaryMetadata metadata,
+            Instant createdAt) {
+        public RuntimeCheckpoint {
+            messages = messages == null ? List.of() : List.copyOf(messages);
+            summary = summary == null ? "" : summary;
+        }
+    }
+
+    public record ContextView(
+            List<LlmClient.Message> checkpointMessages,
+            List<TurnRecord> turns,
+            long lastCompletedEventId,
+            Optional<RuntimeCheckpoint> checkpoint) {
+        public ContextView {
+            checkpointMessages = checkpointMessages == null ? List.of() : List.copyOf(checkpointMessages);
+            turns = turns == null ? List.of() : List.copyOf(turns);
+            checkpoint = checkpoint == null ? Optional.empty() : checkpoint;
+        }
+    }
 
     public RuntimeThreadStore(Path dbPath) throws SQLException {
         try {
@@ -53,7 +88,8 @@ public class RuntimeThreadStore implements AutoCloseable {
             ps.setString(1, id);
             ps.setString(2, Instant.now().toString());
             ps.executeUpdate();
-            appendEvent(id, "thread.created", "{\"thread_id\":\"" + id + "\"}");
+            RunEvent event = new RunEvent.ThreadCreated(id);
+            appendEvent(id, event.type(), RunEventJsonCodec.encode(event, ""));
             return id;
         } catch (SQLException e) {
             throw new IllegalStateException("创建 runtime thread 失败: " + e.getMessage(), e);
@@ -120,7 +156,11 @@ public class RuntimeThreadStore implements AutoCloseable {
      * 失败/被拒的 turn 不进入历史）。事件 data 为写入端手拼 JSON，解析端容错：单条解析失败跳过并 warn。
      */
     public synchronized List<TurnRecord> turnHistory(String threadId) {
-        List<RuntimeEvent> allEvents = events(threadId, 0);
+        return turnHistoryAfter(threadId, 0);
+    }
+
+    public synchronized List<TurnRecord> turnHistoryAfter(String threadId, long afterEventId) {
+        List<RuntimeEvent> allEvents = events(threadId, Math.max(0, afterEventId));
         Map<String, String> inputs = new HashMap<>();
         Map<String, String> outputs = new HashMap<>();
         List<TurnRecord> history = new ArrayList<>();
@@ -138,7 +178,8 @@ public class RuntimeThreadStore implements AutoCloseable {
                         String input = inputs.remove(turnId);
                         String output = outputs.remove(turnId);
                         if (input != null && !input.isBlank()) {
-                            history.add(new TurnRecord(input, output == null ? "" : output));
+                            history.add(new TurnRecord(
+                                    input, output == null ? "" : output, event.id()));
                         }
                     }
                     default -> { /* thread.created / turn.failed / turn.rejected 不进历史 */ }
@@ -148,6 +189,79 @@ public class RuntimeThreadStore implements AutoCloseable {
             }
         }
         return history;
+    }
+
+    public synchronized ContextView contextView(String threadId) {
+        Optional<RuntimeCheckpoint> checkpoint = latestCheckpoint(threadId);
+        long coveredThrough = checkpoint.map(RuntimeCheckpoint::coveredThroughEventId).orElse(0L);
+        List<TurnRecord> turns = turnHistoryAfter(threadId, coveredThrough);
+        long lastCompletedEventId = turns.isEmpty()
+                ? coveredThrough
+                : turns.getLast().completedEventId();
+        return new ContextView(
+                checkpoint.map(RuntimeCheckpoint::messages).orElse(List.of()),
+                turns,
+                lastCompletedEventId,
+                checkpoint);
+    }
+
+    public synchronized void saveCheckpoint(
+            String threadId,
+            long coveredThroughEventId,
+            TurnRunner.CheckpointCandidate candidate) {
+        if (candidate == null || candidate.messages().isEmpty() || coveredThroughEventId <= 0) return;
+        try (PreparedStatement ps = connection.prepareStatement("""
+                INSERT INTO runtime_checkpoints (
+                    thread_id, covered_through_event_id, messages_json, summary,
+                    metadata_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """)) {
+            ps.setString(1, threadId);
+            ps.setLong(2, coveredThroughEventId);
+            ps.setString(3, MAPPER.writeValueAsString(candidate.messages()));
+            ps.setString(4, candidate.summary());
+            ps.setString(5, MAPPER.writeValueAsString(candidate.metadata()));
+            ps.setString(6, Instant.now().toString());
+            ps.executeUpdate();
+        } catch (Exception e) {
+            throw new IllegalStateException("写入 runtime checkpoint 失败: " + e.getMessage(), e);
+        }
+    }
+
+    public synchronized Optional<RuntimeCheckpoint> latestCheckpoint(String threadId) {
+        try (PreparedStatement ps = connection.prepareStatement("""
+                SELECT id, thread_id, covered_through_event_id, messages_json,
+                       summary, metadata_json, created_at
+                FROM runtime_checkpoints
+                WHERE thread_id = ?
+                ORDER BY covered_through_event_id DESC, id DESC
+                """)) {
+            ps.setString(1, threadId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    try {
+                        List<LlmClient.Message> messages = MAPPER.readValue(
+                                rs.getString("messages_json"),
+                                new TypeReference<List<LlmClient.Message>>() {});
+                        CompactBoundaryMetadata metadata = MAPPER.readValue(
+                                rs.getString("metadata_json"), CompactBoundaryMetadata.class);
+                        return Optional.of(new RuntimeCheckpoint(
+                                rs.getLong("id"),
+                                rs.getString("thread_id"),
+                                rs.getLong("covered_through_event_id"),
+                                messages,
+                                rs.getString("summary"),
+                                metadata,
+                                Instant.parse(rs.getString("created_at"))));
+                    } catch (Exception corrupted) {
+                        log.warn("解析 runtime checkpoint 失败，回退更早检查点: id={}", rs.getLong("id"));
+                    }
+                }
+            }
+            return Optional.empty();
+        } catch (SQLException e) {
+            throw new IllegalStateException("读取 runtime checkpoint 失败: " + e.getMessage(), e);
+        }
     }
 
     private void initTables() throws SQLException {
@@ -168,6 +282,19 @@ public class RuntimeThreadStore implements AutoCloseable {
                     )
                     """);
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_runtime_events_thread ON runtime_events(thread_id, id)");
+            stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS runtime_checkpoints (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        thread_id TEXT NOT NULL,
+                        covered_through_event_id INTEGER NOT NULL,
+                        messages_json TEXT NOT NULL,
+                        summary TEXT NOT NULL,
+                        metadata_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    )
+                    """);
+            stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_checkpoint_coverage "
+                    + "ON runtime_checkpoints(thread_id, covered_through_event_id)");
         }
     }
 

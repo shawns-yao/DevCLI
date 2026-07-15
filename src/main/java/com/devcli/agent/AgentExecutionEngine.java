@@ -2,6 +2,9 @@ package com.devcli.agent;
 
 import com.devcli.llm.LlmClient;
 import com.devcli.runtime.CancellationContext;
+import com.devcli.runtime.event.RunEvent;
+import com.devcli.runtime.event.RunEventSink;
+import com.devcli.runtime.event.RunEventStreamListener;
 import com.devcli.tool.ToolRegistry;
 
 import java.io.IOException;
@@ -20,6 +23,10 @@ final class AgentExecutionEngine<R> {
         List<LlmClient.Tool> toolDefinitions(int iteration);
 
         LlmClient.StreamListener streamListener();
+
+        default RunEventSink eventSink() {
+            return RunEventSink.NO_OP;
+        }
 
         default LlmClient.ToolChoice toolChoice(int iteration) {
             return LlmClient.ToolChoice.AUTO;
@@ -106,12 +113,13 @@ final class AgentExecutionEngine<R> {
             delegate.beforeIteration(iteration, budget);
 
             try {
+                RunEventSink eventSink = RunEventSink.composite(
+                        delegate.eventSink(),
+                        RunEventSink.fromStreamListener(delegate.streamListener()));
                 LlmClient.ChatResponse response = llmClient.chat(
                         delegate.history(),
                         delegate.toolDefinitions(iteration),
-                        delegate.streamListener() == null
-                                ? LlmClient.StreamListener.NO_OP
-                                : delegate.streamListener(),
+                        new RunEventStreamListener(eventSink),
                         delegate.toolChoice(iteration));
                 if (delegate.isCancelled()) {
                     return delegate.cancelled(budget);
@@ -132,6 +140,7 @@ final class AgentExecutionEngine<R> {
                             response.content(),
                             response.toolCalls()));
                     delegate.beforeToolExecution(response, iteration, budget);
+                    eventSink.emit(RunEvent.ToolCalls.from(response.toolCalls()));
 
                     List<ToolRegistry.ToolExecutionResult> toolResults = delegate.executeTools(
                             response.toolCalls(), iteration);
@@ -143,6 +152,7 @@ final class AgentExecutionEngine<R> {
                         delegate.history().add(LlmClient.Message.tool(
                                 toolResult.id(), toolResult.result()));
                     }
+                    eventSink.emit(RunEvent.ToolResults.from(toolResults));
                     delegate.afterToolResults(response, toolResults, iteration, budget);
                     Optional<R> completed = delegate.completedAfterToolResults(
                             response, toolResults, iteration, budget);
