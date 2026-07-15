@@ -26,6 +26,7 @@ Thumbs.db
 
 # 第三方参考项目（仅本地阅读，不纳入 DevCLI 仓库）
 cc/
+live/
 .ace-tool/
 
 # 检索工具索引目录

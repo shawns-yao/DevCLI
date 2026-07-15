@@ -236,3 +236,20 @@
 - 参考点：cc 的 `SearchExtraToolsTool`、TF-IDF 工具索引和 inter-turn prefetch
 - 验证建议：新增工具索引、检索排序、延迟加载后可调用测试
 - 风险：工具延迟加载会改变模型可见工具集合，必须保证错误提示能引导模型重新搜索工具
+
+## 2026-07-15 LiveAgent 可复用架构提取
+
+- 状态：参考源码已拉取并完成静态提取，两个 P1 与强类型运行事件 P2 第一阶段已实现
+- 来源：`Stack-Cairn/LiveAgent`，提取基线提交 `8dc4b9d830af9d2a5549d7d10c267019d22ef90f`
+- 影响范围：长期记忆治理、Runtime API 历史持久化、运行事件协议、Hook 生命周期、Multi-Agent 跨进程恢复
+- 已完成：筛选长期记忆组织器、结构化证据与审核状态、持久化压缩检查点、强类型运行事件、受控 Hook、持久化子代理身份；明确排除外部 Shell 路径、文本错误模型、工具名特殊并行、普通 worktree 自动应用和技术栈迁移
+- 已实现 P1（2026-07-15）：长期记忆新增结构化 `MemoryEvidence`，持久化 confidence、sourceQuote、reasoning、reviewState、conflictsWith，并按来源引用完整度自动降级 HIGH/MEDIUM；SQLite 旧库幂等补列，旧行按 REVIEWED 兼容迁移；显式写入默认 REVIEWED，策略自动写入默认 UNREVIEWED，REJECTED 保留审计但从关键词、语义召回和 prompt 注入排除；冲突关系结构化持久化并保留旧 metadata 兼容
+- 已实现 P1（2026-07-15）：新增长期记忆离线组织器与 `/memory organize`、`/memory organize apply`；库存有界为 100 条、正文 300 字符并使用 JSON 数据载荷；模型输出 KEEP/MERGE/REVIEW/REJECT 结构化计划，解析失败有界修复 1 次；程序重新校验来源标识、类型、主题、审核状态、覆盖范围和计划置信度，仅自动应用同主题、同类型、全部 UNREVIEWED、覆盖完整且置信度不低于 0.9 的合并，已审核和高风险候选只在本次报告中标记为需要人工复核或由策略拒绝；当前不持久化复核队列
+- 后续可选：增加语义主题聚类、持久化组织器运行历史和人工复核后的显式应用入口
+- 已实现 P1（2026-07-15）：Runtime API 长 thread 默认在历史达到 32,000 token 后生成持久化压缩检查点；保存压缩消息窗口、覆盖完成事件、摘要、token 变化、语义守卫结果、Skill、RAG epoch 和 MCP 快照；恢复使用最新有效检查点并完整追加检查点后的已完成 turn，没有检查点时恢复全部已完成 turn；候选消息移除动态 system prompt、reasoning 和图片正文；检查点在 `turn.completed` 后保存，失败只产生独立事件，损坏记录回退更早检查点
+- 已实现 P2（2026-07-15）：新增强类型 `RunEvent`、事件 sink、模型流适配器和 Runtime JSON 投影；`AgentExecutionEngine` 统一产生 reasoning/content delta、工具调用和工具结果事件，ReAct Renderer 直接消费同一事件流，Plan task 与 SubAgent 的旧 StreamListener 通过适配器兼容；Runtime API 的 turn、模型流、工具和 checkpoint 事件不再手工拼接 JSON，流式消息不重复写入最终输出；无头 Provider 只流式输出 reasoning 时从最终 assistant history 恢复答案
+- 待实现 P2：增加受 ToolEffect 与 HITL 约束的 Hook 生命周期
+- 待实现 P3：在保留 Planner、Worker、Reviewer 和 ExecutionArtifact 的前提下，增加子代理稳定身份、消息游标和跨进程恢复
+- 文档：详细筛选结果记录在 `docs/liveagent-reference-extraction.md`
+- 验证建议：每个候选能力单独设计和提交；优先补 Memory Store 契约测试、组织器风险矩阵测试、Runtime checkpoint 恢复测试和事件顺序测试
+- 风险：LiveAgent 仍在快速迭代；这里只提取机制，不保证其实现可直接移植。禁止新增与 WorkingMemory、ExecutionArtifact、PatchSet 或 ToolExecutionPipeline 重复的状态源

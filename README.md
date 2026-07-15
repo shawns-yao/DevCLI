@@ -70,7 +70,7 @@ Main
 - 所有内置 LLM Provider 使用统一 `LlmException` 错误模型，区分认证、限流、过载、超时、网络、参数、上下文超限、内容过滤、服务端和响应格式错误。限流、过载、超时、网络和 5xx 按指数退避与 jitter 有界重试；流式内容已经输出后不重试，避免重复正文或工具调用。SubAgent 会把标准错误码和 `retryable` 标记保留到编排层，瞬时故障判断不依赖具体网络错误文案。
 - `ConversationHistoryCompactor（对话历史压缩器）` 是治理 LLM messages 窗口的唯一压缩点；压缩分两层：第 0 层 `microcompact` 先把单条超大消息（多为大工具结果）头尾截断，并把最近 2 个 user round 之前的旧 `tool_result` 按 `toolCallId` 成批落盘为 `<microcompact_boundary>` 引用（不调 LLM、不删消息、保 tool_call 配对），扛不住再走 LLM 摘要（Map-Reduce / 增量）。摘要提交到 history 前会经过运行时语义守卫，抽取必须、禁止、默认值、命令、版本和配置赋值等关键约束；摘要缺失时直接从原始消息恢复，不再等后续任务失败后发现。
 - `WorkingMemory（工作记忆）` 只保存当前会话派生状态，不承担压缩职责。`RagEvidenceMemory（RAG 证据记忆）` 会记录检索证据的 `IndexEpoch（索引版本）`、`SymbolVersion（符号版本）` 和 `ClasspathEpoch（类路径版本）`；`search_code` 通过结构化 `RAG_EVIDENCE_JSON` 载荷传递证据，避免依赖展示文本解析。
-- `LongTermMemory（长期记忆）` 只保存跨会话稳定事实，默认不把临时任务请求写入长期层。每条记忆统一记录 schemaVersion、主题内 revision 和 expiresAt；新写入事实按类型应用 TTL，检索时自动清理过期项。同主题内容变化或可解析键值事实冲突时自动标记 `conflict_with`，旧事实进入 superseded 状态。长期记忆注入时会抑制与 WorkingMemory 临时事实语义重复的条目。
+- `LongTermMemory（长期记忆）` 只保存跨会话稳定事实，默认不把临时任务请求写入长期层。每条记忆统一记录 schemaVersion、主题内 revision、expiresAt 和结构化 MemoryEvidence；证据包含置信度、来源引用、写入原因、审核状态和冲突条目。显式写入默认已审核，策略自动写入默认未审核；已拒绝记忆保留审计但不参与关键词、语义召回或 prompt 注入。新写入事实按类型应用 TTL，检索时自动清理过期项。同主题内容变化或可解析键值事实冲突时自动记录 conflictsWith，旧事实进入 superseded 状态。长期记忆注入时会抑制与 WorkingMemory 临时事实语义重复的条目。
 - `PathGuard（路径围栏）` 负责限制文件访问不逃逸项目根。
 - `ToolEffect + ToolAccessScope（工具副作用能力）` 由执行管线强制：非隔离分析任务只获得只读能力，隔离任务才允许项目写入和主机命令；MCP 缺失只读注解或声明 destructive/openWorld 时按外部副作用处理。工具参数先转换为稳定语义指纹，字段顺序、查询大小写和冗余空白不再绕过停滞检测；成功的只读结果会短期缓存，任何副作用执行都会清空缓存。
 - `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 和 `/team` 并行执行时拦截 `write_file`，同一文件只能被一个运行中 task / step 写入；并行工具线程会继承步骤租约归属，任务结束后释放租约。`ToolRegistry` 托管共享后台清理器，project fork 复用同一线程，最后一个注册表关闭后停止；周期可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
@@ -336,7 +336,7 @@ Authorization: Bearer your_local_api_key
 ```
 
 Runtime API 默认仅绑定 `127.0.0.1`。HTTP 请求线程和 Agent 执行线程隔离；Agent 执行池默认 `2` 个线程、队列 `64`，可通过
-`-Ddevcli.runtime.api.turn.threads` / `-Ddevcli.runtime.api.turn.queue` 调整。队列满时返回 `429 {"error":"runtime_busy"}`。
+`-Ddevcli.runtime.api.turn.threads` / `-Ddevcli.runtime.api.turn.queue` 调整。队列满时返回 `429 {"error":"runtime_busy"}`。长 thread 默认在历史达到 32,000 token 后持久化压缩检查点，可通过 `DEVCLI_RUNTIME_CHECKPOINT_TRIGGER_TOKENS` 或 `-Ddevcli.runtime.checkpoint.trigger.tokens` 调整，最小值为 4,000。
 
 ## Usage
 
@@ -414,6 +414,8 @@ Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个
 | `/search <query>` | 检索代码库 |
 | `/graph <class>` | 查看代码关系图谱 |
 | `/memory` | 查看记忆状态 |
+| `/memory organize` | 生成长期记忆整理计划，不修改记忆 |
+| `/memory organize apply` | 应用程序判定为低风险的整理项 |
 | `/memory clear` | 清空长期记忆 |
 | `/save <fact>` | 保存长期事实 |
 | `/save --pin <fact>` | 保存强约束事实，每轮全量注入 |
@@ -479,7 +481,7 @@ DevCLI 的上下文分为四层：
 - `ConversationHistory（对话历史）`：真实 LLM messages，由压缩器治理窗口。
 - `WorkingMemory（工作记忆）`：当前会话工具证据、任务状态和临时事实，不跨会话持久化。用户显式要求“别管记忆”“忽略记忆”等时，本会话不注入长期记忆、通用 WorkingMemory 和角色裁剪后的 WorkingMemory。其中 `TaskLedger（任务账本）` 结构化记录计划执行进度，不进对话历史、压缩不触碰它；当前由 `/plan` 维护。Plan 与 Multi-Agent 的任务终态统一落在 `ExecutionArtifact`，只有主项目成功应用的 PatchSet 修改资源才写入运行态、checkpoint 和 WorkingMemory；checkpoint 版本 2 的 `RecoveryState` 负责跨进程恢复，旧 completed/failed 结构会先归一化。压缩后恢复上下文会按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 和 MCP 工具状态分节注入，并做预算控制与行级去重；microcompact 工具引用会按 storedPath / toolCallId 去重；Multi-Agent 会按 Planner / Worker / Reviewer 裁剪恢复内容，避免恢复段重复携带完整工具输出。压缩边界会同时记录全局 RAG 索引版本和当前会话 RAG 证据版本。
 - `SessionMemory（会话预摘要）`：当前进程内缓存压缩前置摘要，覆盖同一消息指纹且未过期时可被压缩器复用；默认 30 分钟过期。Plan / Multi-Agent turn 结束后会后台维护预摘要，避免主流程等待摘要 LLM 调用。
-- `LongTermMemory（长期记忆）`：跨会话稳定事实，SQLite 持久化，支持检索注入；写入前经过 `LongTermMemoryPolicy` 规则化分流，中英文显式低敏偏好/项目事实、稳定个人属性和多次重复出现的稳定事实可保存，反馈类事实按 `FEEDBACK` 类型落库，敏感或模糊新事实要求确认，中英文临时闲聊和低复用信息跳过；显式保存请求如果内容仍然明显临时或低复用，也先进入确认态而不是直接落库。命中 `subject（主题键）` 的事实写入时，同主题旧事实自动标记为 `superseded（已取代）`，检索只返回 `active（有效）` 条目（如 Fastjson → Jackson 选型切换）。与 WorkingMemory 临时事实语义重复的长期记忆不会重复注入 prompt。
+- `LongTermMemory（长期记忆）`：跨会话稳定事实，SQLite 持久化，支持检索注入；写入前经过 `LongTermMemoryPolicy` 规则化分流，中英文显式低敏偏好/项目事实、稳定个人属性和多次重复出现的稳定事实可保存，反馈类事实按 `FEEDBACK` 类型落库，敏感或模糊新事实要求确认，中英文临时闲聊和低复用信息跳过；显式保存请求如果内容仍然明显临时或低复用，也先进入确认态而不是直接落库。`MemoryEvidence` 将 confidence、sourceQuote、reasoning、reviewState 和 conflictsWith 作为持久化契约；显式写入默认 REVIEWED，自动策略写入默认 UNREVIEWED，REJECTED 仅保留审计。`/memory organize` 生成结构化整理计划，`/memory organize apply` 只自动应用同主题、同类型、全部未审核、覆盖完整且计划置信度不低于 0.9 的合并；模型自报风险不作为放行依据，已审核条目始终在本次运行报告中标记为需要人工复核。命中 `subject（主题键）` 的事实写入时，同主题旧事实自动标记为 `superseded（已取代）`，检索只返回可召回条目（如 Fastjson → Jackson 选型切换）。与 WorkingMemory 临时事实语义重复的长期记忆不会重复注入 prompt。
 - `StickyMemory（强约束记忆）`：通过 `/save --pin` 保存，每轮全量注入 system prompt。
 
 保存长期事实：
@@ -594,14 +596,21 @@ Runtime API 适合把 DevCLI 接入本地脚本、编辑器插件或自动化系
 事件类型：
 
 - `turn.started`
+- `reasoning.delta`
 - `message.delta`
+- `tool.calls`
+- `tool.results`
 - `turn.completed`
 - `turn.failed`
 - `turn.rejected`
+- `thread.checkpoint.created`
+- `thread.checkpoint.failed`
+
+模型流、工具调用、工具结果和 turn 生命周期统一使用强类型 `RunEvent`。CLI Renderer 通过适配器消费同一事件流，Runtime API 将事件投影为带 `schema_version: 1` 的稳定 JSON 后写入 SSE；远程客户端不需要解析终端文本。工具参数在协议中保持 JSON 对象，工具结果包含结构化状态、错误码、重试标记、耗时和图片数量，不包含图片正文。
 
 默认只绑定本机地址 `127.0.0.1`，并要求 API Key。HTTP 请求线程与 Agent turn 执行线程隔离，turn 队列满时返回 `429 runtime_busy`。
 
-同一 thread 的多个 turn 有上下文延续：每个 turn 仍然新建独立 Agent 保持隔离，但执行前会从 SQLite 事件流重放该 thread 最近的历史输入/输出对（最多 20 轮，超长窗口由对话压缩器治理）。历史持久化在磁盘，进程重启后上下文不丢失；失败或被拒的 turn 不进入历史。
+同一 thread 的多个 turn 有上下文延续：每个 turn 仍然新建独立 Agent 保持隔离。执行前从 SQLite 恢复最新压缩检查点，并完整重放检查点之后的已完成 turn；没有检查点时重放全部已完成 turn，不再固定截断最近 20 轮。检查点保存压缩后的消息窗口、覆盖事件、摘要、token 变化、语义守卫状态、Skill、RAG epoch 和 MCP 快照；动态 system prompt、reasoning 与图片正文不会持久化。检查点写入发生在 `turn.completed` 之后，失败只记录独立事件，不改变 turn 已完成终态。历史和检查点均持久化到磁盘；失败或被拒的 turn 不进入恢复上下文。
 
 ## Safety
 

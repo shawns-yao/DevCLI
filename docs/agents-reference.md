@@ -238,6 +238,12 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - Runtime API: `serve --http --port 8080`，仅 127.0.0.1，需 API Key
 - 端点：POST /v1/threads / POST /v1/threads/{id}/turns / GET /v1/threads/{id}/events
 - Runtime API 的 turn 通过 `KeyedSerialExecutor` 调度：同 key 的通道创建、入队和空通道删除使用原子 compute，杜绝旧通道与新通道并存；底层调度拒绝会通知全部等待者，单个 turn 异常不会阻塞同通道后续任务
+- thread 上下文从 SQLite 恢复最新压缩检查点，并完整追加检查点覆盖事件之后的已完成 turn；没有检查点时恢复全部已完成 turn，不再固定保留最近 20 轮
+- 历史默认达到 32,000 token 时生成持久化检查点，`DEVCLI_RUNTIME_CHECKPOINT_TRIGGER_TOKENS` / `devcli.runtime.checkpoint.trigger.tokens` 可调整，最小 4,000；检查点保存压缩消息、覆盖事件、摘要、token 变化和 `CompactBoundaryMetadata` 运行态快照
+- 检查点候选会移除动态 system prompt、reasoning 和图片正文；保存发生在 `turn.completed` 事件之后，失败只写入 `thread.checkpoint.failed`；最新记录损坏时按时间回退到更早可解析检查点
+- `RunEvent` 统一表达 reasoning/content delta、工具调用、工具结果、turn 终态和 checkpoint 事件；`AgentExecutionEngine` 将模型 StreamListener 回调转换为事件，再通过适配器投影到既有 Renderer 或 Runtime sink
+- Runtime JSON 投影集中维护协议字段和转义，每个 payload 固定携带 `schema_version=1`；工具 arguments 优先保持 JSON 对象，无法解析时保留原文本；工具结果携带 status、error_code、retryable、elapsed_millis 和 image_count，不持久化图片正文
+- Runtime runner 收到事件 sink 后可边执行边写入 SQLite/SSE；如果 Provider 没有产生 content delta，服务端才用最终输出补一个 `message.delta`，避免流式回答重复写入
 - 每次交互、后台任务和无头 turn 绑定独立 `RunContext`，其中包含项目路径与取消令牌；预先创建的线程池不读取其他运行的取消状态，线程中断也进入取消语义
 - `HeadlessAgentRunner` 统一管理无头 Agent、ToolRegistry 和 MemoryManager 生命周期；后台任务取消时同时取消对应 RunContext 并中断执行线程
 - ToolResultSizeManager 的落盘项目路径来自执行该工具的 ToolRegistry 实例，不再通过静态活动路径跨运行共享
@@ -368,7 +374,9 @@ EMBEDDING_BASE_URL=http://localhost:11434
 
 `ConversationHistoryCompactor` 在摘要尺寸治理后、重建 history 前调用 `CompactionSemanticGuard`。守卫从待压缩原消息中提取必须、禁止、默认值、命令、版本、端口、目录、验收和配置赋值等关键约束，通过规范化文本与标识符锚点判断保留情况；缺失约束直接以提取式恢复段补回，并在摘要上限内优先保留。
 
-`MemoryEntry` 持久化 `schemaVersion`、`revision` 和 `expiresAt`。旧构造与旧 SQLite 行迁移为 schema 1、revision 1、无历史过期时间；新写入条目按类型 TTL 生成 expiresAt。LongTermMemory 在检索、读取、计数和类型筛选前清理过期条目，并同步删除持久化记录和向量索引。显式 subject 内容变化以及 `key=value`、`主题是值` 等可解析声明冲突会记录 `conflict_detected/conflict_with`，旧条软删除，新条 revision 递增。
+`MemoryOrganizer` 通过 `/memory organize` 生成结构化整理计划，通过 `/memory organize apply` 应用低风险合并。库存最多携带 100 条可召回记忆，每条正文限制 300 字符并编码为 JSON 数据；解析失败最多修复一次。模型只能提出 KEEP、MERGE、REVIEW、REJECT 候选，程序重新校验来源标识、类型、主题、审核状态、覆盖范围和计划置信度。只有同主题、同类型、全部 UNREVIEWED、覆盖该主题全部可召回条目且计划置信度不低于 0.9 的 MERGE 可以自动应用；其余候选只在本次运行报告中标记为需要人工复核，或由策略拒绝；当前不持久化复核队列。
+
+`MemoryEntry` 持久化 `schemaVersion`、`revision`、`expiresAt` 和结构化 `MemoryEvidence`。证据字段包括 confidence、sourceQuote、reasoning、reviewState、conflictsWith；HIGH 置信度至少需要 5 字符 sourceQuote，MEDIUM 需要非空 sourceQuote，否则构造时自动降级；旧构造与旧 SQLite 行迁移为 schema 1、revision 1、无历史过期时间、UNSPECIFIED 置信度和 REVIEWED 状态，新写入条目使用 schema 2 并按类型 TTL 生成 expiresAt。显式写入默认 REVIEWED，策略自动写入默认 UNREVIEWED；REJECTED 条目保留审计，但从关键词检索、语义检索和 prompt 注入中排除。LongTermMemory 在检索、读取、计数和类型筛选前清理过期条目，并同步删除持久化记录和向量索引。显式 subject 内容变化以及 `key=value`、`主题是值` 等可解析声明冲突会记录结构化 conflictsWith，同时保留 `conflict_detected/conflict_with` 兼容 metadata；旧条软删除，新条 revision 递增。
 
 `ToolInvocationFingerprint` 对 JSON 对象字段排序，统一查询字段大小写、冗余空白和路径分隔符。AgentBudget 使用该指纹判断语义重复；ToolRegistry 只缓存成功、无图片的 READ_ONLY 结果，默认 128 条、30 秒。项目路径切换或任何非只读工具进入执行阶段时清空缓存，禁止把副作用前的陈旧读取跨状态复用。
 
