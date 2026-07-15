@@ -612,6 +612,26 @@ Runtime API 适合把 DevCLI 接入本地脚本、编辑器插件或自动化系
 
 同一 thread 的多个 turn 有上下文延续：每个 turn 仍然新建独立 Agent 保持隔离。执行前从 SQLite 恢复最新压缩检查点，并完整重放检查点之后的已完成 turn；没有检查点时重放全部已完成 turn，不再固定截断最近 20 轮。检查点保存压缩后的消息窗口、覆盖事件、摘要、token 变化、语义守卫状态、Skill、RAG epoch 和 MCP 快照；动态 system prompt、reasoning 与图片正文不会持久化。检查点写入发生在 `turn.completed` 之后，失败只记录独立事件，不改变 turn 已完成终态。历史和检查点均持久化到磁盘；失败或被拒的 turn 不进入恢复上下文。
 
+## Hooks
+
+DevCLI 支持 `agent`、`turn`、`message` 和 `tool execution` 四层生命周期 Hook：
+
+- `agent_start` / `agent_end`
+- `turn_start` / `turn_end`
+- `message_start` / `message_end`
+- `tool_execution_start` / `tool_execution_end`
+
+Hook 配置按 id 合并，项目级覆盖用户级：
+
+1. `~/.devcli/hooks.json`
+2. `<project>/.devcli/hooks.json`
+
+也可以通过 `DEVCLI_HOOKS_FILE` 或 `-Ddevcli.hooks.file` 指定单一配置文件。配置使用 `schemaVersion: 1`，模板位于 `Config/hooks.example.json`。
+
+Hook 不直接执行任意 shell 或 HTTP 请求，而是调用已注册工具，因此继续经过 ToolEffect、能力范围、参数校验、HITL、策略和审计管线。READ_ONLY / LOCAL_CONTEXT Hook 会被强制收窄到只读能力；其他副作用必须同时配置 `allowSideEffects: true`、启用 HITL，并且目标工具具有逐次审批策略，否则拒绝执行。
+
+Hook 在对应生命周期点同步、按配置顺序执行，确保事件顺序可复现；工具自身的超时和取消机制继续生效。`failureMode: warn` 只记录警告，不改变 Agent 终态；`failureMode: required` 会通过统一 Agent 失败出口终止当前执行。参数字符串支持 `${event}`、`${project}`、`${run_id}`、`${iteration}`、`${tool_name}`、`${tool_call_id}` 和 `${status}` 占位符。
+
 ## Safety
 
 DevCLI 是本地 Agent CLI，不提供容器或虚拟机级沙箱。安全机制包括：

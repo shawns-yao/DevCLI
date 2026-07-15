@@ -3,6 +3,7 @@ package com.devcli.agent;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.devcli.hook.HookLifecycle;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.LlmException;
 import com.devcli.llm.LlmTraceLogger;
@@ -453,7 +454,8 @@ public class SubAgent {
         SubAgentStreamRenderer streamRenderer = new SubAgentStreamRenderer(name, role, out);
 
         AgentBudget budget = createExecutionBudget();
-        return new AgentExecutionEngine<AgentMessage>(llmClient, budget).run(
+        return new AgentExecutionEngine<AgentMessage>(
+                llmClient, budget, HookLifecycle.load(toolRegistry)).run(
                 new AgentExecutionEngine.Delegate<>() {
                     @Override
                     public List<LlmClient.Message> history() {

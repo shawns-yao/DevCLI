@@ -248,6 +248,15 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `HeadlessAgentRunner` 统一管理无头 Agent、ToolRegistry 和 MemoryManager 生命周期；后台任务取消时同时取消对应 RunContext 并中断执行线程
 - ToolResultSizeManager 的落盘项目路径来自执行该工具的 ToolRegistry 实例，不再通过静态活动路径跨运行共享
 
+### Controlled Hook Lifecycle
+
+- 生命周期事件：agent_start/end、turn_start/end、message_start/end、tool_execution_start/end；状态机幂等，并在异常、取消和预算出口闭合未结束层级
+- `AgentExecutionEngine` 是统一触发点，因此 ReAct、Plan task 和 SubAgent 不维护独立 Hook 顺序
+- 配置读取：`DEVCLI_HOOKS_FILE` / `devcli.hooks.file` 指定单文件，否则按用户级 `~/.devcli/hooks.json`、项目级 `.devcli/hooks.json` 合并，项目同 id 覆盖用户定义；上限 64 条
+- Hook 动作使用 ToolRegistry 工具名与 JSON arguments，不提供旁路 shell 或 HTTP executor；参数支持 event、project、run_id、iteration、tool_name、tool_call_id、status 占位符
+- READ_ONLY / LOCAL_CONTEXT Hook 强制收窄为 READ_ONLY scope；其余 ToolEffect 需要 `allowSideEffects=true`、启用 HitlToolRegistry，且 ApprovalPolicy 必须要求逐次审批；当前 Plan/SubAgent scope 仍可继续拒绝超出能力范围的动作
+- `failureMode=warn` 只记录警告；`required` 转换为标准 Agent IOException 失败出口，包括 agent_end 阶段
+
 ### Image Input (Phase 21)
 
 - ContentPart 支持图片 block（base64 + mimeType）

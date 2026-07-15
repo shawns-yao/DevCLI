@@ -239,7 +239,7 @@
 
 ## 2026-07-15 LiveAgent 可复用架构提取
 
-- 状态：参考源码已拉取并完成静态提取，两个 P1 与强类型运行事件 P2 第一阶段已实现
+- 状态：参考源码已拉取并完成静态提取，两个 P1 与两个 P2 能力已实现
 - 来源：`Stack-Cairn/LiveAgent`，提取基线提交 `8dc4b9d830af9d2a5549d7d10c267019d22ef90f`
 - 影响范围：长期记忆治理、Runtime API 历史持久化、运行事件协议、Hook 生命周期、Multi-Agent 跨进程恢复
 - 已完成：筛选长期记忆组织器、结构化证据与审核状态、持久化压缩检查点、强类型运行事件、受控 Hook、持久化子代理身份；明确排除外部 Shell 路径、文本错误模型、工具名特殊并行、普通 worktree 自动应用和技术栈迁移
@@ -248,7 +248,7 @@
 - 后续可选：增加语义主题聚类、持久化组织器运行历史和人工复核后的显式应用入口
 - 已实现 P1（2026-07-15）：Runtime API 长 thread 默认在历史达到 32,000 token 后生成持久化压缩检查点；保存压缩消息窗口、覆盖完成事件、摘要、token 变化、语义守卫结果、Skill、RAG epoch 和 MCP 快照；恢复使用最新有效检查点并完整追加检查点后的已完成 turn，没有检查点时恢复全部已完成 turn；候选消息移除动态 system prompt、reasoning 和图片正文；检查点在 `turn.completed` 后保存，失败只产生独立事件，损坏记录回退更早检查点
 - 已实现 P2（2026-07-15）：新增强类型 `RunEvent`、事件 sink、模型流适配器和 Runtime JSON 投影；`AgentExecutionEngine` 统一产生 reasoning/content delta、工具调用和工具结果事件，ReAct Renderer 直接消费同一事件流，Plan task 与 SubAgent 的旧 StreamListener 通过适配器兼容；Runtime API 的 turn、模型流、工具和 checkpoint 事件不再手工拼接 JSON，流式消息不重复写入最终输出；无头 Provider 只流式输出 reasoning 时从最终 assistant history 恢复答案
-- 待实现 P2：增加受 ToolEffect 与 HITL 约束的 Hook 生命周期
+- 已实现 P2（2026-07-15）：新增 agent/turn/message/tool execution 四层幂等 Hook 生命周期，统一挂接 AgentExecutionEngine；用户级与项目级配置按 id 合并，支持 64 条上限和运行上下文占位符；Hook 只调用 ToolRegistry 工具，不提供旁路 shell/HTTP 执行器，READ_ONLY/LOCAL_CONTEXT 强制收窄能力，其他副作用必须显式允许、启用 HITL 并命中逐次审批策略；warn 失败不改变核心终态，required 失败进入标准 Agent 失败出口，异常和取消路径会闭合未结束生命周期
 - 待实现 P3：在保留 Planner、Worker、Reviewer 和 ExecutionArtifact 的前提下，增加子代理稳定身份、消息游标和跨进程恢复
 - 文档：详细筛选结果记录在 `docs/liveagent-reference-extraction.md`
 - 验证建议：每个候选能力单独设计和提交；优先补 Memory Store 契约测试、组织器风险矩阵测试、Runtime checkpoint 恢复测试和事件顺序测试

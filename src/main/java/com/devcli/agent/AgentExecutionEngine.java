@@ -1,5 +1,7 @@
 package com.devcli.agent;
 
+import com.devcli.hook.HookDispatcher;
+import com.devcli.hook.HookLifecycle;
 import com.devcli.llm.LlmClient;
 import com.devcli.runtime.CancellationContext;
 import com.devcli.runtime.event.RunEvent;
@@ -89,14 +91,58 @@ final class AgentExecutionEngine<R> {
 
     private final LlmClient llmClient;
     private final AgentBudget budget;
+    private final HookLifecycle hookLifecycle;
 
     AgentExecutionEngine(LlmClient llmClient, AgentBudget budget) {
+        this(llmClient, budget, null);
+    }
+
+    AgentExecutionEngine(LlmClient llmClient, AgentBudget budget, HookLifecycle hookLifecycle) {
         this.llmClient = Objects.requireNonNull(llmClient, "llmClient");
         this.budget = Objects.requireNonNull(budget, "budget");
+        this.hookLifecycle = hookLifecycle;
     }
 
     R run(Delegate<R> delegate) {
         Objects.requireNonNull(delegate, "delegate");
+        if (hookLifecycle == null || hookLifecycle.isEmpty()) {
+            return runLoop(delegate);
+        }
+        R result = null;
+        HookDispatcher.HookExecutionException hookFailure = null;
+        Throwable primaryFailure = null;
+        try {
+            hookLifecycle.startAgent();
+            result = runLoop(delegate);
+        } catch (HookDispatcher.HookExecutionException e) {
+            hookFailure = e;
+        } catch (RuntimeException | Error e) {
+            primaryFailure = e;
+        }
+        try {
+            hookLifecycle.endAgent();
+        } catch (HookDispatcher.HookExecutionException e) {
+            if (hookFailure == null) {
+                hookFailure = e;
+            } else {
+                hookFailure.addSuppressed(e);
+            }
+        }
+        if (primaryFailure instanceof RuntimeException runtimeException) {
+            if (hookFailure != null) runtimeException.addSuppressed(hookFailure);
+            throw runtimeException;
+        }
+        if (primaryFailure instanceof Error error) {
+            if (hookFailure != null) error.addSuppressed(hookFailure);
+            throw error;
+        }
+        if (hookFailure != null) {
+            return delegate.failed(new IOException(hookFailure.getMessage(), hookFailure), budget);
+        }
+        return result;
+    }
+
+    private R runLoop(Delegate<R> delegate) {
         while (true) {
             if (delegate.isCancelled()) {
                 return delegate.cancelled(budget);
@@ -110,6 +156,9 @@ final class AgentExecutionEngine<R> {
             }
 
             int iteration = budget.beginIteration();
+            if (hookLifecycle != null) {
+                hookLifecycle.startTurn(iteration);
+            }
             delegate.beforeIteration(iteration, budget);
 
             try {
@@ -132,6 +181,11 @@ final class AgentExecutionEngine<R> {
                 delegate.afterResponse(response, iteration, budget);
                 response = Objects.requireNonNullElse(
                         delegate.normalizeResponse(response, iteration, budget), response);
+                if (hookLifecycle != null) {
+                    hookLifecycle.assistantMessageCompleted(
+                            iteration,
+                            response.toolCalls() == null ? 0 : response.toolCalls().size());
+                }
 
                 if (response.hasToolCalls()) {
                     budget.recordToolCalls(response.toolCalls());
@@ -141,6 +195,9 @@ final class AgentExecutionEngine<R> {
                             response.toolCalls()));
                     delegate.beforeToolExecution(response, iteration, budget);
                     eventSink.emit(RunEvent.ToolCalls.from(response.toolCalls()));
+                    if (hookLifecycle != null) {
+                        hookLifecycle.toolExecutionsStarted(iteration, response.toolCalls());
+                    }
 
                     List<ToolRegistry.ToolExecutionResult> toolResults = delegate.executeTools(
                             response.toolCalls(), iteration);
@@ -153,6 +210,9 @@ final class AgentExecutionEngine<R> {
                                 toolResult.id(), toolResult.result()));
                     }
                     eventSink.emit(RunEvent.ToolResults.from(toolResults));
+                    if (hookLifecycle != null) {
+                        hookLifecycle.toolResultsReceived(iteration, toolResults);
+                    }
                     delegate.afterToolResults(response, toolResults, iteration, budget);
                     Optional<R> completed = delegate.completedAfterToolResults(
                             response, toolResults, iteration, budget);

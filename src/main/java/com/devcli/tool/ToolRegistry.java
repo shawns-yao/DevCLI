@@ -207,6 +207,12 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         return projectPath;
     }
 
+    /** 返回工具声明的副作用等级；未知工具按外部副作用保守处理。 */
+    public ToolEffect toolEffect(String name) {
+        Tool tool = tools.get(name);
+        return tool == null ? ToolEffect.EXTERNAL_MUTATION : tool.effect();
+    }
+
     /**
      * 为隔离工作区创建项目级工具注册表。内置 Provider 重新绑定到新根目录，
      * MCP 描述与调用器、策略配置和记忆处理器沿用父注册表。

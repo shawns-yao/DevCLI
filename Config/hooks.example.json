@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "hooks": [
+    {
+      "id": "agent-start-inventory",
+      "name": "启动时读取项目目录",
+      "event": "agent_start",
+      "enabled": false,
+      "tool": "list_dir",
+      "arguments": {
+        "path": "."
+      },
+      "failureMode": "warn",
+      "allowSideEffects": false
+    },
+    {
+      "id": "agent-end-command",
+      "name": "结束后执行受审批命令",
+      "event": "agent_end",
+      "enabled": false,
+      "tool": "execute_command",
+      "arguments": {
+        "command": "echo hook completed"
+      },
+      "failureMode": "warn",
+      "allowSideEffects": true
+    }
+  ]
+}

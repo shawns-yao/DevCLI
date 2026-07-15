@@ -2,6 +2,7 @@ package com.devcli.agent;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.devcli.hook.HookLifecycle;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.LlmTraceLogger;
 import com.devcli.lsp.LspDiagnosticReport;
@@ -645,7 +646,8 @@ public class PlanExecuteAgent {
         ));
 
         AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
-        return new AgentExecutionEngine<TaskRunResult>(llmClient, budget).run(
+        return new AgentExecutionEngine<TaskRunResult>(
+                llmClient, budget, HookLifecycle.load(activeTaskToolRegistry())).run(
                 new AgentExecutionEngine.Delegate<>() {
                     @Override
                     public List<LlmClient.Message> history() {

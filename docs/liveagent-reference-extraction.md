@@ -91,12 +91,13 @@ DevCLI 只适合提取稳定身份和恢复语义：
 
 ### 6. Hook 生命周期
 
-LiveAgent 提供 agent、turn、message 和 tool execution 四层生命周期 Hook。DevCLI 可以提取事件点，但不能直接照搬任意 shell 或 HTTP Hook：
+LiveAgent 提供 agent、turn、message 和 tool execution 四层生命周期 Hook。DevCLI 已于 2026-07-15 完成受控实现，但没有照搬任意 shell 或 HTTP Hook：
 
-- Hook 订阅强类型运行事件。
-- 本地只读 Hook 可默认启用。
-- HOST_PROCESS 和 EXTERNAL_MUTATION Hook 必须进入现有副作用权限与审批链路。
-- Hook 失败不得改变核心任务终态，除非配置为验收型强制 Hook。
+- `AgentExecutionEngine` 统一触发四层幂等生命周期，ReAct、Plan task 和 SubAgent 共用顺序与异常闭合语义。
+- Hook 动作只能调用 ToolRegistry 已注册工具，继续经过 ToolEffect、能力范围、参数校验、HITL、策略和审计管线。
+- READ_ONLY / LOCAL_CONTEXT 强制收窄到只读 scope；其他副作用必须显式允许、启用 HITL，并命中逐次审批策略，否则拒绝。
+- 用户级与项目级配置按 id 合并，项目覆盖用户定义；支持运行上下文占位符和 64 条上限。
+- `warn` Hook 失败只记录警告；`required` Hook 失败进入 Agent 统一失败出口，包括 agent_end 阶段。
 
 ## 明确不采用
 
@@ -114,7 +115,7 @@ LiveAgent 提供 agent、turn、message 和 tool execution 四层生命周期 Ho
 1. P1：记忆证据、审核状态和离线组织器第一阶段已实现。
 2. P1：Runtime API 持久化压缩检查点已实现。
 3. P2：强类型运行事件协议及 Renderer 适配第一阶段已实现。
-4. P2：受控 Hook 生命周期。
+4. P2：受控 Hook 生命周期已实现。
 5. P3：持久化子代理身份与跨进程恢复。
 
 每项需要独立设计、针对性测试和分功能提交，禁止一次性横跨 Memory、Runtime、Renderer 和 Multi-Agent。
