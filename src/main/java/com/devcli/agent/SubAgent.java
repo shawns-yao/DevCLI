@@ -136,6 +136,7 @@ public class SubAgent {
     private final AtomicReference<ExecutionEvidenceAccumulator> executionEvidence =
             new AtomicReference<>(new ExecutionEvidenceAccumulator());
     private String currentSkillActivationText = "";
+    private String recoveryContext = "";
 
     public SubAgent(String name, AgentRole role, LlmClient llmClient, ToolRegistry toolRegistry) {
         this.name = name;
@@ -152,6 +153,11 @@ public class SubAgent {
 
     public void setExternalContextSupplier(Supplier<String> externalContextSupplier) {
         this.externalContextSupplier = externalContextSupplier == null ? () -> "" : externalContextSupplier;
+        refreshSystemPrompt();
+    }
+
+    public void setRecoveryContext(String recoveryContext) {
+        this.recoveryContext = recoveryContext == null ? "" : recoveryContext.trim();
         refreshSystemPrompt();
     }
 
@@ -218,7 +224,12 @@ public class SubAgent {
     private String buildWorkingMemory() {
         try {
             String memory = workingMemorySupplier.get();
-            return memory == null ? "" : memory.trim();
+            String normalized = memory == null ? "" : memory.trim();
+            if (recoveryContext.isBlank()) {
+                return normalized;
+            }
+            String recovered = "## 子代理恢复状态\n" + recoveryContext;
+            return normalized.isBlank() ? recovered : normalized + "\n\n" + recovered;
         } catch (Exception e) {
             log.warn("Failed to render working memory in SubAgent {}", name, e);
             return "";

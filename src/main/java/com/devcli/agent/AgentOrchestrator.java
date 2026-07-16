@@ -25,6 +25,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -58,6 +59,7 @@ public class AgentOrchestrator {
     static final int DEFAULT_WORKER_COUNT = 2;
     /** Worker 数量保护上限：过多并发 Worker 会放大 LLM 限流与终端输出竞争。 */
     static final int MAX_WORKER_COUNT = 8;
+    private static final int SUBAGENT_CONTEXT_SCHEMA_VERSION = 1;
     private static final double MIN_REVIEW_SCORE = 0.6;
     private static final double REQUIRED_FUNCTIONAL_SCORE = 1.0;
     private static final double FINAL_INTEGRATION_FAILURE_RATIO_LIMIT = 0.5;
@@ -77,7 +79,7 @@ public class AgentOrchestrator {
 
     private final LlmClient llmClient;
     private final SubAgent planner;
-    private final List<SubAgent> workers;
+    private List<SubAgent> workers;
     private final SubAgent reviewer;
     private final MemoryManager memoryManager;
     private final ToolRegistry toolRegistry;
@@ -279,11 +281,100 @@ public class AgentOrchestrator {
     }
 
     private static List<SubAgent> buildWorkers(int count, LlmClient llmClient, ToolRegistry toolRegistry) {
-        List<SubAgent> built = new ArrayList<>(count);
+        List<String> names = new ArrayList<>(count);
         for (int i = 1; i <= count; i++) {
-            built.add(new SubAgent("worker-" + i, AgentRole.WORKER, llmClient, toolRegistry));
+            names.add("worker-" + i);
+        }
+        return buildWorkers(names, llmClient, toolRegistry);
+    }
+
+    private static List<SubAgent> buildWorkers(List<String> names, LlmClient llmClient,
+                                               ToolRegistry toolRegistry) {
+        List<SubAgent> built = new ArrayList<>(names.size());
+        for (String name : names) {
+            built.add(new SubAgent(name, AgentRole.WORKER, llmClient, toolRegistry));
         }
         return List.copyOf(built);
+    }
+
+    private List<AgentCheckpoint.AgentIdentityRecord> currentAgentIdentities() {
+        long now = System.currentTimeMillis();
+        List<AgentCheckpoint.AgentIdentityRecord> identities = new ArrayList<>();
+        identities.add(agentIdentity(planner, now));
+        workers.forEach(worker -> identities.add(agentIdentity(worker, now)));
+        identities.add(agentIdentity(reviewer, now));
+        return List.copyOf(identities);
+    }
+
+    private static AgentCheckpoint.AgentIdentityRecord agentIdentity(SubAgent agent, long now) {
+        return new AgentCheckpoint.AgentIdentityRecord(
+                agent.getName(), agent.getRole().name(), agent.getName(),
+                SUBAGENT_CONTEXT_SCHEMA_VERSION, now, now);
+    }
+
+    private AgentCheckpoint.RecoveryState restoreAgentTopology(AgentCheckpoint loaded) {
+        AgentCheckpoint.RecoveryState recovery = loaded.recoveryState();
+        if (recovery.agentIdentities().isEmpty()) {
+            loaded.ensureAgentIdentities(currentAgentIdentities());
+            saveCheckpointStrict();
+            recovery = loaded.recoveryState();
+        }
+        List<AgentCheckpoint.AgentIdentityRecord> identities = recovery.agentIdentities();
+        long planners = identities.stream()
+                .filter(identity -> "PLANNER".equalsIgnoreCase(identity.role()))
+                .filter(identity -> planner.getName().equals(identity.agentId()))
+                .count();
+        long reviewers = identities.stream()
+                .filter(identity -> "REVIEWER".equalsIgnoreCase(identity.role()))
+                .filter(identity -> reviewer.getName().equals(identity.agentId()))
+                .count();
+        List<String> workerIds = identities.stream()
+                .filter(identity -> "WORKER".equalsIgnoreCase(identity.role()))
+                .map(AgentCheckpoint.AgentIdentityRecord::agentId)
+                .toList();
+        if (planners != 1 || reviewers != 1 || workerIds.isEmpty()
+                || workerIds.size() > MAX_WORKER_COUNT) {
+            throw new IllegalStateException("checkpoint 子代理身份拓扑无效");
+        }
+        if (new HashSet<>(workerIds).size() != workerIds.size()) {
+            throw new IllegalStateException("checkpoint Worker 身份重复");
+        }
+        List<String> currentWorkerIds = workers.stream().map(SubAgent::getName).toList();
+        if (!currentWorkerIds.equals(workerIds)) {
+            workers = buildWorkers(workerIds, llmClient, toolRegistry);
+            workers.forEach(this::configureSubAgent);
+        }
+        loaded.ensureAgentIdentities(currentAgentIdentities());
+        AgentCheckpoint.RecoveryState restoredRecovery = recovery;
+        applyRecoveryContext(planner, restoredRecovery);
+        workers.forEach(worker -> applyRecoveryContext(worker, restoredRecovery));
+        applyRecoveryContext(reviewer, restoredRecovery);
+        return restoredRecovery;
+    }
+
+    private static void applyRecoveryContext(SubAgent agent, AgentCheckpoint.RecoveryState recovery) {
+        AgentCheckpoint.AgentIdentityRecord identity = recovery.agentIdentities().stream()
+                .filter(candidate -> candidate.agentId().equals(agent.getName()))
+                .findFirst()
+                .orElse(null);
+        AgentCheckpoint.AgentCursorRecord cursor = recovery.agentCursors().get(agent.getName());
+        if (identity == null
+                || identity.contextSchemaVersion() != SUBAGENT_CONTEXT_SCHEMA_VERSION
+                || cursor == null || cursor.lastMessageSeq() <= 0) {
+            agent.setRecoveryContext("");
+            return;
+        }
+        StringBuilder context = new StringBuilder()
+                .append("身份: ").append(agent.getName())
+                .append("\n消息游标: ").append(cursor.lastMessageSeq())
+                .append("\n约束: 最近摘要只用于恢复上下文，步骤终态以 ExecutionArtifact 为准");
+        if (!cursor.lastStepId().isBlank()) {
+            context.append("\n最近步骤: ").append(cursor.lastStepId());
+        }
+        if (!cursor.summary().isBlank()) {
+            context.append("\n最近摘要: ").append(cursor.summary());
+        }
+        agent.setRecoveryContext(context.toString());
     }
 
     public void setExternalContextSupplier(Supplier<String> externalContextSupplier) {
@@ -437,6 +528,10 @@ public class AgentOrchestrator {
                     currentUserTask);
             checkpoint.setPlanSteps(toPlanSteps(steps));
             checkpoint.setAcceptanceCriteria(toCriterionRecords(currentAcceptanceCriteria));
+            checkpoint.ensureAgentIdentities(currentAgentIdentities());
+            checkpoint.advanceAgentCursor(planner.getName(), "",
+                    "计划已生成：" + steps.size() + " 个步骤，"
+                            + currentAcceptanceCriteria.size() + " 条验收标准");
             checkpoint.save();
 
             out.println(AnsiStyle.heading("📋 执行计划"));
@@ -493,7 +588,15 @@ public class AgentOrchestrator {
                     + "] 存在无法自动回滚的 PatchSet 写前日志："
                     + patchReconcile.failures();
         }
-        AgentCheckpoint.RecoveryState recovery = loaded.recoveryState();
+        checkpoint = loaded;
+        AgentCheckpoint.RecoveryState recovery;
+        try {
+            recovery = restoreAgentTopology(loaded);
+        } catch (RuntimeException e) {
+            checkpoint = null;
+            return "❌ checkpoint [" + loaded.getOrchestrationId()
+                    + "] 子代理身份恢复失败：" + e.getMessage();
+        }
         if (recovery.planSteps().isEmpty()) {
             return "❌ checkpoint [" + loaded.getOrchestrationId()
                     + "] 缺少计划数据（旧格式落盘），无法恢复；请重新发起 /team 任务。";
@@ -524,7 +627,6 @@ public class AgentOrchestrator {
 
         List<ExecutionStep> steps = rebuildStepsFromCheckpoint(recovery);
         restoreCheckpointArtifactsIntoWorkingMemory(recovery);
-        checkpoint = loaded; // 复用同一 checkpoint：id 不变，进度续写
 
         out.println(AnsiStyle.heading("🔁 恢复执行 checkpoint [" + loaded.getOrchestrationId() + "]"
                 + "（已完成 " + completedCount + "/" + steps.size() + " 步）"));
@@ -655,7 +757,7 @@ public class AgentOrchestrator {
             if (executable.size() == 1) {
                 // 单步批次：直接串行流式输出，保持实时打字观感
                 ExecutionStep step = executable.get(0);
-                SubAgent worker = workers.get(singleStepCursor % workers.size());
+                SubAgent worker = resolveAssignedWorker(step.id(), singleStepCursor);
                 singleStepCursor++;
                 String context = buildStepContext(steps, step);
                 runStep(step, steps, retryCount, worker, reviewer, context, out);
@@ -1292,11 +1394,52 @@ public class AgentOrchestrator {
         }
     }
 
-    private void saveCheckpointStrict() {
+    private synchronized void saveCheckpointStrict() {
         try {
             checkpoint.saveStrict();
         } catch (IOException e) {
             throw new IllegalStateException("Checkpoint 持久化失败: " + e.getMessage(), e);
+        }
+    }
+
+    private synchronized SubAgent resolveAssignedWorker(String stepId, int preferredIndex) {
+        AgentCheckpoint.StepAssignmentRecord existing = checkpoint == null
+                ? null
+                : checkpoint.getStepAssignments().get(stepId);
+        if (existing != null) {
+            return workers.stream()
+                    .filter(worker -> worker.getName().equals(existing.workerAgentId()))
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalStateException(
+                            "checkpoint 步骤绑定的 Worker 不存在: " + existing.workerAgentId()));
+        }
+        SubAgent worker = workers.get(Math.floorMod(preferredIndex, workers.size()));
+        if (checkpoint != null) {
+            checkpoint.assignStep(stepId, worker.getName(), reviewer.getName());
+            saveCheckpointStrict();
+        }
+        return worker;
+    }
+
+    private synchronized void recordAgentMessage(String agentId, String stepId,
+                                                 String phase, AgentMessage message) {
+        if (checkpoint == null) {
+            return;
+        }
+        String type = message == null || message.type() == null ? "UNKNOWN" : message.type().name();
+        String content = message == null || message.content() == null ? "" : message.content().trim();
+        String summary = phase + " [" + type + "]" + (content.isBlank() ? "" : " " + content);
+        if (checkpoint.advanceAgentCursor(agentId, stepId, summary)) {
+            saveCheckpointStrict();
+        }
+    }
+
+    private synchronized void recordAgentEvent(String agentId, String stepId,
+                                               String phase, String summary) {
+        if (checkpoint != null
+                && checkpoint.advanceAgentCursor(agentId, stepId,
+                phase + (summary == null || summary.isBlank() ? "" : ": " + summary.trim()))) {
+            saveCheckpointStrict();
         }
     }
 
@@ -1314,16 +1457,24 @@ public class AgentOrchestrator {
             t.setDaemon(true);
             return t;
         });
-        BlockingQueue<SubAgent> workerPool = new LinkedBlockingQueue<>(workers);
         Map<String, ByteArrayOutputStream> buffers = new ConcurrentHashMap<>();
-        // Bug #8 修复：每个 Worker 独立存储 ForkContext，避免共用上下文
+        Map<String, SubAgent> assignments = new LinkedHashMap<>();
+        for (int i = 0; i < batch.size(); i++) {
+            ExecutionStep step = batch.get(i);
+            assignments.put(step.id(), resolveAssignedWorker(step.id(), i));
+        }
+        Map<String, ReentrantLock> workerLocks = new HashMap<>();
+        workers.forEach(worker -> workerLocks.put(worker.getName(), new ReentrantLock(true)));
         Map<SubAgent, SubAgent.ForkContext> workerContexts = new ConcurrentHashMap<>();
         for (SubAgent worker : workers) {
             workerContexts.put(worker, worker.createForkContext());
         }
         List<Future<?>> futures = new ArrayList<>();
-        SubAgent reviewerForkTemplate = new SubAgent("reviewer-fork-template", AgentRole.REVIEWER, llmClient, toolRegistry);
+        SubAgent reviewerForkTemplate = new SubAgent(reviewer.getName(), AgentRole.REVIEWER, llmClient, toolRegistry);
         configureSubAgent(reviewerForkTemplate);
+        if (checkpoint != null) {
+            applyRecoveryContext(reviewerForkTemplate, checkpoint.recoveryState());
+        }
         SubAgent.ForkContext reviewerForkContext = reviewerForkTemplate.createForkContext();
 
         for (ExecutionStep step : batch) {
@@ -1333,16 +1484,19 @@ public class AgentOrchestrator {
             String context = buildStepContext(steps, step);
 
             futures.add(executor.submit(() -> {
-                SubAgent worker = null;
+                SubAgent worker = assignments.get(step.id());
+                ReentrantLock workerLock = workerLocks.get(worker.getName());
                 SubAgent localReviewer = new SubAgent(
-                        "reviewer-" + step.id(), AgentRole.REVIEWER, llmClient, toolRegistry);
+                        reviewer.getName(), AgentRole.REVIEWER, llmClient, toolRegistry);
                 configureSubAgent(localReviewer);
+                if (checkpoint != null) {
+                    applyRecoveryContext(localReviewer, checkpoint.recoveryState());
+                }
                 try {
-                    worker = workerPool.take();
-                    SubAgent leasedWorker = worker;
-                    SubAgent.ForkContext workerForkContext = workerContexts.get(leasedWorker);
+                    workerLock.lockInterruptibly();
+                    SubAgent.ForkContext workerForkContext = workerContexts.get(worker);
                     toolRegistry.runWithResourceLease(step.id(), () -> {
-                        runStep(step, steps, retryCount, leasedWorker, localReviewer, context, stepOut,
+                        runStep(step, steps, retryCount, worker, localReviewer, context, stepOut,
                                 workerForkContext, reviewerForkContext);
                         return null;
                     });
@@ -1355,9 +1509,9 @@ public class AgentOrchestrator {
                     updateStep(steps, step.id(), step.withFailed("并行执行异常: " + e.getMessage()));
                     stepOut.println("❌ 步骤 [" + step.id() + "] 并行执行异常：" + e.getMessage() + "\n");
                 } finally {
-                    if (worker != null) {
-                        worker.clearHistory();
-                        workerPool.offer(worker);
+                    worker.clearHistory();
+                    if (workerLock.isHeldByCurrentThread()) {
+                        workerLock.unlock();
                     }
                     toolRegistry.releaseResourceLeases(step.id());
                     stepOut.flush();
@@ -1437,6 +1591,11 @@ public class AgentOrchestrator {
                     reviewer.getName(), reviewer.getRole(), llmClient, isolatedRegistry);
             configureSubAgent(isolatedWorker);
             configureSubAgent(isolatedReviewer);
+            if (checkpoint != null) {
+                AgentCheckpoint.RecoveryState recovery = checkpoint.recoveryState();
+                applyRecoveryContext(isolatedWorker, recovery);
+                applyRecoveryContext(isolatedReviewer, recovery);
+            }
 
             activeStepToolRegistry.set(isolatedRegistry);
             activeStepUpdate.set(buffer);
@@ -1730,12 +1889,14 @@ public class AgentOrchestrator {
             ToolRegistry registry = activeToolRegistry();
             String completionToolName = TeamWorkerProtocol.completionToolName(
                     step.type(), toolChoice);
-            return registry.runWithResourceLease(step.id(), () -> workerForkContext == null
+            AgentMessage result = registry.runWithResourceLease(step.id(), () -> workerForkContext == null
                     ? worker.executeWithContext(taskMsg, context, out, toolChoice,
                             completionToolName)
                     : worker.executeForkedWithContext(
                             taskMsg, context, workerForkContext, out, toolChoice,
                             completionToolName));
+            recordAgentMessage(worker.getName(), step.id(), "Worker 执行完成", result);
+            return result;
         } finally {
             activeToolRegistry().releaseResourceLeases(step.id());
         }
@@ -1779,6 +1940,8 @@ public class AgentOrchestrator {
                                               PrintStream out, SubAgent.ForkContext reviewerForkContext) {
         PreReviewResult preReview = runPreReviewHook(step);
         if (!preReview.passed()) {
+            recordAgentEvent(reviewer.getName(), step.id(),
+                    "Pre-Review 未通过", preReview.feedback());
             out.println("⛔ 步骤 [" + step.id() + "] Pre-Review Hook 未通过，跳过 Reviewer LLM");
             out.println("   反馈: " + preReview.feedback() + "\n");
             return new ReviewDecision(false, preReview.feedback(), false,
@@ -1796,6 +1959,7 @@ public class AgentOrchestrator {
                 ? reviewer.review(reviewTask, workerResult, out)
                 : reviewer.reviewForked(reviewTask, workerResult, reviewerForkContext, out);
         reviewer.clearHistory();
+        recordAgentMessage(reviewer.getName(), step.id(), "Reviewer 审查完成", reviewResult);
 
         if (reviewResult.type() == AgentMessage.Type.ERROR) {
             log.warn("Reviewer failed for step {}: {}", step.id(), reviewResult.content());

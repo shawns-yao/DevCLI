@@ -19,6 +19,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -1910,6 +1911,31 @@ class AgentOrchestratorTest {
         return (String) method.invoke(null, result);
     }
 
+    private static AgentCheckpoint.RecoveryState invokeRestoreAgentTopology(
+            AgentOrchestrator orchestrator, AgentCheckpoint checkpoint) throws Exception {
+        Field checkpointField = AgentOrchestrator.class.getDeclaredField("checkpoint");
+        checkpointField.setAccessible(true);
+        checkpointField.set(orchestrator, checkpoint);
+        Method method = AgentOrchestrator.class.getDeclaredMethod("restoreAgentTopology", AgentCheckpoint.class);
+        method.setAccessible(true);
+        return (AgentCheckpoint.RecoveryState) method.invoke(orchestrator, checkpoint);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<SubAgent> workersOf(AgentOrchestrator orchestrator) throws Exception {
+        Field field = AgentOrchestrator.class.getDeclaredField("workers");
+        field.setAccessible(true);
+        return (List<SubAgent>) field.get(orchestrator);
+    }
+
+    private static SubAgent invokeResolveAssignedWorker(AgentOrchestrator orchestrator,
+                                                        String stepId, int preferredIndex) throws Exception {
+        Method method = AgentOrchestrator.class.getDeclaredMethod(
+                "resolveAssignedWorker", String.class, int.class);
+        method.setAccessible(true);
+        return (SubAgent) method.invoke(orchestrator, stepId, preferredIndex);
+    }
+
     private static String findSystemByLastUser(List<List<LlmClient.Message>> calls, String userNeedle) {
         return calls.stream()
                 .filter(messages -> DispatchingStubGLMClient.findLastUser(messages).contains(userNeedle))
@@ -1954,6 +1980,38 @@ class AgentOrchestratorTest {
             assertEquals(List.of("src/main/java/App.java"), steps.get(0).modifiedFiles());
         } finally {
             checkpoint.delete();
+        }
+    }
+
+    @Test
+    void restoreUsesCheckpointWorkerTopologyAssignmentAndCursor(@TempDir File memoryDir) throws Exception {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-agent-topology", "目标");
+        checkpoint.ensureAgentIdentities(List.of(
+                new AgentCheckpoint.AgentIdentityRecord("planner", "PLANNER", "planner", 1, 1, 1),
+                new AgentCheckpoint.AgentIdentityRecord("worker-1", "WORKER", "worker-1", 1, 1, 1),
+                new AgentCheckpoint.AgentIdentityRecord("worker-2", "WORKER", "worker-2", 1, 1, 1),
+                new AgentCheckpoint.AgentIdentityRecord("worker-3", "WORKER", "worker-3", 1, 1, 1),
+                new AgentCheckpoint.AgentIdentityRecord("reviewer", "REVIEWER", "reviewer", 1, 1, 1)));
+        checkpoint.assignStep("step-1", "worker-3", "reviewer");
+        checkpoint.advanceAgentCursor("worker-3", "step-1", "上次执行已修改服务接口");
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(memoryDir)) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    new GLMClient("test-key"), new ToolRegistry(), mm);
+
+            AgentCheckpoint.RecoveryState recovery = invokeRestoreAgentTopology(orchestrator, checkpoint);
+            List<SubAgent> restoredWorkers = workersOf(orchestrator);
+            SubAgent assigned = invokeResolveAssignedWorker(orchestrator, "step-1", 0);
+
+            assertEquals(List.of("worker-1", "worker-2", "worker-3"),
+                    restoredWorkers.stream().map(SubAgent::getName).toList());
+            assertEquals("worker-3", assigned.getName());
+            assertEquals("worker-3", recovery.stepAssignments().get("step-1").workerAgentId());
+            Method systemPrompt = SubAgent.class.getDeclaredMethod("getSystemPrompt");
+            systemPrompt.setAccessible(true);
+            String workerPrompt = (String) systemPrompt.invoke(assigned);
+            assertTrue(workerPrompt.contains("消息游标: 1"), workerPrompt);
+            assertTrue(workerPrompt.contains("上次执行已修改服务接口"), workerPrompt);
         }
     }
 
