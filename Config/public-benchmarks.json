@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-16",
+  "datasets": [
+    {
+      "id": "swebench-lite",
+      "displayName": "SWE-bench Lite",
+      "category": "agent",
+      "datasetRepository": "SWE-bench/SWE-bench_Lite",
+      "datasetRevision": "69611d31007e1c6731db8bd5b5c3f2d33f5bab6e",
+      "license": "数据实例沿用各源仓库许可，官方 harness 为 MIT",
+      "artifact": "Data/raw/public-benchmarks/swebench-lite/test.parquet",
+      "artifactUrl": "https://huggingface.co/datasets/SWE-bench/SWE-bench_Lite/resolve/69611d31007e1c6731db8bd5b5c3f2d33f5bab6e/data/test-00000-of-00001.parquet",
+      "artifactSha256": "f46f2e3f003f2552932393da4b223e1e0456a2c71eba8b73ae58f29646c1278b",
+      "sampleUrl": "https://datasets-server.huggingface.co/rows?dataset=SWE-bench%2FSWE-bench_Lite&config=default&split=test&offset=0&length={limit}",
+      "officialHarness": "Data/raw/public-benchmarks/official-harnesses/swebench-harness",
+      "evaluationMode": "official-python-harness"
+    },
+    {
+      "id": "longmemeval-oracle",
+      "displayName": "LongMemEval Oracle Cleaned",
+      "category": "memory",
+      "datasetRepository": "xiaowu0162/longmemeval-cleaned",
+      "datasetRevision": "98d7416c24c778c2fee6e6f3006e7a073259d48f",
+      "license": "MIT",
+      "artifact": "Data/raw/public-benchmarks/longmemeval/longmemeval_oracle.json",
+      "artifactUrl": "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/98d7416c24c778c2fee6e6f3006e7a073259d48f/longmemeval_oracle.json",
+      "artifactSha256": "821a2034d219ab45846873dd14c14f12cfe7776e73527a483f9dac095d38620c",
+      "sampleUrl": "https://datasets-server.huggingface.co/rows?dataset=xiaowu0162%2Flongmemeval-cleaned&config=default&split=longmemeval_oracle&offset=0&length={limit}",
+      "officialHarness": "Data/raw/public-benchmarks/official-harnesses/longmemeval-harness",
+      "evaluationMode": "official-llm-judge"
+    },
+    {
+      "id": "longbench-v1",
+      "displayName": "LongBench v1",
+      "category": "long-context",
+      "datasetRepository": "THUDM/LongBench",
+      "datasetRevision": "2e00731f8d0bff23dc4325161044d0ed8af94c1e",
+      "license": "MIT",
+      "artifact": "Data/raw/public-benchmarks/longbench/data.zip",
+      "artifactUrl": "https://huggingface.co/datasets/THUDM/LongBench/resolve/main/data.zip",
+      "artifactSha256": "cb45b11a4133c6bc1d6a44b0f8e701335ff1e543195db1103472e575857f7f64",
+      "extractedRoot": "Data/raw/public-benchmarks/longbench/extracted/data",
+      "officialHarness": "Data/raw/public-benchmarks/official-harnesses/longbench-harness",
+      "evaluationMode": "official-task-metrics"
+    },
+    {
+      "id": "ruler-v1",
+      "displayName": "RULER v1",
+      "category": "long-context",
+      "datasetRepository": "NVIDIA/RULER",
+      "datasetRevision": "e8bbff677ca2c239640dc90f93310dcf32408c93",
+      "license": "Apache-2.0",
+      "artifact": "Data/raw/public-benchmarks/ruler/ruler-rulerv1-ns-e8bbff67.zip",
+      "artifactUrl": "https://api.github.com/repos/NVIDIA/RULER/zipball/e8bbff677ca2c239640dc90f93310dcf32408c93",
+      "artifactSha256": "7fba5482e36b25368037a57526f409b115285c1b233e45b2a8f5058707029d36",
+      "officialHarness": "Data/raw/public-benchmarks/ruler/rulerv1-ns",
+      "evaluationMode": "nemo-skills-ruler"
+    }
+  ]
+}

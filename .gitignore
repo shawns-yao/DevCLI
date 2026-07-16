@@ -19,6 +19,7 @@ target/
 Log/
 Temp/
 /Test/
+/Data/raw/
 
 # 操作系统
 .DS_Store

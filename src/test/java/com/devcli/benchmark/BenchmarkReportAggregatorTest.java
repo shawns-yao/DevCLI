@@ -15,8 +15,10 @@ class BenchmarkReportAggregatorTest {
         Path reports = root.resolve("target/benchmark-reports");
         Path rag = reports.resolve("rag/codesearchnet-java-public");
         Path agent = root.resolve("target/agent-benchmark/run-1");
+        Path publicReports = reports.resolve("public");
         Files.createDirectories(rag);
         Files.createDirectories(agent);
+        Files.createDirectories(publicReports);
         Files.writeString(rag.resolve("rag-retrieval-benchmark.json"), """
                 {"dataset_name":"codesearchnet-java-public","dataset_type":"public_codesearchnet_java",
                  "embedding_provider":"openai","embedding_model":"embed-model",
@@ -42,6 +44,16 @@ class BenchmarkReportAggregatorTest {
                  "avg_hidden_failure_rate":0.05,"avg_unique_bug_rate":0.05},
                  "comparison":{"task_success_rate_delta_pct_points":50.0}}}
                 """);
+        Files.writeString(publicReports.resolve("public-dataset-readiness.json"), """
+                {"schema_version":1,"datasets":[{"id":"swebench-lite","ready":true}]}
+                """);
+        Files.writeString(publicReports.resolve("public-long-context-benchmark.json"), """
+                {"provider":"anthropic","model":"model-x",
+                 "longmemeval_oracle":[{}],"longbench_v1":[{},{}],"ruler_v1":[{}],
+                 "aggregate":{"longmemeval_normalized_answer_hit_rate":0.5,
+                 "longbench_official_metric_average":0.75,
+                 "ruler_official_string_match_average":1.0}}
+                """);
 
         String previous = System.getProperty("devcli.benchmark.report.dir");
         System.setProperty("devcli.benchmark.report.dir", reports.toString());
@@ -56,6 +68,8 @@ class BenchmarkReportAggregatorTest {
             assertTrue(csv.contains("\"memory\",\"low_value_block_rate\",0.8,\"memory-cases\",\"anthropic\",\"model-x\",2"));
             assertTrue(csv.contains("\"memory\",\"recall_at_5\",0.85,\"memory-cases\",\"anthropic\",\"model-x\",2"));
             assertTrue(csv.contains("\"memory\",\"injection_hit_rate\",0.9,\"memory-cases\",\"anthropic\",\"model-x\",3"));
+            assertTrue(csv.contains("\"public_long_context\",\"official_metric_average\",0.75"));
+            assertTrue(Files.readString(result.json()).contains("public_dataset_readiness"));
             assertTrue(Files.readString(result.manifest()).contains("Compression"));
         } finally {
             if (previous == null) {

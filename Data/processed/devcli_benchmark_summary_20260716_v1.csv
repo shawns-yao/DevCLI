@@ -1,0 +1,29 @@
+category,metric,value,dataset,provider,model,sample_size
+"rag","improved_recall_at_5",1.0,"codesearchnet-java-public","openai","Qwen/Qwen3-Embedding-4B",50
+"rag","improved_mrr_at_5",0.99,"codesearchnet-java-public","openai","Qwen/Qwen3-Embedding-4B",50
+"rag","improved_ndcg_at_5",0.9926,"codesearchnet-java-public","openai","Qwen/Qwen3-Embedding-4B",50
+"rag","recall_at_5_delta_pct_points",0.0,"codesearchnet-java-public","openai","Qwen/Qwen3-Embedding-4B",50
+"rag","mrr_at_5_delta_pct_points",2.0,"codesearchnet-java-public","openai","Qwen/Qwen3-Embedding-4B",50
+"rag","ndcg_at_5_delta_pct_points",1.47,"codesearchnet-java-public","openai","Qwen/Qwen3-Embedding-4B",50
+"rag","improved_recall_at_5",0.65,"synthetic-java-call-chain","openai","Qwen/Qwen3-Embedding-4B",5
+"rag","improved_mrr_at_5",0.8,"synthetic-java-call-chain","openai","Qwen/Qwen3-Embedding-4B",5
+"rag","improved_ndcg_at_5",0.6144,"synthetic-java-call-chain","openai","Qwen/Qwen3-Embedding-4B",5
+"rag","recall_at_5_delta_pct_points",5.0,"synthetic-java-call-chain","openai","Qwen/Qwen3-Embedding-4B",5
+"rag","mrr_at_5_delta_pct_points",13.33,"synthetic-java-call-chain","openai","Qwen/Qwen3-Embedding-4B",5
+"rag","ndcg_at_5_delta_pct_points",6.99,"synthetic-java-call-chain","openai","Qwen/Qwen3-Embedding-4B",5
+"agent_single_agent","task_success_rate",0.0,"hidden-cli-tasks","anthropic","glm-5.2",5
+"agent_single_agent","avg_completion_rate",0.0,"hidden-cli-tasks","anthropic","glm-5.2",5
+"agent_single_agent","avg_hidden_failure_rate",1.0,"hidden-cli-tasks","anthropic","glm-5.2",5
+"agent_single_agent","avg_unique_bug_rate",1.0,"hidden-cli-tasks","anthropic","glm-5.2",5
+"agent_planner_worker_reviewer","task_success_rate",0.0,"hidden-cli-tasks","anthropic","glm-5.2",5
+"agent_planner_worker_reviewer","avg_completion_rate",0.2733,"hidden-cli-tasks","anthropic","glm-5.2",5
+"agent_planner_worker_reviewer","avg_hidden_failure_rate",0.7267,"hidden-cli-tasks","anthropic","glm-5.2",5
+"agent_planner_worker_reviewer","avg_unique_bug_rate",0.7267,"hidden-cli-tasks","anthropic","glm-5.2",5
+"memory","write_accuracy",0.96,"memory-cases","anthropic","glm-5.2",25
+"memory","low_value_block_rate",1.0,"memory-cases","anthropic","glm-5.2",13
+"memory","recall_at_5",0.9167,"memory-cases","anthropic","glm-5.2",12
+"memory","injection_hit_rate",0.9167,"memory-cases","anthropic","glm-5.2",12
+"compression","retention_ratio",0.9444444444444444,"compression-facts","anthropic","glm-5.2",18
+"public_memory","normalized_answer_hit_rate",0.6666666666666666,"LongMemEval Oracle Cleaned","anthropic","glm-5.2",3
+"public_long_context","official_metric_average",0.6666666666666666,"LongBench v1 exact subsets","anthropic","glm-5.2",6
+"public_long_context","official_string_match_average",1.0,"RULER v1 niah_single_1","anthropic","glm-5.2",3

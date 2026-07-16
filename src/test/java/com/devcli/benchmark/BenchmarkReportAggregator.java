@@ -51,6 +51,14 @@ final class BenchmarkReportAggregator {
         sources.add(relative(root, reportRoot.resolve("real-llm-memory-benchmark.json")));
         sources.add(relative(root, reportRoot.resolve("real-llm-compression-retention.json")));
         ragReports.forEach(path -> sources.add(relative(root, path)));
+        Path publicReadinessReport = reportRoot.resolve("public/public-dataset-readiness.json");
+        Path publicLongContextReport = reportRoot.resolve("public/public-long-context-benchmark.json");
+        if (Files.isRegularFile(publicReadinessReport)) {
+            sources.add(relative(root, publicReadinessReport));
+        }
+        if (Files.isRegularFile(publicLongContextReport)) {
+            sources.add(relative(root, publicLongContextReport));
+        }
 
         ArrayNode rag = summary.putArray("rag");
         List<CsvMetric> csvMetrics = new ArrayList<>();
@@ -107,12 +115,39 @@ final class BenchmarkReportAggregator {
                 compression.path("provider").asText(), compression.path("model").asText(),
                 compression.path("fact_count").asInt()));
 
+        if (Files.isRegularFile(publicReadinessReport)) {
+            summary.set("public_dataset_readiness", readRequired(publicReadinessReport));
+        }
+        if (Files.isRegularFile(publicLongContextReport)) {
+            JsonNode publicReport = readRequired(publicLongContextReport);
+            summary.set("public_long_context", publicReport);
+            addPublicLongContextCsv(csvMetrics, publicReport);
+        }
+
         Files.writeString(jsonFile, JSON.writerWithDefaultPrettyPrinter().writeValueAsString(summary),
                 StandardCharsets.UTF_8);
         Files.writeString(csvFile, renderCsv(csvMetrics), StandardCharsets.UTF_8);
         Files.writeString(manifestFile, renderManifest(safeVersion, summary, csvMetrics),
                 StandardCharsets.UTF_8);
         return new Result(jsonFile, csvFile, manifestFile);
+    }
+
+    private static void addPublicLongContextCsv(List<CsvMetric> metrics, JsonNode report) {
+        String provider = report.path("provider").asText();
+        String model = report.path("model").asText();
+        JsonNode aggregate = report.path("aggregate");
+        metrics.add(new CsvMetric("public_memory", "normalized_answer_hit_rate",
+                aggregate.path("longmemeval_normalized_answer_hit_rate").asDouble(),
+                "LongMemEval Oracle Cleaned", provider, model,
+                report.path("longmemeval_oracle").size()));
+        metrics.add(new CsvMetric("public_long_context", "official_metric_average",
+                aggregate.path("longbench_official_metric_average").asDouble(),
+                "LongBench v1 exact subsets", provider, model,
+                report.path("longbench_v1").size()));
+        metrics.add(new CsvMetric("public_long_context", "official_string_match_average",
+                aggregate.path("ruler_official_string_match_average").asDouble(),
+                "RULER v1 niah_single_1", provider, model,
+                report.path("ruler_v1").size()));
     }
 
     private static void addMemoryCsv(List<CsvMetric> metrics, JsonNode memory) {

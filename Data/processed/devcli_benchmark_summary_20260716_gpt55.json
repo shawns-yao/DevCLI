@@ -1,0 +1,306 @@
+{
+  "created_at" : "2026-07-16T06:54:26.493640600Z",
+  "report_version" : "20260716_gpt55",
+  "sources" : [ "target/agent-benchmark/run-1784181404991/agent-collaboration-benchmark.json", "target/benchmark-reports/real-llm-memory-benchmark.json", "target/benchmark-reports/real-llm-compression-retention.json", "target/benchmark-reports/rag/codesearchnet-java-public/rag-retrieval-benchmark.json", "target/benchmark-reports/rag/synthetic-java-call-chain/rag-retrieval-benchmark.json", "target/benchmark-reports/public/public-dataset-readiness.json", "target/benchmark-reports/public/public-long-context-benchmark.json" ],
+  "rag" : [ {
+    "dataset_name" : "codesearchnet-java-public",
+    "dataset_type" : "public_codesearchnet_java",
+    "embedding_provider" : "openai",
+    "embedding_model" : "Qwen/Qwen3-Embedding-4B",
+    "query_count" : 50,
+    "improved_recall_at_5" : 1.0,
+    "improved_mrr_at_5" : 0.99,
+    "improved_ndcg_at_5" : 0.9926,
+    "recall_at_5_delta_pct_points" : 0.0,
+    "mrr_at_5_delta_pct_points" : 2.0,
+    "ndcg_at_5_delta_pct_points" : 1.47
+  }, {
+    "dataset_name" : "synthetic-java-call-chain",
+    "dataset_type" : "synthetic_sample_project",
+    "embedding_provider" : "openai",
+    "embedding_model" : "Qwen/Qwen3-Embedding-4B",
+    "query_count" : 5,
+    "improved_recall_at_5" : 0.65,
+    "improved_mrr_at_5" : 0.8,
+    "improved_ndcg_at_5" : 0.6144,
+    "recall_at_5_delta_pct_points" : 5.0,
+    "mrr_at_5_delta_pct_points" : 13.33,
+    "ndcg_at_5_delta_pct_points" : 6.99
+  } ],
+  "agent_collaboration" : {
+    "provider" : "openai",
+    "model" : "gpt-5.5",
+    "task_count" : 5,
+    "single_agent" : {
+      "avg_completion_rate" : 0.94,
+      "avg_hidden_failure_rate" : 0.06,
+      "avg_unique_bug_rate" : 0.06,
+      "avg_elapsed_ms" : 169137,
+      "task_success_rate" : 0.6,
+      "task_success_count" : 3,
+      "llm_completed_count" : 5,
+      "task_count" : 5
+    },
+    "planner_worker_reviewer" : {
+      "avg_completion_rate" : 0.76,
+      "avg_hidden_failure_rate" : 0.24,
+      "avg_unique_bug_rate" : 0.24,
+      "avg_elapsed_ms" : 470713,
+      "task_success_rate" : 0.2,
+      "task_success_count" : 1,
+      "llm_completed_count" : 5,
+      "task_count" : 5
+    },
+    "comparison" : {
+      "task_count" : 5,
+      "task_success_rate_delta_pct_points" : -40.0,
+      "avg_completion_rate_delta_pct_points" : -18.0,
+      "avg_hidden_failure_rate_reduction_pct" : -300.0,
+      "avg_unique_bug_rate_reduction_pct" : -300.0,
+      "note" : "execution time intentionally excluded from quality claim"
+    }
+  },
+  "memory" : {
+    "provider" : "anthropic",
+    "model" : "glm-5.2",
+    "metrics" : {
+      "write_accuracy" : 0.96,
+      "low_value_block_rate" : 1.0,
+      "recall_at_5" : 0.9167,
+      "injection_hit_rate" : 0.9167
+    }
+  },
+  "compression" : {
+    "provider" : "anthropic",
+    "model" : "glm-5.2",
+    "retention_ratio" : 0.9444444444444444,
+    "fact_count" : 18,
+    "compaction_count" : 5
+  },
+  "public_dataset_readiness" : {
+    "schema_version" : 1,
+    "generated_at" : "2026-07-16T02:04:37.902655200Z",
+    "sample_limit" : 5,
+    "datasets" : [ {
+      "id" : "swebench-lite",
+      "repository" : "SWE-bench/SWE-bench_Lite",
+      "revision" : "69611d31007e1c6731db8bd5b5c3f2d33f5bab6e",
+      "license" : "数据实例沿用各源仓库许可，官方 harness 为 MIT",
+      "evaluation_mode" : "official-python-harness",
+      "artifact_bytes" : 1111559,
+      "sha256_matches" : true,
+      "official_harness_present" : true,
+      "ready" : true,
+      "message" : "ready"
+    }, {
+      "id" : "longmemeval-oracle",
+      "repository" : "xiaowu0162/longmemeval-cleaned",
+      "revision" : "98d7416c24c778c2fee6e6f3006e7a073259d48f",
+      "license" : "MIT",
+      "evaluation_mode" : "official-llm-judge",
+      "artifact_bytes" : 15388478,
+      "sha256_matches" : true,
+      "official_harness_present" : true,
+      "ready" : true,
+      "message" : "ready"
+    }, {
+      "id" : "longbench-v1",
+      "repository" : "THUDM/LongBench",
+      "revision" : "2e00731f8d0bff23dc4325161044d0ed8af94c1e",
+      "license" : "MIT",
+      "evaluation_mode" : "official-task-metrics",
+      "artifact_bytes" : 113932529,
+      "sha256_matches" : true,
+      "official_harness_present" : true,
+      "ready" : true,
+      "message" : "ready"
+    }, {
+      "id" : "ruler-v1",
+      "repository" : "NVIDIA/RULER",
+      "revision" : "e8bbff677ca2c239640dc90f93310dcf32408c93",
+      "license" : "Apache-2.0",
+      "evaluation_mode" : "nemo-skills-ruler",
+      "artifact_bytes" : 6706,
+      "sha256_matches" : true,
+      "official_harness_present" : true,
+      "ready" : true,
+      "message" : "ready"
+    } ],
+    "sample_validation" : {
+      "swebench_lite" : 5,
+      "longmemeval_oracle" : 5,
+      "longbench_v1" : 20,
+      "ruler_v1" : "official NeMo-Skills harness pinned; generated data requires model tokenizer"
+    }
+  },
+  "public_long_context" : {
+    "schema_version" : 1,
+    "generated_at" : "2026-07-16T06:50:58.657880Z",
+    "provider" : "openai",
+    "model" : "gpt-5.5",
+    "limit_per_dataset" : 3,
+    "longmemeval_oracle" : [ {
+      "question_id" : "gpt4_2655b836",
+      "question_type" : "temporal-reasoning",
+      "session_count" : 3,
+      "answer" : "GPS system not functioning correctly",
+      "hypothesis" : "",
+      "normalized_answer_hit" : false,
+      "input_tokens" : 10595,
+      "output_tokens" : 0,
+      "input_tokens_estimated" : true,
+      "elapsed_ms" : 26396,
+      "error" : "LLM request failed: provider=openai, model=gpt-5.5, status=400, code=INVALID_REQUEST, detail=This chat was flagged for possible cybersecurity risk If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program. https://chatgpt.com/cyber"
+    }, {
+      "question_id" : "gpt4_2487a7cb",
+      "question_type" : "temporal-reasoning",
+      "session_count" : 2,
+      "answer" : "'Data Analysis using Python' webinar",
+      "hypothesis" : "The “Data Analysis using Python” webinar.The “Data Analysis using Python” webinar.",
+      "normalized_answer_hit" : true,
+      "input_tokens" : 7027,
+      "output_tokens" : 79,
+      "input_tokens_estimated" : false,
+      "elapsed_ms" : 7194,
+      "error" : ""
+    }, {
+      "question_id" : "gpt4_76048e76",
+      "question_type" : "temporal-reasoning",
+      "session_count" : 2,
+      "answer" : "bike",
+      "hypothesis" : "The bike.The bike.",
+      "normalized_answer_hit" : true,
+      "input_tokens" : 5459,
+      "output_tokens" : 7,
+      "input_tokens_estimated" : false,
+      "elapsed_ms" : 8136,
+      "error" : ""
+    } ],
+    "longbench_v1" : [ {
+      "id" : "96387e4ae15da043d51ef61053087ad39e7b4f01fba3f2a2",
+      "dataset" : "passage_count",
+      "length" : 11221,
+      "metric" : "exact-match",
+      "score" : 0.0,
+      "prediction" : "88",
+      "answers" : [ "8" ],
+      "input_tokens" : 15433,
+      "output_tokens" : 185,
+      "input_tokens_estimated" : false,
+      "elapsed_ms" : 6817,
+      "error" : ""
+    }, {
+      "id" : "15103103336cc36442b0c42f3458b745a0dff917705e78dd",
+      "dataset" : "passage_count",
+      "length" : 9921,
+      "metric" : "exact-match",
+      "score" : 0.0,
+      "prediction" : "99",
+      "answers" : [ "11" ],
+      "input_tokens" : 13066,
+      "output_tokens" : 136,
+      "input_tokens_estimated" : false,
+      "elapsed_ms" : 6124,
+      "error" : ""
+    }, {
+      "id" : "a3c722ad83ccdf65bf5185f0f8ae4c7f35e62d2203d84a2f",
+      "dataset" : "passage_count",
+      "length" : 6578,
+      "metric" : "exact-match",
+      "score" : 0.0,
+      "prediction" : "",
+      "answers" : [ "13" ],
+      "input_tokens" : 10146,
+      "output_tokens" : 0,
+      "input_tokens_estimated" : true,
+      "elapsed_ms" : 30053,
+      "error" : "LLM request failed: provider=openai, model=gpt-5.5, status=400, code=INVALID_REQUEST, detail=This chat was flagged for possible cybersecurity risk If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program. https://chatgpt.com/cyber"
+    }, {
+      "id" : "f440b317fe84ec87132b316031ad47925a6ae33e0ef0ee3a",
+      "dataset" : "passage_retrieval_en",
+      "length" : 8525,
+      "metric" : "exact-match",
+      "score" : 0.0,
+      "prediction" : "",
+      "answers" : [ "Paragraph 15" ],
+      "input_tokens" : 12848,
+      "output_tokens" : 0,
+      "input_tokens_estimated" : true,
+      "elapsed_ms" : 26390,
+      "error" : "LLM request failed: provider=openai, model=gpt-5.5, status=400, code=INVALID_REQUEST, detail=This chat was flagged for possible cybersecurity risk If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program. https://chatgpt.com/cyber"
+    }, {
+      "id" : "5096757b48e895ad15b31e620bedd26e5ba11406619bb23f",
+      "dataset" : "passage_retrieval_en",
+      "length" : 8679,
+      "metric" : "exact-match",
+      "score" : 1.0,
+      "prediction" : "Paragraph 8Paragraph 8",
+      "answers" : [ "Paragraph 8" ],
+      "input_tokens" : 11462,
+      "output_tokens" : 7,
+      "input_tokens_estimated" : false,
+      "elapsed_ms" : 4515,
+      "error" : ""
+    }, {
+      "id" : "8b64051664cb901d9bdb2496f545d7eee2afc4104b2cd70e",
+      "dataset" : "passage_retrieval_en",
+      "length" : 9562,
+      "metric" : "exact-match",
+      "score" : 0.0,
+      "prediction" : "",
+      "answers" : [ "Paragraph 18" ],
+      "input_tokens" : 14382,
+      "output_tokens" : 0,
+      "input_tokens_estimated" : true,
+      "elapsed_ms" : 25105,
+      "error" : "LLM request failed: provider=openai, model=gpt-5.5, status=400, code=INVALID_REQUEST, detail=This chat was flagged for possible cybersecurity risk If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program. https://chatgpt.com/cyber"
+    } ],
+    "ruler_v1" : [ {
+      "id" : "1179",
+      "task" : "niah_single_1",
+      "length" : 4093,
+      "score" : 1.0,
+      "prediction" : "54379235437923",
+      "answers" : [ "5437923" ],
+      "input_tokens" : 3981,
+      "output_tokens" : 7,
+      "input_tokens_estimated" : false,
+      "elapsed_ms" : 2849,
+      "error" : ""
+    }, {
+      "id" : "8824",
+      "task" : "niah_single_1",
+      "length" : 4093,
+      "score" : 1.0,
+      "prediction" : "30942353094235",
+      "answers" : [ "3094235" ],
+      "input_tokens" : 3979,
+      "output_tokens" : 7,
+      "input_tokens_estimated" : false,
+      "elapsed_ms" : 3985,
+      "error" : ""
+    }, {
+      "id" : "1717",
+      "task" : "niah_single_1",
+      "length" : 3496,
+      "score" : 1.0,
+      "prediction" : "42260674226067",
+      "answers" : [ "4226067" ],
+      "input_tokens" : 3383,
+      "output_tokens" : 7,
+      "input_tokens_estimated" : false,
+      "elapsed_ms" : 4003,
+      "error" : ""
+    } ],
+    "aggregate" : {
+      "longmemeval_normalized_answer_hit_rate" : 0.6666666666666666,
+      "longbench_official_metric_average" : 0.16666666666666666,
+      "ruler_official_string_match_average" : 1.0,
+      "input_tokens" : 111761,
+      "output_tokens" : 435,
+      "elapsed_ms" : 151567,
+      "failed_calls" : 4
+    },
+    "longmemeval_official_judge_status" : "hypotheses generated; run the pinned LongMemEval evaluate_qa.py with a supported judge model"
+  }
+}
