@@ -108,7 +108,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 流程：规划 → 按依赖分配 Worker → Reviewer 审查 → 未通过重试(最多 2 次)
 - Planner 输出先做协议与结构校验：支持从前后说明中提取完整 JSON；解析失败、DAG 无效或阻塞性空工作区纯检查步骤会触发有界修复。修复前清空 Planner 历史，并把原始任务、失败原因、无效输出预览和固定 schema 放入新请求。默认修复 2 次，可通过 `devcli.team.planner.repair.max.attempts` / `DEVCLI_TEAM_PLANNER_REPAIR_MAX_ATTEMPTS` 调整到 `[0, 3]`。
 - Planner 不调用工具；空工作区属于合法状态。目录和文件存在性检查不能成为阻塞实现的独立步骤，必要检查并入首个实现步骤并采用“若不存在则创建”语义。
-- SubAgent 按单次执行保存结构化工具证据。Worker 最终 content 为空但存在 `ToolStatus.SUCCESS` 时，由 Orchestrator 合成有界证据摘要进入 Pre-Review / Reviewer；没有成功证据时由独立 Worker 协议守卫追加一次强制执行上下文，要求文件任务调用 `write_file`、分析任务调用读取工具，并在该请求首轮设置命名 `LlmClient.ToolChoice`：FILE_WRITE / INTEGRATION 选择 `write_file`，COMMAND 选择 `execute_command`，其他类型选择 `list_dir`。Anthropic Messages 请求映射为 `tool_choice: {"type":"tool","name":"..."}`，OpenAI-compatible 请求映射为命名 function choice。FILE_WRITE / INTEGRATION 步骤出现成功 `write_file` 批次后直接以结构化证据结束当前 Worker 执行；强制修复中的指定工具也采用同一完成策略，避免再发起无必要的 LLM 收尾请求。Provider 忽略命名工具选择时，`AgentExecutionEngine` 追加一次严格 JSON 工具信封请求；SubAgent 只接受单一完整 JSON 对象、目标工具名及对象参数，拒绝 reasoning、Markdown、代码围栏、尾随文本和未知字段，解析后仍通过原有工具参数校验、能力范围、HITL 与策略管线。工具失败时才恢复 AUTO 进入下一轮纠正，最终仍无成功证据才返回“执行结果为空”。
+- SubAgent 按单次执行保存结构化工具证据。Worker 最终 content 为空但存在 `ToolStatus.SUCCESS` 时，由 Orchestrator 合成有界证据摘要进入 Pre-Review / Reviewer；无论 content 是否为空，只要没有成功工具证据，独立 Worker 协议守卫都会追加一次强制执行上下文，阻止文字方案或伪代码冒充执行结果，并要求文件任务调用 `write_file`、分析任务调用读取工具，并在该请求首轮设置命名 `LlmClient.ToolChoice`：FILE_WRITE / INTEGRATION 选择 `write_file`，COMMAND 选择 `execute_command`，其他类型选择 `list_dir`。Anthropic Messages 请求映射为 `tool_choice: {"type":"tool","name":"..."}`，OpenAI-compatible 请求映射为命名 function choice。FILE_WRITE / INTEGRATION 步骤出现成功 `write_file` 批次后直接以结构化证据结束当前 Worker 执行；强制修复中的指定工具也采用同一完成策略，避免再发起无必要的 LLM 收尾请求。Provider 忽略命名工具选择时，`AgentExecutionEngine` 追加一次严格 JSON 工具信封请求；SubAgent 只接受单一完整 JSON 对象、目标工具名及对象参数，拒绝 reasoning、Markdown、代码围栏、尾随文本和未知字段，解析后仍通过原有工具参数校验、能力范围、HITL 与策略管线。工具失败时才恢复 AUTO 进入下一轮纠正，最终仍无成功证据才返回“执行结果为空”。
 - SubAgent IOException 返回 ERROR 类型
 - Planner 共享主 ToolRegistry；副作用 Worker 使用 `WorkspaceExecutionSession` 创建隔离 ToolRegistry，Pre-Review 与 Reviewer 在同一隔离目录读取真实产物，MemoryManager 继续共享角色裁剪视图。
 - Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用 `ExecutionArtifact`，统一保存 state、output、summary、modifiedResources、error、attempt、startedAt、finishedAt。
@@ -379,15 +379,15 @@ EMBEDDING_BASE_URL=http://localhost:11434
 
 ## Runtime Reliability And Memory Lifecycle
 
-模型调用统一通过 `LlmException` 表达错误，`LlmErrorCode` 区分认证、限流、过载、超时、网络、参数、上下文超限、内容过滤、服务端和响应格式错误。Anthropic 与 OpenAI-compatible 基类复用同一 `LlmRetryExecutor`；限流、过载、超时、网络和 5xx 使用指数退避与 jitter，其他错误立即返回。流式 listener 已收到任何 reasoning/content delta 后，当前调用转为不可重试，避免重复输出和重复工具调用。SubAgent 返回错误时保留 `code` 与 `retryable`，Orchestrator 优先读取标准重试标记，旧文本规则只用于兼容。
+模型调用统一通过 `LlmException` 表达错误，`LlmErrorCode` 区分认证、限流、过载、超时、网络、参数、上下文超限、内容过滤、服务端和响应格式错误。Anthropic 与 OpenAI-compatible 基类复用同一 `LlmRetryExecutor`；限流、过载、超时、网络和 5xx 使用指数退避与 jitter，其他错误立即返回。流式 listener 已收到任何 reasoning/content delta 后，当前调用转为不可重试，避免重复输出和重复工具调用。OpenAI-compatible 工具调用聚合同时支持标准增量片段、累积快照和完整字段重复发送：相同或回退快照忽略，扩展快照替换，普通片段继续追加，避免生成重复工具名或拼接多个完整 JSON。SubAgent 返回错误时保留 `code` 与 `retryable`，Orchestrator 优先读取标准重试标记，旧文本规则只用于兼容。
 
-`ConversationHistoryCompactor` 在摘要尺寸治理后、重建 history 前调用 `CompactionSemanticGuard`。守卫从待压缩原消息中提取必须、禁止、默认值、命令、版本、端口、目录、验收和配置赋值等关键约束，通过规范化文本与标识符锚点判断保留情况；缺失约束直接以提取式恢复段补回，并在摘要上限内优先保留。
+`ConversationHistoryCompactor` 在摘要尺寸治理后、重建 history 前调用 `CompactionSemanticGuard`。守卫从待压缩原消息中提取必须、禁止、默认值、命令、版本、端口、目录、验收和配置赋值等关键约束；结构化声明按主题对账并只保留最新值，否定约束必须在包含同一语义锚点的摘要分段中保留否定极性；缺失约束直接以提取式恢复段补回，并在摘要上限内优先保留。
 
 `MemoryOrganizer` 通过 `/memory organize` 生成结构化整理计划，通过 `/memory organize apply` 应用低风险合并。库存最多携带 100 条可召回记忆，每条正文限制 300 字符并编码为 JSON 数据；解析失败最多修复一次。模型只能提出 KEEP、MERGE、REVIEW、REJECT 候选，程序重新校验来源标识、类型、主题、审核状态、覆盖范围和计划置信度。只有同主题、同类型、全部 UNREVIEWED、覆盖该主题全部可召回条目且计划置信度不低于 0.9 的 MERGE 可以自动应用；其余候选只在本次运行报告中标记为需要人工复核，或由策略拒绝；当前不持久化复核队列。
 
-`MemoryEntry` 持久化 `schemaVersion`、`revision`、`expiresAt` 和结构化 `MemoryEvidence`。证据字段包括 confidence、sourceQuote、reasoning、reviewState、conflictsWith；HIGH 置信度至少需要 5 字符 sourceQuote，MEDIUM 需要非空 sourceQuote，否则构造时自动降级；旧构造与旧 SQLite 行迁移为 schema 1、revision 1、无历史过期时间、UNSPECIFIED 置信度和 REVIEWED 状态，新写入条目使用 schema 2 并按类型 TTL 生成 expiresAt。显式写入默认 REVIEWED，策略自动写入默认 UNREVIEWED；REJECTED 条目保留审计，但从关键词检索、语义检索和 prompt 注入中排除。LongTermMemory 在检索、读取、计数和类型筛选前清理过期条目，并同步删除持久化记录和向量索引。显式 subject 内容变化以及 `key=value`、`主题是值` 等可解析声明冲突会记录结构化 conflictsWith，同时保留 `conflict_detected/conflict_with` 兼容 metadata；旧条软删除，新条 revision 递增。
+`MemoryEntry` 持久化 `schemaVersion`、`revision`、`expiresAt` 和结构化 `MemoryEvidence`。证据字段包括 confidence、sourceQuote、reasoning、reviewState、conflictsWith；HIGH 置信度至少需要 5 字符 sourceQuote，MEDIUM 需要非空 sourceQuote，否则构造时自动降级；旧构造与旧 SQLite 行迁移为 schema 1、revision 1、无历史过期时间、UNSPECIFIED 置信度和 REVIEWED 状态，新写入条目使用 schema 2 并按类型 TTL 生成 expiresAt。显式写入默认 REVIEWED，策略自动写入默认 UNREVIEWED；REJECTED 条目保留审计，但从关键词检索、语义检索和 prompt 注入中排除。LongTermMemory 在检索、读取、计数和类型筛选前清理过期条目，并同步删除持久化记录和向量索引。显式 subject 内容变化以及配置赋值、默认值、当前值、设置值和正反使用声明等可解析冲突会记录结构化 conflictsWith，同时保留 `conflict_detected/conflict_with` 兼容 metadata；旧条软删除，新条 revision 递增；相同主题同值的可确定改写自动去重。
 
-`ToolInvocationFingerprint` 对 JSON 对象字段排序，统一查询字段大小写、冗余空白和路径分隔符。AgentBudget 使用该指纹判断语义重复；ToolRegistry 只缓存成功、无图片的 READ_ONLY 结果，默认 128 条、30 秒。项目路径切换或任何非只读工具进入执行阶段时清空缓存，禁止把副作用前的陈旧读取跨状态复用。
+`ToolInvocationFingerprint` 对 JSON 对象字段排序，统一查询字段大小写、Unicode NFKC 等价字符、冗余空白和路径分隔符；正则 pattern 保持大小写敏感，避免相似但不等价调用共享缓存。AgentBudget 使用该指纹判断语义重复；ToolRegistry 只缓存成功、无图片的 READ_ONLY 结果，默认 128 条、30 秒。项目路径切换或任何非只读工具进入执行阶段时清空缓存，禁止把副作用前的陈旧读取跨状态复用。
 
 ## Benchmark Evaluation
 
@@ -395,7 +395,9 @@ EMBEDDING_BASE_URL=http://localhost:11434
 
 Agent benchmark 对同一组隐藏检查任务比较单 Agent 与 Planner/Worker/Reviewer，任务成功要求 LLM 流程完成且隐藏检查全部通过。Memory benchmark 统计写入策略准确率、低价值拦截率、Recall@5 和注入命中率。Compression benchmark 在 230k token 生产阈值下执行多次真实摘要，再通过分层事实问答统计保真率。
 
-原始报告默认写入 `target/benchmark-reports/` 和 `target/agent-benchmark/`。`BenchmarkReportAggregatorIT` 将最新结果汇总为 `Data/processed/` 下的 JSON、CSV，并在 `Data/manifest/` 记录来源。评测方法、复现命令和结果边界见 `docs/benchmark-evaluation.md`。
+公开集合扩展由 `PublicBenchmarkCatalog` 读取固定配置并校验原始文件 SHA-256 与官方 harness。`PublicBenchmarkReadinessIT` 验证 SWE-bench Lite、LongMemEval、LongBench 和 RULER 数据入口；`RulerDatasetGenerationIT` 直接调用固定版本官方生成器，避免 Windows shell 对换行模板的破坏；`PublicLongContextBenchmarkIT` 生成 LongMemEval hypothesis、复用 LongBench 官方 prompt/数字指标和 RULER string match；`SweBenchLiteAgentBenchmarkIT` 生成官方 predictions JSONL，并可通过 Linux Docker harness 执行 resolved 评测。代理指标与官方指标在报告中分字段保存。
+
+原始报告默认写入 `target/benchmark-reports/` 和 `target/agent-benchmark/`。`BenchmarkReportAggregatorIT` 将最新结果汇总为 `Data/processed/` 下的 JSON、CSV，并在 `Data/manifest/` 记录来源。评测方法、固定版本、复现命令和结果边界见 `docs/benchmark-evaluation.md`。
 
 ## Test Coverage Summary
 

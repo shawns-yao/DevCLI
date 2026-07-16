@@ -2,12 +2,26 @@
 
 ## 2026-07-14 Multi-Agent 计划协议与空结果可靠性
 
-- 状态：代码与针对性测试已实现，logops 真实受控任务已通过，完整 5 任务待复跑
+- 状态：代码与针对性测试已实现，完整 5 任务已复跑；交付可靠性仍未达标
 - 来源：Agent 受控评测中单 Agent 成功率 20%，Planner/Worker/Reviewer 成功率 0%；主要失败来自 Planner 非 JSON 输出、空工作区纯检查步骤阻塞实现，以及 Worker 最终文本为空。首次修复后真实复跑确认 Planner 已生成直接实现步骤，但 Worker 连续两次只描述准备写入、没有调用工具，仍被空结果阻断
 - 影响范围：Multi-Agent 编排、Planner 与 Worker 协议守卫、SubAgent 单次执行证据、角色提示词、受控 Agent benchmark、配置模板、README、AGENTS、详细架构文档和 Agent 测试
 - 已实现：Planner 支持从前后说明中提取完整 JSON；解析失败、DAG 无效或阻塞性空工作区纯检查步骤触发有界协议修复；修复请求携带原始任务、失败原因、无效输出预览和固定 schema；空工作区检查必须并入实现步骤；Worker 空文本但存在结构化成功工具证据时合成有界摘要进入 Reviewer；没有成功证据时追加一次强制执行协议，并按步骤类型指定首轮工具，FILE_WRITE / INTEGRATION 选择 `write_file`，COMMAND 选择 `execute_command`，其他类型选择 `list_dir`；Anthropic 与 OpenAI-compatible 均映射为命名工具选择；FILE_WRITE / INTEGRATION 步骤在成功 `write_file` 批次后直接以结构化证据结束 Worker，强制修复中的指定工具采用同一规则，不再发起收尾 LLM 请求，失败时才恢复 AUTO 纠正；Provider 忽略命名工具选择时追加一次严格 JSON 工具信封请求，只接受目标工具、对象参数和无尾随内容的完整 JSON，并继续走原工具安全管线；SubAgent 错误保留标准错误码和 retryable 标记；Pre-Review 区分跳过与硬检查实际通过，Reviewer 可重试故障或达到默认 2 轮上限时只有后者允许普通步骤降级接受；受控 benchmark 不暴露 execute_command，并把 Pre-Review 编译交给运行后的隐藏验证器，避免 Docker daemon 状态污染模型指标，生产沙箱策略不变
-- 已验证：覆盖说明文本包裹 JSON、非 JSON 修复、合法 JSON 中阻塞性检查步骤修复、成功工具证据放行、失败工具证据可见、空结果强制工具修复、修复后仍无证据保持失败、文件写入步骤成功批次后结束、命名工具成功后单轮结束、失败后继续纠正、步骤类型映射、严格工具信封解析与拒绝规则、两类 Provider 请求体映射、Reviewer 轮数边界以及 Planner / Worker 提示词约束；2026-07-14 真实 logops 任务中单 Agent 0/10，Planner/Worker/Reviewer 10/10，任务成功率从 0% 提升到 100%
-- 未验证：完整 5 个真实模型受控任务尚未复跑，当前 100% 结果只证明 logops 单任务链路，不代表整套任务成功率或统计稳定性
+- 已验证：覆盖说明文本包裹 JSON、非 JSON 修复、合法 JSON 中阻塞性检查步骤修复、成功工具证据放行、失败工具证据可见、空结果强制工具修复、修复后仍无证据保持失败、文件写入步骤成功批次后结束、命名工具成功后单轮结束、失败后继续纠正、步骤类型映射、严格工具信封解析与拒绝规则、两类 Provider 请求体映射、Reviewer 轮数边界以及 Planner / Worker 提示词约束；2026-07-16 完整复跑中，单 Agent 0/5、隐藏检查平均完成率 0%；Planner/Worker/Reviewer 0/5、隐藏检查平均完成率 27.33%，其中 logops 9/10、ordermvc 7/15
+- 已补强（2026-07-16）：OpenAI 兼容流式工具调用同时支持标准增量、累积快照和完整字段重复发送，避免工具名与 JSON 参数重复拼接；Krill AI `gpt-5.5` 完整 5 任务复跑中，单 Agent 成功 3/5、隐藏检查平均完成率 94%，Planner/Worker/Reviewer 成功 1/5、平均完成率 76%
+- 已实现（2026-07-16）：新增订单履约 Saga 协作评测场景，预置只读公共契约，将库存、支付、配送、通知、审计拆为五个独立模块，并把履约编排设为最终集成步骤；单 Agent 与 Planner/Worker/Reviewer 使用同一任务说明、工具边界和隐藏验证器；测试工具白名单在隔离 ToolRegistry fork 中保持，避免 Worker 重新获得 `execute_command`
+- 实验目的：验证 Multi-Agent 是否只在具备明确模块边界、可并行子任务和最终集成依赖的任务上取得收益，避免继续使用单文件 CLI 任务得出不适用的结论
+- 实验变量：自变量只有执行模式，分别为单 Agent 与 Planner/Worker/Reviewer；控制变量包括同一 `gpt-5.5` 模型、同一 Provider、同一只读契约、同一初始空工作区、同一任务说明、同一工具白名单、同一 JDK 编译器、同一隐藏检查和相互独立的运行目录
+- 实验流程：每种模式复制相同的 `SagaContracts.java` 到独立工作区；单 Agent 首轮强制读取契约后完成全部模块；Multi-Agent 由 Planner 生成 DAG，库存、支付、配送、通知、审计五个实现步骤可并行，履约编排依赖前五步，Reviewer 在最终集成前逐项审查；模型结束后再由模型不可见的外部验证器编译源码并通过隔离类加载器执行行为检查
+- 工具控制：两种模式都只暴露 `read_file`、`write_file`、`list_dir`，不暴露 `execute_command`；工具限制必须随 Multi-Agent 隔离工作区 fork 继承，避免 Docker、本机命令和环境状态污染模型能力指标
+- 验收设计：隐藏检查共 30 项，其中架构约束 3 项、库存 4 项、支付 4 项、配送 4 项、通知 3 项、审计 2 项、正常履约 4 项、失败补偿 3 项、幂等 2 项、并发 1 项
+- 架构验收：公共契约 SHA-256 必须保持不变；六个指定实现类必须位于允许包目录并实现对应接口；五个服务必须同时提供 public 无参构造器和 FailureSwitch 构造器，履约编排必须提供五服务依赖构造器
+- 模块验收：库存检查可用库存预留、库存不足拒绝、重复预留幂等和释放；支付检查授权引用、授权状态、重复授权幂等和退款；配送检查配送引用、活动状态、重复创建幂等和取消；通知检查成功与失败通知各最多一次及故障注入；审计检查事件顺序、订单隔离和故障注入
+- 流程验收：正常路径必须执行库存预留、支付授权、创建配送、成功通知，并保留对应资源状态；审计顺序必须包含 NEW、INVENTORY_RESERVED、PAYMENT_AUTHORIZED、SHIPMENT_CREATED、COMPLETED
+- 补偿验收：支付授权失败必须释放库存；配送创建失败必须退款并释放库存；成功通知失败必须按配送取消、支付退款、库存释放的逆序补偿；失败路径只能发送一次失败通知并返回 FAILED
+- 幂等与并发验收：相同请求重复执行不能重复产生副作用；相同幂等键必须复用首次结果；同一请求并发执行时所有调用返回 COMPLETED，库存、支付、配送和成功通知各只产生一次有效副作用
+- 计分规则：完成率为隐藏检查通过数除以 30；只有 LLM 调用完成且 30/30 才记为任务成功；同时记录端到端耗时。契约变更、工具白名单失效、使用被禁止工具或外部环境进入评分链路时，该轮结果作废
+- 已验证（2026-07-16）：Krill AI `gpt-5.5` 单次有效运行中，单 Agent 通过 27/30（90.0%，192.8 秒），Planner/Worker/Reviewer 通过 30/30（100.0%，725.1 秒），正确率提升 10 个百分点，耗时为 3.76 倍；单 Agent 未通过退款后活动授权清理、取消后活动配送清理和幂等键冲突处理；首次运行因隔离 fork 丢失白名单而允许 Worker 看到 `execute_command`，该轮作废且不纳入统计
+- 未完成：Saga 结果目前只有 1 次有效运行，尚不具备统计稳定性；现有 CLI 任务中 Multi-Agent 在 incidentops 仅通过 2/10，角色链路仍会放大语义偏差，Reviewer 平均耗时过长。Krill AI 端点仍会重复发送完整 content，并对部分公开长上下文样本触发安全拦截；需要完成 content 快照兼容后重新运行 LongBench/RULER
 - 风险：阻塞性检查识别当前采用窄范围语义规则，覆盖空工作区、项目结构、目录和文件存在性；复杂自然语言计划仍依赖修复请求中的模型服从性。强制执行协议只有 1 次，避免无限消耗；最终结果仍必须经过 Pre-Review 与 Reviewer，只有硬检查实际通过且 Reviewer 属于可重试故障时允许安全降级
 
 ## 2026-07-13 运行时可靠性与记忆治理补强
@@ -16,8 +30,9 @@
 - 来源：架构复查发现多模型错误与重试语义不统一、压缩摘要缺少提交前语义校验、长期记忆缺少统一版本和过期机制、错误记忆没有自动矛盾检测、重复工具调用只比较原始参数且没有结果缓存
 - 影响范围：`llm/`、`memory/`、`tool/`、AgentBudget、SQLite 记忆表、配置模板、README、AGENTS 和详细架构文档
 - 已实现：统一 `LlmException/LlmErrorCode`，只重试限流、过载、超时、网络和 5xx；流式输出后禁止重试；压缩摘要写回前运行语义守卫并恢复缺失关键约束；长期记忆增加 schemaVersion、revision、expiresAt 和按类型 TTL；同主题或键值声明冲突自动标记并 supersede；工具调用使用规范化语义指纹，READ_ONLY 成功结果按 TTL 缓存，副作用执行和项目切换清空缓存
-- 验证结果：新增错误重试、压缩语义守卫、记忆生命周期与持久化、自动矛盾检测、语义停滞、缓存命中与失效测试；兼容既有 LLM、压缩、Memory、ToolRegistry 和 AgentBudget 测试
-- 风险：矛盾检测当前优先覆盖显式 subject 和可解析键值声明，复杂自然语言矛盾仍需要后续引入 embedding/NLI 判定；语义守卫以关键约束抽取和锚点保留为主，不替代完整事实问答评测
+- 已增强（2026-07-16）：压缩语义守卫增加结构化声明对账，同一配置或自然语言声明只保留最新值，避免压缩时同时恢复已失效旧值；否定约束必须在包含同一语义锚点的摘要分段中保留否定极性，不能由无关的“不要”句子误判通过；长期记忆复用统一声明解析器，支持配置赋值、默认值、当前值、设置值和禁止使用等可确定表达，相同主题同值的改写自动去重，不同值或正反声明自动建立冲突并 supersede；工具指纹增加 Unicode NFKC 归一化，同时取消对正则 `pattern` 的大小写折叠，避免把大小写敏感查询错误命中缓存
+- 验证结果：错误重试、压缩语义守卫、记忆生命周期与持久化、自动矛盾检测、语义停滞、缓存命中与失效测试通过；新增最新值覆盖、无关否定拒绝、自然语言改写去重、正反声明冲突、全角查询等价和正则大小写隔离测试；兼容长期记忆 supersede、MemoryManager 和压缩器既有测试
+- 风险：声明解析只处理可以确定抽取主题和值的表达，不使用 embedding 直接决定冲突或缓存命中，避免相似但不等价内容产生错误覆盖；复杂隐含矛盾仍需受控 NLI 判定。语义守卫保护关键约束和结构化声明，不替代完整事实问答评测
 
 ## 2026-07-13 CLI 演示链路补强
 
@@ -133,13 +148,14 @@
 
 ## 2026-06-16 公开数据集评测框架
 
-- 状态：阶段一已实现（2026-07-13）
+- 状态：阶段二已实现（2026-07-16），完整公开集合规模评测继续推进
 - 来源：用户希望围绕 Multi-Agent、Memory、Context Compression、RAG 四条链路进行公开数据集测试和量化
 - 影响范围：`src/test/java/com/devcli/benchmark/`、`src/test/java/com/devcli/rag/`、`Data/processed/`、`Data/manifest/`、README、AGENTS 和详细架构文档
 - 已实现：RAG 统一输出 Recall@5、MRR@5、nDCG@5；Agent 输出任务成功率；Memory 输出写入准确率、低价值拦截率、Recall@5 和注入命中率；Compression 输出事实保真率；聚合器生成固定 JSON、CSV 和数据清单
-- 已验证：CodeSearchNet Java 公共 test split 50 条；Memory 25 条策略样本与 12 条召回查询；230k token 阈值、18 条事实、5 次真实压缩；Agent 使用 5 个项目内隐藏检查任务，单 Agent 成功率 20.0%，Planner/Worker/Reviewer 成功率 0.0%
-- 未实现：Agent、Memory、Compression 尚未接入 SWE-bench Lite、LongMemEval、RULER/LongBench 官方集合；当前三类结果必须标记为项目内受控评测；Multi-Agent 仍需修复 Planner 非 JSON 输出和空工作区检查步骤阻断实现的问题
-- 风险：真实 LLM、Embedding、Reranker 和公开数据集端点会引入费用、耗时、网络依赖和结果波动；50 条 RAG 样本与单次 Agent 运行不代表统计稳定结论
+- 已验证：CodeSearchNet Java 公共 test split 50 条；Memory 25 条策略样本与 12 条召回查询；230k token 阈值、18 条事实、5 次真实压缩；2026-07-16 Agent 完整复跑中，单 Agent 成功率 0/5、隐藏检查平均完成率 0%，Planner/Worker/Reviewer 成功率 0/5、隐藏检查平均完成率 27.33%
+- 已实现阶段二（2026-07-16）：固定 SWE-bench Lite、LongMemEval Oracle Cleaned、LongBench v1 和 RULER v1 官方版本、许可、SHA-256 与本地原始数据边界；新增统一目录清单、数据适配器、官方指标兼容实现、RULER 固定种子生成、SWE-bench predictions 与 Linux Docker harness 命令、真实长上下文报告及聚合 CSV 接入；首轮运行 LongMemEval 3 条、LongBench 6 条、RULER 3 条。SWE-bench Lite 单样本已生成 predictions，但补丁只包含复现脚本；官方 harness 已修复 fixtures 导入与本地镜像构建参数
+- 待完成：LongMemEval 官方 LLM judge、SWE-bench Lite 官方 resolved 结果、LongBench/RULER 多长度和扩大样本评测；SWE-bench 基础镜像构建连续两次因 Ubuntu archive 返回 503 中断，尚无有效 resolved 分母；当前首轮公开样本只验证链路，不代表完整集合成绩
+- 风险：真实 LLM、Embedding、Reranker 和公开数据集端点会引入费用、耗时、网络依赖和结果波动；50 条 RAG 样本、3 条公开长上下文样本和单次 Agent 运行不代表统计稳定结论
 
 ## 2026-06-16 CodeSearchNet Java RAG 评测适配
 

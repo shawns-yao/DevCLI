@@ -7,11 +7,11 @@
 | 链路 | 数据来源 | 核心指标 |
 | --- | --- | --- |
 | RAG | CodeSearchNet Java 公共 test split；项目内合成调用链集合 | Recall@5、MRR@5、nDCG@5 |
-| Agent | 5 个带隐藏检查的 Java CLI 编程任务 | 任务成功率、隐藏检查完成率、隐藏失败率、去重缺陷率 |
-| Memory | 25 条写入策略样本、12 条语义召回与注入查询 | 写入准确率、低价值拦截率、Recall@5、注入命中率 |
-| Context Compression | 230k token 长会话、18 条分层事实、5 次真实压缩 | 事实保真率 |
+| Agent | 5 个带隐藏检查的 Java CLI 编程任务；SWE-bench Lite | 任务成功率、隐藏检查完成率、官方 resolved rate |
+| Memory | 25 条写入策略样本、12 条语义召回与注入查询；LongMemEval Oracle Cleaned | 写入准确率、Recall@5、代理答案命中率、官方 judge accuracy |
+| Context Compression / Long Context | 230k token 长会话；LongBench v1；RULER v1 | 事实保真率、官方任务指标、RULER string match |
 
-CodeSearchNet 属于公开数据集。Agent、Memory 和 Context Compression 当前使用可复现的项目内受控任务，不应描述为公开数据集结果。后续接入 SWE-bench Lite、LongMemEval 或 RULER 时，应作为独立数据集版本记录，避免与当前结果混合。
+CodeSearchNet、SWE-bench Lite、LongMemEval、LongBench 和 RULER 属于公开集合。项目内 Agent、Memory 和 Context Compression 受控任务继续单独报告，禁止把代理指标、子集结果或项目内样本描述成完整公开榜单成绩。公开数据版本、哈希、许可和本地文件边界记录在 `Config/public-benchmarks.json` 与 `Data/manifest/public_benchmark_sources_20260716_v1.md`。
 
 ## 2026-07-13 基线结果
 
@@ -62,7 +62,79 @@ CodeSearchNet Java 公共 test split 采样 50 条，Top-K 固定为 5：
 | 单 Agent | 20.0%（1/5） | 20.0% | 80.0% |
 | Planner/Worker/Reviewer | 0.0%（0/5） | 0.0% | 100.0% |
 
-该结果不能作为 Multi-Agent 优势写入简历。失败证据显示两个系统性问题：Planner 有时违反仅输出 JSON 的协议，导致计划无法解析；部分计划把空工作区检查拆成前置步骤，空结果被判定为步骤失败，后续实现任务全部跳过。单 Agent 仅 `ordermvc` 通过 15/15 隐藏检查，其余任务没有形成可编译交付物。该表属于 2026-07-14 协议修复前基线；当前代码已增加 JSON 提取与有界修复、阻塞性空工作区检查校验，以及成功工具证据驱动的空结果摘要，但真实模型评测尚未复跑，旧数据继续只用于暴露缺陷。
+该结果不能作为 Multi-Agent 优势写入简历。失败证据显示两个系统性问题：Planner 有时违反仅输出 JSON 的协议，导致计划无法解析；部分计划把空工作区检查拆成前置步骤，空结果被判定为步骤失败，后续实现任务全部跳过。单 Agent 仅 `ordermvc` 通过 15/15 隐藏检查，其余任务没有形成可编译交付物。该表属于 2026-07-14 协议修复前基线，只用于暴露缺陷。
+
+## 2026-07-16 受控 Agent 复跑
+
+使用同一 `glm-5.2`、每任务每模式 1 次、LLM 重试 1 次、最大输出 4096 token。任务成功仍要求全部隐藏检查通过：
+
+| 任务 | 单 Agent | Planner/Worker/Reviewer |
+| --- | ---: | ---: |
+| logops | 0/10 | 9/10 |
+| salesops | 0/10 | 0/10 |
+| incidentops | 0/10 | 0/10 |
+| ordermvc | 0/15 | 7/15 |
+| banking | 0/20 | 0/20 |
+
+| 模式 | 任务成功率 | 隐藏检查平均完成率 | 平均耗时 |
+| --- | ---: | ---: | ---: |
+| 单 Agent | 0.0%（0/5） | 0.0% | 123.0 秒 |
+| Planner/Worker/Reviewer | 0.0%（0/5） | 27.33% | 543.2 秒 |
+
+修复后的编排链路已经能在 logops 和 ordermvc 产生真实文件，但结果仍不具备简历价值。主要失败包括 Planner 输出在 token 上限处截断、Provider 忽略命名工具选择、Worker 只返回设计说明或不完整文件，以及 Reviewer 链路耗时过长。当前结论是评测框架有效，Agent 交付可靠性仍未达标。
+
+### OpenAI 兼容端点复测
+
+Krill AI 端点会在多个流式分片中重复发送完整工具名和完整参数，而不是只发送增量片段。旧聚合逻辑直接拼接，导致 `write_filewrite_file`、重复 JSON 参数和未知工具拒绝。修复后同时支持完整快照、累积快照与标准增量分片。
+
+使用 `gpt-5.5` 和同一组 5 个隐藏任务完整复跑：
+
+| 任务 | 单 Agent | Planner/Worker/Reviewer |
+| --- | ---: | ---: |
+| logops | 10/10 | 9/10 |
+| salesops | 8/10 | 8/10 |
+| incidentops | 10/10 | 2/10 |
+| ordermvc | 15/15 | 15/15 |
+| banking | 18/20 | 18/20 |
+
+| 模式 | 任务成功率 | 隐藏检查平均完成率 | 平均耗时 |
+| --- | ---: | ---: | ---: |
+| 单 Agent | 60.0%（3/5） | 94.0% | 169.1 秒 |
+| Planner/Worker/Reviewer | 20.0%（1/5） | 76.0% | 470.7 秒 |
+
+单 Agent 在当前样本中明显优于 Multi-Agent。Multi-Agent 的主要退化来自 incidentops，只通过 2/10；说明更多角色和审查轮次没有自动转化为更高正确率，反而放大了步骤间语义偏差。该结果可以作为真实评测结论，但样本量仍只有 5 个项目内任务，不能外推为通用 Agent 排名。
+
+### Saga 协作场景
+
+现有 5 个 CLI 任务以单文件或紧耦合实现为主，不适合验证任务拆解、并行模块开发和最终集成的收益。新增订单履约 Saga 场景，向两种模式提供同一份只读 Java 契约，并要求实现库存、支付、配送、通知、审计和履约编排六个模块。Planner/Worker/Reviewer 模式应把前五个模块拆为可并行步骤，最终履约编排依赖这些模块。
+
+隐藏验证固定为 30 项，覆盖 3 项架构约束、17 项模块行为、4 项正常流程、3 项反向补偿、2 项幂等和 1 项并发检查。模型只能使用 `read_file`、`write_file` 和 `list_dir`；该白名单会随隔离项目 ToolRegistry fork 保持，不允许 Worker 在子工作区重新获得 `execute_command`。验证器在模型结束后使用 JDK 编译器和隔离类加载器检查，不依赖模型自述。真实模型运行通过 `-Ddevcli.benchmark.saga=true` 显式启用，报告写入 `target/agent-benchmark/saga-run-*/saga-collaboration-benchmark.json`。
+
+Krill AI `gpt-5.5` 单次有效运行结果：
+
+| 模式 | 隐藏检查 | 完成率 | 耗时 |
+| --- | ---: | ---: | ---: |
+| 单 Agent | 27/30 | 90.0% | 192.8 秒 |
+| Planner/Worker/Reviewer | 30/30 | 100.0% | 725.1 秒 |
+
+Multi-Agent 在该场景提升 3 个检查、10 个百分点，并完成全部补偿、幂等和并发要求；代价是耗时增加 532.3 秒，为单 Agent 的 3.76 倍。单 Agent 未通过支付退款后活动授权状态、配送取消后活动配送状态，以及同一幂等键对应不同请求的处理。该结果首次证明当前编排链路在可拆分模块和最终集成任务上取得正确率收益，但目前只有 1 次运行，不能外推为统计稳定结论。首次运行因隔离 ToolRegistry fork 丢失测试白名单而允许 Worker 看到 `execute_command`，其 Multi-Agent 结果已作废，不纳入该表。
+
+## 2026-07-16 公开集合首轮样本
+
+首轮用于验证下载、适配、真实模型调用和官方指标对接，不代表完整集合成绩。模型与当前 `.env` 中的 Anthropic Messages 兼容配置一致。
+
+| 集合 | 样本 | 首轮结果 | 指标性质 |
+| --- | ---: | ---: | --- |
+| LongMemEval Oracle Cleaned | 3 | 66.7% | normalized answer hit 代理指标；官方 judge 待执行 |
+| LongBench v1 `passage_count` | 3 | 33.3% | 官方 count score |
+| LongBench v1 `passage_retrieval_en` | 3 | 100.0% | 官方 retrieval score |
+| RULER v1 `niah_single_1`，4K | 3 | 100.0% | 官方 string_match_all |
+
+12 次模型调用没有请求失败。当前 Provider 没有返回 input token usage，报告会使用 DevCLI token 估算并写入 `input_tokens_estimated=true`，避免把缺失值误写成 0 成本。
+
+同日使用 Krill AI `gpt-5.5` 重跑相同样本：LongMemEval normalized answer hit 为 66.7%，LongBench 原始平均为 16.7%，RULER 原始 string match 为 100%。该轮 4/12 次调用被端点以 cybersecurity 风险拦截；端点还会重复发送完整 content，导致 `8` 变成 `88`、`Paragraph 8` 重复两次、RULER 答案重复。除 LongMemEval 的成功样本外，本轮 LongBench 与 RULER 原始值暂不用于模型能力比较，需先完成 content 快照兼容后重跑。
+
+SWE-bench Lite 已完成 300 条测试集、固定版本和官方 harness 接入。2026-07-16 的 `astropy__astropy-12907` 单样本生成了 predictions，但补丁只新增复现脚本，没有修改目标源码。官方 harness 已修复 fixtures 导入和 `namespace=none` 本地镜像构建参数；基础镜像构建连续两次因 Ubuntu archive 返回 HTTP 503 中断，因此当前没有有效 resolved 结果。最终成功率仍必须由 FAIL_TO_PASS 与 PASS_TO_PASS 得出，不能用非空补丁数量代替。
 
 ## 指标定义
 
@@ -98,14 +170,64 @@ mvn -q "-Dtest=RealLlmCompressionRetentionIT" -DskipTests=false `
   "-Ddevcli.it.compression.provider=anthropic" test
 ```
 
-Agent：
+Agent 五任务：
 
 ```powershell
 mvn -q "-Dtest=AgentCollaborationBenchmarkIT#compareSingleAgentWithMultiAgentOnOneTask" `
   -DskipTests=false `
   "-Ddevcli.benchmark.agent=true" `
-  "-Ddevcli.benchmark.llm.maxAttempts=1" test
+  "-Ddevcli.benchmark.llm.maxAttempts=1" `
+  "-Ddevcli.llm.retry.max.attempts=1" `
+  "-Ddevcli.llm.call.timeout.seconds=180" `
+  "-Ddevcli.llm.read.timeout.seconds=120" `
+  "-Ddevcli.llm.max.output.tokens=2048" test
 ```
+
+公开数据完整性与适配：
+
+```powershell
+mvn -q "-Dtest=PublicBenchmarkReadinessIT" -DskipTests=false `
+  "-Ddevcli.benchmark.public.datasets=true" `
+  "-Ddevcli.benchmark.public.sample.limit=5" test
+```
+
+LongMemEval、LongBench 与 RULER 首轮真实样本：
+
+```powershell
+mvn -q "-Dtest=PublicLongContextBenchmarkIT" -DskipTests=false `
+  "-Ddevcli.benchmark.public.longcontext=true" `
+  "-Ddevcli.benchmark.public.limit=3" test
+```
+
+RULER 固定种子数据生成：
+
+```powershell
+mvn -q "-Dtest=RulerDatasetGenerationIT" -DskipTests=false `
+  "-Ddevcli.benchmark.ruler.generate=true" `
+  "-Ddevcli.benchmark.ruler.samples=3" `
+  "-Ddevcli.benchmark.ruler.length=4096" test
+```
+
+SWE-bench Lite Linux harness 镜像：
+
+```powershell
+$harness = Get-ChildItem Data/raw/public-benchmarks/official-harnesses/swebench-harness -Directory |
+  Select-Object -First 1
+
+docker build -t devcli/swebench-harness:f7bbbb2 `
+  -f Config/swebench-harness.Dockerfile $harness.FullName
+```
+
+SWE-bench Lite 单样本补丁生成：
+
+```powershell
+mvn -q "-Dtest=SweBenchLiteAgentBenchmarkIT" -DskipTests=false `
+  "-Ddevcli.benchmark.swebench=true" `
+  "-Ddevcli.benchmark.swebench.limit=1" `
+  "-Ddevcli.benchmark.swebench.mode=single" test
+```
+
+使用固定 Dockerfile 构建 Linux 官方 harness 后，可追加 `-Ddevcli.benchmark.swebench.evaluate=true`。Windows Python 缺少 `resource` 模块，不能直接运行官方 harness；必须使用 Linux Docker 或 Linux 主机。
 
 聚合固定报告：
 
@@ -122,5 +244,7 @@ mvn -q "-Dtest=BenchmarkReportAggregatorIT" -DskipTests=false `
 - 真实 LLM、Embedding 和 Reranker 会产生费用，并受模型版本、端点负载和随机性影响。
 - CodeSearchNet 当前只采样 50 条 Java test split 数据，适合项目阶段对比，不代表完整数据集成绩。
 - Agent 当前只有 5 个受控任务，每种模式执行 1 次；结果适合工程验证，不应描述为统计稳定结论。
-- Memory 与 Compression 属于项目内受控评测，不能冒充 LongMemEval、RULER 或 LongBench 官方成绩。
-- 公开简历表述应同时写明数据集、样本量、Top-K、模型和评测日期。
+- LongMemEval 的 normalized answer hit 只是代理指标；只有官方 `evaluate_qa.py` judge 结果才能称为 LongMemEval accuracy。
+- LongBench 和 RULER 必须同时写明实际子任务、上下文长度和样本量，不能外推到完整集合。
+- SWE-bench 必须使用官方 Docker harness 的 resolved 结果，不能根据补丁非空、编译成功或模型自述判断成功。
+- 公开简历表述应同时写明数据集、修订版本、样本量、子任务、模型和评测日期。
