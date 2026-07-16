@@ -37,4 +37,44 @@ class CompactionSemanticGuardTest {
         assertTrue(result.validBeforeRepair());
         assertTrue(result.missingConstraints().isEmpty());
     }
+
+    @Test
+    void keepsOnlyLatestValueForSameStructuredClaim() {
+        List<LlmClient.Message> source = List.of(
+                LlmClient.Message.user("server.port=8080"),
+                LlmClient.Message.user("server.port=8443"));
+
+        CompactionSemanticGuard.Validation result = CompactionSemanticGuard.validateAndRepair(
+                source, "端口配置尚未记录。", 2_000);
+
+        assertFalse(result.validBeforeRepair());
+        assertTrue(result.repairedSummary().contains("server.port=8443"));
+        assertFalse(result.repairedSummary().contains("server.port=8080"));
+        assertTrue(result.protectedConstraintCount() == 1);
+    }
+
+    @Test
+    void unrelatedNegativeSentenceDoesNotSatisfyProhibition() {
+        List<LlmClient.Message> source = List.of(
+                LlmClient.Message.user("禁止修改 public API。"));
+
+        CompactionSemanticGuard.Validation result = CompactionSemanticGuard.validateAndRepair(
+                source, "不要删除测试。public API 需要检查。", 2_000);
+
+        assertFalse(result.validBeforeRepair());
+        assertTrue(result.repairedSummary().contains("禁止修改 public API"));
+    }
+
+    @Test
+    void latestNaturalLanguageClaimSupersedesOlderValue() {
+        List<LlmClient.Message> source = List.of(
+                LlmClient.Message.user("项目默认 Java 版本是 17。"),
+                LlmClient.Message.user("项目默认 Java 版本是 21。"));
+
+        CompactionSemanticGuard.Validation result = CompactionSemanticGuard.validateAndRepair(
+                source, "项目约束待恢复。", 2_000);
+
+        assertTrue(result.repairedSummary().contains("Java 版本是 21"));
+        assertFalse(result.repairedSummary().contains("Java 版本是 17"));
+    }
 }

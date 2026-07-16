@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 
+import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -15,7 +16,7 @@ import java.util.Set;
 public final class ToolInvocationFingerprint {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Set<String> CASE_INSENSITIVE_FIELDS = Set.of(
-            "query", "keyword", "pattern", "mode", "provider", "server", "language");
+            "query", "keyword", "mode", "provider", "server", "language");
     private static final Set<String> PATH_FIELDS = Set.of(
             "path", "file", "directory", "project_path", "cwd");
 
@@ -59,7 +60,8 @@ public final class ToolInvocationFingerprint {
             return result;
         }
         if (node.isTextual()) {
-            String value = node.asText().replaceAll("\\s+", " ").trim();
+            String value = Normalizer.normalize(node.asText(), Normalizer.Form.NFKC)
+                    .replaceAll("\\s+", " ").trim();
             if (PATH_FIELDS.contains(fieldName)) {
                 value = normalizePath(value);
             }

@@ -45,6 +45,40 @@ class ToolResultCacheTest {
     }
 
     @Test
+    void unicodeEquivalentQuerySharesCachedResult() throws Exception {
+        AtomicInteger executions = new AtomicInteger();
+        try (ToolRegistry registry = new ToolRegistry()) {
+            registry.registerTool(new ToolRegistry.Tool(
+                    "cached_lookup", "test", JSON.readTree("{\"type\":\"object\"}"),
+                    arguments -> "value-" + executions.incrementAndGet(),
+                    ToolRegistry.ToolEffect.READ_ONLY));
+
+            registry.executeToolOutput("cached_lookup", "{\"query\":\"ＡＰＩ Service\"}");
+            ToolOutput second = registry.executeToolOutput("cached_lookup", "{\"query\":\"api service\"}");
+
+            assertEquals("value-1", second.text());
+            assertEquals(1, executions.get());
+        }
+    }
+
+    @Test
+    void caseSensitivePatternDoesNotShareCachedResult() throws Exception {
+        AtomicInteger executions = new AtomicInteger();
+        try (ToolRegistry registry = new ToolRegistry()) {
+            registry.registerTool(new ToolRegistry.Tool(
+                    "cached_lookup", "test", JSON.readTree("{\"type\":\"object\"}"),
+                    arguments -> "value-" + executions.incrementAndGet(),
+                    ToolRegistry.ToolEffect.READ_ONLY));
+
+            registry.executeToolOutput("cached_lookup", "{\"pattern\":\"UserService\"}");
+            ToolOutput second = registry.executeToolOutput("cached_lookup", "{\"pattern\":\"userservice\"}");
+
+            assertEquals("value-2", second.text());
+            assertEquals(2, executions.get());
+        }
+    }
+
+    @Test
     void mutationInvalidatesReadOnlyCache() throws Exception {
         AtomicInteger executions = new AtomicInteger();
         try (ToolRegistry registry = new ToolRegistry()) {

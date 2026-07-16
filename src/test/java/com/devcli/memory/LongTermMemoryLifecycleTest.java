@@ -118,6 +118,43 @@ class LongTermMemoryLifecycleTest {
     }
 
     @Test
+    void semanticallyEquivalentClaimIsNotStoredTwice() throws Exception {
+        try (LongTermMemory memory = new LongTermMemory(tempDir.toFile())) {
+            memory.storeManaged(entry("first", "项目默认 Java 版本是 21", "", null));
+            memory.storeManaged(entry("duplicate", "项目 Java 版本设置为 21", "", null));
+
+            assertEquals(1, memory.size());
+            assertTrue(memory.retrieve("first").isPresent());
+            assertTrue(memory.retrieve("duplicate").isEmpty());
+        }
+    }
+
+    @Test
+    void paraphrasedClaimWithDifferentValueCreatesConflict() throws Exception {
+        try (LongTermMemory memory = new LongTermMemory(tempDir.toFile())) {
+            memory.storeManaged(entry("old-model", "项目默认模型是 glm-5", "", null));
+            memory.storeManaged(entry("new-model", "项目当前模型设置为 gpt-5.5", "", null));
+
+            assertFalse(memory.retrieve("old-model").orElseThrow().isActive());
+            MemoryEntry latest = memory.retrieve("new-model").orElseThrow();
+            assertEquals(2, latest.getRevision());
+            assertEquals(java.util.List.of("old-model"), latest.getEvidence().conflictsWith());
+        }
+    }
+
+    @Test
+    void negatedUsageConflictsWithPreviousDefaultUsage() throws Exception {
+        try (LongTermMemory memory = new LongTermMemory(tempDir.toFile())) {
+            memory.storeManaged(entry("docker-on", "项目默认使用 Docker", "", null));
+            memory.storeManaged(entry("docker-off", "项目禁止使用 Docker", "", null));
+
+            assertFalse(memory.retrieve("docker-on").orElseThrow().isActive());
+            assertEquals(java.util.List.of("docker-on"),
+                    memory.retrieve("docker-off").orElseThrow().getEvidence().conflictsWith());
+        }
+    }
+
+    @Test
     void expiredMemoryIsExcludedAndPruned() throws Exception {
         try (LongTermMemory memory = new LongTermMemory(tempDir.toFile())) {
             memory.store(entry("expired", "临时事实", "", Instant.now().minusSeconds(1)));

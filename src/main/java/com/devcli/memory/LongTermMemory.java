@@ -132,8 +132,13 @@ public class LongTermMemory implements Memory, AutoCloseable {
     public synchronized void storeWithSubject(MemoryEntry entry) {
         if (entry == null) return;
         pruneExpired();
+        List<MemoryEntry> existingEntries = new ArrayList<>(entries.values());
+        if (entry.getSubject().isBlank()
+                && MemoryConflictDetector.findEquivalent(entry, existingEntries).isPresent()) {
+            return;
+        }
         Optional<MemoryConflictDetector.Conflict> conflict =
-                MemoryConflictDetector.detect(entry, new ArrayList<>(entries.values()));
+                MemoryConflictDetector.detect(entry, existingEntries);
         String subject = entry.getSubject();
         if ((subject == null || subject.isBlank()) && conflict.isPresent()) {
             subject = conflict.get().subject();
@@ -187,8 +192,13 @@ public class LongTermMemory implements Memory, AutoCloseable {
 
     public synchronized void storeManaged(MemoryEntry entry) {
         if (entry == null) return;
+        List<MemoryEntry> existingEntries = new ArrayList<>(entries.values());
+        if (entry.getSubject().isBlank()
+                && MemoryConflictDetector.findEquivalent(entry, existingEntries).isPresent()) {
+            return;
+        }
         if (!entry.getSubject().isBlank()
-                || MemoryConflictDetector.detect(entry, new ArrayList<>(entries.values())).isPresent()) {
+                || MemoryConflictDetector.detect(entry, existingEntries).isPresent()) {
             storeWithSubject(entry);
         } else {
             store(entry);
