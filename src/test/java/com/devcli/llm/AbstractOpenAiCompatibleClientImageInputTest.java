@@ -229,6 +229,57 @@ class AbstractOpenAiCompatibleClientImageInputTest {
     }
 
     @Test
+    void ignoresRepeatedCompleteToolCallSnapshots() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse()
+                    .setHeader("Content-Type", "text/event-stream")
+                    .setBody("""
+                            data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"write_file","arguments":"{\\\"path\\\":\\\"a.txt\\\",\\\"content\\\":\\\"x\\\"}"}}]}}]}
+
+                            data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"write_file","arguments":"{\\\"path\\\":\\\"a.txt\\\",\\\"content\\\":\\\"x\\\"}"}}]}}]}
+
+                            data: [DONE]
+
+                            """));
+            OpenAiClient client = new OpenAiClient(
+                    "test-key", "gpt-5.5", server.url("/v1").toString());
+
+            LlmClient.ChatResponse response = client.chat(
+                    List.of(LlmClient.Message.user("write")), null);
+
+            assertEquals(1, response.toolCalls().size());
+            assertEquals("write_file", response.toolCalls().getFirst().function().name());
+            assertEquals("{\"path\":\"a.txt\",\"content\":\"x\"}",
+                    response.toolCalls().getFirst().function().arguments());
+        }
+    }
+
+    @Test
+    void stillAppendsStandardIncrementalToolCallFragments() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse()
+                    .setHeader("Content-Type", "text/event-stream")
+                    .setBody("""
+                            data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"write_","arguments":"{\\\"path\\\":\\\""}}]}}]}
+
+                            data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"file","arguments":"a.txt\\\"}"}}]}}]}
+
+                            data: [DONE]
+
+                            """));
+            OpenAiClient client = new OpenAiClient(
+                    "test-key", "gpt-5.5", server.url("/v1").toString());
+
+            LlmClient.ChatResponse response = client.chat(
+                    List.of(LlmClient.Message.user("write")), null);
+
+            assertEquals("write_file", response.toolCalls().getFirst().function().name());
+            assertEquals("{\"path\":\"a.txt\"}",
+                    response.toolCalls().getFirst().function().arguments());
+        }
+    }
+
+    @Test
     void parsesReasoningFieldAliasesFromStreamingDeltas() throws Exception {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(new MockResponse()

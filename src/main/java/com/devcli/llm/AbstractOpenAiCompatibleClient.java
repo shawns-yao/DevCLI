@@ -381,13 +381,41 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
 
             JsonNode function = tc.path("function");
             String name = function.path("name").asText("");
-            if (!name.isEmpty()) {
-                acc.name.append(name);
-            }
+            mergeToolCallField(acc.name, name, false);
             String arguments = function.path("arguments").asText("");
-            if (!arguments.isEmpty()) {
-                acc.arguments.append(arguments);
-            }
+            mergeToolCallField(acc.arguments, arguments, true);
+        }
+    }
+
+    private void mergeToolCallField(StringBuilder accumulated, String incoming,
+                                    boolean jsonObjectSnapshot) {
+        if (incoming == null || incoming.isEmpty()) {
+            return;
+        }
+        if (accumulated.isEmpty()) {
+            accumulated.append(incoming);
+            return;
+        }
+
+        String current = accumulated.toString();
+        if (incoming.equals(current) || current.startsWith(incoming)) {
+            return;
+        }
+        if (incoming.startsWith(current)
+                || jsonObjectSnapshot && isCompleteJsonObject(current) && isCompleteJsonObject(incoming)) {
+            accumulated.setLength(0);
+            accumulated.append(incoming);
+            return;
+        }
+        accumulated.append(incoming);
+    }
+
+    private boolean isCompleteJsonObject(String value) {
+        try {
+            JsonNode parsed = mapper.readTree(value);
+            return parsed != null && parsed.isObject();
+        } catch (IOException ignored) {
+            return false;
         }
     }
 

@@ -80,6 +80,36 @@ public class DevCliConfig {
         return loadBaseUrlFromEnv(provider);
     }
 
+    public int getMaxTokens(String provider) {
+        String normalized = provider == null ? "" : provider.trim().toLowerCase();
+        Integer override = positiveInt(System.getProperty("devcli.llm.max.output.tokens"));
+        if (override == null && !normalized.isBlank()) {
+            override = positiveInt(System.getProperty("devcli." + normalized + ".max.tokens"));
+        }
+        if (override == null && !normalized.isBlank()) {
+            override = positiveInt(getEnvOrDotEnv(normalized.toUpperCase() + "_MAX_TOKENS"));
+        }
+        if (override != null) {
+            return override;
+        }
+        ProviderConfig providerConfig = providers.get(normalized);
+        return providerConfig == null || providerConfig.getMaxTokens() <= 0
+                ? 8192
+                : providerConfig.getMaxTokens();
+    }
+
+    private static Integer positiveInt(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            int parsed = Integer.parseInt(raw.trim());
+            return parsed > 0 ? parsed : null;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
     public static DevCliConfig load() {
         if (Files.exists(CONFIG_FILE)) {
             try {

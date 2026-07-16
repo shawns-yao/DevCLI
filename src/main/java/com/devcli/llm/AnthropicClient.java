@@ -37,15 +37,21 @@ public class AnthropicClient implements LlmClient {
     private final String apiKey;
     private final String model;
     private final String apiUrl;
+    private final int maxOutputTokens;
 
     public AnthropicClient(String apiKey) {
         this(apiKey, DEFAULT_MODEL, DEFAULT_BASE_URL);
     }
 
     public AnthropicClient(String apiKey, String model, String baseUrl) {
+        this(apiKey, model, baseUrl, 8_192);
+    }
+
+    public AnthropicClient(String apiKey, String model, String baseUrl, int maxOutputTokens) {
         this.apiKey = apiKey;
         this.model = model != null && !model.isBlank() ? model : DEFAULT_MODEL;
         this.apiUrl = toMessagesUrl(baseUrl);
+        this.maxOutputTokens = Math.max(1, Math.min(65_536, maxOutputTokens));
     }
 
     String getApiUrl() {
@@ -133,7 +139,7 @@ public class AnthropicClient implements LlmClient {
 
     @Override
     public int maxOutputTokens() {
-        return 8_192;
+        return maxOutputTokens;
     }
 
     @Override

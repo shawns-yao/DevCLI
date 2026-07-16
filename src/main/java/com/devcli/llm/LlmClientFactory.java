@@ -25,7 +25,8 @@ public class LlmClientFactory {
                 configuredProvider.equals(normalized) ? null : config.getBaseUrl(configuredProvider));
 
         return switch (normalized) {
-            case "anthropic" -> new AnthropicClient(apiKey, model, baseUrl);
+            case "anthropic" -> new AnthropicClient(
+                    apiKey, model, baseUrl, config.getMaxTokens(normalized));
             case "glm" -> new GLMClient(apiKey, model);
             case "deepseek" -> new DeepSeekClient(apiKey, model, baseUrl);
             case "step" -> new StepClient(apiKey, model, baseUrl);

@@ -132,17 +132,19 @@ class LlmClientFactoryTest {
     void createsAnthropicClientWithMessagesEndpoint() {
         DevCliConfig config = new DevCliConfig();
         config.setProviders(new LinkedHashMap<>());
-        config.getProviders().put("anthropic",
-                new DevCliConfig.ProviderConfig(
-                        "test-anthropic-key",
-                        "https://muyuan.do",
-                        "claude-sonnet-4-20250514"));
+        DevCliConfig.ProviderConfig anthropic = new DevCliConfig.ProviderConfig(
+                "test-anthropic-key",
+                "https://muyuan.do",
+                "claude-sonnet-4-20250514");
+        anthropic.setMaxTokens(2048);
+        config.getProviders().put("anthropic", anthropic);
 
         LlmClient client = LlmClientFactory.create("anthropic", config);
 
         AnthropicClient anthropicClient = assertInstanceOf(AnthropicClient.class, client);
         assertEquals("anthropic", anthropicClient.getProviderName());
         assertEquals("claude-sonnet-4-20250514", anthropicClient.getModelName());
+        assertEquals(2048, anthropicClient.maxOutputTokens());
         assertEquals("https://muyuan.do/v1/messages", anthropicClient.getApiUrl());
     }
 
