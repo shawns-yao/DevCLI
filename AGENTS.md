@@ -74,7 +74,7 @@ Reviewer 输出必须是可解析 JSON，并包含三层评分：`functional_cor
 
 Final integration 只做入口/API/默认参数/跨模块联动胶水；普通步骤失败比例达到 `50%` 时熔断，不让最终步骤强行修补。
 
-失败步骤支持有界在位重做（默认 1 次）：失败步骤保持原 id/依赖在 DAG 原位换思路重做，redo 用尽后保持 FAILED。checkpoint 协议版本 3 保存共享 `ExecutionArtifact` 和 pending PatchSet 写前日志；应用前记录 before/after 哈希与原文件备份，恢复时在项目提交锁内按最终哈希提升 COMPLETED、继续 PENDING 或自动回滚。写前日志目录和备份限制为当前所有者访问，超过 TTL 且没有对应 checkpoint 的孤儿日志会清理。对账保存失败、回滚不完整时停止 resume；高于当前版本的 checkpoint 明确报告不兼容，版本 1/2 保持兼容。计划、依赖、验收点和执行产物原子写入 `~/.devcli/checkpoints/`，全部成功后删除；resume 不恢复 WorkingMemory / 会话记忆。
+失败步骤支持有界在位重做（默认 1 次）：失败步骤保持原 id/依赖在 DAG 原位换思路重做，redo 用尽后保持 FAILED。checkpoint 协议版本 4 保存共享 `ExecutionArtifact`、pending PatchSet 写前日志、稳定 Planner/Worker/Reviewer 身份、步骤分配和单调消息游标；应用前记录 before/after 哈希与原文件备份，恢复时在项目提交锁内按最终哈希提升 COMPLETED、继续 PENDING 或自动回滚。恢复优先重建 checkpoint 中的 Worker 拓扑并保持原步骤绑定，按上下文 schema 版本注入最近摘要；不持久化完整 SubAgent 对话对象图。写前日志目录和备份限制为当前所有者访问，超过 TTL 且没有对应 checkpoint 的孤儿日志会清理。对账保存失败、回滚不完整或身份拓扑损坏时停止 resume；高于当前版本的 checkpoint 明确报告不兼容，版本 1/2/3 保持兼容。计划、依赖、验收点、执行产物和恢复元数据原子写入 `~/.devcli/checkpoints/`，全部成功后删除；resume 不恢复 WorkingMemory。
 
 Side-Git 快照按 `devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX` 保留最近快照；每次新建快照后会重写 side-history，只保留最新 N 条。裁剪累计达到阈值或超过最小间隔后，会在时间上限内回收不可达松散对象；默认阈值 100、间隔 24 小时、上限 30 秒，可通过 `DEVCLI_SNAPSHOT_GC_ENABLED`、`DEVCLI_SNAPSHOT_GC_PRUNED_THRESHOLD`、`DEVCLI_SNAPSHOT_GC_MIN_INTERVAL_HOURS`、`DEVCLI_SNAPSHOT_GC_MAX_SECONDS` 调整。
 

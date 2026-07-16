@@ -80,14 +80,14 @@ DevCLI 已于 2026-07-15 完成第一阶段强类型事件出口：
 
 LiveAgent 子代理具有稳定标识、私有上下文、运行记录、消息总线和 worktree 恢复能力。
 
-DevCLI 只适合提取稳定身份和恢复语义：
+DevCLI 已于 2026-07-16 完成稳定身份和恢复语义提取：
 
-- 保留 Planner、Worker、Reviewer 与 DAG，不改成自由聊天式编排。
-- 子代理私有上下文只保存摘要、ExecutionArtifact 引用和消息游标，不持久化完整可变对象图。
-- 恢复继续使用 checkpoint、WorkspaceExecutionSession 和资源租约。
-- 父子消息必须结构化并在 turn 边界投递，禁止绕过 WorkingMemory 角色视图。
-
-该能力只有在需要跨进程长时间 Multi-Agent 任务时才实施，当前优先级低于记忆治理和运行事件协议。
+- 保留 Planner、Worker、Reviewer、DAG 与 `ExecutionArtifact`，没有改成自由聊天式编排。
+- Multi-Agent checkpoint 协议版本 4 保存稳定身份、上下文 schema 版本、步骤到 Worker/Reviewer 的绑定、单调消息游标和有界最近摘要。
+- resume 优先按 checkpoint 重建 Worker 拓扑；运行时 Worker 数量配置变化不会改写原步骤绑定，失败步骤重做仍使用原 Worker 身份。
+- 恢复摘要通过 SubAgent system prompt 的恢复段注入；schema 不兼容时丢弃旧摘要，只保留任务终态和步骤分配。
+- 每次 Worker 或 Reviewer 任务级结果推进游标并严格保存；相同步骤、相同摘要的重复边界不会重复推进。
+- 恢复继续复用 checkpoint、WorkspaceExecutionSession、PatchSet 和资源租约，没有持久化完整私有对话对象图，也没有新增消息数据库或重复状态源。
 
 ### 6. Hook 生命周期
 
@@ -116,6 +116,6 @@ LiveAgent 提供 agent、turn、message 和 tool execution 四层生命周期 Ho
 2. P1：Runtime API 持久化压缩检查点已实现。
 3. P2：强类型运行事件协议及 Renderer 适配第一阶段已实现。
 4. P2：受控 Hook 生命周期已实现。
-5. P3：持久化子代理身份与跨进程恢复。
+5. P3：持久化子代理身份与跨进程恢复已实现。
 
 每项需要独立设计、针对性测试和分功能提交，禁止一次性横跨 Memory、Runtime、Renderer 和 Multi-Agent。

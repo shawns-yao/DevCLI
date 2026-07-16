@@ -112,7 +112,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - SubAgent IOException 返回 ERROR 类型
 - Planner 共享主 ToolRegistry；副作用 Worker 使用 `WorkspaceExecutionSession` 创建隔离 ToolRegistry，Pre-Review 与 Reviewer 在同一隔离目录读取真实产物，MemoryManager 继续共享角色裁剪视图。
 - Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用 `ExecutionArtifact`，统一保存 state、output、summary、modifiedResources、error、attempt、startedAt、finishedAt。
-- checkpoint 协议版本 3 通过 `RecoveryState` 恢复共享 artifact，并增加 pending PatchSet 写前日志；旧 completed/failed map 和版本 1/2 继续兼容，高于当前版本明确拒绝。
+- checkpoint 协议版本 4 通过 `RecoveryState` 恢复共享 artifact、pending PatchSet 写前日志、稳定子代理身份、步骤分配和消息游标；版本 1/2/3 继续兼容，高于当前版本明确拒绝。恢复按 checkpoint 重建 Worker 拓扑并保持原步骤绑定，只注入 schema 兼容的最近摘要，不恢复完整私有对话。
 - `/team` Worker 每次尝试都通过隔离 ToolRegistry 的 `runWithResourceLease(stepId, ...)` 绑定资源租约上下文，并在 finally 中释放；并行工具线程显式继承步骤租约归属。ToolRegistry 统一托管 `ResourceLeaseMaintenance`，project fork 共享同一个定时线程；最后一个注册关闭后停止。默认每 60 秒清理过期租约，可通过 `devcli.resource.lease.cleanup.interval.seconds` / `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
 - `/plan` 副作用任务与 `/team` 副作用步骤在隔离工作区执行；`ToolEffect` / `ToolAccessScope` 在工具管线中强制限制非隔离任务只能使用只读能力。隔离命令和 Pre-Review 强制通过受限 Docker 执行，无网络且禁止回退主机。PatchSet 逐文件流式哈希，只保留变更内容；JVM 公平锁与跨进程文件锁共同串行提交，锁缓存按活跃使用者计数退役。应用前保存 before/after 哈希和原文件备份；备份限制为当前所有者访问，孤儿日志按 TTL 清理，恢复时提升完成、继续待执行或回滚，失败回滚会报告具体路径。
 - `PreReviewVerifier` 独立负责 Maven/javac 选择、Java 文件扫描、超时、进程输出解码和失败摘要；无 Maven 时使用 UTF-8 javac 参数文件并在执行后清理。结果区分“未执行硬检查”和“硬检查实际通过”；Reviewer 遇到可重试 LLM 故障时，普通步骤只有后者允许降级接受，未执行检查继续失败关闭。Reviewer 默认最多 2 轮，可通过 `devcli.team.reviewer.max.iterations` / `DEVCLI_TEAM_REVIEWER_MAX_ITERATIONS` 调整到 `[1, 8]`；达到硬轮数上限视为可恢复 Reviewer 故障，仍受同一硬检查条件约束。
@@ -300,7 +300,7 @@ Plan Task / Multi-Agent ExecutionStep / checkpoint 共用任务产物；统一�
 任务状态 / 进度可视化；可执行任务判定和拓扑排序委托给 ExecutionGraph
 
 ### AgentCheckpoint.java
-checkpoint 协议版本 3；通过 RecoveryState 恢复共享 ExecutionArtifact，保存 PatchSet 写前日志和原文件备份，恢复时按文件哈希对账；兼容旧结构并返回明确的未来版本不兼容状态
+checkpoint 协议版本 4；通过 RecoveryState 恢复共享 ExecutionArtifact、稳定子代理身份、步骤分配、单调消息游标和最小摘要，保存 PatchSet 写前日志与原文件备份，恢复时按文件哈希对账并保持原 Worker 绑定；兼容版本 1/2/3，损坏身份拓扑或未来版本明确拒绝
 
 ### PreReviewVerifier.java
 Reviewer 前 Java 硬验证；封装 Maven/javac 命令、扫描、超时、输出解码和失败摘要，无 Maven 时使用 javac 参数文件避免命令行过长
