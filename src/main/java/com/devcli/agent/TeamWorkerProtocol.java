@@ -7,16 +7,21 @@ import java.util.Objects;
 
 /** Multi-Agent Worker 的执行协议守卫。 */
 final class TeamWorkerProtocol {
-    static final int MAX_EMPTY_RESULT_REPAIRS = 1;
+    static final int MAX_MANDATORY_TOOL_REPAIRS = 1;
 
     private TeamWorkerProtocol() {
     }
 
     static boolean needsMandatoryToolRepair(AgentMessage result, SubAgent.ExecutionEvidence evidence) {
+        return needsMandatoryToolRepair(result, evidence, false);
+    }
+
+    static boolean needsMandatoryToolRepair(AgentMessage result, SubAgent.ExecutionEvidence evidence,
+                                            boolean requireToolEvidence) {
         if (result == null || result.type() == AgentMessage.Type.ERROR) {
             return false;
         }
-        if (result.content() != null && !result.content().isBlank()) {
+        if (!requireToolEvidence && result.content() != null && !result.content().isBlank()) {
             return false;
         }
         return evidence == null || !evidence.hasSuccessfulToolCall();
@@ -54,7 +59,7 @@ final class TeamWorkerProtocol {
                 %s
 
                 [Worker 执行协议修复]
-                上一次 Worker 未产生可验收结果：最终 content 为空，并且没有成功工具证据。
+                上一次 Worker 未产生可验收结果：没有成功工具证据，文字说明、设计方案和伪代码不能替代真实执行。
                 这不是规划轮次。禁止复述需求、设计方案、伪代码或未来时计划。
                 本次响应的第一个动作必须是工具调用，不允许先输出 reasoning 或 content。
                 - 文件或代码实现任务：立即调用 write_file 产生真实修改，再调用 execute_command 做最小验证。

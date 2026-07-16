@@ -233,6 +233,20 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    void mandatoryWorkerRepairShouldRejectTextWithoutToolEvidence() {
+        AgentMessage textOnly = AgentMessage.result(
+                "worker", AgentRole.WORKER, "已给出完整实现方案");
+
+        assertFalse(TeamWorkerProtocol.needsMandatoryToolRepair(
+                textOnly, SubAgent.ExecutionEvidence.empty()));
+        assertTrue(TeamWorkerProtocol.needsMandatoryToolRepair(
+                textOnly, SubAgent.ExecutionEvidence.empty(), true));
+        assertFalse(TeamWorkerProtocol.needsMandatoryToolRepair(
+                AgentMessage.error("worker", AgentRole.WORKER, "LLM 调用失败"),
+                SubAgent.ExecutionEvidence.empty(), true));
+    }
+
+    @Test
     void reviewerFailureDegradationShouldRequireHardCheckForRegularSteps() {
         assertFalse(AgentOrchestrator.canDegradeReviewerFailure(false, true, false));
         assertTrue(AgentOrchestrator.canDegradeReviewerFailure(false, true, true));

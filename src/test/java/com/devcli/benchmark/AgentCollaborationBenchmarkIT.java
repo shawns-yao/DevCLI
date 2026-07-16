@@ -5,14 +5,13 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.devcli.agent.Agent;
 import com.devcli.agent.AgentBenchmarkTestSupport;
 import com.devcli.agent.AgentOrchestrator;
+import com.devcli.agent.ControlledBenchmarkToolRegistry;
 import com.devcli.config.DevCliConfig;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.LlmClientFactory;
 import com.devcli.memory.LongTermMemory;
 import com.devcli.memory.MemoryManager;
 import com.devcli.render.PlainRenderer;
-import com.devcli.tool.ToolOutput;
-import com.devcli.tool.ToolRegistry;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -138,6 +137,15 @@ class AgentCollaborationBenchmarkIT {
         assertEquals(banking.hiddenTotal(), banking.hiddenFailures());
     }
 
+    @Test
+    void missingSourcesShouldUseTaskSpecificFailureLabels(@TempDir Path workspace) {
+        Evaluation sales = evaluate(workspace.resolve("sales"), salesOpsTask());
+        Evaluation incident = evaluate(workspace.resolve("incident"), incidentOpsTask());
+
+        assertTrue(sales.hiddenFailureDetails().getFirst().startsWith("sales status default unavailable:"));
+        assertTrue(incident.hiddenFailureDetails().getFirst().startsWith("incident severity default unavailable:"));
+    }
+
     private static RunResult runSingleWithRetries(LlmClient llm, BenchmarkTask task, Path workspace) throws Exception {
         return runWithRetries("single-agent", task, workspace,
                 attemptWorkspace -> runSingleAttempt(llm, task, attemptWorkspace));
@@ -171,12 +179,14 @@ class AgentCollaborationBenchmarkIT {
 
     private static RunResult runSingleAttempt(LlmClient llm, BenchmarkTask task, Path workspace) throws Exception {
         Files.createDirectories(workspace);
-        LimitedToolRegistry registry = registryFor(workspace);
+        ControlledBenchmarkToolRegistry registry = registryFor(workspace);
         long started = System.nanoTime();
         String output;
         try (Agent agent = new Agent(llm, registry)) {
             agent.setRenderer(new PlainRenderer());
-            output = agent.run(promptFor("single-agent", task));
+            output = agent.run(
+                    promptFor("single-agent", task),
+                    LlmClient.ToolChoice.required("write_file"));
         } catch (Exception e) {
             return result("single-agent", task, workspace, started, false, "LLM run failed: " + e.getMessage());
         }
@@ -185,14 +195,14 @@ class AgentCollaborationBenchmarkIT {
 
     private static RunResult runTeamAttempt(LlmClient llm, BenchmarkTask task, Path workspace) throws Exception {
         Files.createDirectories(workspace);
-        LimitedToolRegistry registry = registryFor(workspace);
+        ControlledBenchmarkToolRegistry registry = registryFor(workspace);
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         PrintStream out = new PrintStream(buffer, true, StandardCharsets.UTF_8);
         long started = System.nanoTime();
         String output;
         try (NoOpMemoryManager memory = new NoOpMemoryManager(workspace.resolve(".memory"))) {
             AgentOrchestrator orchestrator = new AgentOrchestrator(llm, registry, memory, out);
-            AgentBenchmarkTestSupport.deferPreReviewToHiddenValidator(orchestrator);
+            AgentBenchmarkTestSupport.configureControlledBenchmark(orchestrator);
             output = orchestrator.run(promptFor("planner-worker-reviewer", task));
         } catch (Exception e) {
             return result("planner-worker-reviewer", task, workspace, started, false,
@@ -218,8 +228,8 @@ class AgentCollaborationBenchmarkIT {
         }
     }
 
-    private static LimitedToolRegistry registryFor(Path workspace) {
-        LimitedToolRegistry registry = new LimitedToolRegistry(ALLOWED_TOOLS);
+    private static ControlledBenchmarkToolRegistry registryFor(Path workspace) {
+        ControlledBenchmarkToolRegistry registry = new ControlledBenchmarkToolRegistry(ALLOWED_TOOLS);
         registry.setProjectPath(workspace.toString());
         return registry;
     }
@@ -1362,6 +1372,30 @@ class AgentCollaborationBenchmarkIT {
 
     private static List<String> fatalFunctionalFailures(String taskId, String reason) {
         return switch (taskId) {
+            case "salesops" -> List.of(
+                    "sales status default unavailable: " + reason,
+                    "sales status interactive unavailable: " + reason,
+                    "sales daily default unavailable: " + reason,
+                    "sales revenue region unavailable: " + reason,
+                    "sales export unavailable: " + reason,
+                    "sales clean explicit unavailable: " + reason,
+                    "sales invalid command unavailable: " + reason,
+                    "sales root command required unavailable: " + reason,
+                    "sales table header unavailable: " + reason,
+                    "sales clean default unavailable: " + reason
+            );
+            case "incidentops" -> List.of(
+                    "incident severity default unavailable: " + reason,
+                    "incident severity interactive unavailable: " + reason,
+                    "incident service query unavailable: " + reason,
+                    "incident stat severity unavailable: " + reason,
+                    "incident p1 export unavailable: " + reason,
+                    "incident archive explicit unavailable: " + reason,
+                    "incident invalid command unavailable: " + reason,
+                    "incident root command required unavailable: " + reason,
+                    "incident table header unavailable: " + reason,
+                    "incident archive default unavailable: " + reason
+            );
             case "ordermvc" -> List.of(
                     "architecture check failed: " + reason,
                     "4+ files requirement unavailable: " + reason,
@@ -1551,6 +1585,19 @@ class AgentCollaborationBenchmarkIT {
         report.put("hidden_failure_metric", "hidden validation failures / hidden validation checks total");
         report.put("unique_bug_metric", "deduplicated functional failure categories / hidden validation checks total");
         report.put("note", "task suite run once per task per mode; report averages across distinct task specs");
+        ObjectNode runConfig = report.putObject("run_config");
+        runConfig.put("benchmark_max_attempts",
+                Integer.getInteger("devcli.benchmark.llm.maxAttempts", DEFAULT_MAX_LLM_ATTEMPTS));
+        runConfig.put("llm_retry_max_attempts",
+                Integer.getInteger("devcli.llm.retry.max.attempts", 3));
+        runConfig.put("llm_call_timeout_seconds",
+                Long.getLong("devcli.llm.call.timeout.seconds", 600L));
+        runConfig.put("llm_read_timeout_seconds",
+                Long.getLong("devcli.llm.read.timeout.seconds", 300L));
+        runConfig.put("llm_max_output_tokens",
+                Integer.getInteger("devcli.llm.max.output.tokens", llm.maxOutputTokens()));
+        runConfig.put("selected_tasks",
+                System.getProperty("devcli.benchmark.tasks", "all"));
 
         com.fasterxml.jackson.databind.node.ArrayNode tasks = report.putArray("tasks");
         for (TaskComparison comparison : comparisons) {
@@ -1765,29 +1812,6 @@ class AgentCollaborationBenchmarkIT {
     private static final class NoOpMemoryManager extends MemoryManager {
         private NoOpMemoryManager(Path storageDir) {
             super(null, 32768, 200000, new LongTermMemory(storageDir.toFile()));
-        }
-    }
-
-    private static final class LimitedToolRegistry extends ToolRegistry {
-        private final Set<String> allowedTools;
-
-        private LimitedToolRegistry(Set<String> allowedTools) {
-            this.allowedTools = Set.copyOf(allowedTools);
-        }
-
-        @Override
-        public List<com.devcli.llm.LlmClient.Tool> getToolDefinitions() {
-            return super.getToolDefinitions().stream()
-                    .filter(tool -> allowedTools.contains(tool.name()))
-                    .toList();
-        }
-
-        @Override
-        public ToolOutput executeToolOutput(String name, String argumentsJson) {
-            if (!allowedTools.contains(name)) {
-                return ToolOutput.text("benchmark policy rejected tool: " + name);
-            }
-            return super.executeToolOutput(name, argumentsJson);
         }
     }
 }

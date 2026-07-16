@@ -176,6 +176,16 @@ public class Agent implements AutoCloseable {
      * 运行 Agent 循环
      */
     public String run(String userInput) {
+        return run(userInput, LlmClient.ToolChoice.AUTO);
+    }
+
+    /**
+     * 运行 Agent 循环，并允许受控执行入口约束首轮工具选择。
+     */
+    public String run(String userInput, LlmClient.ToolChoice initialToolChoice) {
+        LlmClient.ToolChoice effectiveInitialToolChoice = initialToolChoice == null
+                ? LlmClient.ToolChoice.AUTO
+                : initialToolChoice;
         log.info("ReAct run started: inputLength={}", userInput == null ? 0 : userInput.length());
         currentSkillActivationText = userInput == null ? "" : userInput;
         toolRegistry.prefetchToolDefinitionsForInput(currentSkillActivationText);
@@ -236,6 +246,13 @@ public class Agent implements AutoCloseable {
                     }
 
                     @Override
+                    public LlmClient.ToolChoice toolChoice(int iteration) {
+                        return iteration == 1
+                                ? effectiveInitialToolChoice
+                                : LlmClient.ToolChoice.AUTO;
+                    }
+
+                    @Override
                     public void beforeIteration(int iteration, AgentBudget currentBudget) {
                         updateSystemPromptWithMemory(memoryContext);
                         injectPendingLspDiagnostics();
@@ -256,6 +273,27 @@ public class Agent implements AutoCloseable {
                                 llmClient,
                                 response.reasoningContent());
                         pushStatus(currentBudget, startNanos, "running");
+                    }
+
+                    @Override
+                    public LlmClient.ChatResponse normalizeResponse(
+                            LlmClient.ChatResponse response,
+                            int iteration,
+                            AgentBudget currentBudget) {
+                        return SubAgent.adaptRequiredToolEnvelope(
+                                response, effectiveInitialToolChoice);
+                    }
+
+                    @Override
+                    public String retryInstructionAfterResponseWithoutTools(
+                            LlmClient.ChatResponse response,
+                            int iteration,
+                            AgentBudget currentBudget) {
+                        if (iteration == 1 && effectiveInitialToolChoice.hasSpecificTool()) {
+                            return TeamWorkerProtocol.buildToolEnvelopeRepairPrompt(
+                                    effectiveInitialToolChoice.toolName());
+                        }
+                        return "";
                     }
 
                     @Override

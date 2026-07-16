@@ -100,6 +100,7 @@ public class AgentOrchestrator {
     private final ThreadLocal<ToolRegistry> activeStepToolRegistry = new ThreadLocal<>();
     private final ThreadLocal<StepUpdateBuffer> activeStepUpdate = new ThreadLocal<>();
     private PreReviewVerifier preReviewVerifier = new PreReviewVerifier();
+    private boolean requireWorkerToolEvidence;
     private final WorkspaceCommitCoordinator workspaceCommitCoordinator =
             new WorkspaceCommitCoordinator();
 
@@ -402,6 +403,10 @@ public class AgentOrchestrator {
      */
     void setPreReviewVerifier(PreReviewVerifier preReviewVerifier) {
         this.preReviewVerifier = Objects.requireNonNull(preReviewVerifier, "preReviewVerifier");
+    }
+
+    void setRequireWorkerToolEvidence(boolean requireWorkerToolEvidence) {
+        this.requireWorkerToolEvidence = requireWorkerToolEvidence;
     }
 
 
@@ -1852,12 +1857,12 @@ public class AgentOrchestrator {
             }
 
             if (TeamWorkerProtocol.needsMandatoryToolRepair(
-                    result, worker.getLastExecutionEvidence())
-                    && protocolRepairs < TeamWorkerProtocol.MAX_EMPTY_RESULT_REPAIRS) {
+                    result, worker.getLastExecutionEvidence(), requireWorkerToolEvidence)
+                    && protocolRepairs < TeamWorkerProtocol.MAX_MANDATORY_TOOL_REPAIRS) {
                 protocolRepairs++;
                 out.println("⚠️ 步骤 [" + step.id() + "] " + label
                         + "Worker 未产生成功工具证据，正在强制执行修复 ("
-                        + protocolRepairs + "/" + TeamWorkerProtocol.MAX_EMPTY_RESULT_REPAIRS + ")...");
+                        + protocolRepairs + "/" + TeamWorkerProtocol.MAX_MANDATORY_TOOL_REPAIRS + ")...");
                 worker.clearHistory();
                 LlmClient.ToolChoice requiredToolChoice =
                         TeamWorkerProtocol.requiredToolChoice(step.type());

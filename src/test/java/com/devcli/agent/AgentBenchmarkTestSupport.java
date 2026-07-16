@@ -7,7 +7,8 @@ public final class AgentBenchmarkTestSupport {
     private AgentBenchmarkTestSupport() {
     }
 
-    public static void deferPreReviewToHiddenValidator(AgentOrchestrator orchestrator) {
+    public static void configureControlledBenchmark(AgentOrchestrator orchestrator) {
+        orchestrator.setRequireWorkerToolEvidence(true);
         orchestrator.setPreReviewVerifier(new PreReviewVerifier(
                 60,
                 request -> CommandExecutionService.Result.completed(
