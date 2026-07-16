@@ -245,14 +245,82 @@ class AgentCheckpointTest {
     }
 
     @Test
+    void roundTripsStableAgentIdentityCursorAndAssignment() throws Exception {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-agents", "目标");
+        checkpoint.ensureAgentIdentities(agentIdentities());
+        checkpoint.assignStep("step-1", "worker-2", "reviewer");
+        assertTrue(checkpoint.advanceAgentCursor("worker-2", "step-1", "完成接口重构"));
+        assertTrue(checkpoint.advanceAgentCursor("reviewer", "step-1", "审查通过"));
+        checkpoint.saveStrict();
+
+        AgentCheckpoint loaded = AgentCheckpoint.load("orch-agents");
+        AgentCheckpoint.RecoveryState recovery = loaded.recoveryState();
+
+        assertEquals(4, recovery.agentIdentities().size());
+        assertEquals("worker-2", recovery.stepAssignments().get("step-1").workerAgentId());
+        assertEquals(1, recovery.agentCursors().get("worker-2").lastMessageSeq());
+        assertEquals(2, recovery.agentCursors().get("reviewer").lastMessageSeq());
+        assertEquals(2, recovery.messageSequence());
+        assertFalse(Files.readString(tempDir.resolve("orch-agents.json"))
+                .contains("conversationHistory"));
+    }
+
+    @Test
+    void duplicateMessageBoundaryDoesNotAdvanceCursor() {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-cursor", "目标");
+        checkpoint.ensureAgentIdentities(agentIdentities());
+
+        assertTrue(checkpoint.advanceAgentCursor("worker-1", "step-1", "执行完成"));
+        assertFalse(checkpoint.advanceAgentCursor("worker-1", "step-1", "执行完成"));
+
+        assertEquals(1, checkpoint.getMessageSequence());
+        assertEquals(1, checkpoint.getAgentCursors().get("worker-1").lastMessageSeq());
+    }
+
+    @Test
+    void rejectsDuplicateAgentIdentityDuringLoad() throws Exception {
+        String invalid = """
+                {
+                  "protocolVersion": 4,
+                  "orchestrationId": "orch-invalid-agent",
+                  "goal": "目标",
+                  "agentIdentities": [
+                    {"agentId":"worker-1","role":"WORKER","displayName":"worker-1","contextSchemaVersion":1,"createdAt":1,"updatedAt":1},
+                    {"agentId":"worker-1","role":"WORKER","displayName":"worker-1","contextSchemaVersion":1,"createdAt":1,"updatedAt":1}
+                  ],
+                  "agentCursors": {},
+                  "stepAssignments": {}
+                }
+                """;
+        Files.writeString(tempDir.resolve("orch-invalid-agent.json"), invalid, StandardCharsets.UTF_8);
+
+        AgentCheckpoint.LoadResult result = AgentCheckpoint.loadResult("orch-invalid-agent");
+
+        assertEquals(AgentCheckpoint.LoadStatus.INVALID, result.status());
+        assertNull(result.checkpoint());
+    }
+
+    @Test
     void loadsCheckpointFromLegacyProtocolVersion() {
-        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-legacy", "目标");
-        checkpoint.setProtocolVersion(1);
-        checkpoint.save();
+        for (int version : List.of(1, 2, 3)) {
+            String id = "orch-legacy-v" + version;
+            AgentCheckpoint checkpoint = new AgentCheckpoint(id, "目标");
+            checkpoint.setProtocolVersion(version);
+            checkpoint.save();
 
-        AgentCheckpoint loaded = AgentCheckpoint.load("orch-legacy");
+            AgentCheckpoint loaded = AgentCheckpoint.load(id);
 
-        assertNotNull(loaded);
-        assertEquals(1, loaded.recoveryState().protocolVersion());
+            assertNotNull(loaded);
+            assertEquals(version, loaded.recoveryState().protocolVersion());
+            assertTrue(loaded.recoveryState().agentIdentities().isEmpty());
+        }
+    }
+
+    private static List<AgentCheckpoint.AgentIdentityRecord> agentIdentities() {
+        return List.of(
+                new AgentCheckpoint.AgentIdentityRecord("planner", "PLANNER", "planner", 1, 1, 1),
+                new AgentCheckpoint.AgentIdentityRecord("worker-1", "WORKER", "worker-1", 1, 1, 1),
+                new AgentCheckpoint.AgentIdentityRecord("worker-2", "WORKER", "worker-2", 1, 1, 1),
+                new AgentCheckpoint.AgentIdentityRecord("reviewer", "REVIEWER", "reviewer", 1, 1, 1));
     }
 }

@@ -18,9 +18,11 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.LinkedHashMap;
+import java.util.Set;
 
 /**
  * Multi-Agent orchestration checkpoint for failure recovery.
@@ -43,7 +45,8 @@ public class AgentCheckpoint {
         .enable(SerializationFeature.INDENT_OUTPUT);
     /** 步骤 result 落盘上限：buildStepContext 注入依赖结果最多 800 字符，8KB 足够保真。 */
     public static final int MAX_SUMMARY_LENGTH = 8 * 1024;
-    public static final int CURRENT_PROTOCOL_VERSION = 3;
+    public static final int CURRENT_PROTOCOL_VERSION = 4;
+    private static final int MAX_AGENT_SUMMARY_LENGTH = 2 * 1024;
 
     private int protocolVersion = CURRENT_PROTOCOL_VERSION;
     private String orchestrationId;
@@ -60,6 +63,10 @@ public class AgentCheckpoint {
      */
     private Map<String, StepArtifact> failedArtifacts;
     private Map<String, PendingPatchCommit> pendingPatchCommits;
+    private List<AgentIdentityRecord> agentIdentities;
+    private Map<String, AgentCursorRecord> agentCursors;
+    private Map<String, StepAssignmentRecord> stepAssignments;
+    private long messageSequence;
     private long timestamp;
     private int failedSteps;
     private String lastError;
@@ -116,11 +123,49 @@ public class AgentCheckpoint {
     public record RecoveryState(int protocolVersion, String orchestrationId, String goal,
                                 List<PlanStep> planSteps,
                                 List<CriterionRecord> acceptanceCriteria,
-                                Map<String, ExecutionArtifact> artifacts) {
+                                Map<String, ExecutionArtifact> artifacts,
+                                List<AgentIdentityRecord> agentIdentities,
+                                Map<String, AgentCursorRecord> agentCursors,
+                                Map<String, StepAssignmentRecord> stepAssignments,
+                                long messageSequence) {
         public RecoveryState {
             planSteps = planSteps == null ? List.of() : List.copyOf(planSteps);
             acceptanceCriteria = acceptanceCriteria == null ? List.of() : List.copyOf(acceptanceCriteria);
             artifacts = artifacts == null ? Map.of() : Map.copyOf(artifacts);
+            agentIdentities = agentIdentities == null ? List.of() : List.copyOf(agentIdentities);
+            agentCursors = agentCursors == null ? Map.of() : Map.copyOf(agentCursors);
+            stepAssignments = stepAssignments == null ? Map.of() : Map.copyOf(stepAssignments);
+        }
+    }
+
+    public record AgentIdentityRecord(String agentId, String role, String displayName,
+                                      int contextSchemaVersion, long createdAt, long updatedAt) {
+        public AgentIdentityRecord {
+            agentId = normalizeRequired(agentId, "agentId");
+            role = normalizeRequired(role, "role");
+            displayName = displayName == null || displayName.isBlank() ? agentId : displayName.trim();
+            contextSchemaVersion = Math.max(1, contextSchemaVersion);
+            createdAt = createdAt <= 0 ? System.currentTimeMillis() : createdAt;
+            updatedAt = updatedAt <= 0 ? createdAt : updatedAt;
+        }
+    }
+
+    public record AgentCursorRecord(String agentId, long lastMessageSeq, String summary,
+                                    String lastStepId, long updatedAt) {
+        public AgentCursorRecord {
+            agentId = normalizeRequired(agentId, "agentId");
+            lastMessageSeq = Math.max(0, lastMessageSeq);
+            summary = boundAgentSummary(summary);
+            lastStepId = lastStepId == null ? "" : lastStepId.trim();
+            updatedAt = updatedAt <= 0 ? System.currentTimeMillis() : updatedAt;
+        }
+    }
+
+    public record StepAssignmentRecord(String stepId, String workerAgentId, String reviewerAgentId) {
+        public StepAssignmentRecord {
+            stepId = normalizeRequired(stepId, "stepId");
+            workerAgentId = normalizeRequired(workerAgentId, "workerAgentId");
+            reviewerAgentId = normalizeRequired(reviewerAgentId, "reviewerAgentId");
         }
     }
 
@@ -139,6 +184,9 @@ public class AgentCheckpoint {
         this.planSteps = new ArrayList<>();
         this.acceptanceCriteria = new ArrayList<>();
         this.supersededSteps = new ArrayList<>();
+        this.agentIdentities = new ArrayList<>();
+        this.agentCursors = new HashMap<>();
+        this.stepAssignments = new HashMap<>();
         this.timestamp = System.currentTimeMillis();
     }
 
@@ -146,6 +194,85 @@ public class AgentCheckpoint {
         this();
         this.orchestrationId = orchestrationId;
         this.goal = goal;
+    }
+
+    public synchronized void ensureAgentIdentities(List<AgentIdentityRecord> identities) {
+        List<AgentIdentityRecord> requested = identities == null ? List.of() : List.copyOf(identities);
+        if (requested.isEmpty()) {
+            throw new IllegalArgumentException("agent identities are required");
+        }
+        if (agentIdentities == null || agentIdentities.isEmpty()) {
+            agentIdentities = new ArrayList<>(requested);
+            agentCursors = agentCursors == null ? new HashMap<>() : agentCursors;
+            long now = System.currentTimeMillis();
+            for (AgentIdentityRecord identity : requested) {
+                agentCursors.putIfAbsent(identity.agentId(),
+                        new AgentCursorRecord(identity.agentId(), 0, "", "", now));
+            }
+            protocolVersion = CURRENT_PROTOCOL_VERSION;
+            validateAgentState();
+            return;
+        }
+        Set<String> existingIds = agentIdentities.stream()
+                .map(AgentIdentityRecord::agentId)
+                .collect(java.util.stream.Collectors.toSet());
+        Set<String> requestedIds = requested.stream()
+                .map(AgentIdentityRecord::agentId)
+                .collect(java.util.stream.Collectors.toSet());
+        if (!existingIds.equals(requestedIds)) {
+            throw new IllegalStateException("checkpoint agent topology does not match runtime topology");
+        }
+        validateAgentState();
+    }
+
+    public synchronized StepAssignmentRecord assignStep(String stepId, String workerAgentId,
+                                                        String reviewerAgentId) {
+        StepAssignmentRecord requested = new StepAssignmentRecord(stepId, workerAgentId, reviewerAgentId);
+        StepAssignmentRecord existing = stepAssignments().get(requested.stepId());
+        if (existing != null && !existing.equals(requested)) {
+            throw new IllegalStateException("step " + stepId + " already assigned to "
+                    + existing.workerAgentId());
+        }
+        stepAssignments().putIfAbsent(requested.stepId(), requested);
+        validateAgentState();
+        return stepAssignments().get(requested.stepId());
+    }
+
+    public synchronized boolean advanceAgentCursor(String agentId, String stepId, String summary) {
+        String normalizedAgentId = normalizeRequired(agentId, "agentId");
+        String normalizedStepId = stepId == null ? "" : stepId.trim();
+        String boundedSummary = boundAgentSummary(summary);
+        boolean knownAgent = agentIdentities != null && agentIdentities.stream()
+                .anyMatch(identity -> identity.agentId().equals(normalizedAgentId));
+        if (!knownAgent) {
+            throw new IllegalArgumentException("unknown agent identity: " + normalizedAgentId);
+        }
+        AgentCursorRecord current = agentCursors().get(normalizedAgentId);
+        if (current != null
+                && current.lastStepId().equals(normalizedStepId)
+                && current.summary().equals(boundedSummary)) {
+            return false;
+        }
+        messageSequence++;
+        agentCursors().put(normalizedAgentId, new AgentCursorRecord(
+                normalizedAgentId, messageSequence, boundedSummary,
+                normalizedStepId, System.currentTimeMillis()));
+        validateAgentState();
+        return true;
+    }
+
+    private static String normalizeRequired(String value, String field) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(field + " is required");
+        }
+        return value.trim();
+    }
+
+    private static String boundAgentSummary(String summary) {
+        String normalized = summary == null ? "" : summary.trim();
+        return normalized.length() <= MAX_AGENT_SUMMARY_LENGTH
+                ? normalized
+                : normalized.substring(0, MAX_AGENT_SUMMARY_LENGTH) + "...(截断)";
     }
 
     // ─────────────────────────────────────────────────────────
@@ -364,6 +491,61 @@ public class AgentCheckpoint {
         return pendingPatchCommits;
     }
 
+    private Map<String, AgentCursorRecord> agentCursors() {
+        if (agentCursors == null) {
+            agentCursors = new HashMap<>();
+        }
+        return agentCursors;
+    }
+
+    private Map<String, StepAssignmentRecord> stepAssignments() {
+        if (stepAssignments == null) {
+            stepAssignments = new HashMap<>();
+        }
+        return stepAssignments;
+    }
+
+    private void validateAgentState() {
+        List<AgentIdentityRecord> identities = agentIdentities == null ? List.of() : agentIdentities;
+        if (identities.isEmpty() && agentCursors().isEmpty() && stepAssignments().isEmpty()) {
+            return;
+        }
+        Set<String> ids = new HashSet<>();
+        Map<String, String> roles = new HashMap<>();
+        for (AgentIdentityRecord identity : identities) {
+            if (!ids.add(identity.agentId())) {
+                throw new IllegalArgumentException("duplicate agent identity: " + identity.agentId());
+            }
+            roles.put(identity.agentId(), identity.role());
+        }
+        if (ids.isEmpty()) {
+            throw new IllegalArgumentException("agent identities are required when cursor or assignment state exists");
+        }
+        long maxSequence = 0;
+        for (Map.Entry<String, AgentCursorRecord> entry : agentCursors().entrySet()) {
+            AgentCursorRecord cursor = entry.getValue();
+            if (cursor == null || !entry.getKey().equals(cursor.agentId()) || !ids.contains(cursor.agentId())) {
+                throw new IllegalArgumentException("invalid agent cursor: " + entry.getKey());
+            }
+            maxSequence = Math.max(maxSequence, cursor.lastMessageSeq());
+        }
+        messageSequence = Math.max(messageSequence, maxSequence);
+        for (Map.Entry<String, StepAssignmentRecord> entry : stepAssignments().entrySet()) {
+            StepAssignmentRecord assignment = entry.getValue();
+            if (assignment == null || !entry.getKey().equals(assignment.stepId())) {
+                throw new IllegalArgumentException("invalid step assignment: " + entry.getKey());
+            }
+            if (!"WORKER".equalsIgnoreCase(roles.get(assignment.workerAgentId()))) {
+                throw new IllegalArgumentException("step assignment references invalid worker: "
+                        + assignment.workerAgentId());
+            }
+            if (!"REVIEWER".equalsIgnoreCase(roles.get(assignment.reviewerAgentId()))) {
+                throw new IllegalArgumentException("step assignment references invalid reviewer: "
+                        + assignment.reviewerAgentId());
+            }
+        }
+    }
+
     public boolean isStepCompleted(String stepId) {
         return completedSteps.contains(stepId);
     }
@@ -390,7 +572,11 @@ public class AgentCheckpoint {
                 goal,
                 planSteps,
                 acceptanceCriteria,
-                normalized);
+                normalized,
+                agentIdentities,
+                agentCursors,
+                stepAssignments,
+                messageSequence);
     }
 
     // ─────────────────────────────────────────────────────────
@@ -416,6 +602,7 @@ public class AgentCheckpoint {
         Path checkpointDir = getCheckpointDir();
         Files.createDirectories(checkpointDir);
 
+        validateAgentState();
         Path checkpointFile = checkpointDir.resolve(orchestrationId + ".json");
         Path tempFile = checkpointDir.resolve(orchestrationId + ".json.tmp");
         mapper.writeValue(tempFile.toFile(), this);
@@ -562,6 +749,10 @@ public class AgentCheckpoint {
         if (pendingPatchCommits == null) pendingPatchCommits = new HashMap<>();
         if (planSteps == null) planSteps = new ArrayList<>();
         if (acceptanceCriteria == null) acceptanceCriteria = new ArrayList<>();
+        if (agentIdentities == null) agentIdentities = new ArrayList<>();
+        if (agentCursors == null) agentCursors = new HashMap<>();
+        if (stepAssignments == null) stepAssignments = new HashMap<>();
+        validateAgentState();
     }
 
     private Path patchJournalRoot() {
@@ -712,6 +903,38 @@ public class AgentCheckpoint {
 
     public void setPendingPatchCommits(Map<String, PendingPatchCommit> pendingPatchCommits) {
         this.pendingPatchCommits = pendingPatchCommits == null ? new HashMap<>() : pendingPatchCommits;
+    }
+
+    public List<AgentIdentityRecord> getAgentIdentities() {
+        return agentIdentities == null ? List.of() : List.copyOf(agentIdentities);
+    }
+
+    public void setAgentIdentities(List<AgentIdentityRecord> agentIdentities) {
+        this.agentIdentities = agentIdentities == null ? new ArrayList<>() : new ArrayList<>(agentIdentities);
+    }
+
+    public Map<String, AgentCursorRecord> getAgentCursors() {
+        return Map.copyOf(agentCursors());
+    }
+
+    public void setAgentCursors(Map<String, AgentCursorRecord> agentCursors) {
+        this.agentCursors = agentCursors == null ? new HashMap<>() : new HashMap<>(agentCursors);
+    }
+
+    public Map<String, StepAssignmentRecord> getStepAssignments() {
+        return Map.copyOf(stepAssignments());
+    }
+
+    public void setStepAssignments(Map<String, StepAssignmentRecord> stepAssignments) {
+        this.stepAssignments = stepAssignments == null ? new HashMap<>() : new HashMap<>(stepAssignments);
+    }
+
+    public long getMessageSequence() {
+        return messageSequence;
+    }
+
+    public void setMessageSequence(long messageSequence) {
+        this.messageSequence = Math.max(0, messageSequence);
     }
 
     public long getTimestamp() {
