@@ -16,10 +16,11 @@ final class WorkspaceBackendFactory {
         String mode = resolveMode(System.getProperties(), System.getenv());
         return switch (mode) {
             case "copy" -> new CopyWorkspaceBackend();
+            case "cow" -> new FileSystemCowWorkspaceBackend();
             case "git" -> new GitWorktreeBackend();
             case "auto" -> GitWorktreeBackend.supports(projectRoot)
                     ? new GitWorktreeBackend()
-                    : new CopyWorkspaceBackend();
+                    : new FileSystemCowWorkspaceBackend();
             default -> throw new IllegalArgumentException("unsupported workspace backend: " + mode);
         };
     }

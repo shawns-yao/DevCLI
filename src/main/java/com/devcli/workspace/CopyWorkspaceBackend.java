@@ -1,13 +1,10 @@
 package com.devcli.workspace;
 
 import java.io.IOException;
-import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -61,7 +58,7 @@ public class CopyWorkspaceBackend implements WorkspaceBackend {
             throw new IOException("invalid isolated workspace path");
         }
 
-        List<Path> sources = collectSources(root, base);
+        List<Path> sources = WorkspaceSourceTree.collectRegularFiles(root, base);
         if (sources.isEmpty()) {
             return new Materialization(Map.of());
         }
@@ -129,33 +126,6 @@ public class CopyWorkspaceBackend implements WorkspaceBackend {
         Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING,
                 StandardCopyOption.COPY_ATTRIBUTES);
         return new FileSnapshot(relative, PatchSet.hash(target));
-    }
-
-    private static List<Path> collectSources(Path root, Path workspaceBase) throws IOException {
-        List<Path> sources = new ArrayList<>();
-        Files.walkFileTree(root, new SimpleFileVisitor<>() {
-            @Override
-            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                if (dir.equals(root)) {
-                    return FileVisitResult.CONTINUE;
-                }
-                if (Files.isSymbolicLink(dir)
-                        || WorkspacePathPolicy.isExcluded(root, workspaceBase, dir)) {
-                    return FileVisitResult.SKIP_SUBTREE;
-                }
-                return FileVisitResult.CONTINUE;
-            }
-
-            @Override
-            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                if (attrs.isRegularFile() && !Files.isSymbolicLink(file)
-                        && !WorkspacePathPolicy.isExcluded(root, workspaceBase, file)) {
-                    sources.add(file);
-                }
-                return FileVisitResult.CONTINUE;
-            }
-        });
-        return sources;
     }
 
     private static FileSnapshot await(CompletionService<FileSnapshot> completion,

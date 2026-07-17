@@ -88,8 +88,11 @@ class WorkspaceExecutionSessionTest {
 
         try (WorkspaceExecutionSession first = WorkspaceExecutionSession.open(parent, "first");
              WorkspaceExecutionSession second = WorkspaceExecutionSession.open(parent, "second")) {
-            Files.writeString(first.workspacePath().resolve("shared.txt"), "first");
-            Files.writeString(second.workspacePath().resolve("shared.txt"), "second");
+            assertTrue(first.toolRegistry().executeToolOutput(
+                    "write_file", "{\"path\":\"shared.txt\",\"content\":\"first\"}").isSuccess());
+            assertTrue(second.toolRegistry().executeToolOutput(
+                    "write_file", "{\"path\":\"shared.txt\",\"content\":\"second\"}").isSuccess());
+            assertEquals("base", Files.readString(project.resolve("shared.txt")));
             PatchSet firstPatch = first.patchSet();
             PatchSet secondPatch = second.patchSet();
             CountDownLatch firstDecisionEntered = new CountDownLatch(1);

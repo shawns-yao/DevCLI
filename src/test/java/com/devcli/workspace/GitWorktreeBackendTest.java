@@ -49,13 +49,13 @@ class GitWorktreeBackendTest {
     }
 
     @Test
-    void factoryUsesGitBackendForRepositoryAndCopyForPlainDirectory(@TempDir Path tempDir)
+    void factoryUsesGitBackendForRepositoryAndCowForPlainDirectory(@TempDir Path tempDir)
             throws Exception {
         Path project = createRepository(tempDir.resolve("project"));
         Path plain = Files.createDirectories(tempDir.resolve("plain"));
 
         assertInstanceOf(GitWorktreeBackend.class, WorkspaceBackendFactory.create(project));
-        assertInstanceOf(CopyWorkspaceBackend.class, WorkspaceBackendFactory.create(plain));
+        assertInstanceOf(FileSystemCowWorkspaceBackend.class, WorkspaceBackendFactory.create(plain));
     }
 
     @Test
