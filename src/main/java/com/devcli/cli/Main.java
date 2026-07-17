@@ -6,7 +6,6 @@ import com.devcli.agent.PlanExecuteAgent;
 import com.devcli.browser.BrowserAuditMetadata;
 import com.devcli.browser.BrowserConnectivityCheck;
 import com.devcli.browser.BrowserGuard;
-import com.devcli.browser.BrowserMode;
 import com.devcli.browser.BrowserSession;
 import com.devcli.browser.SensitivePagePolicy;
 import com.devcli.config.DevCliConfig;
@@ -35,14 +34,7 @@ import com.devcli.rag.CodeRelation;
 import com.devcli.rag.SearchResultFormatter;
 import com.devcli.runtime.CancellationContext;
 import com.devcli.runtime.CancellationToken;
-import com.devcli.runtime.HeadlessAgentRunner;
 import com.devcli.runtime.RunContext;
-import com.devcli.runtime.api.RuntimeApiServer;
-import com.devcli.runtime.api.RuntimeCheckpointCandidateFactory;
-import com.devcli.runtime.api.RuntimeCheckpointPolicy;
-import com.devcli.runtime.api.RuntimeThreadStore;
-import com.devcli.runtime.api.TurnRunner;
-import com.devcli.runtime.event.RunEventSink;
 import com.devcli.runtime.task.DurableTaskManager;
 import com.devcli.runtime.task.TaskCommandFormatter;
 import com.devcli.snapshot.RestoreResult;
@@ -86,7 +78,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -195,9 +186,9 @@ public class Main {
 
     public static void main(String[] args) {
         configureAwtForCli();
-        if (isRuntimeServeCommand(args)) {
+        if (RuntimeCommandLauncher.isServeCommand(args)) {
             configureLogging();
-            startRuntimeApiAndBlock(args);
+            RuntimeCommandLauncher.startAndBlock(args);
             return;
         }
 
@@ -221,25 +212,10 @@ public class Main {
             hitlToolRegistry.setBrowserGuard(new BrowserGuard(browserSession, new SensitivePagePolicy()));
             McpServerManager mcpServerManager = new McpServerManager(hitlToolRegistry, Path.of("."));
             AtomicReference<SkillRegistry> skillRegistryRef = new AtomicReference<>();
-            hitlToolRegistry.setBrowserConnector(new com.devcli.browser.BrowserConnector() {
-                @Override
-                public String status() {
-                    return handleBrowserCommand("status", browserSession, browserConnectivityCheck,
-                            mcpServerManager, hitlToolRegistry, hitlHandler);
-                }
-
-                @Override
-                public String connectDefault() {
-                    return handleBrowserCommand("connect", browserSession, browserConnectivityCheck,
-                            mcpServerManager, hitlToolRegistry, hitlHandler);
-                }
-
-                @Override
-                public String disconnect() {
-                    return handleBrowserCommand("disconnect", browserSession, browserConnectivityCheck,
-                            mcpServerManager, hitlToolRegistry, hitlHandler);
-                }
-            });
+            BrowserCommandHandler browserCommands = new BrowserCommandHandler(
+                    browserSession, browserConnectivityCheck, mcpServerManager,
+                    hitlToolRegistry, hitlHandler);
+            hitlToolRegistry.setBrowserConnector(browserCommands);
 
             LineReader lineReader = LineReaderBuilder.builder()
                     .terminal(terminal)
@@ -343,7 +319,7 @@ public class Main {
                     return java.util.List.of();
                 }
             });
-            DurableTaskManager taskManager = openTaskManager(llmClientRef);
+            DurableTaskManager taskManager = RuntimeCommandLauncher.openTaskManager(llmClientRef);
             taskManager.start();
             Runtime.getRuntime().addShutdownHook(new Thread(taskManager::close, "devcli-task-shutdown"));
             renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
@@ -632,13 +608,7 @@ public class Main {
                         continue;
                     }
                     case BROWSER -> {
-                        printMcpCommandResult(ui, handleBrowserCommand(
-                                command.payload(),
-                                browserSession,
-                                browserConnectivityCheck,
-                                mcpServerManager,
-                                hitlToolRegistry,
-                                hitlHandler));
+                        printMcpCommandResult(ui, browserCommands.handle(command.payload()));
                         continue;
                     }
                     case TASK -> {
@@ -815,104 +785,6 @@ public class Main {
         }
     }
 
-    private static boolean isRuntimeServeCommand(String[] args) {
-        return args != null
-                && args.length >= 1
-                && "serve".equalsIgnoreCase(args[0])
-                && java.util.Arrays.stream(args).anyMatch("--http"::equalsIgnoreCase);
-    }
-
-    private static void startRuntimeApiAndBlock(String[] args) {
-        DevCliConfig config = DevCliConfig.load();
-        LlmClient client = LlmClientFactory.createFromConfig(config);
-        if (client == null) {
-            System.err.println("❌ 错误: 未找到可用的 API Key");
-            System.err.println("请在 .env 文件中添加 ANTHROPIC_AUTH_TOKEN、OPENAI_API_KEY、GLM_API_KEY、DEEPSEEK_API_KEY、STEP_API_KEY 或 KIMI_API_KEY");
-            throw new IllegalStateException("未找到可用的 API Key");
-        }
-        int port = parseServePort(args, 8080);
-        try {
-            RuntimeThreadStore store = new RuntimeThreadStore(RuntimeThreadStore.defaultDbPath());
-            RuntimeApiServer server = new RuntimeApiServer(
-                    store,
-                    (threadId, input, eventSink) ->
-                            runHeadlessTurn(threadId, input, eventSink, client, store),
-                    port,
-                    RuntimeApiServer.configuredApiKey());
-            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                server.close();
-                store.close();
-            }, "devcli-runtime-api-shutdown"));
-            server.start();
-            System.out.println("✅ DevCLI Runtime API 已启动: http://127.0.0.1:" + server.port());
-            System.out.println("   认证: Authorization: Bearer <DEVCLI_RUNTIME_API_KEY>");
-            new CountDownLatch(1).await();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        } catch (Exception e) {
-            System.err.println("❌ Runtime API 启动失败: " + e.getMessage());
-            throw new RuntimeException("Runtime API 启动失败", e);
-        }
-    }
-
-    private static int parseServePort(String[] args, int defaultPort) {
-        if (args == null) {
-            return defaultPort;
-        }
-        for (int i = 0; i < args.length - 1; i++) {
-            if ("--port".equalsIgnoreCase(args[i])) {
-                try {
-                    return Integer.parseInt(args[i + 1]);
-                } catch (NumberFormatException ignored) {
-                    return defaultPort;
-                }
-            }
-        }
-        return defaultPort;
-    }
-
-    private static String runHeadlessTask(String prompt, LlmClient llmClient) {
-        return HeadlessAgentRunner.run(
-                llmClient,
-                Path.of("."),
-                prompt,
-                List.of());
-    }
-
-    /**
-     * Runtime API turn 执行（存储即状态）：每 turn 新建 Agent 保持隔离，
-     * 执行前重放最近持久化检查点和检查点后的完整 turn。Agent 在 turn 完成后按阈值压缩，
-     * RuntimeApiServer 再用本轮 completed event id 固化覆盖边界，避免摘要与精确 turn 重复。
-     */
-    private static TurnRunner.TurnResult runHeadlessTurn(
-            String threadId, String prompt, RunEventSink eventSink,
-            LlmClient llmClient, RuntimeThreadStore store) {
-        RuntimeThreadStore.ContextView contextView = store.contextView(threadId);
-        List<LlmClient.Message> seed = new ArrayList<>(contextView.checkpointMessages());
-        for (RuntimeThreadStore.TurnRecord turn : contextView.turns()) {
-            seed.add(LlmClient.Message.user(turn.input()));
-            seed.add(LlmClient.Message.assistant(turn.output()));
-        }
-        HeadlessAgentRunner.RunResult runResult = HeadlessAgentRunner.runDetailed(
-                llmClient,
-                Path.of("."),
-                prompt,
-                seed,
-                RuntimeCheckpointPolicy.configuredTriggerTokens(),
-                eventSink);
-        TurnRunner.CheckpointCandidate checkpoint = RuntimeCheckpointCandidateFactory
-                .fromHistory(runResult.history(), runResult.compacted())
-                .orElse(null);
-        return new TurnRunner.TurnResult(runResult.output(), checkpoint);
-    }
-
-    private static DurableTaskManager openTaskManager(AtomicReference<LlmClient> llmClientRef) {
-        try {
-            return DurableTaskManager.openDefault(prompt -> runHeadlessTask(prompt, llmClientRef.get()));
-        } catch (Exception e) {
-            throw new IllegalStateException("后台任务管理器初始化失败: " + e.getMessage(), e);
-        }
-    }
 
     static PlanExecuteAgent createPlanAgent(LlmClient llmClient, Agent reactAgent,
                                             PlanExecuteAgent.PlanReviewHandler reviewHandler) {
@@ -1664,154 +1536,6 @@ public class Main {
         out.println();
     }
 
-    static String handleBrowserCommand(String payload,
-                                       BrowserSession browserSession,
-                                       BrowserConnectivityCheck connectivityCheck,
-                                       McpServerManager mcpServerManager,
-                                       HitlToolRegistry registry,
-                                       HitlHandler hitlHandler) {
-        String normalized = payload == null || payload.isBlank() ? "status" : payload.trim();
-        String[] parts = normalized.split("\\s+");
-        String subCommand = parts[0].toLowerCase();
-        return switch (subCommand) {
-            case "status" -> browserStatus(browserSession, connectivityCheck, mcpServerManager);
-            case "connect" -> {
-                if (parts.length >= 2) {
-                    int port = parseBrowserPort(parts[1]);
-                    yield browserConnectByPort(port, browserSession, connectivityCheck, mcpServerManager, hitlHandler);
-                }
-                yield browserAutoConnect(browserSession, mcpServerManager, hitlHandler);
-            }
-            case "disconnect" -> browserDisconnect(browserSession, mcpServerManager, hitlHandler);
-            case "tabs" -> browserTabs(browserSession, registry);
-            default -> """
-                    ❌ 未知 /browser 子命令: %s
-                    可用命令：
-                      /browser status
-                      /browser connect [port]
-                      /browser disconnect
-                      /browser tabs
-                    """.formatted(normalized).trim();
-        };
-    }
-
-    private static String browserStatus(BrowserSession browserSession,
-                                        BrowserConnectivityCheck connectivityCheck,
-                                        McpServerManager mcpServerManager) {
-        BrowserConnectivityCheck.ProbeResult probe = connectivityCheck.probe(9222);
-        McpServer server = mcpServerManager.server("chrome-devtools");
-        String serverStatus = server == null
-                ? "未配置"
-                : server.status() == McpServerStatus.READY
-                ? "● ready (" + server.tools().size() + " tools)"
-                : server.status().name().toLowerCase() + (server.errorMessage() == null ? "" : " - " + server.errorMessage());
-        String mode = browserSession.mode() == BrowserMode.SHARED
-                ? "shared（复用 " + browserSession.browserUrl() + "）"
-                : "isolated（临时 user-data-dir，无登录态）";
-        return """
-                🌐 浏览器会话
-                  当前模式: %s
-                  chrome-devtools server: %s
-                  旧式 /json/version 探活: %s
-                  自动连接: Chrome 144+ 可在 chrome://inspect/#remote-debugging 勾选 Allow remote debugging 后使用 /browser connect
-                """.formatted(mode, serverStatus, probe.ok() ? "✅ " + probe.browserUrl() : "⚠️ " + probe.message()).trim();
-    }
-
-    private static String browserAutoConnect(BrowserSession browserSession,
-                                             McpServerManager mcpServerManager,
-                                             HitlHandler hitlHandler) {
-        McpServer server = mcpServerManager.server("chrome-devtools");
-        if (server == null) {
-            return "❌ 未配置 chrome-devtools MCP server，请先检查 ~/.devcli/mcp.json";
-        }
-        List<String> oldArgs = List.copyOf(server.config().getArgs());
-        List<String> autoConnectArgs = List.of("-y", "chrome-devtools-mcp@latest", "--autoConnect");
-        String result = mcpServerManager.restartWithArgs("chrome-devtools", autoConnectArgs);
-        McpServer restarted = mcpServerManager.server("chrome-devtools");
-        if (restarted != null && restarted.status() == McpServerStatus.READY) {
-            browserSession.switchToShared("autoConnect");
-            hitlHandler.clearApprovedAllForServer("chrome-devtools");
-            return "🔄 已用 --autoConnect 连接 Chrome（需已在 chrome://inspect/#remote-debugging 允许远程调试）\n" + result;
-        }
-        mcpServerManager.restartWithArgs("chrome-devtools", oldArgs);
-        return "❌ autoConnect 连接失败，已回滚 chrome-devtools 启动参数：\n" + result
-                + "\n\n请确认 Chrome 144+ 已打开 chrome://inspect/#remote-debugging，并勾选 Allow remote debugging for this browser instance。";
-    }
-
-    private static String browserConnectByPort(int port,
-                                               BrowserSession browserSession,
-                                               BrowserConnectivityCheck connectivityCheck,
-                                               McpServerManager mcpServerManager,
-                                               HitlHandler hitlHandler) {
-        if (port < 1024 || port > 65535) {
-            return "❌ /browser connect 端口必须在 1024-65535 之间。默认 /browser connect 使用 --autoConnect；旧式 CDP 端口连接可用 /browser connect 9222。";
-        }
-        BrowserConnectivityCheck.ProbeResult probe = connectivityCheck.probe(port);
-        if (!probe.ok()) {
-            return "❌ 未检测到 Chrome 调试端口 127.0.0.1:" + port + "：" + probe.message() + "\n\n"
-                    + chromeLaunchHelp(port);
-        }
-
-        McpServer server = mcpServerManager.server("chrome-devtools");
-        if (server == null) {
-            return "❌ 未配置 chrome-devtools MCP server，请先检查 ~/.devcli/mcp.json";
-        }
-        List<String> oldArgs = List.copyOf(server.config().getArgs());
-        List<String> sharedArgs = List.of("-y", "chrome-devtools-mcp@latest", "--browser-url=" + probe.browserUrl());
-        String result = mcpServerManager.restartWithArgs("chrome-devtools", sharedArgs);
-        McpServer restarted = mcpServerManager.server("chrome-devtools");
-        if (restarted != null && restarted.status() == McpServerStatus.READY) {
-            browserSession.switchToShared(probe.browserUrl());
-            hitlHandler.clearApprovedAllForServer("chrome-devtools");
-            return "🔄 切换 chrome-devtools server 到 shared 模式 (" + probe.browserUrl() + ")\n" + result;
-        }
-        mcpServerManager.restartWithArgs("chrome-devtools", oldArgs);
-        return "❌ shared 模式切换失败，已回滚 chrome-devtools 启动参数：\n" + result;
-    }
-
-    private static String browserDisconnect(BrowserSession browserSession,
-                                            McpServerManager mcpServerManager,
-                                            HitlHandler hitlHandler) {
-        McpServer server = mcpServerManager.server("chrome-devtools");
-        if (server == null) {
-            browserSession.switchToIsolated();
-            return "❌ 未配置 chrome-devtools MCP server，已清理本地浏览器会话状态";
-        }
-        String result = mcpServerManager.restartWithArgs(
-                "chrome-devtools",
-                List.of("-y", "chrome-devtools-mcp@latest", "--isolated=true"));
-        browserSession.switchToIsolated();
-        hitlHandler.clearApprovedAllForServer("chrome-devtools");
-        return "🔄 已切回 isolated 浏览器模式\n" + result;
-    }
-
-    private static String browserTabs(BrowserSession browserSession, HitlToolRegistry registry) {
-        if (browserSession.mode() != BrowserMode.SHARED) {
-            return "当前为 isolated 模式，没有真实 Chrome tab 可复用。可用 /browser connect 切到 shared 模式。";
-        }
-        return registry.executeTool("mcp__chrome-devtools__list_pages", "{}");
-    }
-
-    private static int parseBrowserPort(String value) {
-        if (value == null || value.isBlank()) {
-            return 9222;
-        }
-        try {
-            return Integer.parseInt(value.trim());
-        } catch (NumberFormatException e) {
-            return -1;
-        }
-    }
-
-    private static String chromeLaunchHelp(int port) {
-        return """
-                请先用调试端口启动 Chrome：
-                  macOS: open -na "Google Chrome" --args --remote-debugging-port=%d --user-data-dir=/tmp/devcli-chrome-profile
-                  Windows: start chrome.exe --remote-debugging-port=%d --user-data-dir=%%TEMP%%\\devcli-chrome-profile
-                  Linux: google-chrome --remote-debugging-port=%d --user-data-dir=/tmp/devcli-chrome-profile
-                然后重新执行 /browser connect %d
-                """.formatted(port, port, port, port).trim();
-    }
 
     private static void printMcpCommandResult(PrintStream out, String result) {
         out.println(result);

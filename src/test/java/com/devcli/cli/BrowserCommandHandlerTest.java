@@ -19,13 +19,13 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class MainBrowserCommandTest {
+class BrowserCommandHandlerTest {
 
     @Test
     void browserStatusShowsCurrentMode(@TempDir Path tempDir) throws IOException {
         Harness h = new Harness(tempDir);
 
-        String result = Main.handleBrowserCommand("status", h.session, h.connectivity, h.manager, h.registry, h.handler);
+        String result = h.commands().handle("status");
 
         assertTrue(result.contains("当前模式"));
         assertTrue(result.contains("isolated"));
@@ -35,7 +35,7 @@ class MainBrowserCommandTest {
     void browserConnectRejectsInvalidPort(@TempDir Path tempDir) throws IOException {
         Harness h = new Harness(tempDir);
 
-        String result = Main.handleBrowserCommand("connect 80", h.session, h.connectivity, h.manager, h.registry, h.handler);
+        String result = h.commands().handle("connect 80");
 
         assertTrue(result.contains("1024-65535"));
         assertEquals(BrowserMode.ISOLATED, h.session.mode());
@@ -48,7 +48,9 @@ class MainBrowserCommandTest {
         CountingConnectivityCheck connectivity = new CountingConnectivityCheck();
         FakeMcpServerManager manager = new FakeMcpServerManager(registry, tempDir);
 
-        String result = Main.handleBrowserCommand("connect", session, connectivity, manager, registry, new TerminalHitlHandler(false));
+        String result = new BrowserCommandHandler(
+                session, connectivity, manager, registry, new TerminalHitlHandler(false))
+                .handle("connect");
 
         assertTrue(result.contains("--autoConnect"));
         assertEquals(BrowserMode.SHARED, session.mode());
@@ -62,7 +64,7 @@ class MainBrowserCommandTest {
         Harness h = new Harness(tempDir);
         h.session.switchToShared("http://127.0.0.1:9222");
 
-        String result = Main.handleBrowserCommand("disconnect", h.session, h.connectivity, h.manager, h.registry, h.handler);
+        String result = h.commands().handle("disconnect");
 
         assertTrue(result.contains("未配置"));
         assertEquals(BrowserMode.ISOLATED, h.session.mode());
@@ -72,7 +74,7 @@ class MainBrowserCommandTest {
     void browserTabsInIsolatedModeGivesConnectHint(@TempDir Path tempDir) throws IOException {
         Harness h = new Harness(tempDir);
 
-        String result = Main.handleBrowserCommand("tabs", h.session, h.connectivity, h.manager, h.registry, h.handler);
+        String result = h.commands().handle("tabs");
 
         assertTrue(result.contains("isolated"));
         assertTrue(result.contains("/browser connect"));
@@ -82,7 +84,7 @@ class MainBrowserCommandTest {
     void unknownBrowserSubCommandShowsHelp(@TempDir Path tempDir) throws IOException {
         Harness h = new Harness(tempDir);
 
-        String result = Main.handleBrowserCommand("wat", h.session, h.connectivity, h.manager, h.registry, h.handler);
+        String result = h.commands().handle("wat");
 
         assertTrue(result.contains("未知 /browser 子命令"));
         assertTrue(result.contains("/browser connect"));
@@ -101,6 +103,11 @@ class MainBrowserCommandTest {
                     tempDir,
                     new McpConfigLoader(tempDir.resolve("user.json"), tempDir.resolve("project.json"), tempDir));
             manager.loadConfiguredServers();
+        }
+
+        private BrowserCommandHandler commands() {
+            return new BrowserCommandHandler(
+                    session, connectivity, manager, registry, handler);
         }
     }
 
