@@ -1,6 +1,8 @@
 package com.devcli.memory;
 
 import com.devcli.rag.RagEvidencePayload;
+import com.devcli.rag.RagEvidenceSideChannel;
+import com.devcli.tool.ToolSideChannel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -125,6 +127,11 @@ public class WorkingMemory {
      * @param result    工具返回（已被 ToolResultSizeManager 处理过的版本）
      */
     public synchronized void recordToolResult(String toolName, String argsJson, String result) {
+        recordToolResult(toolName, argsJson, result, List.of());
+    }
+
+    public synchronized void recordToolResult(String toolName, String argsJson, String result,
+                                              List<ToolSideChannel> sideChannels) {
         if (toolName == null || result == null) return;
         recentToolResults.addLast(new ToolEvidence(
                 toolName,
@@ -132,7 +139,7 @@ public class WorkingMemory {
                 result,
                 Instant.now()));
         evictToolResultsIfNeeded();
-        recordRagEvidenceIfPresent(toolName, argsJson, result);
+        recordRagEvidenceIfPresent(toolName, argsJson, result, sideChannels);
     }
 
     /**
@@ -543,32 +550,52 @@ public class WorkingMemory {
         taskLedger.clear();
     }
 
-    private void recordRagEvidenceIfPresent(String toolName, String argsJson, String result) {
+    private void recordRagEvidenceIfPresent(String toolName, String argsJson, String result,
+                                            List<ToolSideChannel> sideChannels) {
         if (!"search_code".equals(toolName) || result == null || result.isBlank()) {
+            return;
+        }
+        boolean typedPayloadPresent = false;
+        if (sideChannels != null) {
+            for (ToolSideChannel sideChannel : sideChannels) {
+                if (sideChannel instanceof RagEvidenceSideChannel ragEvidence) {
+                    typedPayloadPresent = true;
+                    recordRagEvidencePayload(ragEvidence.payload());
+                }
+            }
+        }
+        if (typedPayloadPresent) {
             return;
         }
         RagEvidencePayload.Payload payload = RagEvidencePayload.extract(result);
         if (!payload.evidence().isEmpty() || !payload.negativeFacts().isEmpty()) {
-            for (RagEvidencePayload.Evidence evidence : payload.evidence()) {
-                addRagEvidence(new RagEvidence(
-                        evidence.filePath(),
-                        evidence.symbolName(),
-                        evidence.chunkType(),
-                        evidence.symbolVersion(),
-                        evidence.classpathEpoch(),
-                        evidence.indexEpoch(),
-                        evidence.query(),
-                        evidence.similarity(),
-                        Instant.now()));
-            }
-            for (RagEvidencePayload.NegativeFact negativeFact : payload.negativeFacts()) {
-                String rendered = negativeFact.renderForMemory();
-                addVolatileFact("NegativeFact（负向事实）: " + rendered);
-                pruneEvidenceForOldSymbolVersion(negativeFact.oldSymbolVersion());
-            }
+            recordRagEvidencePayload(payload);
             return;
         }
         recordLegacyRagEvidenceIfPresent(argsJson, result);
+    }
+
+    private void recordRagEvidencePayload(RagEvidencePayload.Payload payload) {
+        if (payload == null) {
+            return;
+        }
+        for (RagEvidencePayload.Evidence evidence : payload.evidence()) {
+            addRagEvidence(new RagEvidence(
+                    evidence.filePath(),
+                    evidence.symbolName(),
+                    evidence.chunkType(),
+                    evidence.symbolVersion(),
+                    evidence.classpathEpoch(),
+                    evidence.indexEpoch(),
+                    evidence.query(),
+                    evidence.similarity(),
+                    Instant.now()));
+        }
+        for (RagEvidencePayload.NegativeFact negativeFact : payload.negativeFacts()) {
+            String rendered = negativeFact.renderForMemory();
+            addVolatileFact("NegativeFact（负向事实）: " + rendered);
+            pruneEvidenceForOldSymbolVersion(negativeFact.oldSymbolVersion());
+        }
     }
 
     private void recordLegacyRagEvidenceIfPresent(String argsJson, String result) {

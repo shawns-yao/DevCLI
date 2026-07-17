@@ -429,7 +429,8 @@ public class AgentOrchestrator {
                 agent.getRole().name().toLowerCase(Locale.ROOT)));
         agent.setPostCompactRestoreSupplier(() -> memoryManager.buildPostCompactRestoreSectionForAgent(
                 agent.getRole().name().toLowerCase(Locale.ROOT)));
-        agent.setToolResultConsumer(memoryManager::addToolResult);
+        agent.setStructuredToolResultConsumer(result -> memoryManager.addToolResult(
+                result.name(), result.argumentsJson(), result.result(), result.sideChannels()));
         agent.setSkillRegistry(skillRegistry);
         agent.setSkillContextBuffer(skillContextBuffer == null ? null : skillContextBuffer.copy());
     }
@@ -1956,9 +1957,10 @@ public class AgentOrchestrator {
         out.println("🔍 " + reviewer.getName() + " 正在审查步骤 [" + step.id() + "] 的结果...");
         String reviewTask = buildReviewTask(step);
         List<String> reviewToolCalls = Collections.synchronizedList(new ArrayList<>());
-        reviewer.setToolResultConsumer((name, args, result) -> {
-            memoryManager.addToolResult(name, args, result);
-            reviewToolCalls.add(name);
+        reviewer.setStructuredToolResultConsumer(result -> {
+            memoryManager.addToolResult(result.name(), result.argumentsJson(), result.result(),
+                    result.sideChannels());
+            reviewToolCalls.add(result.name());
         });
         AgentMessage reviewResult = reviewerForkContext == null
                 ? reviewer.review(reviewTask, workerResult, out)

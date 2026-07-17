@@ -1,5 +1,15 @@
 # TODO
 
+## 2026-07-17 RAG 强类型证据通道
+
+- 状态：已实现
+- 来源：`search_code` 的结构化证据仍嵌入展示文本，结果裁剪、格式调整和缓存治理存在破坏证据边界的风险
+- 影响范围：工具结构化结果、工具结果缓存与尺寸治理、RAG Provider、WorkingMemory、ReAct、Plan、Multi-Agent 和相关文档与测试
+- 已实现：新增工具结果强类型旁路接口和 RAG 证据载荷类型；`search_code` 的新结果只在旁路通道传递 evidence 与 negativeFact，不再向展示文本附加 `RAG_EVIDENCE_JSON`；工具尺寸治理、只读结果缓存和批量执行结果完整保留旁路载荷；ReAct、Plan、Worker 与 Reviewer 都把旁路载荷传入 WorkingMemory；旧 JSON 载荷和旧展示文本解析仅保留历史 checkpoint 与旧 Provider 兼容
+- 已验证：编译通过；限定测试覆盖展示文本变化不影响证据写入、typed negativeFact 清理旧 symbolVersion、尺寸治理与缓存后载荷不丢失，以及新 `search_code` 文本不再包含旧 JSON 标记
+- 未验证：未运行全量测试，未启动项目，未验证旧 checkpoint 的真实跨版本恢复
+- 风险：`ToolSideChannel` 当前只在进程内传递，Runtime 事件和 checkpoint 不持久化完整旁路对象；历史恢复仍依赖旧文本兼容解析
+
 ## 2026-07-14 Multi-Agent 计划协议与空结果可靠性
 
 - 状态：代码与针对性测试已实现，完整 5 任务已复跑；交付可靠性仍未达标
@@ -122,7 +132,7 @@
 - 状态：已实现
 - 来源：第一阶段已拆分 File / Shell / Project / Memory / Snapshot Provider，剩余高耦合工具需要单独阶段处理，避免把可审查改动扩大成难定位的大重构
 - 影响范围：`src/main/java/com/devcli/tool/ToolRegistry.java`、`src/main/java/com/devcli/tool/provider/`、RAG / Web / Browser / Skill / ToolSearch 相关测试
-- 已实现：`ToolSearchProvider` 已迁移 `search_tools` 注册、搜索、缓存复用和 MCP 工具激活逻辑；`WebToolProvider` 已迁移 `web_search` / `web_fetch` 注册、搜索 provider 懒加载、HTTP 抓取、正文抽取和网络策略检查；`BrowserToolProvider` 已迁移 `browser_connect` / `browser_disconnect` / `browser_status` 注册和连接器调用逻辑；`RagToolProvider` 已迁移 `search_code` 注册、按项目路径复用 `CodeRetriever`、索引为空提示、semantic 降级提示、negativeFact 和 `RAG_EVIDENCE_JSON` 载荷；`SkillToolProvider` 已迁移 `load_skill` 注册、`SkillRegistry` 查询、`SkillContextBuffer` 写入、usage 记录、allowedTools 和 context inline/fork 语义；`ToolRegistry` 保留工具目录版本、MCP 动态注册链路和预激活入口
+- 已实现：`ToolSearchProvider` 已迁移 `search_tools` 注册、搜索、缓存复用和 MCP 工具激活逻辑；`WebToolProvider` 已迁移 `web_search` / `web_fetch` 注册、搜索 provider 懒加载、HTTP 抓取、正文抽取和网络策略检查；`BrowserToolProvider` 已迁移 `browser_connect` / `browser_disconnect` / `browser_status` 注册和连接器调用逻辑；`RagToolProvider` 已迁移 `search_code` 注册、按项目路径复用 `CodeRetriever`、索引为空提示、semantic 降级提示、negativeFact 和强类型证据旁路载荷；`SkillToolProvider` 已迁移 `load_skill` 注册、`SkillRegistry` 查询、`SkillContextBuffer` 写入、usage 记录、allowedTools 和 context inline/fork 语义；`ToolRegistry` 保留工具目录版本、MCP 动态注册链路和预激活入口
 - 未实现：无；MCP 动态工具注册链路继续保留在 `ToolRegistry`
 - 约束：继续保留 `ToolRegistry` 作为统一执行入口、审计入口、参数校验入口和状态协调入口；不削弱路径安全、网络策略、浏览器安全策略、RAG 缓存、Skill allowedTools 和 MCP 动态工具可见性控制
 - 建议验证：按拆分对象分别运行 `ToolRegistryTest`、Web / Browser / RAG / Skill 相关针对性测试；不默认运行项目或全量测试
@@ -142,9 +152,9 @@
 - 状态：已实现
 - 来源：用户指出 `stepModifiedFiles` 未进入后续步骤上下文、RAG 证据解析依赖展示文本、长期记忆英文策略和跨层去重存在缺口
 - 影响范围：`src/main/java/com/devcli/agent/`、`src/main/java/com/devcli/rag/`、`src/main/java/com/devcli/memory/`、`src/main/java/com/devcli/tool/`、`AGENTS.md`、`README.md`、`docs/agents-reference.md`
-- 已实现：Multi-Agent 步骤终态把 `stepModifiedFiles` 同步到运行态 `ExecutionStep`、checkpoint 和 WorkingMemory；依赖步骤上下文和 `/team resume` 恢复 completed artifact 时保留修改文件清单；`search_code` 增加结构化 `RAG_EVIDENCE_JSON` 载荷，WorkingMemory 优先读取结构化证据并兼容旧文本；`ToolRegistry` 按项目路径复用 `CodeRetriever` / SQLite 连接；RAG 与 Memory 向量余弦相似度统一；`LongTermMemoryPolicy` 补充英文显式记忆、临时信息、个人属性和新状态规则；长期记忆注入抑制与 WorkingMemory 临时事实语义重复的条目
+- 已实现：Multi-Agent 步骤终态把 `stepModifiedFiles` 同步到运行态 `ExecutionStep`、checkpoint 和 WorkingMemory；依赖步骤上下文和 `/team resume` 恢复 completed artifact 时保留修改文件清单；`search_code` 已将结构化证据迁移到强类型旁路载荷，WorkingMemory 优先读取旁路证据并兼容旧 JSON 与旧展示文本；`ToolRegistry` 按项目路径复用 `CodeRetriever` / SQLite 连接；RAG 与 Memory 向量余弦相似度统一；`LongTermMemoryPolicy` 补充英文显式记忆、临时信息、个人属性和新状态规则；长期记忆注入抑制与 WorkingMemory 临时事实语义重复的条目
 - 验证建议：`mvn -q -DskipTests=false "-Dtest=AgentOrchestratorTest,MemoryManagerTest,LongTermMemoryPolicyTest,SearchResultFormatterTest,VectorStoreTest,ToolRegistryTest" test`
-- 风险：结构化 RAG 载荷仍嵌入工具文本返回；如后续工具执行框架支持 typed result，应迁移为真正的 side-channel 结果对象
+- 风险：已于 2026-07-17 迁移为强类型旁路结果；当前剩余风险是旁路对象只在进程内传递，历史 checkpoint 仍依赖旧文本兼容解析
 
 ## 2026-06-16 公开数据集评测框架
 

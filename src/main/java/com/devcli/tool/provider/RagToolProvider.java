@@ -2,6 +2,7 @@ package com.devcli.tool.provider;
 
 import com.devcli.rag.CodeRetriever;
 import com.devcli.rag.RagEvidencePayload;
+import com.devcli.rag.RagEvidenceSideChannel;
 import com.devcli.rag.SearchResultFormatter;
 import com.devcli.rag.SymbolInvalidation;
 import com.devcli.rag.VectorStore;
@@ -84,31 +85,40 @@ public final class RagToolProvider implements ToolProvider, AutoCloseable {
                 }
                 List<SymbolInvalidation> invalidations =
                         retriever.relevantInvalidations(query, Math.min(topK, 10));
-                String invalidationFacts = SearchResultFormatter.formatInvalidations(invalidations);
-                if (results.isEmpty()) {
-                    if (!invalidationFacts.isBlank()) {
-                        return ToolOutput.success(RagEvidencePayload.appendTo(
-                                invalidationFacts, query, results, invalidations));
-                    }
-                    return ToolOutput.success("未找到与查询相关的代码。");
-                }
-
-                String formatted = SearchResultFormatter.formatForTool(query, results);
-                if (!invalidationFacts.isBlank()) {
-                    formatted = formatted + "\n\n" + invalidationFacts;
-                }
-                if (retriever.lastSemanticDegraded()) {
-                    formatted = "（注意：语义检索服务不可用，本次已降级为关键词+结构化检索，结果可能不完整）\n\n"
-                            + formatted;
-                }
-                return ToolOutput.success(RagEvidencePayload.appendTo(
-                        formatted, query, results, invalidations));
+                return formatSearchResult(query, results, invalidations, retriever.lastSemanticDegraded());
             }
         } catch (Exception e) {
             closeCachedCodeRetriever();
             return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
                     "代码检索失败: " + e.getMessage(), true);
         }
+    }
+
+    static ToolOutput formatSearchResult(String query,
+                                         List<VectorStore.SearchResult> results,
+                                         List<SymbolInvalidation> invalidations,
+                                         boolean semanticDegraded) {
+        List<VectorStore.SearchResult> safeResults = results == null ? List.of() : results;
+        List<SymbolInvalidation> safeInvalidations = invalidations == null ? List.of() : invalidations;
+        String invalidationFacts = SearchResultFormatter.formatInvalidations(safeInvalidations);
+        RagEvidenceSideChannel evidence = new RagEvidenceSideChannel(
+                RagEvidencePayload.fromSearchResults(query, safeResults, safeInvalidations));
+        if (safeResults.isEmpty()) {
+            if (!invalidationFacts.isBlank()) {
+                return ToolOutput.success(invalidationFacts).withSideChannel(evidence);
+            }
+            return ToolOutput.success("未找到与查询相关的代码。");
+        }
+
+        String formatted = SearchResultFormatter.formatForTool(query, safeResults);
+        if (!invalidationFacts.isBlank()) {
+            formatted = formatted + "\n\n" + invalidationFacts;
+        }
+        if (semanticDegraded) {
+            formatted = "（注意：语义检索服务不可用，本次已降级为关键词+结构化检索，结果可能不完整）\n\n"
+                    + formatted;
+        }
+        return ToolOutput.success(formatted).withSideChannel(evidence);
     }
 
     private synchronized CodeRetriever getCodeRetriever(String projectPath) throws Exception {

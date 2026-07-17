@@ -42,6 +42,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
@@ -129,6 +130,7 @@ public class SubAgent {
     private Supplier<String> workingMemorySupplier = () -> "";
     private Supplier<String> postCompactRestoreSupplier = () -> "";
     private TriConsumer<String, String, String> toolResultConsumer = (name, args, result) -> {};
+    private Consumer<ToolExecutionResult> structuredToolResultConsumer = result -> {};
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private final ConversationHistoryCompactor historyCompactor;
@@ -187,6 +189,10 @@ public class SubAgent {
 
     public void setToolResultConsumer(TriConsumer<String, String, String> toolResultConsumer) {
         this.toolResultConsumer = toolResultConsumer == null ? (name, args, result) -> {} : toolResultConsumer;
+    }
+
+    public void setStructuredToolResultConsumer(Consumer<ToolExecutionResult> toolResultConsumer) {
+        this.structuredToolResultConsumer = toolResultConsumer == null ? result -> {} : toolResultConsumer;
     }
 
     public void setSkillRegistry(SkillRegistry skillRegistry) {
@@ -554,6 +560,7 @@ public class SubAgent {
                             executionEvidence.get().add(toolResult);
                             toolResultConsumer.accept(
                                     toolResult.name(), toolResult.argumentsJson(), toolResult.result());
+                            structuredToolResultConsumer.accept(toolResult);
                         }
                         appendImageToolMessages(history, toolResults);
                     }

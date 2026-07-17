@@ -10,9 +10,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Machine-readable RAG evidence payload embedded in search_code tool results.
+ * Machine-readable RAG evidence payload.
  *
- * <p>The human-readable formatter can change freely; WorkingMemory reads only this stable JSON contract.
+ * <p>New tool executions transport this payload through {@link RagEvidenceSideChannel}. JSON extraction
+ * remains only for historical tool results and checkpoints created before the typed channel migration.
  */
 public final class RagEvidencePayload {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -22,10 +23,11 @@ public final class RagEvidencePayload {
     private RagEvidencePayload() {
     }
 
+    @Deprecated
     public static String appendTo(String visibleText, String query,
                                   List<VectorStore.SearchResult> results,
                                   List<SymbolInvalidation> invalidations) {
-        Payload payload = from(query, results, invalidations);
+        Payload payload = fromSearchResults(query, results, invalidations);
         if (payload.evidence().isEmpty() && payload.negativeFacts().isEmpty()) {
             return visibleText == null ? "" : visibleText;
         }
@@ -64,8 +66,8 @@ public final class RagEvidencePayload {
         }
     }
 
-    private static Payload from(String query, List<VectorStore.SearchResult> results,
-                                List<SymbolInvalidation> invalidations) {
+    public static Payload fromSearchResults(String query, List<VectorStore.SearchResult> results,
+                                            List<SymbolInvalidation> invalidations) {
         List<Evidence> evidence = new ArrayList<>();
         if (results != null) {
             for (VectorStore.SearchResult result : results) {

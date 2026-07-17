@@ -2,6 +2,7 @@ package com.devcli.memory;
 
 import com.devcli.llm.LlmClient;
 import com.devcli.context.ContextProfile;
+import com.devcli.tool.ToolSideChannel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -135,15 +136,20 @@ public class MemoryManager implements AutoCloseable {
      * 在这里以原文形式保留，作为 system prompt "## 最近工具调用证据" 段注入 LLM。
      */
     public void addToolResult(String toolName, String result) {
-        addToolResult(toolName, "", result);
+        addToolResult(toolName, "", result, List.of());
     }
 
     /**
      * 带 args 的版本：让 LLM 能识别"刚刚 read_file 读的是哪个路径"。
      */
     public void addToolResult(String toolName, String argsJson, String result) {
+        addToolResult(toolName, argsJson, result, List.of());
+    }
+
+    public void addToolResult(String toolName, String argsJson, String result,
+                              List<ToolSideChannel> sideChannels) {
         if (toolName == null || result == null) return;
-        workingMemory.recordToolResult(toolName, argsJson, result);
+        workingMemory.recordToolResult(toolName, argsJson, result, sideChannels);
     }
 
     /** 设置任务状态（plan_task / react_iteration / last_error 等）。 */

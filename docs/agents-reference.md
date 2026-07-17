@@ -186,7 +186,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - WorkingMemory 的恢复段不复用完整 system prompt 视图，而是按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 输出短结构化上下文
 - Agent / PlanExecuteAgent / SubAgent 会在恢复段追加 MCP 工具状态和本地 SkillContextBuffer 的已加载 Skill、context、allowedTools 与内容摘要
 - 恢复段通过 `PostCompactRestoreContext` 做统一预算控制和行级去重；SubAgent 恢复区使用 Planner / Worker / Reviewer 角色视图裁剪，Planner 不携带工具证据，Reviewer 不携带会话临时事件
-- RAG 证据从 `search_code` 的结构化 `RAG_EVIDENCE_JSON` 载荷进入 WorkingMemory；旧文本格式仅作兼容解析，展示文本变化不应影响证据抽取和 negativeFact 清理。
+- RAG 证据从 `search_code` 的工具结果强类型旁路载荷进入 WorkingMemory；尺寸治理、只读结果缓存和批量执行结果都会保留该载荷。展示文本不再嵌入结构化 JSON；旧 JSON 与旧展示文本只用于历史兼容，typed negativeFact 仍会即时清理旧 symbolVersion。
 
 ### MicroCompact
 

@@ -728,7 +728,8 @@ public class PlanExecuteAgent {
                                     "resultPreview", preview(toolResult.result(), 300)
                             ));
                             memoryManager.addToolResult(
-                                    toolResult.name(), toolResult.argumentsJson(), toolResult.result());
+                                    toolResult.name(), toolResult.argumentsJson(), toolResult.result(),
+                                    toolResult.sideChannels());
                             allResults.append(toolResult.result()).append("\n");
                         }
                         appendImageToolMessages(messages, toolResults);

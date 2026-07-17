@@ -889,7 +889,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         String managedText = ToolResultSizeManager.process(
                 name, invocationId, projectPath, normalized.hasImageParts(), normalized.text());
         return new ToolOutput(normalized.status(), normalized.errorCode(), normalized.retryable(),
-                managedText, normalized.imageParts(), normalized.modifiedResources());
+                managedText, normalized.imageParts(), normalized.modifiedResources(), normalized.sideChannels());
     }
 
     private ToolOutput executeWithAudit(ToolExecutionPipeline.Context context,
@@ -1297,7 +1297,22 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public record ToolExecutionResult(String id, String name, String argumentsJson,
                                       String result, long elapsedMillis,
                                       ToolStatus status, ToolErrorCode errorCode, boolean retryable,
-                                      List<com.devcli.llm.LlmClient.ContentPart> imageParts) {
+                                      List<com.devcli.llm.LlmClient.ContentPart> imageParts,
+                                      List<ToolSideChannel> sideChannels) {
+        public ToolExecutionResult {
+            imageParts = imageParts == null ? List.of() : List.copyOf(imageParts);
+            sideChannels = sideChannels == null ? List.of() : List.copyOf(sideChannels);
+        }
+
+        /** 兼容迁移前的工具执行结果构造方式。 */
+        public ToolExecutionResult(String id, String name, String argumentsJson,
+                                   String result, long elapsedMillis,
+                                   ToolStatus status, ToolErrorCode errorCode, boolean retryable,
+                                   List<com.devcli.llm.LlmClient.ContentPart> imageParts) {
+            this(id, name, argumentsJson, result, elapsedMillis, status, errorCode,
+                    retryable, imageParts, List.of());
+        }
+
         private static ToolExecutionResult completed(ToolInvocation invocation, ToolOutput output,
                                                      long elapsedMillis) {
             String result = output == null ? "" : output.text();
@@ -1311,7 +1326,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                     output == null ? ToolStatus.SUCCESS : output.status(),
                     output == null ? ToolErrorCode.NONE : output.errorCode(),
                     output != null && output.retryable(),
-                    images);
+                    images,
+                    output == null ? List.of() : output.sideChannels());
         }
 
         public static ToolExecutionResult failed(ToolInvocation invocation, String message) {
