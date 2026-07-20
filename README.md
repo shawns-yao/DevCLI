@@ -684,7 +684,7 @@ LLM tool call
 
 - 启动首屏展示模型、MCP、Skill、ReAct 状态和 getting-started tips。
 - 输入行支持 slash 命令、`@path`、`@image:`、敏感词和危险 shell 片段高亮；`/help` 直接显示完整命令列表。
-- ReAct 执行期间可继续输入后续任务：普通文本进入容量为 8 的会话内 FIFO 队列，`/now <任务>` 取消当前轮次并优先执行新任务，`/cancel` 只取消当前轮次；任务结束时未提交的输入会保留为下一次编辑草稿。Plan、Multi-Agent 或启用 HITL 时继续保持单一终端输入所有权，不并发读取审批输入。
+- ReAct 执行期间可继续输入后续任务：普通文本进入容量为 8 的会话内 FIFO 队列，`/now <任务>` 取消当前轮次并优先执行新任务，空闲时直接执行；`/cancel` 只取消当前轮次。取消后最多等待执行线程退出 5 秒，未退出时停止接收新任务，避免两个轮次并发修改会话状态；任务结束时未提交的输入会保留为下一次编辑草稿。Plan、Multi-Agent 或启用 HITL 时继续保持单一终端输入所有权。
 - 底部状态栏显示当前 phase、模型、上下文百分比、token、cost、elapsed、cwd。终端误判为 dumb 时可用 `DEVCLI_TERMINAL_FORCE_ANSI=true` 强制启用。
 - 重定向输入默认使用 UTF-8，旧式 Windows 控制台可通过 `DEVCLI_TERMINAL_ENCODING=GBK` 覆盖。
 - plain 与 inline 审批都复用主 LineReader，避免审批输入与主提示符争抢标准输入。
