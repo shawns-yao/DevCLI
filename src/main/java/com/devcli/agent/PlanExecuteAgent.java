@@ -29,7 +29,6 @@ import com.devcli.image.ImageReferenceParser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
@@ -37,7 +36,6 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.*;
-import java.util.concurrent.*;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -64,30 +62,6 @@ public class PlanExecuteAgent {
     private record TaskRunResult(String result, boolean streamedOutput) {
         static TaskRunResult of(String result, boolean streamedOutput) {
             return new TaskRunResult(result, streamedOutput);
-        }
-    }
-
-    private record TaskExecutionResult(Task task, String result, boolean streamedOutput,
-                                       List<String> modifiedFiles, String resultSummary, Exception error) {
-        private TaskExecutionResult {
-            modifiedFiles = modifiedFiles == null ? List.of() : List.copyOf(modifiedFiles);
-            resultSummary = resultSummary == null ? "" : resultSummary.trim();
-        }
-
-        static TaskExecutionResult success(Task task, TaskRunResult taskRunResult, List<String> modifiedFiles) {
-            String result = taskRunResult == null ? "" : taskRunResult.result();
-            boolean streamedOutput = taskRunResult != null && taskRunResult.streamedOutput();
-            return new TaskExecutionResult(task, result, streamedOutput, modifiedFiles,
-                    summarizeTaskResult(result, modifiedFiles, null), null);
-        }
-
-        static TaskExecutionResult failure(Task task, Exception error, List<String> modifiedFiles) {
-            return new TaskExecutionResult(task, null, false, modifiedFiles,
-                    summarizeTaskResult(null, modifiedFiles, error), error);
-        }
-
-        boolean failed() {
-            return error != null;
         }
     }
 
@@ -400,8 +374,8 @@ public class PlanExecuteAgent {
                 break;
             }
 
-            List<TaskExecutionResult> batchResults = executeTaskBatch(plan, executableTasks, streamState);
-            for (TaskExecutionResult batchResult : batchResults) {
+            List<PlanTaskExecutionResult> batchResults = executeTaskBatch(plan, executableTasks, streamState);
+            for (PlanTaskExecutionResult batchResult : batchResults) {
                 Task task = batchResult.task();
 
                 if (!batchResult.failed()) {
@@ -474,90 +448,20 @@ public class PlanExecuteAgent {
                 .toList();
     }
 
-    private List<TaskExecutionResult> executeTaskBatch(ExecutionPlan plan, List<Task> executableTasks,
-                                                       StreamState streamState) {
-        List<List<Task>> waves = ResourceConflictDetector.splitConflictFree(
-                executableTasks, Task::getId, Task::getDescription, task -> task.getType().name());
-        if (waves.size() > 1) {
-            List<TaskExecutionResult> results = new ArrayList<>();
-            for (List<Task> wave : waves) {
-                results.addAll(executeConflictFreeTaskBatch(plan, wave, streamState));
-            }
-            return results;
-        }
-        return executeConflictFreeTaskBatch(plan, executableTasks, streamState);
+    private List<PlanTaskExecutionResult> executeTaskBatch(ExecutionPlan plan, List<Task> executableTasks,
+                                                           StreamState streamState) {
+        PlanTaskBatchExecutor batchExecutor = new PlanTaskBatchExecutor(
+                out,
+                task -> {
+                    task.markStarted();
+                    memoryManager.startTaskStep(task.getId());
+                },
+                (task, taskOut) -> executeTaskWithArtifact(plan, task, streamState, taskOut),
+                task -> consumeTaskModifiedFiles(task.getId()));
+        return batchExecutor.execute(executableTasks);
     }
 
-    private List<TaskExecutionResult> executeConflictFreeTaskBatch(ExecutionPlan plan, List<Task> executableTasks,
-                                                                   StreamState streamState) {
-        if (executableTasks.size() == 1) {
-            Task task = executableTasks.get(0);
-            log.info("Executing single task: {} type={}", task.getId(), task.getType());
-            out.println("▶️ 执行任务 [" + task.getId() + "]: " + task.getDescription());
-            task.markStarted();
-            memoryManager.startTaskStep(task.getId());
-
-            return List.of(executeTaskWithArtifact(plan, task, streamState, out));
-        }
-
-        String parallelTaskIds = executableTasks.stream()
-                .map(Task::getId)
-                .collect(Collectors.joining(", "));
-        log.info("Executing parallel batch: {}", parallelTaskIds);
-        out.println("⚡ 本轮并行执行 " + executableTasks.size() + " 个任务: " + parallelTaskIds);
-
-        ExecutorService executor = Executors.newFixedThreadPool(Math.min(executableTasks.size(), 4), r -> {
-            Thread t = new Thread(r, "devcli-plan-executor");
-            t.setDaemon(true);
-            return t;
-        });
-        try {
-            Map<String, ByteArrayOutputStream> buffers = new LinkedHashMap<>();
-            List<Future<TaskExecutionResult>> futures = new ArrayList<>();
-            for (Task task : executableTasks) {
-                out.println("▶️ 并行任务 [" + task.getId() + "]: " + task.getDescription());
-                task.markStarted();
-                memoryManager.startTaskStep(task.getId());
-                ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                buffers.put(task.getId(), baos);
-                PrintStream taskOut = new PrintStream(baos, true, StandardCharsets.UTF_8);
-                futures.add(executor.submit(() -> executeTaskWithArtifact(plan, task, streamState, taskOut)));
-            }
-
-            List<TaskExecutionResult> results = new ArrayList<>();
-            for (Future<TaskExecutionResult> future : futures) {
-                try {
-                    results.add(future.get());
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    Task task = executableTasks.get(results.size());
-                    results.add(TaskExecutionResult.failure(task, e, consumeTaskModifiedFiles(task.getId())));
-                } catch (ExecutionException e) {
-                    Throwable cause = e.getCause();
-                    Exception error = cause instanceof Exception exception
-                            ? exception
-                            : new RuntimeException(cause);
-                    Task task = executableTasks.get(results.size());
-                    results.add(TaskExecutionResult.failure(task, error, consumeTaskModifiedFiles(task.getId())));
-                }
-            }
-
-            // 按任务顺序 flush 各缓冲区到 stdout，避免并行输出交错
-            for (Task task : executableTasks) {
-                ByteArrayOutputStream buf = buffers.get(task.getId());
-                if (buf != null && buf.size() > 0) {
-                    out.print(buf.toString(StandardCharsets.UTF_8));
-                    out.flush();
-                }
-            }
-
-            return results;
-        } finally {
-            executor.shutdownNow();
-        }
-    }
-
-    private TaskExecutionResult executeTaskWithArtifact(ExecutionPlan plan, Task task,
+    private PlanTaskExecutionResult executeTaskWithArtifact(ExecutionPlan plan, Task task,
                                                         StreamState streamState, PrintStream out) {
         PlanTaskWorkspaceExecutor.Execution<TaskRunResult> execution =
                 taskWorkspaceExecutor.execute(
@@ -573,11 +477,12 @@ public class PlanExecuteAgent {
                             }
                         });
         if (execution.failed()) {
-            return TaskExecutionResult.failure(
+            return PlanTaskExecutionResult.failure(
                     task, execution.error(), execution.modifiedFiles());
         }
-        return TaskExecutionResult.success(
-                task, execution.value(), execution.modifiedFiles());
+        TaskRunResult taskResult = execution.value();
+        return PlanTaskExecutionResult.success(
+                task, taskResult.result(), taskResult.streamedOutput(), execution.modifiedFiles());
     }
 
     private List<String> consumeTaskModifiedFiles(String taskId) {
@@ -851,78 +756,6 @@ public class PlanExecuteAgent {
             return normalized;
         }
         return normalized.substring(0, maxLength) + "...";
-    }
-
-    private static String summarizeTaskResult(String result, List<String> modifiedFiles, Exception error) {
-        List<String> files = modifiedFiles == null ? List.of() : modifiedFiles;
-        if (error != null) {
-            String errorMessage = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
-            if (!files.isEmpty()) {
-                return compactText("任务失败，已产生部分文件修改：" + joinLimitedFiles(files)
-                        + "；错误：" + errorMessage, 300);
-            }
-            return compactText("任务失败：" + errorMessage, 300);
-        }
-
-        String conclusion = extractTaskConclusion(result);
-        if (!conclusion.isBlank()) {
-            return compactText(conclusion, 300);
-        }
-        if (!files.isEmpty()) {
-            return compactText("任务已完成，修改文件：" + joinLimitedFiles(files), 300);
-        }
-        return "任务已完成，未返回文本结论";
-    }
-
-    private static String extractTaskConclusion(String result) {
-        if (result == null || result.isBlank()) {
-            return "";
-        }
-        String normalized = result.replace("\r\n", "\n").replace('\r', '\n')
-                .replaceAll("(?s)```.*?```", " ")
-                .replaceAll("\\s+", " ")
-                .trim();
-        if (normalized.isBlank()) {
-            return "";
-        }
-        String[] parts = normalized.split("(?<=[。！？.!?])\\s+");
-        List<String> sentences = new ArrayList<>();
-        for (String part : parts) {
-            String sentence = part.trim();
-            if (!sentence.isBlank()) {
-                sentences.add(sentence);
-            }
-        }
-        if (sentences.isEmpty()) {
-            return normalized;
-        }
-        int start = Math.max(0, sentences.size() - 2);
-        return String.join(" ", sentences.subList(start, sentences.size())).trim();
-    }
-
-    private static String joinLimitedFiles(List<String> files) {
-        if (files == null || files.isEmpty()) {
-            return "";
-        }
-        int limit = Math.min(files.size(), 6);
-        String joined = String.join(", ", files.subList(0, limit));
-        if (files.size() > limit) {
-            joined += " 等 " + files.size() + " 个文件";
-        }
-        return joined;
-    }
-
-    private static String compactText(String value, int maxLength) {
-        if (value == null) {
-            return "";
-        }
-        String normalized = value.replace("\r\n", " ").replace('\r', ' ').replace('\n', ' ')
-                .replaceAll("\\s+", " ")
-                .trim();
-        if (normalized.length() <= maxLength) {
-            return normalized;
-        }
-        return normalized.substring(0, Math.max(0, maxLength - 3)) + "...";
     }
 
     private List<ToolExecutionResult> executeToolCalls(String taskId, List<LlmClient.ToolCall> toolCalls) {

@@ -276,7 +276,7 @@ CLI 入口 / Banner / .env 读取 / 日志初始化 / 模式切换 / JLine raw m
 ReAct 主循环 / 对话历史 / 工具调用与结果回灌
 
 ### PlanExecuteAgent.java
-规划后执行 / 计划审阅 / DAG 任务执行 / 并行批次 / 失败重规划；任务能力范围、隔离工作区、资源租约和 PatchSet 生命周期委托给 `PlanTaskWorkspaceExecutor`
+规划后执行 / 计划审阅 / DAG 状态推进 / 失败重规划；冲突分波、并行调度和顺序输出归并委托给 `PlanTaskBatchExecutor`，结果摘要由 `PlanTaskExecutionResult` 统一生成，任务能力范围、隔离工作区、资源租约和 PatchSet 生命周期委托给 `PlanTaskWorkspaceExecutor`
 
 ### AgentOrchestrator.java
 Multi-Agent 编排器 / 三角色管理 / 按依赖分配 / 审查重试；PatchSet、checkpoint 写前日志、终态持久化和恢复对账委托给 `WorkspaceCommitCoordinator`
