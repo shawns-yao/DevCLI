@@ -27,9 +27,15 @@ public final class LlmRetryExecutor {
         Sleeper effectiveSleeper = sleeper == null ? Thread::sleep : sleeper;
         LlmException last = null;
         for (int attempt = 1; attempt <= effectivePolicy.maxAttempts(); attempt++) {
+            if (SamplingRequestCoordinator.isCurrentCancelled()) {
+                throw cancelled(provider, model, null);
+            }
             try {
                 return operation.get();
             } catch (IOException error) {
+                if (SamplingRequestCoordinator.isCurrentCancelled()) {
+                    throw cancelled(provider, model, error);
+                }
                 last = LlmErrors.normalize(provider, model, error);
                 if (!last.retryable() || attempt >= effectivePolicy.maxAttempts()) {
                     throw last;
@@ -41,8 +47,7 @@ public final class LlmRetryExecutor {
                     effectiveSleeper.sleep(delay);
                 } catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
-                    throw new LlmException(LlmErrorCode.NETWORK, provider, model, 0,
-                            "LLM retry interrupted", false, 0L, interrupted);
+                    throw cancelled(provider, model, interrupted);
                 }
             }
         }
@@ -50,5 +55,10 @@ public final class LlmRetryExecutor {
                 ? new LlmException(LlmErrorCode.UNKNOWN, provider, model, 0,
                 "LLM request failed without error", false, 0L, null)
                 : last;
+    }
+
+    private static LlmException cancelled(String provider, String model, Throwable cause) {
+        return new LlmException(LlmErrorCode.CANCELLED, provider, model, 0,
+                "LLM request cancelled", false, 0L, cause);
     }
 }

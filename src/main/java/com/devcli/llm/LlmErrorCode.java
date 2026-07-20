@@ -11,5 +11,6 @@ public enum LlmErrorCode {
     CONTENT_FILTER,
     SERVER_ERROR,
     MALFORMED_RESPONSE,
+    CANCELLED,
     UNKNOWN
 }

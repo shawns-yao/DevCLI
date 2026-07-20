@@ -3,7 +3,9 @@ package com.devcli.agent;
 import com.devcli.hook.HookDispatcher;
 import com.devcli.hook.HookLifecycle;
 import com.devcli.llm.LlmClient;
+import com.devcli.llm.SamplingRequestCoordinator;
 import com.devcli.runtime.CancellationContext;
+import com.devcli.runtime.RunContext;
 import com.devcli.runtime.event.RunEvent;
 import com.devcli.runtime.event.RunEventSink;
 import com.devcli.runtime.event.RunEventStreamListener;
@@ -13,6 +15,7 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
 
 /**
  * ReAct、Plan task 和 SubAgent 共用的单轮 LLM/工具循环。
@@ -92,15 +95,23 @@ final class AgentExecutionEngine<R> {
     private final LlmClient llmClient;
     private final AgentBudget budget;
     private final HookLifecycle hookLifecycle;
+    private final SamplingRequestCoordinator samplingRequests;
+    private final String engineId = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
 
     AgentExecutionEngine(LlmClient llmClient, AgentBudget budget) {
-        this(llmClient, budget, null);
+        this(llmClient, budget, null, SamplingRequestCoordinator.shared());
     }
 
     AgentExecutionEngine(LlmClient llmClient, AgentBudget budget, HookLifecycle hookLifecycle) {
+        this(llmClient, budget, hookLifecycle, SamplingRequestCoordinator.shared());
+    }
+
+    AgentExecutionEngine(LlmClient llmClient, AgentBudget budget, HookLifecycle hookLifecycle,
+                         SamplingRequestCoordinator samplingRequests) {
         this.llmClient = Objects.requireNonNull(llmClient, "llmClient");
         this.budget = Objects.requireNonNull(budget, "budget");
         this.hookLifecycle = hookLifecycle;
+        this.samplingRequests = Objects.requireNonNull(samplingRequests, "samplingRequests");
     }
 
     R run(Delegate<R> delegate) {
@@ -165,11 +176,15 @@ final class AgentExecutionEngine<R> {
                 RunEventSink eventSink = RunEventSink.composite(
                         delegate.eventSink(),
                         RunEventSink.fromStreamListener(delegate.streamListener()));
-                LlmClient.ChatResponse response = llmClient.chat(
-                        delegate.history(),
-                        delegate.toolDefinitions(iteration),
-                        new RunEventStreamListener(eventSink),
-                        delegate.toolChoice(iteration));
+                LlmClient.ChatResponse response;
+                try (SamplingRequestCoordinator.RequestScope ignored =
+                             samplingRequests.begin(samplingRequestId(iteration))) {
+                    response = llmClient.chat(
+                            delegate.history(),
+                            delegate.toolDefinitions(iteration),
+                            new RunEventStreamListener(eventSink),
+                            delegate.toolChoice(iteration));
+                }
                 if (delegate.isCancelled()) {
                     return delegate.cancelled(budget);
                 }
@@ -238,5 +253,11 @@ final class AgentExecutionEngine<R> {
                 return delegate.failed(e, budget);
             }
         }
+    }
+
+    private String samplingRequestId(int iteration) {
+        RunContext runContext = CancellationContext.currentRun();
+        String runId = runContext == null ? "local" : runContext.runId();
+        return runId + ":engine_" + engineId + ":iteration_" + iteration;
     }
 }

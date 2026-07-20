@@ -58,6 +58,25 @@ class LlmRetryExecutorTest {
     }
 
     @Test
+    void cancelledSamplingRequestDoesNotEnterRetryLoop() {
+        SamplingRequestCoordinator coordinator = new SamplingRequestCoordinator();
+        AtomicInteger calls = new AtomicInteger();
+        try (SamplingRequestCoordinator.RequestScope scope = coordinator.begin("cancelled")) {
+            coordinator.cancel(scope.requestId());
+
+            LlmException error = assertThrows(LlmException.class, () -> LlmRetryExecutor.execute(
+                    "openai", "model", new LlmRetryPolicy(3, 1, 4, 0.0),
+                    millis -> { }, () -> {
+                        calls.incrementAndGet();
+                        return "unexpected";
+                    }));
+
+            assertEquals(LlmErrorCode.CANCELLED, error.code());
+            assertEquals(0, calls.get());
+        }
+    }
+
+    @Test
     void mapsTransportIOExceptionToRetryableNetworkError() {
         LlmException error = LlmErrors.normalize(
                 "deepseek", "model", new IOException("connection reset"));

@@ -2,6 +2,7 @@ package com.devcli.agent;
 
 import com.devcli.llm.GLMClient;
 import com.devcli.llm.LlmClient;
+import com.devcli.llm.SamplingRequestCoordinator;
 import com.devcli.runtime.event.RunEvent;
 import com.devcli.runtime.event.RunEventSink;
 import com.devcli.tool.ToolErrorCode;
@@ -42,6 +43,20 @@ class AgentExecutionEngineTest {
         assertEquals(List.of(LlmClient.ToolChoice.REQUIRED, LlmClient.ToolChoice.AUTO), llm.toolChoices);
         assertEquals(List.of(RunEvent.ToolCalls.class, RunEvent.ToolResults.class),
                 delegate.runEvents.stream().map(Object::getClass).toList());
+    }
+
+    @Test
+    void registersAndCleansSamplingRequestAroundEachModelCall() {
+        SamplingRequestCoordinator coordinator = new SamplingRequestCoordinator();
+        ScriptedClient llm = new ScriptedClient(List.of(
+                new LlmClient.ChatResponse("assistant", "done", null, null, 1, 1)
+        ), () -> assertEquals(1, coordinator.activeCount()));
+
+        String result = new AgentExecutionEngine<String>(
+                llm, new AgentBudget(100, 2, 1), null, coordinator).run(new RecordingDelegate());
+
+        assertEquals("done", result);
+        assertEquals(0, coordinator.activeCount());
     }
 
     @Test
@@ -160,10 +175,16 @@ class AgentExecutionEngineTest {
     private static final class ScriptedClient extends GLMClient {
         private final Iterator<LlmClient.ChatResponse> responses;
         private final List<LlmClient.ToolChoice> toolChoices = new ArrayList<>();
+        private final Runnable beforeResponse;
 
         private ScriptedClient(List<LlmClient.ChatResponse> responses) {
+            this(responses, () -> { });
+        }
+
+        private ScriptedClient(List<LlmClient.ChatResponse> responses, Runnable beforeResponse) {
             super("test-key");
             this.responses = responses.iterator();
+            this.beforeResponse = beforeResponse;
         }
 
         @Override
@@ -175,6 +196,7 @@ class AgentExecutionEngineTest {
         public ChatResponse chat(List<Message> messages, List<Tool> tools,
                                  StreamListener listener, LlmClient.ToolChoice toolChoice) throws IOException {
             toolChoices.add(toolChoice);
+            beforeResponse.run();
             if (!responses.hasNext()) {
                 throw new IOException("script exhausted");
             }
