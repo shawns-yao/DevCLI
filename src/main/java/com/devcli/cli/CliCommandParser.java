@@ -7,6 +7,7 @@ final class CliCommandParser {
         UNKNOWN_COMMAND,
         HELP,
         CANCEL,
+        RUN_NOW,
         EXIT,
         CLEAR,
         HISTORY_CLEAR,
@@ -76,6 +77,14 @@ final class CliCommandParser {
 
         if (trimmed.equalsIgnoreCase("/cancel") || trimmed.equalsIgnoreCase("cancel")) {
             return new ParsedCommand(CommandType.CANCEL, null);
+        }
+
+        if (trimmed.equalsIgnoreCase("/now")) {
+            return new ParsedCommand(CommandType.RUN_NOW, null);
+        }
+
+        if (trimmed.regionMatches(true, 0, "/now ", 0, 5)) {
+            return new ParsedCommand(CommandType.RUN_NOW, trimmed.substring(5).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/clear") || trimmed.equalsIgnoreCase("clear")) {

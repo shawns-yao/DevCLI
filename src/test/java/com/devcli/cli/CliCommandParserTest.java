@@ -337,6 +337,17 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesRunNowCommandWithAndWithoutPayload() {
+        CliCommandParser.ParsedCommand empty = CliCommandParser.parse("/now");
+        CliCommandParser.ParsedCommand task = CliCommandParser.parse("/now 修复当前问题");
+
+        assertEquals(CliCommandParser.CommandType.RUN_NOW, empty.type());
+        assertNull(empty.payload());
+        assertEquals(CliCommandParser.CommandType.RUN_NOW, task.type());
+        assertEquals("修复当前问题", task.payload());
+    }
+
+    @Test
     void parsesSkillListCommand() {
         assertEquals(CliCommandParser.CommandType.SKILL_LIST, CliCommandParser.parse("/skill").type());
         assertEquals(CliCommandParser.CommandType.SKILL_LIST, CliCommandParser.parse("/skill list").type());

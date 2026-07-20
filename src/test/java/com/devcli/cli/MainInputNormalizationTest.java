@@ -173,6 +173,8 @@ class MainInputNormalizationTest {
                 .toList();
 
         assertTrue(commands.contains("/help"));
+        assertTrue(commands.contains("/now <任务内容>"));
+        assertTrue(commands.contains("/cancel"));
         assertTrue(commands.contains("/index [路径]"));
         assertTrue(commands.contains("/search <查询>"));
         assertTrue(commands.contains("/graph <类名>"));

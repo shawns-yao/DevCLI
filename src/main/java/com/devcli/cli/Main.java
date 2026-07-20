@@ -12,6 +12,7 @@ import com.devcli.config.DevCliConfig;
 import com.devcli.cli.turn.ActiveTurnCoordinator;
 import com.devcli.cli.turn.ActiveTurnInput;
 import com.devcli.cli.turn.PromptQueue;
+import com.devcli.cli.turn.TurnExecutionGuard;
 import com.devcli.hitl.HitlHandler;
 import com.devcli.hitl.HitlToolRegistry;
 import com.devcli.hitl.SwitchableHitlHandler;
@@ -121,6 +122,7 @@ public class Main {
     private static final String APP_ARROW_DOWN = "OB";
     private static final int CTRL_O = 15;
     private static final int ACTIVE_PROMPT_QUEUE_CAPACITY = 8;
+    private static final long CANCEL_QUIESCE_TIMEOUT_SECONDS = 5;
     private static final String DEFAULT_CHROME_DEVTOOLS_MCP_JSON = """
             {
               "mcpServers": {
@@ -163,9 +165,9 @@ public class Main {
         }
     }
 
-    private record TurnRunResult(String response, String draft) {
+    private record TurnRunResult(String response, String draft, boolean executionQuiesced) {
         static TurnRunResult completed(String response) {
-            return new TurnRunResult(response, "");
+            return new TurnRunResult(response, "", true);
         }
     }
 
@@ -430,6 +432,13 @@ public class Main {
                     case CANCEL -> {
                         ui.println("当前没有正在运行的任务。\n");
                         continue;
+                    }
+                    case RUN_NOW -> {
+                        if (command.payload() == null || command.payload().isBlank()) {
+                            ui.println("当前没有正在运行的任务。\n");
+                            continue;
+                        }
+                        input = command.payload();
                     }
                     case CLEAR -> {
                         reactAgent.clearHistory();
@@ -800,6 +809,10 @@ public class Main {
                     ui.println(response);
                     ui.println();
                 }
+                if (!turnResult.executionQuiesced()) {
+                    ui.println("取消后执行线程未在限定时间内退出，为避免上下文并发写入，DevCLI 已停止接收新任务。");
+                    break;
+                }
             }
             ui.println("\n👋 再见!");
             reactAgent.close();
@@ -877,16 +890,13 @@ public class Main {
             return thread;
         });
         AtomicBoolean taskCompleted = new AtomicBoolean(false);
-        Future<String> future = executor.submit(() -> {
-            try {
-                return task.call();
-            } finally {
-                taskCompleted.set(true);
-                if (acceptActiveTurnInput) {
-                    wakeActiveTurnReader(terminal, lineReader);
-                }
+        TurnExecutionGuard executionGuard = new TurnExecutionGuard();
+        Future<String> future = executor.submit(executionGuard.wrap(task, () -> {
+            taskCompleted.set(true);
+            if (acceptActiveTurnInput) {
+                wakeActiveTurnReader(terminal, lineReader);
             }
-        });
+        }));
         Attributes original = null;
         String draft = "";
         Runnable cancelCurrent = () -> {
@@ -905,7 +915,7 @@ public class Main {
                 while (!future.isDone()) {
                     if (original != null && readEscCancel(terminal)) {
                         cancelCurrent.run();
-                        return TurnRunResult.completed("⏹️ 已请求取消当前任务。");
+                        return cancelledTurn("⏹️ 已请求取消当前任务。", executionGuard);
                     }
                     try {
                         return TurnRunResult.completed(future.get(150, TimeUnit.MILLISECONDS));
@@ -928,10 +938,10 @@ public class Main {
                         break;
                     }
                     cancelCurrent.run();
-                    return TurnRunResult.completed("⏹️ 已请求取消当前任务。");
+                    return cancelledTurn("⏹️ 已请求取消当前任务。", executionGuard);
                 } catch (EndOfFileException e) {
                     cancelCurrent.run();
-                    return TurnRunResult.completed("⏹️ 已请求取消当前任务。");
+                    return cancelledTurn("⏹️ 已请求取消当前任务。", executionGuard);
                 } finally {
                     renderer.afterInput();
                 }
@@ -952,19 +962,19 @@ public class Main {
                     continue;
                 }
                 if (submission.action() == ActiveTurnInput.Action.INTERRUPT) {
-                    return new TurnRunResult("⏹️ 已取消当前任务，将立即执行新任务。", "");
+                    return cancelledTurn("⏹️ 已取消当前任务，将立即执行新任务。", executionGuard);
                 }
                 if (submission.action() == ActiveTurnInput.Action.CANCEL) {
                     return TurnRunResult.completed("⏹️ 已请求取消当前任务。");
                 }
             }
-            return new TurnRunResult(future.get(), draft);
+            return new TurnRunResult(future.get(), draft, true);
         } catch (CancellationException e) {
-            return TurnRunResult.completed("⏹️ 已取消当前任务。");
+            return cancelledTurn("⏹️ 已取消当前任务。", executionGuard);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             cancelCurrent.run();
-            return TurnRunResult.completed("⏹️ 已取消当前任务。");
+            return cancelledTurn("⏹️ 已取消当前任务。", executionGuard);
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
             String message = cause == null || cause.getMessage() == null ? "未知错误" : cause.getMessage();
@@ -979,6 +989,11 @@ public class Main {
             runContext.close();
             executor.shutdownNow();
         }
+    }
+
+    private static TurnRunResult cancelledTurn(String response, TurnExecutionGuard executionGuard) {
+        boolean stopped = executionGuard.awaitStopped(Duration.ofSeconds(CANCEL_QUIESCE_TIMEOUT_SECONDS));
+        return new TurnRunResult(response, "", stopped);
     }
 
     private static void wakeActiveTurnReader(Terminal terminal, LineReader lineReader) {
@@ -1381,6 +1396,8 @@ public class Main {
                 new SlashCommandHint("/model deepseek", "/model deepseek", "切换到 DeepSeek（读取配置模型）"),
                 new SlashCommandHint("/model step", "/model step", "切换到 StepFun（读取配置模型）"),
                 new SlashCommandHint("/model kimi", "/model kimi", "切换到 Kimi（读取配置模型）"),
+                new SlashCommandHint("/now ", "/now <任务内容>", "中断活动轮次并优先执行；空闲时直接执行"),
+                new SlashCommandHint("/cancel", "/cancel", "取消当前活动轮次"),
                 new SlashCommandHint("/plan", "/plan", "下一条任务使用 Plan-and-Execute 模式"),
                 new SlashCommandHint("/plan ", "/plan <任务内容>", "直接用计划模式执行这条任务"),
                 new SlashCommandHint("/team", "/team", "下一条任务使用 Multi-Agent 协作模式"),
