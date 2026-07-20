@@ -9,6 +9,9 @@ import com.devcli.browser.BrowserGuard;
 import com.devcli.browser.BrowserSession;
 import com.devcli.browser.SensitivePagePolicy;
 import com.devcli.config.DevCliConfig;
+import com.devcli.cli.turn.ActiveTurnCoordinator;
+import com.devcli.cli.turn.ActiveTurnInput;
+import com.devcli.cli.turn.PromptQueue;
 import com.devcli.hitl.HitlHandler;
 import com.devcli.hitl.HitlToolRegistry;
 import com.devcli.hitl.SwitchableHitlHandler;
@@ -83,6 +86,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -116,6 +120,7 @@ public class Main {
     private static final String APP_ARROW_UP = "OA";
     private static final String APP_ARROW_DOWN = "OB";
     private static final int CTRL_O = 15;
+    private static final int ACTIVE_PROMPT_QUEUE_CAPACITY = 8;
     private static final String DEFAULT_CHROME_DEVTOOLS_MCP_JSON = """
             {
               "mcpServers": {
@@ -155,6 +160,12 @@ public class Main {
 
         static PrefillResult seed(String seedBuffer) {
             return new PrefillResult(seedBuffer, false, false);
+        }
+    }
+
+    private record TurnRunResult(String response, String draft) {
+        static TurnRunResult completed(String response) {
+            return new TurnRunResult(response, "");
         }
     }
 
@@ -331,6 +342,8 @@ public class Main {
             }
             boolean nextTaskUsePlanMode = false;
             boolean nextTaskUseTeamMode = false;
+            ActiveTurnCoordinator activeTurnCoordinator = new ActiveTurnCoordinator(ACTIVE_PROMPT_QUEUE_CAPACITY);
+            String pendingDraft = "";
 
             // === TUI / CLI 分支判断 ===
             // 旧 DEVCLI_TUI=true 路径仍走 Lanterna 全屏 TUI（Day 5 后由 LanternaRenderer 接管）。
@@ -362,9 +375,15 @@ public class Main {
 
             while (true) {
                 PromptInput promptInput;
+                PromptQueue.Entry queuedPrompt = activeTurnCoordinator.poll().orElse(null);
                 try {
-                    promptInput = readPromptInput(terminal, lineReader, renderer,
-                            nextTaskUsePlanMode || nextTaskUseTeamMode, spaciousPrompt);
+                    if (queuedPrompt != null) {
+                        promptInput = PromptInput.submitted(queuedPrompt.text());
+                    } else {
+                        promptInput = readPromptInput(terminal, lineReader, renderer,
+                                nextTaskUsePlanMode || nextTaskUseTeamMode, spaciousPrompt, pendingDraft);
+                        pendingDraft = "";
+                    }
                 } catch (UserInterruptException e) {
                     continue;  // Ctrl+C 跳过
                 } catch (EndOfFileException e) {
@@ -761,10 +780,17 @@ public class Main {
                 }
                 SnapshotService snapshotService = reactAgent.getToolRegistry().getSnapshotService();
                 renderer.updateStatus(statusInfo(llmClient, hitlHandler, snapshotMode, mcpServerManager, skillRegistry));
-                String response = runWithCancelSupport(terminal,
+                boolean acceptActiveTurnInput = "react".equals(snapshotMode) && !hitlHandler.isEnabled();
+                TurnRunResult turnResult = runWithCancelSupport(terminal,
+                        lineReader,
+                        renderer,
                         ui,
                         Path.of(reactAgent.getToolRegistry().getProjectPath()),
+                        activeTurnCoordinator,
+                        acceptActiveTurnInput,
                         () -> snapshotService.runTurn(snapshotMode, taskInput, runTask::call));
+                String response = turnResult.response();
+                pendingDraft = turnResult.draft();
                 if (!"react".equals(snapshotMode)) {
                     renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
                 }
@@ -835,8 +861,14 @@ public class Main {
         return null;
     }
 
-    private static String runWithCancelSupport(Terminal terminal, PrintStream out,
-                                               Path projectPath, Callable<String> task) {
+    private static TurnRunResult runWithCancelSupport(Terminal terminal,
+                                                      LineReader lineReader,
+                                                      Renderer renderer,
+                                                      PrintStream out,
+                                                      Path projectPath,
+                                                      ActiveTurnCoordinator coordinator,
+                                                      boolean acceptActiveTurnInput,
+                                                      Callable<String> task) {
         RunContext runContext = CancellationContext.startRunContext(projectPath);
         CancellationToken token = runContext.cancellationToken();
         ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
@@ -844,42 +876,99 @@ public class Main {
             thread.setDaemon(true);
             return thread;
         });
-        Future<String> future = executor.submit(task);
-        // 进入 raw mode 监听 ESC：raw mode 关 ICANON / ECHO / IEXTEN 但保留 ISIG，所以 Ctrl+C 仍能终止 DevCLI。
+        AtomicBoolean taskCompleted = new AtomicBoolean(false);
+        Future<String> future = executor.submit(() -> {
+            try {
+                return task.call();
+            } finally {
+                taskCompleted.set(true);
+                if (acceptActiveTurnInput) {
+                    wakeActiveTurnReader(terminal, lineReader);
+                }
+            }
+        });
         Attributes original = null;
-        try {
-            if (terminal != null) {
-                try {
-                    original = terminal.enterRawMode();
-                } catch (Exception ignored) {
-                    // raw mode 进入失败（非交互终端等），降级为不监听 ESC，靠 Ctrl+C 退出。
-                }
-            }
-            while (!future.isDone()) {
-                if (original != null && readEscCancel(terminal)) {
-                    token.cancel();
-                    future.cancel(true);
-                    executor.shutdownNow();
-                    return "⏹️ 已请求取消当前任务。";
-                }
-                try {
-                    return future.get(150, TimeUnit.MILLISECONDS);
-                } catch (java.util.concurrent.TimeoutException ignored) {
-                    // 继续监听 ESC
-                }
-            }
-            return future.get();
-        } catch (CancellationException e) {
-            return "⏹️ 已取消当前任务。";
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        String draft = "";
+        Runnable cancelCurrent = () -> {
             token.cancel();
             future.cancel(true);
-            return "⏹️ 已取消当前任务。";
+        };
+        try {
+            if (!acceptActiveTurnInput) {
+                if (terminal != null) {
+                    try {
+                        original = terminal.enterRawMode();
+                    } catch (Exception ignored) {
+                        // 非交互终端保留任务执行，仅关闭按键取消能力。
+                    }
+                }
+                while (!future.isDone()) {
+                    if (original != null && readEscCancel(terminal)) {
+                        cancelCurrent.run();
+                        return TurnRunResult.completed("⏹️ 已请求取消当前任务。");
+                    }
+                    try {
+                        return TurnRunResult.completed(future.get(150, TimeUnit.MILLISECONDS));
+                    } catch (java.util.concurrent.TimeoutException ignored) {
+                        // 继续监听 ESC。
+                    }
+                }
+                return TurnRunResult.completed(future.get());
+            }
+
+            while (!future.isDone()) {
+                String activeInput;
+                renderer.beforeInput();
+                try {
+                    activeInput = lineReader.readLine(renderer.inputPrompt(), renderer.inputRightPrompt(),
+                            (MaskingCallback) null, null);
+                } catch (UserInterruptException e) {
+                    if (taskCompleted.get()) {
+                        draft = e.getPartialLine() == null ? "" : e.getPartialLine();
+                        break;
+                    }
+                    cancelCurrent.run();
+                    return TurnRunResult.completed("⏹️ 已请求取消当前任务。");
+                } catch (EndOfFileException e) {
+                    cancelCurrent.run();
+                    return TurnRunResult.completed("⏹️ 已请求取消当前任务。");
+                } finally {
+                    renderer.afterInput();
+                }
+                if (renderer instanceof InlineRenderer inline) {
+                    inline.clearAcceptedInput(activeInput);
+                }
+                ActiveTurnCoordinator.Submission submission = coordinator.submit(activeInput, cancelCurrent);
+                if (!submission.accepted()) {
+                    if (submission.action() == ActiveTurnInput.Action.IGNORE) {
+                        out.println("/now 需要提供立即执行的任务内容。");
+                    } else {
+                        out.println("未加入队列：" + submission.reason());
+                    }
+                    continue;
+                }
+                if (submission.action() == ActiveTurnInput.Action.QUEUE) {
+                    out.println("已加入后续队列，当前等待 " + submission.queueSize() + " 项。");
+                    continue;
+                }
+                if (submission.action() == ActiveTurnInput.Action.INTERRUPT) {
+                    return new TurnRunResult("⏹️ 已取消当前任务，将立即执行新任务。", "");
+                }
+                if (submission.action() == ActiveTurnInput.Action.CANCEL) {
+                    return TurnRunResult.completed("⏹️ 已请求取消当前任务。");
+                }
+            }
+            return new TurnRunResult(future.get(), draft);
+        } catch (CancellationException e) {
+            return TurnRunResult.completed("⏹️ 已取消当前任务。");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            cancelCurrent.run();
+            return TurnRunResult.completed("⏹️ 已取消当前任务。");
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
             String message = cause == null || cause.getMessage() == null ? "未知错误" : cause.getMessage();
-            return "❌ 执行失败: " + message;
+            return TurnRunResult.completed("❌ 执行失败: " + message);
         } finally {
             if (terminal != null && original != null) {
                 try {
@@ -889,6 +978,24 @@ public class Main {
             }
             runContext.close();
             executor.shutdownNow();
+        }
+    }
+
+    private static void wakeActiveTurnReader(Terminal terminal, LineReader lineReader) {
+        if (terminal == null || lineReader == null) {
+            return;
+        }
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(500);
+        while (!lineReader.isReading() && System.nanoTime() < deadline) {
+            try {
+                Thread.sleep(5);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        if (lineReader.isReading()) {
+            terminal.raise(Terminal.Signal.INT);
         }
     }
 
@@ -944,7 +1051,8 @@ public class Main {
                                                LineReader lineReader,
                                                Renderer renderer,
                                                boolean allowEscCancel,
-                                               boolean spaciousPrompt)
+                                               boolean spaciousPrompt,
+                                               String initialBuffer)
             throws UserInterruptException, EndOfFileException {
         if (spaciousPrompt) {
             renderer.stream().println();
@@ -954,7 +1062,8 @@ public class Main {
             String prompt = renderer.inputPrompt();
             String rightPrompt = renderer.inputRightPrompt();
             if (!allowEscCancel) {
-                return PromptInput.submitted(lineReader.readLine(prompt, rightPrompt, (MaskingCallback) null, null));
+                String seed = initialBuffer == null || initialBuffer.isBlank() ? null : initialBuffer;
+                return PromptInput.submitted(lineReader.readLine(prompt, rightPrompt, (MaskingCallback) null, seed));
             }
 
             if (terminal != null && terminal.writer() != null) {
