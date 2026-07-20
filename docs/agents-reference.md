@@ -204,6 +204,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `NO_COLOR=1`：禁用 ANSI 颜色
 - 当前开屏 Banner 是无右侧盒线边框的简洁布局，避免 ANSI/CJK 字宽导致竖线错位
 - InlineRenderer 复用 JLine 4 的编辑能力，默认提示符是 `* `，右提示显示 `message / @path / @image`；`/help`、补全和历史导航共用命令清单与 LineReader
+- ReAct 且 HITL 关闭时，活动轮次继续由主 LineReader 接收输入：普通文本进入容量为 8 的 FIFO 队列，`/now <任务>` 先入队首部再取消当前轮次，`/cancel` 只取消当前轮次；模型结束信号唤醒输入后保留未提交草稿。Plan、Multi-Agent 与 HITL 保持原输入所有权，禁止队列读取器和审批读取器并发访问终端
 - BottomStatusBar 是 JLine `Status` 托管的底部 dock：由 JLine 负责滚动区域和状态行位置，不再手写 `\n`、`moveUp`、`CLEAR_TO_EOS` 或绝对光标行号；dock 上层展示 YOLO/HITL 与 MCP/Skill 摘要，下层展示 model、phase、ctx、token、cost、elapsed 与 cwd
 - 重定向输入默认 UTF-8；`DEVCLI_TERMINAL_ENCODING` 可覆盖旧式控制台编码，`DEVCLI_TERMINAL_FORCE_ANSI=true` 可为误判终端启用 xterm-256color
 - plain / inline 的 HITL 后续文本复用主 LineReader；inline 首选项继续通过 raw mode 单键读取，避免独立 BufferedReader 抢读残留换行
@@ -245,6 +246,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - Runtime JSON 投影集中维护协议字段和转义，每个 payload 固定携带 `schema_version=1`；工具 arguments 优先保持 JSON 对象，无法解析时保留原文本；工具结果携带 status、error_code、retryable、elapsed_millis 和 image_count，不持久化图片正文
 - Runtime runner 收到事件 sink 后可边执行边写入 SQLite/SSE；如果 Provider 没有产生 content delta，服务端才用最终输出补一个 `message.delta`，避免流式回答重复写入
 - 每次交互、后台任务和无头 turn 绑定独立 `RunContext`，其中包含项目路径与取消令牌；预先创建的线程池不读取其他运行的取消状态，线程中断也进入取消语义
+- 每次执行引擎模型调用通过共享采样协调器注册稳定请求标识、独立取消令牌和请求代次；同标识的新请求原子替换旧请求并取消旧执行线程，作用域关闭时只清理自己的代次，避免旧请求结束时误删新请求
 - `HeadlessAgentRunner` 统一管理无头 Agent、ToolRegistry 和 MemoryManager 生命周期；后台任务取消时同时取消对应 RunContext 并中断执行线程
 - ToolResultSizeManager 的落盘项目路径来自执行该工具的 ToolRegistry 实例，不再通过静态活动路径跨运行共享
 

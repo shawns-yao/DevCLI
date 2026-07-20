@@ -40,7 +40,7 @@ DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、�
 - `Renderer（渲染器）`：默认 inline 模式提供底部状态栏、行内 thinking、工具块和 diff；也保留 plain 和 Lanterna TUI 模式。
 - `Runtime API`：本地 HTTP API 暴露 threads / turns / events；同一 thread 的 turn 按提交顺序串行执行，不同 thread 可并行，避免同一会话并发读取过期历史。
 - `RunContext（运行上下文）`：每次交互、后台任务或无头 turn 绑定独立项目路径、取消令牌和资源生命周期；预先创建的线程不会读取其他任务的取消状态，无头 Agent 结束后会关闭本次创建的工具与记忆资源。
-- `AgentExecutionEngine（执行引擎）`：ReAct、Plan task 和 SubAgent 共用同一套取消、预算、LLM 调用、工具消息回灌和异常控制流程，各路径只保留提示词、渲染、记忆和任务结果等差异逻辑。
+- `AgentExecutionEngine（执行引擎）`：ReAct、Plan task 和 SubAgent 共用同一套取消、预算、LLM 调用、工具消息回灌和异常控制流程；每次模型采样具有稳定请求标识和独立取消边界，重复请求会替换并取消旧请求。
 - `ExecutionGraph（执行图）`：Plan 与 Multi-Agent 共用依赖就绪判断、最终集成调度、缺失依赖和环检测，避免两条编排路径各自实现 DAG 规则。
 - `ExecutionArtifact（执行产物）`：Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用状态、输出、摘要、修改资源、错误、尝试次数与时间戳；checkpoint 协议版本 4 增加 PatchSet 写前日志、稳定子代理身份、步骤分配、消息游标和最小恢复摘要，兼容版本 1/2/3 并拒绝未来版本。
 - `Workspace + PatchSet（隔离工作区与补丁集）`：副作用任务通过可替换后端物化隔离目录；Git 仓库默认使用原生 worktree 并叠加当前脏文件、删除文件、未跟踪及被忽略文件，非 Git 目录优先使用文件系统级写时复制，不支持时回退有界复制；PatchSet 逐文件流式哈希，只把变更文件内容载入内存；JVM 公平锁与跨进程文件锁共同串行化补丁预检、应用和 checkpoint 终态。
@@ -70,7 +70,7 @@ Main
 
 关键边界：
 
-- 所有内置 LLM Provider 使用统一 `LlmException` 错误模型，区分认证、限流、过载、超时、网络、参数、上下文超限、内容过滤、服务端和响应格式错误。限流、过载、超时、网络和 5xx 按指数退避与 jitter 有界重试；流式内容已经输出后不重试，避免重复正文或工具调用。SubAgent 会把标准错误码和 `retryable` 标记保留到编排层，瞬时故障判断不依赖具体网络错误文案。
+- 所有内置 LLM Provider 使用统一 `LlmException` 错误模型，区分认证、限流、过载、超时、网络、参数、上下文超限、内容过滤、服务端、响应格式和主动取消。限流、过载、超时、网络和 5xx 按指数退避与 jitter 有界重试；已取消请求和已经输出流式内容的请求不重试，避免重复正文或工具调用。SubAgent 会把标准错误码和 `retryable` 标记保留到编排层，瞬时故障判断不依赖具体网络错误文案。
 - `ConversationHistoryCompactor（对话历史压缩器）` 是治理 LLM messages 窗口的唯一压缩点；压缩分两层：第 0 层 `microcompact` 先把单条超大消息（多为大工具结果）头尾截断，并把最近 2 个 user round 之前的旧 `tool_result` 按 `toolCallId` 成批落盘为 `<microcompact_boundary>` 引用（不调 LLM、不删消息、保 tool_call 配对），扛不住再走 LLM 摘要（Map-Reduce / 增量）。摘要提交到 history 前会经过运行时语义守卫，抽取必须、禁止、默认值、命令、版本和配置赋值等关键约束；同一结构化声明只保留最新值，否定约束必须在同一语义分段中保留否定极性；摘要缺失时直接从原始消息恢复，不再等后续任务失败后发现。
 - `WorkingMemory（工作记忆）` 只保存当前会话派生状态，不承担压缩职责。`RagEvidenceMemory（RAG 证据记忆）` 会记录检索证据的 `IndexEpoch（索引版本）`、`SymbolVersion（符号版本）` 和 `ClasspathEpoch（类路径版本）`；`search_code` 通过工具结果强类型旁路载荷传递证据，展示文本只面向模型和终端。旧 JSON 载荷与旧展示文本仅用于历史兼容。
 - `LongTermMemory（长期记忆）` 只保存跨会话稳定事实，默认不把临时任务请求写入长期层。每条记忆统一记录 schemaVersion、主题内 revision、expiresAt 和结构化 MemoryEvidence；证据包含置信度、来源引用、写入原因、审核状态和冲突条目。显式写入默认已审核，策略自动写入默认未审核；已拒绝记忆保留审计但不参与关键词、语义召回或 prompt 注入。新写入事实按类型应用 TTL，检索时自动清理过期项。同主题内容变化、配置赋值、默认值、当前值和正反使用声明发生冲突时自动记录 conflictsWith，旧事实进入 superseded 状态；相同主题同值的可确定改写不会重复保存。长期记忆注入时会抑制与 WorkingMemory 临时事实语义重复的条目。
@@ -684,6 +684,7 @@ LLM tool call
 
 - 启动首屏展示模型、MCP、Skill、ReAct 状态和 getting-started tips。
 - 输入行支持 slash 命令、`@path`、`@image:`、敏感词和危险 shell 片段高亮；`/help` 直接显示完整命令列表。
+- ReAct 执行期间可继续输入后续任务：普通文本进入容量为 8 的会话内 FIFO 队列，`/now <任务>` 取消当前轮次并优先执行新任务，`/cancel` 只取消当前轮次；任务结束时未提交的输入会保留为下一次编辑草稿。Plan、Multi-Agent 或启用 HITL 时继续保持单一终端输入所有权，不并发读取审批输入。
 - 底部状态栏显示当前 phase、模型、上下文百分比、token、cost、elapsed、cwd。终端误判为 dumb 时可用 `DEVCLI_TERMINAL_FORCE_ANSI=true` 强制启用。
 - 重定向输入默认使用 UTF-8，旧式 Windows 控制台可通过 `DEVCLI_TERMINAL_ENCODING=GBK` 覆盖。
 - plain 与 inline 审批都复用主 LineReader，避免审批输入与主提示符争抢标准输入。

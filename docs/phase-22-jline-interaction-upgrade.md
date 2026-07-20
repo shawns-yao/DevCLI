@@ -80,6 +80,9 @@ Terminal
 - 保持右提示 `message / @path / @image`。
 - 验证多行输入方案，优先评估 Alt+Enter / Shift+Enter 的终端兼容性。
 - 保留 ESC 清空、Ctrl+V 图片、Ctrl+O 折叠。
+- ReAct 活动轮次支持继续编辑并提交输入：普通文本进入有界 FIFO 队列，`/now <任务>` 取消当前轮次并把新任务放到队首，`/cancel` 只取消当前轮次。
+- 模型完成时通过终端中断信号唤醒活动 LineReader；未按回车的半成品输入保存为下一次编辑草稿，不作为任务执行。
+- Plan、Multi-Agent 或启用 HITL 时不启动活动轮次队列输入，确保计划审阅和审批始终独占终端输入。
 
 ## 22.4 补全系统升级
 
