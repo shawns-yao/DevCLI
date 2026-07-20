@@ -279,7 +279,7 @@ ReAct 主循环 / 对话历史 / 工具调用与结果回灌
 规划后执行 / 计划审阅 / DAG 状态推进 / 失败重规划；冲突分波、并行调度和顺序输出归并委托给 `PlanTaskBatchExecutor`，结果摘要由 `PlanTaskExecutionResult` 统一生成，任务能力范围、隔离工作区、资源租约和 PatchSet 生命周期委托给 `PlanTaskWorkspaceExecutor`
 
 ### AgentOrchestrator.java
-Multi-Agent 编排器 / 三角色管理 / 按依赖分配 / 审查重试；PatchSet、checkpoint 写前日志、终态持久化和恢复对账委托给 `WorkspaceCommitCoordinator`
+Multi-Agent 编排器 / 三角色管理 / 按依赖推进 / 审查重试；资源冲突分波、Worker 并发协调和顺序输出归并委托给 `MultiAgentBatchExecutor`，PatchSet、checkpoint 写前日志、终态持久化和恢复对账委托给 `WorkspaceCommitCoordinator`
 
 ### AgentExecutionEngine.java
 ReAct / Plan task / SubAgent 共用循环；统一取消和预算检查、LLM 调用、assistant/tool 消息协议、结构化工具错误记录与 IOException 出口；路径差异通过 Delegate 钩子注入

@@ -6,7 +6,6 @@ import com.devcli.llm.LlmClient;
 import com.devcli.memory.MemoryManager;
 import com.devcli.plan.ExecutionArtifact;
 import com.devcli.plan.ExecutionGraph;
-import com.devcli.plan.ResourceConflictDetector;
 import com.devcli.runtime.CancellationContext;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.trace.TraceContext;
@@ -17,15 +16,12 @@ import com.devcli.workspace.WorkspaceExecutionSession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
-import java.util.concurrent.*;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -45,11 +41,10 @@ import java.util.stream.Collectors;
  *
  * 并行策略：
  * - 同一依赖批次内部 **并行** 执行（最多 Worker 池大小并发，默认 2）
- * - 每个并行步骤使用独立的 PrintStream 缓冲流式输出，批次结束后按 step_id 顺序 flush 到 stdout，
- *   避免多线程写同一个终端流造成交错，同时仍让用户看到结构化的执行过程
+ * - 多步批次委托 {@link MultiAgentBatchExecutor} 做资源分波、独立输出缓冲与稳定顺序归并
  * - 单步批次仍走直连流式路径，保持"实时打字"的观感
- * - Worker 通过 {@link java.util.concurrent.BlockingQueue} 池化分配，确保同一 Worker 不会被两个步骤并发占用
- * - Reviewer 在并行路径中按步骤即时创建独立实例，避免对话历史竞争
+ * - Worker 通过公平锁串行化同一实例的任务，避免对话历史竞争
+ * - Reviewer 在并行路径中按步骤即时创建独立实例
  */
 public class AgentOrchestrator {
     private static final Logger log = LoggerFactory.getLogger(AgentOrchestrator.class);
@@ -769,19 +764,7 @@ public class AgentOrchestrator {
                 runStep(step, steps, retryCount, worker, reviewer, context, out);
                 worker.clearHistory();
             } else {
-                // 多步批次：真正并行执行，每步用独立的 PrintStream 缓冲，完成后按 step_id 顺序 flush
-                List<List<ExecutionStep>> waves = ResourceConflictDetector.splitConflictFree(
-                        executable, ExecutionStep::id, ExecutionStep::description, ExecutionStep::type);
-                for (List<ExecutionStep> wave : waves) {
-                    traceRecorder.record(traceContext, "batch.wave", Map.of(
-                            "batchIndex", batchIndex,
-                            "size", wave.size(),
-                            "stepIds", wave.stream().map(ExecutionStep::id).toList().toString()
-                    ));
-                    out.println("⚡ 批次 #" + batchIndex + "：" + wave.size()
-                            + " 个独立步骤并行执行（最多 " + workers.size() + " 个并发 Worker）\n");
-                    runBatchParallel(wave, steps, retryCount);
-                }
+                runBatchParallel(batchIndex, executable, steps, retryCount, traceContext);
             }
         }
 
@@ -1450,109 +1433,35 @@ public class AgentOrchestrator {
     }
 
     /**
-     * 并行执行一批相互独立的步骤。
-     *
-     * 每个步骤获取一个 Worker（池化，避免同一 Worker 被两个步骤并发占用），同时创建独立的 Reviewer 实例，
-     * 流式输出写入步骤本地的 ByteArrayOutputStream；所有任务完成后按 step_id 顺序将缓冲区 flush 到 stdout。
+     * 组装当前编排状态对应的批次执行器；并发、资源分波和输出归并由协作类负责。
      */
-    private void runBatchParallel(List<ExecutionStep> batch, List<ExecutionStep> steps,
-                                  Map<String, Integer> retryCount) {
-        int parallelism = Math.min(batch.size(), workers.size());
-        ExecutorService executor = Executors.newFixedThreadPool(parallelism, r -> {
-            Thread t = new Thread(r, "devcli-multi-agent");
-            t.setDaemon(true);
-            return t;
-        });
-        Map<String, ByteArrayOutputStream> buffers = new ConcurrentHashMap<>();
-        Map<String, SubAgent> assignments = new LinkedHashMap<>();
-        for (int i = 0; i < batch.size(); i++) {
-            ExecutionStep step = batch.get(i);
-            assignments.put(step.id(), resolveAssignedWorker(step.id(), i));
-        }
-        Map<String, ReentrantLock> workerLocks = new HashMap<>();
-        workers.forEach(worker -> workerLocks.put(worker.getName(), new ReentrantLock(true)));
-        Map<SubAgent, SubAgent.ForkContext> workerContexts = new ConcurrentHashMap<>();
-        for (SubAgent worker : workers) {
-            workerContexts.put(worker, worker.createForkContext());
-        }
-        List<Future<?>> futures = new ArrayList<>();
-        SubAgent reviewerForkTemplate = new SubAgent(reviewer.getName(), AgentRole.REVIEWER, llmClient, toolRegistry);
-        configureSubAgent(reviewerForkTemplate);
-        if (checkpoint != null) {
-            applyRecoveryContext(reviewerForkTemplate, checkpoint.recoveryState());
-        }
-        SubAgent.ForkContext reviewerForkContext = reviewerForkTemplate.createForkContext();
-
-        for (ExecutionStep step : batch) {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            buffers.put(step.id(), baos);
-            PrintStream stepOut = new PrintStream(baos, true, StandardCharsets.UTF_8);
-            String context = buildStepContext(steps, step);
-
-            futures.add(executor.submit(() -> {
-                SubAgent worker = assignments.get(step.id());
-                ReentrantLock workerLock = workerLocks.get(worker.getName());
-                SubAgent localReviewer = new SubAgent(
-                        reviewer.getName(), AgentRole.REVIEWER, llmClient, toolRegistry);
-                configureSubAgent(localReviewer);
-                if (checkpoint != null) {
-                    applyRecoveryContext(localReviewer, checkpoint.recoveryState());
-                }
-                try {
-                    workerLock.lockInterruptibly();
-                    SubAgent.ForkContext workerForkContext = workerContexts.get(worker);
-                    toolRegistry.runWithResourceLease(step.id(), () -> {
-                        runStep(step, steps, retryCount, worker, localReviewer, context, stepOut,
-                                workerForkContext, reviewerForkContext);
-                        return null;
-                    });
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    updateStep(steps, step.id(), step.withFailed("并行执行被中断"));
-                    stepOut.println("❌ 步骤 [" + step.id() + "] 被中断\n");
-                } catch (RuntimeException e) {
-                    log.error("Parallel step {} failed unexpectedly", step.id(), e);
-                    updateStep(steps, step.id(), step.withFailed("并行执行异常: " + e.getMessage()));
-                    stepOut.println("❌ 步骤 [" + step.id() + "] 并行执行异常：" + e.getMessage() + "\n");
-                } finally {
-                    worker.clearHistory();
-                    if (workerLock.isHeldByCurrentThread()) {
-                        workerLock.unlock();
-                    }
-                    toolRegistry.releaseResourceLeases(step.id());
-                    stepOut.flush();
-                }
-                return null;
-            }));
-        }
-
-        for (Future<?> f : futures) {
-            try {
-                f.get();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                log.warn("Batch wait interrupted");
-            } catch (ExecutionException e) {
-                log.error("Parallel step task failed", e.getCause());
-            }
-        }
-        executor.shutdownNow();
-
-        // 按 step_id 顺序 flush 各步骤的缓冲输出，保证用户看到的执行过程有稳定顺序
-        for (ExecutionStep step : batch) {
-            ByteArrayOutputStream buf = buffers.get(step.id());
-            if (buf != null && buf.size() > 0) {
-                out.print(buf.toString(StandardCharsets.UTF_8));
-                out.flush();
-            }
-        }
+    private void runBatchParallel(int batchIndex, List<ExecutionStep> executable,
+                                  List<ExecutionStep> steps, Map<String, Integer> retryCount,
+                                  TraceContext traceContext) {
+        MultiAgentBatchExecutor batchExecutor = new MultiAgentBatchExecutor(
+                out,
+                workers,
+                reviewer,
+                llmClient,
+                toolRegistry,
+                traceRecorder,
+                new MultiAgentBatchExecutor.Hooks(
+                        this::resolveAssignedWorker,
+                        this::configureSubAgent,
+                        agent -> {
+                            if (checkpoint != null) {
+                                applyRecoveryContext(agent, checkpoint.recoveryState());
+                            }
+                        },
+                        step -> buildStepContext(steps, step),
+                        (step, worker, localReviewer, context, stepOut,
+                         workerForkContext, reviewerForkContext) ->
+                                runStep(step, steps, retryCount, worker, localReviewer, context, stepOut,
+                                        workerForkContext, reviewerForkContext),
+                        (step, reason) -> updateStep(steps, step.id(), step.withFailed(reason))));
+        batchExecutor.execute(batchIndex, executable, traceContext);
     }
 
-    /**
-     * 执行单个步骤（Worker 执行 + Reviewer 审查 + 最多 2 次重试）。
-     *
-     * 此方法被串行和并行两条路径共享，通过 {@code out} 控制流式输出目的地。
-     */
     private void runStep(ExecutionStep step, List<ExecutionStep> steps,
                          Map<String, Integer> retryCount,
                          SubAgent worker, SubAgent reviewer, String context,

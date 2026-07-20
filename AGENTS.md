@@ -64,7 +64,7 @@ Multi-Agent Planner 输出前后允许存在说明文本，编排器会提取完
 
 Multi-Agent 的 WorkingMemory 按角色注入隔离视图：Planner 只看任务状态 + 会话关键事件，不看工具原文证据；Worker 看完整任务状态 + 关键事件 + 工具证据；Reviewer 只看任务状态 + 工具证据，避免把会话事件误当验收依据。
 
-Multi-Agent 并行批次使用 `SubAgent.ForkContext` 共享冻结 system prompt 前缀、exact tool definitions 快照、skill body 快照和 fork fingerprint；每个子任务只追加自己的 user 后缀，避免并行 Worker / Reviewer 因历史或动态工具差异破坏 prompt cache 命中。
+Multi-Agent 并行批次由 `MultiAgentBatchExecutor` 负责资源冲突分波、Worker 公平锁、独立输出缓冲和稳定顺序归并；批次使用 `SubAgent.ForkContext` 共享冻结 system prompt 前缀、exact tool definitions 快照、skill body 快照和 fork fingerprint，每个子任务只追加自己的 user 后缀，避免并行 Worker / Reviewer 因历史或动态工具差异破坏 prompt cache 命中。
 
 并行 Worker 写文件时，隔离 ToolRegistry 内的 `write_file` 仍进入运行时资源租约检查：每个 `/plan` task 或 `/team` step 以自己的 id 持有写租约，同一隔离工作区文件只能被一个运行中步骤写入；冲突返回策略拒绝，不做 last-writer-wins 覆盖或 LLM 自动合并。`/plan` task 和 `/team` Worker 尝试结束后都会在 finally 中释放本步骤租约。ToolRegistry 共享后台清理器，project fork 不重复创建线程，最后一个注册表关闭后终止；默认周期 60 秒，可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` / `-Ddevcli.resource.lease.cleanup.interval.seconds` 调整。设计说明见 `docs/runtime-resource-lease-design.md`。
 
@@ -100,7 +100,7 @@ MCP 动态工具：`mcp__{server}__{tool}`（+ resources 虚拟工具）
 
 ```
 src/main/java/com/devcli/
-├── agent/       Agent.java, PlanExecuteAgent.java, PlanTaskBatchExecutor.java, PlanTaskExecutionResult.java, SubAgent.java, AgentOrchestrator.java, PlanTaskWorkspaceExecutor.java, WorkspaceCommitCoordinator.java
+├── agent/       Agent.java, PlanExecuteAgent.java, PlanTaskBatchExecutor.java, PlanTaskExecutionResult.java, SubAgent.java, AgentOrchestrator.java, MultiAgentBatchExecutor.java, PlanTaskWorkspaceExecutor.java, WorkspaceCommitCoordinator.java
 ├── cli/         Main.java, CliCommandParser.java, PlanReviewInputParser.java
 ├── browser/     BrowserSession, BrowserGuard, SensitivePagePolicy
 ├── llm/         AnthropicClient, GLMClient, DeepSeekClient, StepClient, KimiClient, OpenAiClient
@@ -264,7 +264,7 @@ Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔�
 | 工具调用 | ToolRegistry.java + Agent.java |
 | 模型/API | llm/*Client.java + LlmClientFactory.java |
 | RAG | CodeRetriever.java + CodeIndex.java + VectorStore.java |
-| Multi-Agent | AgentOrchestrator.java + SubAgent.java |
+| Multi-Agent | AgentOrchestrator.java + MultiAgentBatchExecutor.java + SubAgent.java |
 | MCP | McpServerManager.java + McpClient.java |
 | TUI/渲染 | render/Renderer.java + RendererFactory.java |
 
