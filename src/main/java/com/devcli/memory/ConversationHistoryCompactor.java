@@ -91,9 +91,18 @@ public class ConversationHistoryCompactor {
      * （每 N 片合并成一段中间摘要），再 Reduce 最终。防止 Reduce prompt 自己撑爆 window。
      */
     private static final int MAX_REDUCE_FANIN = 8;
-    /** 摘要消息的统一前缀，用于识别"上一轮压缩留下的摘要"。 */
-    static final String SUMMARY_MARKER = "[已压缩的历史对话摘要]\n";
-    static final String POST_COMPACT_RESTORE_MARKER = "[压缩后恢复上下文]\n";
+    /**
+     * 摘要消息的统一前缀，用于识别"上一轮压缩留下的摘要"。
+     *
+     * <p>使用语言无关的结构化标记（与 {@code <compact_boundary>} /
+     * {@code <microcompact_boundary>} 同一约定）：协议识别不应依赖中文散文,
+     * 否则换模型或模型复述该句时识别会失效。旧版中文标记仅保留用于
+     * 识别历史会话与已持久化检查点（见 {@link #LEGACY_SUMMARY_MARKER}），新写入一律用结构化标记。
+     */
+    static final String SUMMARY_MARKER = "<compact_summary>\n";
+    /** 旧版中文摘要前缀：仅用于向后兼容识别，不再写入。 */
+    static final String LEGACY_SUMMARY_MARKER = "[已压缩的历史对话摘要]\n";
+    static final String POST_COMPACT_RESTORE_MARKER = "<post_compact_restore>\n";
     private static final int MAX_POST_COMPACT_RESTORE_CHARS = 8_000;
     static final String MICROCOMPACT_OUTPUTS_DIR = ".devcli/microcompact_tool_outputs";
     private static final DateTimeFormatter MICROCOMPACT_SESSION_ID_FMT =
@@ -423,11 +432,13 @@ public class ConversationHistoryCompactor {
             rebuilt.add(history.get(i));
         }
         rebuilt.add(LlmClient.Message.user(SUMMARY_MARKER + summary.trim()));
-        rebuilt.add(LlmClient.Message.assistant("好的，我已了解之前的上下文，请继续。"));
+        // 占位确认消息只为维持 user/assistant 交替协议;用语言无关的最短文本,
+        // 避免模型复述中文散文或在非中文模型下产生歧义。
+        rebuilt.add(LlmClient.Message.assistant("OK."));
         String restoreContext = buildPostCompactRestoreContext();
         if (!restoreContext.isBlank()) {
             rebuilt.add(LlmClient.Message.user(POST_COMPACT_RESTORE_MARKER + restoreContext));
-            rebuilt.add(LlmClient.Message.assistant("好的，我已恢复压缩后的工作上下文。"));
+            rebuilt.add(LlmClient.Message.assistant("OK."));
         }
         rebuilt.addAll(history.subList(splitIdx, history.size()));
 
@@ -905,9 +916,14 @@ public class ConversationHistoryCompactor {
         LlmClient.Message first = history.get(systemEnd);
         if (!"user".equals(first.role())) return null;
         String content = first.content();
-        if (content == null || !content.startsWith(SUMMARY_MARKER)) return null;
+        if (content == null) return null;
+        // 新结构化标记优先;旧中文标记仅为识别历史会话/旧检查点回放的存量摘要。
+        String matchedMarker = content.startsWith(SUMMARY_MARKER) ? SUMMARY_MARKER
+                : content.startsWith(LEGACY_SUMMARY_MARKER) ? LEGACY_SUMMARY_MARKER
+                : null;
+        if (matchedMarker == null) return null;
         String summaryText = CompactBoundaryMetadata.stripBoundaryBlock(
-                content.substring(SUMMARY_MARKER.length()).trim());
+                content.substring(matchedMarker.length()).trim());
         // endIdx 跳过摘要 user + 紧随的 assistant 确认（如果有）
         int endIdx = systemEnd + 1;
         if (endIdx < history.size() && "assistant".equals(history.get(endIdx).role())) {

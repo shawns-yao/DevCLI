@@ -100,6 +100,9 @@ public record CompactBoundaryMetadata(
         String text = content;
         if (text.startsWith(ConversationHistoryCompactor.SUMMARY_MARKER)) {
             text = text.substring(ConversationHistoryCompactor.SUMMARY_MARKER.length()).trim();
+        } else if (text.startsWith(ConversationHistoryCompactor.LEGACY_SUMMARY_MARKER)) {
+            // 兼容旧版中文标记:已持久化的检查点/历史会话回放仍可能携带。
+            text = text.substring(ConversationHistoryCompactor.LEGACY_SUMMARY_MARKER.length()).trim();
         }
         if (!text.startsWith(START)) {
             return Optional.empty();

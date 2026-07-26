@@ -73,7 +73,7 @@ class ConversationHistoryCompactorTest {
         // 验证不变量：[system, user(摘要), assistant(确认), 保留尾部从某个 user 起算]
         assertEquals("system", history.get(0).role());
         assertEquals("user", history.get(1).role());
-        assertTrue(history.get(1).content().contains("已压缩的历史对话摘要"));
+        assertTrue(history.get(1).content().contains("<compact_summary>"));
         assertTrue(history.get(1).content().contains("MOCK SUMMARY OF OLD CONTENT"));
         assertEquals("assistant", history.get(2).role());
         assertEquals("user", history.get(3).role(),
@@ -232,7 +232,7 @@ class ConversationHistoryCompactorTest {
 
         assertTrue(compacted);
         assertEquals("user", history.get(3).role());
-        assertTrue(history.get(3).content().contains("[压缩后恢复上下文]"));
+        assertTrue(history.get(3).content().contains("<post_compact_restore>"));
         assertTrue(history.get(3).content().contains("src/Main.java"));
         assertEquals("assistant", history.get(4).role());
         assertEquals("user", history.get(5).role(), "恢复上下文后保留尾部仍应以 user 起头");
@@ -269,7 +269,7 @@ class ConversationHistoryCompactorTest {
         int firstUserAfterSummary = -1;
         for (int i = 0; i < history.size(); i++) {
             if ("user".equals(history.get(i).role())
-                    && !history.get(i).content().contains("已压缩的历史对话摘要")) {
+                    && !history.get(i).content().contains("<compact_summary>")) {
                 firstUserAfterSummary = i;
                 break;
             }
@@ -428,7 +428,7 @@ class ConversationHistoryCompactorTest {
         // 保留区不应该残留任何 tool_call_id 是 old-* 的 tool message
         for (int i = 1; i < history.size(); i++) {
             LlmClient.Message m = history.get(i);
-            if (i == 1 && m.content() != null && m.content().contains("已压缩的历史对话摘要")) continue;
+            if (i == 1 && m.content() != null && m.content().contains("<compact_summary>")) continue;
             if ("tool".equals(m.role()) && m.toolCallId() != null
                     && m.toolCallId().startsWith("old-")) {
                 orphanToolResultInTail.incrementAndGet();
@@ -476,7 +476,7 @@ class ConversationHistoryCompactorTest {
 
         assertTrue(compacted);
         assertEquals("user", history.get(0).role());
-        assertTrue(history.get(0).content().contains("已压缩的历史对话摘要"));
+        assertTrue(history.get(0).content().contains("<compact_summary>"));
         assertEquals("assistant", history.get(1).role());
         assertEquals("user", history.get(2).role(),
                 "保留区必须以 user 起头");
@@ -511,6 +511,35 @@ class ConversationHistoryCompactorTest {
         assertTrue(history.get(1).content().contains("INCREMENTAL_OUTPUT"));
         assertFalse(history.get(1).content().contains("old summary content"),
                 "重建后老摘要应被新摘要替换，不残留");
+    }
+
+    @Test
+    void detectsLegacyChineseSummaryMarkerForBackwardCompat() {
+        // 向后兼容：旧版本持久化的检查点/历史会话使用中文标记
+        // "[已压缩的历史对话摘要]"。升级到结构化标记后,旧摘要仍必须被识别为
+        // "上一轮摘要"并走增量路径,不能退化成全量重摘要或摘要套娃。
+        StubCompactor c = new StubCompactor("INCREMENTAL_OUTPUT", 2_000, true);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("S"));
+        history.add(LlmClient.Message.user(
+                ConversationHistoryCompactor.LEGACY_SUMMARY_MARKER + "legacy summary content"));
+        history.add(LlmClient.Message.assistant("好的，我已了解之前的上下文，请继续。"));
+        for (int i = 0; i < 5; i++) {
+            history.add(LlmClient.Message.user("NewQ" + i + " " + longText(3_000)));
+            history.add(LlmClient.Message.assistant("NewA" + i));
+        }
+
+        boolean compacted = c.compactIfNeeded(history, 100);
+
+        assertTrue(compacted);
+        assertEquals(0, c.summarizeCalls.get(), "旧标记也应识别为上一轮摘要,走增量路径");
+        assertEquals(1, c.incrementalCalls.get());
+        // 重建后统一切换到新结构化标记,旧中文标记不再写入
+        assertTrue(history.get(1).content().contains("<compact_summary>"));
+        assertFalse(history.get(1).content().contains("已压缩的历史对话摘要"),
+                "重建后应使用新结构化标记,不再写入旧中文标记");
+        assertFalse(history.get(1).content().contains("legacy summary content"),
+                "旧摘要内容应被增量合并进新摘要,不残留原文");
     }
 
     private static String longText(int chars) {
