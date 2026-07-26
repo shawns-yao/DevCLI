@@ -6,18 +6,58 @@
 
 DevCLI 是一个面向 Java 后端开发者的终端 Agent CLI。它可以在命令行中通过自然语言驱动代码阅读、生成、调试、重构、命令执行和仓库检索。
 
-核心能力：
+ReAct 主循环、Plan-and-Execute、Multi-Agent 编排、MCP 协议客户端、上下文压缩、RAG 检索与终端渲染全部自行实现，不依赖 Spring AI、LangChain4j 等 Agent 框架。
 
-- ReAct（推理-行动）主循环：支持多轮工具调用、结果回灌和流式输出。
-- Plan-and-Execute（规划执行）：通过 `/plan` 生成任务计划并按依赖执行。
-- Multi-Agent（多智能体）：通过 `/team` 使用 Planner / Worker / Reviewer 协作执行复杂任务。
-- RAG（检索增强生成）：基于 JavaParser、SQLite 向量存储、关键词召回、代码关系图谱、RRF（倒数排名融合）和 CrossEncoderReranker（交叉编码器重排）检索仓库实现。
-- Memory（记忆）：支持当前会话工作记忆、长期记忆、强约束记忆，以及绑定 SymbolVersion（符号版本）的 RAG 证据记忆。
-- MCP（Model Context Protocol）：可接入外部 MCP server，动态注册工具和 resources。
-- Skill：支持 jar 内置、用户级和项目级 Skill；frontmatter 可声明 allowedTools、context 和 paths，按当前任务路径筛选并按使用频率排序。
-- HITL（Human-in-the-Loop）：危险操作可开启人工审批、路径限制和审计日志。
-- Browser / Web：支持 web_search、web_fetch，以及 Chrome DevTools MCP 浏览器操作。
-- Image Input（图片输入）：支持本地图片和剪贴板图片作为模型输入。
+## Project Snapshot
+
+| 项 | 数值 |
+| --- | --- |
+| 主源码 | 308 个文件 / 51,683 行，26 个顶层模块 |
+| 测试 | 232 个文件 / 34,510 行，1344 个用例全部通过 |
+| 语言与构建 | Java 17 + Maven，产出单一可执行 jar |
+| 迭代 | 230 次提交（2026-04 起） |
+
+三项量化结果：
+
+- **上下文成本**：修正 system prompt 易变段导致的前缀缓存失效后，13 轮迭代会话的可复用前缀占比由 29.4% 提升到 87.3%，未命中输入下降约 5.5 倍（基于内置 token 估算器的结构性测算，非计费账单）。
+- **检索质量**：CodeSearchNet Java 公开集 50 条样本上 Recall@5 1.0000、MRR@5 0.9900、nDCG@5 0.9926。
+- **协作模式对照**：单 Agent 与 Planner/Worker/Reviewer 的优劣随任务可拆分性反转。不可拆分的短 CLI 任务上单 Agent 通过 3/5、协作模式 1/5；可拆分的订单履约 Saga 多模块场景上协作模式通过 30/30、单 Agent 27/30，代价是 3.76 倍耗时。
+
+评测使用固定版本公开数据集与受控任务，公开集与项目内任务分开报告。部分场景样本量较小，只用于验证链路与方法，不外推为榜单成绩；完整方法、命令与适用边界见 [Benchmark Evaluation](#benchmark-evaluation)。
+
+安装与启动见 [Install](#install) 与 [Startup](#startup)。
+
+## Implementation Status
+
+**已实现**
+
+- ReAct 主循环、Plan-and-Execute、Multi-Agent（Planner / Worker / Reviewer）三条执行路径，共用取消、预算、DAG 依赖与执行产物协议。
+- RAG（检索增强生成）：JavaParser 切分、SQLite 向量存储、关键词召回、代码关系图谱、RRF（倒数排名融合）与 CrossEncoderReranker（交叉编码器重排）。
+- 四层记忆（对话历史 / 工作记忆 / 长期记忆 / 强约束记忆）与两层上下文压缩（microcompact 落盘引用 + Map-Reduce 与增量九段摘要），含语义守卫、prompt-too-long 重试与失败熔断。
+- MCP（Model Context Protocol）：手写 JSON-RPC 2.0 客户端，支持 stdio 与 Streamable HTTP，动态注册工具与 resources。
+- Skill：jar 内置、用户级与项目级三层加载，`load_skill` 按需展开，allowedTools 白名单约束后续工具调用。
+- 安全模型：HITL（人工审批）、路径围栏、命令快速拒绝与 JSONL 审计链。
+- 隔离工作区与 PatchSet（补丁集）、文件级资源租约、跨步骤过期写入屏障、工具证据出处标记。
+- Prompt 分层组装（jar 内置 / 用户级 / 项目级覆盖），system prompt 只承载会话级稳定内容以保证前缀缓存命中。
+- 多模型运行时切换（Anthropic / OpenAI 兼容 / GLM / DeepSeek / StepFun / Kimi）。
+- 联网与浏览器：`web_search`、`web_fetch` 正文提取，以及经 Chrome DevTools MCP 的浏览器操作与调试实例登录态复用。
+- 三种终端渲染器：inline 流式（默认）、plain、Lanterna 全屏。
+
+**部分实现（MVP）**
+
+- LSP（语言服务器协议）诊断注入：仅实现协议子集，编辑后回灌编译诊断。
+- Git Side-History 快照与回滚：turn 粒度快照与 `/restore`，尚未覆盖全部编辑入口。
+- 后台任务与 Runtime API：SQLite 持久化任务队列与本地 HTTP/SSE 端点，仅监听回环地址。
+- 图片输入：本地路径、file URL 与剪贴板图片。
+- SWE-bench Lite：已产出官方格式 predictions JSONL，官方 harness 尚未跑出有效 resolved 结果。
+
+**未实现**
+
+- 符号级 Worker 上下文清单：当前过期写入屏障为文件级，拦不住「改方法签名 + 另一文件改调用方」的语义冲突。
+- 上下文失效事件主动推送：当前为写入时惰性检测，不中断运行中的 Worker。
+- per-Worker worktree（工作树）物理隔离。
+- Reviewer 独立检索策略：与 Worker 共用同一套召回。
+- MCP OAuth 授权与 `sampling/createMessage`。
 
 ## Feature Overview
 
@@ -699,7 +739,7 @@ Lanterna renderer 保留为全屏三栏 TUI；plain renderer 适合 CI、日志�
 
 评测原始报告默认写入 `target/benchmark-reports/` 和 `target/agent-benchmark/`。聚合器会生成可提交的 JSON、CSV 与数据清单到 `Data/processed/` 和 `Data/manifest/`。完整方法、命令、基线结果和适用边界见 `docs/benchmark-evaluation.md`。
 
-2026-07-13 的 50 条 CodeSearchNet Java 样本结果：Recall@5 1.0000、MRR@5 0.9900、nDCG@5 0.9926；Memory 写入准确率 96.0%、Recall@5 91.7%；230k token 阈值下经过 5 次真实压缩，18 条事实保真率 94.4%。2026-07-16 公开集合首轮链路验证中，LongMemEval Oracle Cleaned 3 条 normalized answer hit 为 66.7%（代理指标），LongBench v1 6 条官方子集平均为 66.7%，RULER v1 4K NIAH 3 条为 100%；这些小样本不能外推为完整榜单成绩。同日完成 5 个受控 Agent 任务复跑：单 Agent 任务成功率 0/5、隐藏检查平均完成率 0%；Planner/Worker/Reviewer 任务成功率 0/5、隐藏检查平均完成率 27.33%，其中 logops 9/10、ordermvc 7/15，其余任务未形成可验收交付物。该结果只能用于暴露执行协议和模型服从性问题，不能作为简历中的成功率优势。SWE-bench Lite 单样本已生成预测，但补丁只包含复现脚本；官方 harness 因 Ubuntu 软件源连续返回 503，尚未形成有效 resolved 结果。针对 OpenAI 兼容端点重复发送完整工具调用字段的问题，流式聚合器已兼容完整快照与标准增量分片。Krill AI `gpt-5.5` 完整 5 任务复跑中，单 Agent 成功 3/5、隐藏检查平均完成率 94%，Planner/Worker/Reviewer 成功 1/5、平均完成率 76%；当前 CLI 样本显示单 Agent 更稳定。新增 Saga 协作场景的单次有效运行中，单 Agent 通过 27/30（90.0%，192.8 秒），Planner/Worker/Reviewer 通过 30/30（100.0%，725.1 秒），说明可拆分模块和最终集成任务出现 10 个百分点正确率收益，但耗时为 3.76 倍，且单次结果不能外推。公开长上下文运行中 LongMemEval 代理命中率为 66.7%、RULER 为 100%，但端点仍重复发送完整 content，导致 `8` 聚合为 `88` 等错误；同时 4/12 次调用触发服务端安全拦截，因此 LongBench 16.7% 与 RULER 展示值暂不能作为正常模型成绩。
+2026-07-13 的 50 条 CodeSearchNet Java 样本结果：Recall@5 1.0000、MRR@5 0.9900、nDCG@5 0.9926；Memory 写入准确率 96.0%、Recall@5 91.7%；230k token 阈值下经过 5 次真实压缩，18 条事实保真率 94.4%。2026-07-16 公开集合首轮链路验证中，LongMemEval Oracle Cleaned 3 条 normalized answer hit 为 66.7%（代理指标），LongBench v1 6 条官方子集平均为 66.7%，RULER v1 4K NIAH 3 条为 100%；这些小样本不能外推为完整榜单成绩。同日完成 5 个受控 Agent 任务复跑：单 Agent 任务成功率 0/5、隐藏检查平均完成率 0%；Planner/Worker/Reviewer 任务成功率 0/5、隐藏检查平均完成率 27.33%，其中 logops 9/10、ordermvc 7/15，其余任务未形成可验收交付物。该结果只用于暴露执行协议与模型服从性问题，不代表稳定的成功率水平。SWE-bench Lite 单样本已生成预测，但补丁只包含复现脚本；官方 harness 因 Ubuntu 软件源连续返回 503，尚未形成有效 resolved 结果。针对 OpenAI 兼容端点重复发送完整工具调用字段的问题，流式聚合器已兼容完整快照与标准增量分片。Krill AI `gpt-5.5` 完整 5 任务复跑中，单 Agent 成功 3/5、隐藏检查平均完成率 94%，Planner/Worker/Reviewer 成功 1/5、平均完成率 76%；当前 CLI 样本显示单 Agent 更稳定。新增 Saga 协作场景的单次有效运行中，单 Agent 通过 27/30（90.0%，192.8 秒），Planner/Worker/Reviewer 通过 30/30（100.0%，725.1 秒），说明可拆分模块和最终集成任务出现 10 个百分点正确率收益，但耗时为 3.76 倍，且单次结果不能外推。公开长上下文运行中 LongMemEval 代理命中率为 66.7%、RULER 为 100%，但端点仍重复发送完整 content，导致 `8` 聚合为 `88` 等错误；同时 4/12 次调用触发服务端安全拦截，因此 LongBench 16.7% 与 RULER 展示值暂不能作为正常模型成绩。
 
 ## Tests
 
