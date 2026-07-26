@@ -254,6 +254,10 @@ public class Main {
             renderer.start();
             renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, null));
 
+            // 统一关停协调器:JVM 多个 shutdown hook 无顺序保证,
+            // 这里全部收敛到单一 hook,按显式 order 关闭(依赖方先关,被依赖资源后关)。
+            ShutdownCoordinator shutdown = new ShutdownCoordinator();
+
             String startupNote = "";
             try {
                 McpConfigBootstrapResult bootstrapResult = ensureDefaultMcpConfig(Path.of(System.getProperty("user.home")));
@@ -262,7 +266,7 @@ public class Main {
                 }
                 mcpServerManager.loadConfiguredServers();
                 mcpServerManager.startAll(ui, mcpStartupWait());
-                Runtime.getRuntime().addShutdownHook(new Thread(mcpServerManager::close, "devcli-mcp-shutdown"));
+                shutdown.register(30, "mcpServerManager", mcpServerManager::close);
             } catch (Exception e) {
                 startupNote = "MCP 初始化失败: " + e.getMessage();
             }
@@ -289,7 +293,7 @@ public class Main {
             hitlToolRegistry.setSkillContextBuffer(skillContextBuffer);
 
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
-            Runtime.getRuntime().addShutdownHook(new Thread(reactAgent::close, "devcli-agent-shutdown"));
+            shutdown.register(20, "reactAgent", reactAgent::close);
             reactAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
             reactAgent.setSkillRegistry(skillRegistry);
             reactAgent.setSkillContextBuffer(skillContextBuffer);
@@ -307,7 +311,7 @@ public class Main {
             // 用同一个 EmbeddingClient（启动期不强制连 Ollama）+ 独立 SQLite vector store。
             // store 失败 / embed 失败时所有路径自动 fallback 到关键词检索，不影响 ReAct 主路径。
             com.devcli.memory.MemoryVectorStore memoryVectorStore = new com.devcli.memory.MemoryVectorStore();
-            Runtime.getRuntime().addShutdownHook(new Thread(memoryVectorStore::close, "devcli-memvec-shutdown"));
+            shutdown.register(40, "memoryVectorStore", memoryVectorStore::close);
             com.devcli.rag.EmbeddingClient embeddingClient = new com.devcli.rag.EmbeddingClient();
             // store 钩子：每次 LongTermMemory.store 后异步 embed 写向量库
             reactAgent.getMemoryManager().getLongTermMemory().setVectorIndex(
@@ -334,7 +338,8 @@ public class Main {
             });
             DurableTaskManager taskManager = RuntimeCommandLauncher.openTaskManager(llmClientRef);
             taskManager.start();
-            Runtime.getRuntime().addShutdownHook(new Thread(taskManager::close, "devcli-task-shutdown"));
+            // 后台任务管理器可能仍在驱动无头 Agent(依赖 MCP / 记忆资源),必须最先关闭。
+            shutdown.register(10, "taskManager", taskManager::close);
             renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
             StartupScreenInfo startupScreenInfo = startupScreenInfo(llmClient, mcpServerManager, skillRegistry, startupNote);
             if (renderer instanceof InlineRenderer inline) {
