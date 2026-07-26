@@ -102,7 +102,7 @@ class KeyedSerialExecutorTest {
             }
 
             assertEquals(1, maxActive.get());
-            assertEquals(0, executor.pendingCount());
+            awaitPendingCount(executor, 0);
         } finally {
             submitters.shutdownNow();
             workers.shutdownNow();
@@ -174,7 +174,7 @@ class KeyedSerialExecutorTest {
 
             assertInstanceOf(RejectedExecutionException.class, first.get(3, TimeUnit.SECONDS));
             assertInstanceOf(RejectedExecutionException.class, second.get(3, TimeUnit.SECONDS));
-            assertEquals(0, executor.pendingCount());
+            awaitPendingCount(executor, 0);
         } finally {
             releaseScheduling.countDown();
             callers.shutdownNow();
@@ -210,7 +210,7 @@ class KeyedSerialExecutorTest {
             assertTrue(secondAborted.await(3, TimeUnit.SECONDS));
             assertTrue(fatalObserved.await(3, TimeUnit.SECONDS));
             assertEquals(0, secondRuns.get());
-            assertEquals(0, executor.pendingCount());
+            awaitPendingCount(executor, 0);
         } finally {
             pool.shutdownNow();
         }
