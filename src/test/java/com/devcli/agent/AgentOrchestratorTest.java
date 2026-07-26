@@ -1853,6 +1853,44 @@ class AgentOrchestratorTest {
         }
     }
 
+    @Test
+    void workerToolEvidenceCarriesProducingStepProvenance(@TempDir Path tempDir) {
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                return response("""
+                        {
+                          "summary": "单步列目录",
+                          "steps": [
+                            {"id": "a", "description": "列出项目目录", "type": "ANALYSIS", "dependencies": []}
+                          ]
+                        }
+                        """);
+            }
+            if (body.contains("原始任务：")) {
+                return response(approvedReviewJson());
+            }
+            if (body.contains("列出项目目录")) {
+                return toolResponse("call_1", "list_dir", "{\"path\":\".\"}");
+            }
+            return response("done");
+        };
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    new DispatchingStubGLMClient(dispatcher), isolatedToolRegistry(tempDir), mm);
+
+            orchestrator.run("列目录并验收");
+
+            List<String> scopes = mm.getWorkingMemory().getRecentToolResults().stream()
+                    .map(evidence -> evidence.scope)
+                    .toList();
+            assertTrue(scopes.stream().anyMatch(scope -> !scope.isBlank()),
+                    "Multi-Agent 步骤产生的工具证据必须带出处，实际: " + scopes);
+            assertTrue(scopes.stream().anyMatch("step_1"::equals),
+                    "出处应为产生它的步骤 id，实际: " + scopes);
+        }
+    }
+
     private static LlmClient.ChatResponse toolResponse(String id, String name, String arguments) {
         return new LlmClient.ChatResponse(
                 "assistant", "", null,

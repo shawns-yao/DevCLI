@@ -132,12 +132,21 @@ public class WorkingMemory {
 
     public synchronized void recordToolResult(String toolName, String argsJson, String result,
                                               List<ToolSideChannel> sideChannels) {
+        recordToolResult(toolName, argsJson, result, sideChannels, "");
+    }
+
+    /**
+     * @param scope 产生该证据的执行范围（Multi-Agent 下为步骤 id）；单 Agent 路径传空串
+     */
+    public synchronized void recordToolResult(String toolName, String argsJson, String result,
+                                              List<ToolSideChannel> sideChannels, String scope) {
         if (toolName == null || result == null) return;
         recentToolResults.addLast(new ToolEvidence(
                 toolName,
                 argsJson == null ? "" : argsJson,
                 result,
-                Instant.now()));
+                Instant.now(),
+                scope));
         evictToolResultsIfNeeded();
         recordRagEvidenceIfPresent(toolName, argsJson, result, sideChannels);
     }
@@ -150,19 +159,56 @@ public class WorkingMemory {
      */
     private void evictToolResultsIfNeeded() {
         while (recentToolResults.size() > maxToolResults) {
-            int readOnlyIdx = -1;
-            for (int i = 0; i < recentToolResults.size(); i++) {
-                if (!isSideEffectTool(recentToolResults.get(i).toolName)) {
-                    readOnlyIdx = i;
-                    break;
-                }
+            int victim = selectEvictionVictim(false);
+            if (victim < 0) {
+                victim = selectEvictionVictim(true);
             }
-            if (readOnlyIdx >= 0) {
-                recentToolResults.remove(readOnlyIdx);
-            } else {
-                recentToolResults.removeFirst();
+            recentToolResults.remove(victim < 0 ? 0 : victim);
+        }
+    }
+
+    /**
+     * 选择淘汰对象。两级规则：
+     * <ol>
+     *   <li>副作用证据优先保留（先在只读证据里找victim，找不到才动副作用）</li>
+     *   <li>同一级别内，从<b>条目最多的 scope</b> 里淘汰最旧的一条</li>
+     * </ol>
+     *
+     * <p>第 2 条是跨 scope 公平约束：Multi-Agent 下多个步骤共享同一份证据池，
+     * 纯 FIFO 会让话多的步骤把安静步骤的证据整体挤空，后续 Reviewer 就再也看不到那一步的产物。
+     *
+     * @param includeSideEffect true 时把副作用证据也纳入候选
+     * @return 待淘汰下标；无候选返回 -1
+     */
+    private int selectEvictionVictim(boolean includeSideEffect) {
+        Map<String, Integer> countByScope = new LinkedHashMap<>();
+        for (ToolEvidence evidence : recentToolResults) {
+            if (!includeSideEffect && isSideEffectTool(evidence.toolName)) {
+                continue;
+            }
+            countByScope.merge(evidence.scope, 1, Integer::sum);
+        }
+        if (countByScope.isEmpty()) {
+            return -1;
+        }
+        String largestScope = null;
+        int largestCount = 0;
+        for (Map.Entry<String, Integer> entry : countByScope.entrySet()) {
+            if (entry.getValue() > largestCount) {
+                largestCount = entry.getValue();
+                largestScope = entry.getKey();
             }
         }
+        for (int i = 0; i < recentToolResults.size(); i++) {
+            ToolEvidence evidence = recentToolResults.get(i);
+            if (!includeSideEffect && isSideEffectTool(evidence.toolName)) {
+                continue;
+            }
+            if (evidence.scope.equals(largestScope)) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     /**
@@ -311,6 +357,11 @@ public class WorkingMemory {
             Collections.reverse(reversed);
             for (ToolEvidence ev : reversed) {
                 sb.append("- **").append(ev.toolName).append("**");
+                // 出处标签：Multi-Agent 下多个步骤共享证据池，不标出处会让 Reviewer
+                // 把别的步骤的产物当作本步骤证据
+                if (!ev.scope.isBlank()) {
+                    sb.append(" [来自 ").append(ev.scope).append(']');
+                }
                 if (!ev.argsJson.isBlank()) {
                     sb.append(" args: `").append(truncate(ev.argsJson, 120)).append('`');
                 }
@@ -716,12 +767,18 @@ public class WorkingMemory {
         public final String argsJson;
         public final String result;
         public final Instant capturedAt;
+        /**
+         * 产生该证据的执行范围（Multi-Agent 下为步骤 id）。单 Agent / Plan 路径为空串，
+         * 表示"无步骤概念"，渲染时不加出处标签。
+         */
+        public final String scope;
 
-        ToolEvidence(String toolName, String argsJson, String result, Instant capturedAt) {
+        ToolEvidence(String toolName, String argsJson, String result, Instant capturedAt, String scope) {
             this.toolName = toolName;
             this.argsJson = argsJson;
             this.result = result;
             this.capturedAt = capturedAt;
+            this.scope = scope == null ? "" : scope;
         }
     }
 

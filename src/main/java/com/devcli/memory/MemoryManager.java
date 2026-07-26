@@ -149,7 +149,40 @@ public class MemoryManager implements AutoCloseable {
     public void addToolResult(String toolName, String argsJson, String result,
                               List<ToolSideChannel> sideChannels) {
         if (toolName == null || result == null) return;
-        workingMemory.recordToolResult(toolName, argsJson, result, sideChannels);
+        workingMemory.recordToolResult(toolName, argsJson, result, sideChannels, currentEvidenceScope());
+    }
+
+    // ─────────────────────────────
+    // 工具证据的出处范围（Multi-Agent 步骤隔离）
+    // ─────────────────────────────
+
+    /**
+     * 当前线程的证据出处范围。Multi-Agent 并行 Worker 各占一个线程，
+     * 由 {@code AgentOrchestrator} 在步骤执行前后设置，使证据能标出产生它的步骤。
+     * 单 Agent / Plan 路径为空串。
+     */
+    private final ThreadLocal<String> evidenceScope = ThreadLocal.withInitial(() -> "");
+
+    private String currentEvidenceScope() {
+        String scope = evidenceScope.get();
+        return scope == null ? "" : scope;
+    }
+
+    /**
+     * 在给定证据出处范围内执行。范围只影响本线程，嵌套调用结束后恢复外层范围。
+     */
+    public <T> T runWithEvidenceScope(String scope, java.util.function.Supplier<T> action) {
+        String previous = currentEvidenceScope();
+        evidenceScope.set(scope == null ? "" : scope);
+        try {
+            return action.get();
+        } finally {
+            if (previous.isEmpty()) {
+                evidenceScope.remove();
+            } else {
+                evidenceScope.set(previous);
+            }
+        }
     }
 
     /** 设置任务状态（plan_task / react_iteration / last_error 等）。 */

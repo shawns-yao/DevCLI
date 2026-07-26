@@ -30,7 +30,11 @@ compile may fail, or behavior may be subtly wrong
 - `ResourceLeaseManager（资源租约管理器）` 已经实现文件级写租约。
 - 并行 Worker 写同一文件会被拒绝，不做 `last-writer-wins（最后写入覆盖）`。
 - `Pre-Review Hook（审查前硬检查）` 会在 Reviewer LLM 前先跑编译检查。
-- `WorkingMemory（工作记忆）` 按角色隔离注入。
+- `WorkingMemory（工作记忆）` 按角色隔离注入。注意角色视图只决定**渲染哪些段落**，不区分证据由哪个步骤产生。
+- 工具证据带 `EvidenceScope（证据出处）`：`AgentOrchestrator` 在步骤执行期间设置线程级出处，`WorkingMemory` 渲染时标注 `[来自 step_N]`，Reviewer 可分辨哪条证据属于哪一步。
+- 证据淘汰跨出处公平：全局 FIFO 上限下，从条目最多的出处淘汰最旧一条，避免话多步骤把安静步骤的证据整体挤空（既有「副作用证据优先保留」约定不变）。
+- 并行 Worker 的上下文快照在批次开始前冻结（`ForkContext.turnContextSnapshot`），同批 Worker 之间新产生证据不再相互污染，也消除了对共享 `WorkingMemory` 的并发读竞争。
+- 明确不做硬隔离：跨步骤证据可见性是需要的——Worker 需要知道别人改了哪些文件，否则更容易照着过期接口写代码。要解决的是出处不明与淘汰不公平，不是可见性。
 
 ## 不足
 

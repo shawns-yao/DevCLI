@@ -1475,20 +1475,25 @@ public class AgentOrchestrator {
                          PrintStream out,
                          SubAgent.ForkContext workerForkContext,
                          SubAgent.ForkContext reviewerForkContext) {
-        if (requiresIsolatedWorkspace(step)) {
-            runStepInIsolatedWorkspace(step, steps, retryCount, worker, reviewer, context, out,
-                    workerForkContext, reviewerForkContext);
-            return;
-        }
-        try {
-            toolRegistry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY, () -> {
-                runStepWithLease(step, steps, retryCount, worker, reviewer, context, out,
+        // 本步骤产生的工具证据都标记为该步骤出处：多个 Worker 共享同一份 WorkingMemory，
+        // 不标出处会让 Reviewer 把别的步骤的产物当作本步骤证据，也让淘汰无法跨步骤公平
+        memoryManager.runWithEvidenceScope(step.id(), () -> {
+            if (requiresIsolatedWorkspace(step)) {
+                runStepInIsolatedWorkspace(step, steps, retryCount, worker, reviewer, context, out,
                         workerForkContext, reviewerForkContext);
                 return null;
-            });
-        } finally {
-            toolRegistry.releaseResourceLeases(step.id());
-        }
+            }
+            try {
+                toolRegistry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY, () -> {
+                    runStepWithLease(step, steps, retryCount, worker, reviewer, context, out,
+                            workerForkContext, reviewerForkContext);
+                    return null;
+                });
+            } finally {
+                toolRegistry.releaseResourceLeases(step.id());
+            }
+            return null;
+        });
     }
 
     private void runStepInIsolatedWorkspace(ExecutionStep step, List<ExecutionStep> steps,
