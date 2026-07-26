@@ -1478,21 +1478,27 @@ public class AgentOrchestrator {
         // 本步骤产生的工具证据都标记为该步骤出处：多个 Worker 共享同一份 WorkingMemory，
         // 不标出处会让 Reviewer 把别的步骤的产物当作本步骤证据，也让淘汰无法跨步骤公平
         memoryManager.runWithEvidenceScope(step.id(), () -> {
-            if (requiresIsolatedWorkspace(step)) {
-                runStepInIsolatedWorkspace(step, steps, retryCount, worker, reviewer, context, out,
-                        workerForkContext, reviewerForkContext);
-                return null;
-            }
             try {
-                toolRegistry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY, () -> {
-                    runStepWithLease(step, steps, retryCount, worker, reviewer, context, out,
+                if (requiresIsolatedWorkspace(step)) {
+                    runStepInIsolatedWorkspace(step, steps, retryCount, worker, reviewer, context, out,
                             workerForkContext, reviewerForkContext);
                     return null;
-                });
+                }
+                try {
+                    toolRegistry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY, () -> {
+                        runStepWithLease(step, steps, retryCount, worker, reviewer, context, out,
+                                workerForkContext, reviewerForkContext);
+                        return null;
+                    });
+                } finally {
+                    toolRegistry.releaseResourceLeases(step.id());
+                }
+                return null;
             } finally {
-                toolRegistry.releaseResourceLeases(step.id());
+                // 步骤真正结束才清理过期写入屏障的读取观察。放在这里而不是租约释放处：
+                // 租约按每次 Worker 调用释放，步骤内还有修复与重试要继续受屏障保护。
+                toolRegistry.forgetStaleWriteScope(step.id());
             }
-            return null;
         });
     }
 

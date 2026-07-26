@@ -20,7 +20,10 @@ public final class FileToolProvider implements ToolProvider {
                 args -> {
                     Path safe = context.resolveSafePath(args.get("path"));
                     try {
-                        return ToolOutput.success("文件内容:\n" + Files.readString(safe));
+                        String content = Files.readString(safe);
+                        // 记录读到的版本，供过期写入屏障比对
+                        context.recordFileRead(safe, content, context.currentResourceLeaseStep());
+                        return ToolOutput.success("文件内容:\n" + content);
                     } catch (Exception e) {
                         return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
                                 "读取文件失败: " + e.getMessage(), false);
@@ -59,6 +62,12 @@ public final class FileToolProvider implements ToolProvider {
                         }
                     } catch (Exception ignored) {
                         // 二进制 / 大文件 / 编码错读不出来时，前文当 null 处理（diff 退化为长度提示）
+                    }
+                    // 过期写入屏障：本步骤读过该文件、期间内容变了，说明要基于旧版本写回，
+                    // 直接写会静默覆盖对方改动。抛策略异常让模型看到可执行的恢复动作（重读后重写）。
+                    String staleReason = context.staleWriteReason(activeStep, safe, before);
+                    if (staleReason != null) {
+                        throw new PolicyException(staleReason);
                     }
                     try {
                         Path parent = safe.getParent();

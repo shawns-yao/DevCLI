@@ -90,6 +90,12 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private final ThreadLocal<SkillContextBuffer> skillContextBufferOverride = new ThreadLocal<>();
     private final ThreadLocal<ToolAccessScope> toolAccessScope = new ThreadLocal<>();
     private final ResourceLeaseManager resourceLeaseManager = new ResourceLeaseManager();
+    /**
+     * 过期写入屏障：租约只在步骤执行期内防并发写，跨步骤的 read-modify-write 版本过期由它兜。
+     * 只对非空步骤 id 生效，单 Agent 路径不启用。
+     */
+    private final com.devcli.workspace.StaleWriteBarrier staleWriteBarrier =
+            new com.devcli.workspace.StaleWriteBarrier();
     private final ResourceLeaseMaintenance resourceLeaseMaintenance;
     private final ResourceLeaseMaintenance.Registration resourceLeaseMaintenanceRegistration;
     private final ThreadLocal<String> resourceLeaseStep = new ThreadLocal<>();
@@ -425,12 +431,33 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public boolean isWriteLeaseValid(String stepId, Path path) { return resourceLeaseManager.isLeaseValid(stepId, path); }
 
     @Override
+    public void recordFileRead(Path safePath, String content, String stepId) {
+        staleWriteBarrier.recordRead(stepId, safePath, content);
+    }
+
+    /**
+     * 步骤真正结束时清理其读取观察，避免长会话无界增长。
+     *
+     * <p>不能并入 {@link #releaseResourceLeases(String)}：租约释放发生在每次 Worker 调用结束
+     * （一个步骤有初次 / 修复 / 重试多次调用），并入会让被拦后的重试失去屏障保护。
+     */
+    public void forgetStaleWriteScope(String stepId) {
+        staleWriteBarrier.forgetScope(stepId);
+    }
+
+    @Override
+    public String staleWriteReason(String stepId, Path safePath, String currentContent) {
+        return staleWriteBarrier.staleReason(stepId, safePath, currentContent);
+    }
+
+    @Override
     public void recordFileWrite(String displayPath, Path safePath, String before, String content, String stepId) {
         if (stepId != null && !stepId.isBlank()) {
             stepModifiedFiles
                     .computeIfAbsent(stepId, k -> java.util.concurrent.ConcurrentHashMap.newKeySet())
                     .add(safePath.toString());
         }
+        staleWriteBarrier.recordWrite(stepId, safePath, content);
         try {
             writeFileObserver.accept(displayPath, new String[]{before, content});
         } catch (Exception ignored) {

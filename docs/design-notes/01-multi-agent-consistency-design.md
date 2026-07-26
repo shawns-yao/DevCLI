@@ -38,9 +38,13 @@ compile may fail, or behavior may be subtly wrong
 
 ## 不足
 
-- 没有 `WorkerContextManifest（Worker 上下文清单）` 记录 Worker 依赖了哪些文件、符号、索引版本。
-- 没有 `ContextInvalidationEvent（上下文失效事件）` 主动通知运行中的 Worker。
-- 没有 `StaleWriteBarrier（过期写入屏障）` 阻止过期 Worker 继续写代码。
+- `StaleWriteBarrier（过期写入屏障）` 已落地，但只到**文件级**：按"读取时观察到的内容指纹"与"写入前磁盘实际指纹"比对，跨步骤有效（`com.devcli.workspace.StaleWriteBarrier`）。
+  - 拦截条件：本步骤读过该文件，且写入前磁盘内容已变。
+  - 拦截方式：抛策略异常，错误信息指出哪个文件、被哪个步骤改过、并要求先 `read_file` 重读再重写——给模型一个可执行的恢复动作，而不是静默失败。
+  - 作用边界：只对非空步骤 id 生效。单 Agent 路径没有步骤概念，且"读文件 → 执行命令改文件 → 写回"是正常流程，启用会误拦。
+  - 未覆盖：`execute_command` 内部的文件改动无法追踪；隔离工作区模式下各步骤各自持有 `ToolRegistry`，跨步骤检测由补丁应用失败兜底。
+- 仍缺**符号级** `WorkerContextManifest（Worker 上下文清单）`：文件级屏障拦不住"A 改了方法签名、B 改另一个文件里的调用方"这类语义冲突。
+- 仍缺 `ContextInvalidationEvent（上下文失效事件）` 主动推送：当前是写入时惰性检测（写的时候才发现过期），不是运行中主动中断 Worker。
 - 没有 per-Worker `Worktree（工作树）` 物理隔离。
 - `Re-plan（重规划）` 后，对已写入产物的接纳、撤销、合并边界还不够结构化。
 - 文件级锁只能防物理覆盖，不能防语义冲突。
