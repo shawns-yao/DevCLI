@@ -192,7 +192,17 @@ public final class PatchSet {
                     Files.createDirectories(path.getParent());
                     Files.write(path, originals.get(path));
                 } else {
-                    Files.deleteIfExists(path);
+                    try {
+                        Files.deleteIfExists(path);
+                    } catch (java.nio.file.FileSystemException deleteFailure) {
+                        // 平台差异:目标从未被写入且父路径不是目录时,Linux 的 unlink 返回
+                        // ENOTDIR(抛 FileSystemException),而 Windows 映射为"路径不存在"
+                        // (deleteIfExists 返回 false)。只要目标确实不存在,回滚语义已满足,
+                        // 不应记为回滚失败;目标仍存在才是真失败。
+                        if (Files.exists(path)) {
+                            throw deleteFailure;
+                        }
+                    }
                 }
             } catch (Exception rollbackFailure) {
                 String message = rollbackFailure.getMessage() == null
