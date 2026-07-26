@@ -152,9 +152,9 @@ public class MemoryManager implements AutoCloseable {
         workingMemory.recordToolResult(toolName, argsJson, result, sideChannels, currentEvidenceScope());
     }
 
-    // ─────────────────────────────
+    // ─────────────────────────────────────────────────────────
     // 工具证据的出处范围（Multi-Agent 步骤隔离）
-    // ─────────────────────────────
+    // ─────────────────────────────────────────────────────────
 
     /**
      * 当前线程的证据出处范围。Multi-Agent 并行 Worker 各占一个线程，
@@ -249,12 +249,12 @@ public class MemoryManager implements AutoCloseable {
                 case SAVE -> "允许保存";
             });
         }
-        storeFact(fact, decision.metadata());
+        String id = storeFact(fact, decision.metadata());
         if (!longTermMemory.isPersistent()) {
             return new StoreResult(true, decision,
-                    "已存入本会话内存，但未持久化（长期记忆存储不可用，重启后丢失）");
+                    "已存入本会话内存，但未持久化（长期记忆存储不可用，重启后丢失）", id);
         }
-        return new StoreResult(true, decision, "已保存到长期记忆");
+        return new StoreResult(true, decision, "已保存到长期记忆", id);
     }
 
     private void maybePersistUserFact(String content) {
@@ -288,7 +288,7 @@ public class MemoryManager implements AutoCloseable {
         return normalized;
     }
 
-    private void storeFact(String fact, Map<String, String> metadata) {
+    private String storeFact(String fact, Map<String, String> metadata) {
         Map<String, String> effectiveMetadata =
                 metadata == null || metadata.isEmpty() ? Map.of("source", "fact") : metadata;
         String subject = MemorySubjectExtractor.extract(fact, effectiveMetadata);
@@ -309,6 +309,25 @@ public class MemoryManager implements AutoCloseable {
                 evidence
         );
         longTermMemory.storeManaged(entry);
+        notifyAutoSaved(entry, effectiveMetadata);
+        return entry.getId();
+    }
+
+    /**
+     * 回传写入事件。写入长期记忆意味着跨会话持久化用户内容，
+     * 不允许无声——监听器失败不能影响写入主路径。
+     */
+    private void notifyAutoSaved(MemoryEntry entry, Map<String, String> metadata) {
+        try {
+            autoSaveListener.accept(new AutoSavedFact(
+                    entry.getId(),
+                    entry.getContent(),
+                    metadata.getOrDefault("source", "policy"),
+                    metadata.getOrDefault("reason_code", ""),
+                    metadata.getOrDefault("memory_type", "fact")));
+        } catch (RuntimeException e) {
+            log.warn("auto-save listener failed for memory {}", entry.getId(), e);
+        }
     }
 
     private static MemoryEntry.MemoryType memoryEntryType(Map<String, String> metadata) {
@@ -319,7 +338,33 @@ public class MemoryManager implements AutoCloseable {
         return MemoryEntry.MemoryType.FACT;
     }
 
-    public record StoreResult(boolean stored, LongTermMemoryPolicy.Decision decision, String message) {}
+    public record StoreResult(boolean stored, LongTermMemoryPolicy.Decision decision, String message, String id) {
+        public StoreResult(boolean stored, LongTermMemoryPolicy.Decision decision, String message) {
+            this(stored, decision, message, "");
+        }
+    }
+
+    /**
+     * 一次长期记忆写入事件。自动写入与显式写入都走这条通道，让 CLI 能告诉用户
+     * 写了什么、依据哪条规则、怎么删。
+     */
+    public record AutoSavedFact(String id, String content, String source,
+                                String reasonCode, String memoryType) {}
+
+    /** 长期记忆写入监听器。默认无监听（单元测试与无 CLI 场景）。 */
+    private volatile java.util.function.Consumer<AutoSavedFact> autoSaveListener = fact -> {};
+
+    public void setAutoSaveListener(java.util.function.Consumer<AutoSavedFact> listener) {
+        this.autoSaveListener = listener == null ? fact -> {} : listener;
+    }
+
+    /** 按 id 删除单条长期记忆。自动写入提示里给出的删除入口。 */
+    public boolean forgetLongTermMemory(String id) {
+        if (id == null || id.isBlank()) {
+            return false;
+        }
+        return longTermMemory.delete(id.trim());
+    }
 
     /**
      * 返回当前持久化长期记忆的只读快照，供工具层审计和展示。

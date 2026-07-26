@@ -18,6 +18,7 @@ final class CliCommandParser {
         MEMORY_STATUS,
         MEMORY_ORGANIZE,
         MEMORY_CLEAR,
+        MEMORY_FORGET,
         MEMORY_SAVE,
         MEMORY_PIN,
         INDEX_CODE,
@@ -147,6 +148,13 @@ final class CliCommandParser {
 
         if (trimmed.equalsIgnoreCase("/memory clear") || trimmed.equalsIgnoreCase("/mem clear")) {
             return new ParsedCommand(CommandType.MEMORY_CLEAR, null);
+        }
+
+        // /memory forget <id>：删除单条长期记忆，配合自动写入提示里给出的 id
+        if (trimmed.regionMatches(true, 0, "/memory forget", 0, "/memory forget".length())
+                || trimmed.regionMatches(true, 0, "/mem forget", 0, "/mem forget".length())) {
+            String id = trimmed.substring(trimmed.indexOf("forget") + "forget".length()).trim();
+            return new ParsedCommand(CommandType.MEMORY_FORGET, id);
         }
 
         if (trimmed.equalsIgnoreCase("/save")) {

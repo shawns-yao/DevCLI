@@ -30,8 +30,14 @@ First implementation phase completed.
 - `ConversationHistoryCompactor（对话历史压缩器）` 控制真实 LLM messages 窗口。
 - `WorkingMemory（工作记忆）` 保存当前会话派生状态和工具证据。
 - `LongTermMemory（长期记忆）` 保存跨会话稳定事实。
-- 长期记忆主要通过 `/save` 或用户明确要求保存。
-- 敏感信息和模糊个人状态不会自动保存。
+- 长期记忆有四条写入路径，其中**三条不需要用户确认**（由 `LongTermMemoryPolicy.evaluate` 判定）：
+  - `explicit`：`/save`、`save_memory` 或文中含显式记忆意图。
+  - `heuristic`：命中 `isPersonalAttribute（个人属性）` 正则，立即保存。
+  - `recurrence`：`feedback（反馈类）` 事实**首次提及**即保存；`preference` / `project` / `feedback` 同内容重复 3 次即保存。
+  - 其余具体但缺显式意图的事实降为 `CONFIRM（待确认）`，不落库。
+- 敏感信息不会自动保存：`sensitivity（敏感度）` 为 high / medium 时一律降为 `CONFIRM（待确认）`；`isNovelProfileFact（新个人状态）` 同样降为待确认。
+- 自动写入不再无声：每次落库都通过 `MemoryManager.AutoSavedFact` 回传事件，CLI 打印写入内容摘要、判定规则（`reason_code`）与删除命令。用户可用 `/memory forget <id>` 删除单条。
+- 判定依据是正则启发式，不是模型判断，存在误判可能；可见提示与单条删除是配套的纠错手段。
 - `LongTermMemory（长期记忆）` 按 `subject（主题键）` 归并：同主题新事实写入时旧事实标记为 `superseded（已取代）`，检索只返回 `active（有效）` 条目。
 - Multi-Agent 按 Planner / Worker / Reviewer 注入不同视图。
 

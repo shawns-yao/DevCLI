@@ -298,6 +298,14 @@ public class Main {
             reactAgent.setSkillRegistry(skillRegistry);
             reactAgent.setSkillContextBuffer(skillContextBuffer);
 
+            // 长期记忆写入可见化：写入长期记忆意味着跨会话持久化用户内容，
+            // 保留自动保存能力但不允许无声——每次落库都告知写了什么、依据哪条规则、怎么删。
+            reactAgent.getMemoryManager().setAutoSaveListener(fact -> ui.println(
+                    "🧠 已记入长期记忆 [" + fact.memoryType() + "/" + fact.source() + "]: "
+                            + abbreviateMemoryNotice(fact.content())
+                            + "\n   规则: " + fact.reasonCode()
+                            + " | 删除: /memory forget " + fact.id()));
+
             // === Sticky Memory 初始化（PR-B）===
             // 三层文件式记忆 + pinned facts JSON。
             // 启动时加载文件层；运行时变化（/save --pin 等）写 pinned_facts.json。
@@ -469,6 +477,7 @@ public class Main {
                         ui.println("   /memory organize - 生成长期记忆整理计划");
                         ui.println("   /memory organize apply - 应用低风险整理项");
                         ui.println("   /memory clear - 清空长期记忆");
+                        ui.println("   /memory forget <id> - 删除单条长期记忆");
                         ui.println("   /save <事实> - 手动保存到长期记忆（Retrievable）");
                         ui.println("   /save --pin <事实> - 永久 pin 到 Sticky 区，每轮注入 system prompt");
                         ui.println();
@@ -489,6 +498,18 @@ public class Main {
                     case MEMORY_CLEAR -> {
                         reactAgent.getMemoryManager().clearLongTerm();
                         ui.println("🧹 长期记忆已清空\n");
+                        ui.println();
+                        continue;
+                    }
+                    case MEMORY_FORGET -> {
+                        String forgetId = command.payload();
+                        if (forgetId == null || forgetId.isBlank()) {
+                            ui.println("❌ 请提供要删除的记忆 id，例如 /memory forget fact-1a2b3c4d\n");
+                        } else if (reactAgent.getMemoryManager().forgetLongTermMemory(forgetId)) {
+                            ui.println("🧹 已删除长期记忆 " + forgetId + "\n");
+                        } else {
+                            ui.println("❌ 未找到长期记忆 " + forgetId + "（可用 /memory 查看现有条目）\n");
+                        }
                         ui.println();
                         continue;
                     }
@@ -1391,6 +1412,16 @@ public class Main {
     record SlashCommandHint(String insertText, String display, String description) {
     }
 
+    /** 记忆写入提示里只展示摘要，避免长句刷屏；完整内容用 /memory 查看。 */
+    static String abbreviateMemoryNotice(String content) {
+        if (content == null) {
+            return "";
+        }
+        String normalized = content.replace("\r\n", " ").replace('\r', ' ')
+                .replace('\n', ' ').trim().replaceAll("\\s+", " ");
+        return normalized.length() <= 60 ? normalized : normalized.substring(0, 57) + "...";
+    }
+
     static List<SlashCommandHint> slashCommandHints() {
         return List.of(
                 new SlashCommandHint("/model", "/model", "查看当前模型"),
@@ -1447,6 +1478,7 @@ public class Main {
                 new SlashCommandHint("/memory organize", "/memory organize", "生成长期记忆整理计划"),
                 new SlashCommandHint("/memory organize apply", "/memory organize apply", "应用低风险整理项"),
                 new SlashCommandHint("/memory clear", "/memory clear", "清空长期记忆"),
+                new SlashCommandHint("/memory forget", "/memory forget <id>", "删除单条长期记忆"),
                 new SlashCommandHint("/save ", "/save <事实内容>", "手动保存关键事实到长期记忆"),
                 new SlashCommandHint("/skill", "/skill", "查看 skill 列表"),
                 new SlashCommandHint("/skill list", "/skill list", "查看 skill 列表"),

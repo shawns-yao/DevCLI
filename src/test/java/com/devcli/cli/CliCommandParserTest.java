@@ -148,6 +148,24 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesMemoryForgetSlashCommandWithId() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/memory forget fact-1a2b3c4d");
+
+        assertEquals(CliCommandParser.CommandType.MEMORY_FORGET, command.type());
+        assertEquals("fact-1a2b3c4d", command.payload());
+    }
+
+    @Test
+    void parsesMemoryForgetShortFormAndEmptyId() {
+        assertEquals(CliCommandParser.CommandType.MEMORY_FORGET,
+                CliCommandParser.parse("/mem forget fact-9").type());
+        // 缺 id 时仍归为 MEMORY_FORGET，由命令层给出用法提示，而不是被当成普通输入发给模型
+        CliCommandParser.ParsedCommand blank = CliCommandParser.parse("/memory forget");
+        assertEquals(CliCommandParser.CommandType.MEMORY_FORGET, blank.type());
+        assertEquals("", blank.payload());
+    }
+
+    @Test
     void parsesSaveSlashCommand() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/save 记住这个事实");
 
