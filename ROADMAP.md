@@ -494,7 +494,8 @@
   - `modes/agent.md` / `modes/plan.md` / `modes/planner.md` / `modes/team-planner.md` / `modes/team-worker.md` / `modes/team-reviewer.md`：各模式的工作流预期和权限
   - `approvals/suggest.md` / `approvals/auto.md` / `approvals/never.md`：审批策略
   - `personalities/calm.md`：语调（保留现有 `AGENTS.md` 中的 Personality 规范）
-- `PromptAssembler`：按固定顺序组装（base → personality → mode → approval → project_context → skills → context_mgmt → handoff），遵循"volatile content last"原则以最大化 KV prefix cache 命中率
+- `PromptAssembler`：system prompt 按固定顺序组装（base → personality → mode → approval → sticky_memory → project_context → context_mgmt → handoff），**只放会话级稳定内容**；轮次级内容（长期记忆检索 / skill 索引 / 工作记忆）由 `assembleTurnContext()` 单独组装并前置到当轮 user 消息，以 append-only 方式进入历史
+- prompt cache 契约修正：早期"volatile content last"理解为「易变段放在 system prompt 内部尾部」，实际无效——system prompt 是整个请求的 token 前缀，它变一个字节就会让其后全部对话历史失配。正确形态是易变内容完全移出 `messages[0]`，且只追加不改写（见 `docs/phase-19-prompt-layering.md`，契约由 `AgentPromptCacheStabilityTest` 守护）
 - 用户级覆盖：`~/.devcli/prompts/base.md` 可整体替换内置 base.md；`~/.devcli/prompts/modes/agent.md` 可覆盖特定模式；项目级 `.devcli/prompts/...` 优先级更高
 - 启动时校验：必含 `## Language` section（保证 reasoning_content 语言跟随）
 - 兼容旧有 API：`Agent.java` / `PlanExecuteAgent.java` / `SubAgent.java` / `Planner.java` 不再手写运行模式 prompt，改为调 `PromptAssembler.assemble(mode, context)`

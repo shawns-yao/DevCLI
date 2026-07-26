@@ -63,7 +63,8 @@ class HeadlessAgentRunnerTest {
         List<LlmClient.Message> messages = seenMessages.get();
         assertSame(seed.get(0), messages.get(1));
         assertSame(seed.get(1), messages.get(2));
-        assertEquals("now", messages.get(3).content());
+        // 当轮上下文快照前置在当轮 user 消息里，用户原文仍须落在末尾
+        assertTrue(messages.get(3).content().endsWith("now"), messages.get(3).content());
     }
 
     @Test
@@ -75,7 +76,8 @@ class HeadlessAgentRunnerTest {
 
         assertTrue(result.output().contains("done"));
         assertTrue(result.history().stream().anyMatch(message ->
-                "user".equals(message.role()) && "hello".equals(message.content())));
+                "user".equals(message.role()) && message.content() != null
+                        && message.content().endsWith("hello")));
         assertTrue(result.history().stream().anyMatch(message ->
                 "assistant".equals(message.role()) && "done".equals(message.content())));
         assertEquals(false, result.compacted());

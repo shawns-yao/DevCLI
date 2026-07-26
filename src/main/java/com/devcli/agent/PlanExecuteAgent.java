@@ -527,21 +527,22 @@ public class PlanExecuteAgent {
         String memoryContext = memoryManager.buildContextForQuery(
                 task.getDescription(),
                 memoryManager.getContextProfile().memoryContextTokens());
-        String taskInput = buildTaskContext(goal, plan, task);
-        if (!memoryContext.isEmpty()) {
-            taskInput = taskInput + "\n\n" + memoryContext;
+        String taskInput = prependSkillBodies(buildTaskContext(goal, plan, task));
+        // 长期记忆检索结果与 skill 索引、工作记忆一起作为当轮快照前置到任务消息，
+        // 不进 system prompt——否则每任务/每迭代都会让前缀失配
+        String turnContext = buildTurnContext(memoryContext, taskInput);
+        if (!turnContext.isBlank()) {
+            taskInput = turnContext + "\n\n" + taskInput;
         }
-        taskInput = prependSkillBodies(taskInput);
 
         List<LlmClient.Message> messages = new ArrayList<>(Arrays.asList(
-                LlmClient.Message.system(buildTaskSystemPrompt(task, taskInput)),
+                LlmClient.Message.system(buildTaskSystemPrompt(task)),
                 ImageReferenceParser.userMessage(
                         taskInput,
                         Path.of(activeTaskToolRegistry().getProjectPath()))
         ));
 
         StringBuilder allResults = new StringBuilder();
-        String finalTaskInput = taskInput;
         TaskStreamRenderer streamRenderer = new TaskStreamRenderer(task.getId(), streamState, out);
         TraceContext traceContext = TraceContext.root("plan-task");
         traceRecorder.record(traceContext, "task.start", Map.of(
@@ -576,8 +577,8 @@ public class PlanExecuteAgent {
 
                     @Override
                     public void beforeIteration(int iteration, AgentBudget currentBudget) {
-                        messages.set(0, LlmClient.Message.system(
-                                buildTaskSystemPrompt(task, finalTaskInput)));
+                        // 不在迭代内重建 system prompt：它已只含任务身份与会话级稳定内容，
+                        // 逐字节稳定才能让其后的任务历史命中前缀缓存。
                         injectPendingLspDiagnostics(messages, out);
                         maybeCompactHistory(messages, out);
                     }
@@ -703,12 +704,24 @@ public class PlanExecuteAgent {
                 });
     }
 
-    private String buildTaskSystemPrompt(Task task, String activationText) {
+    /**
+     * 任务级 system prompt。只含任务身份（type / description）与会话级稳定内容；
+     * 工作记忆与 skill 索引改由 {@link #buildTurnContext(String, String)} 注入任务消息，
+     * 使 messages[0] 在同一任务的全部迭代中逐字节稳定，保住前缀缓存。
+     */
+    private String buildTaskSystemPrompt(Task task) {
         return promptAssembler.assemble(PromptMode.PLAN, PromptContext.builder()
                 .variable("taskType", task.getType())
                 .variable("taskDescription", task.getDescription())
                 .externalContext(buildExternalContext())
                 .stickyMemory(buildStickyMemory())
+                .build());
+    }
+
+    /** 组装当轮上下文快照（长期记忆检索结果 / skill 索引 / 工作记忆），前置到任务消息。 */
+    private String buildTurnContext(String memoryContext, String activationText) {
+        return promptAssembler.assembleTurnContext(PromptContext.builder()
+                .memoryContext(memoryContext)
                 .workingMemory(memoryManager.buildWorkingMemorySection())
                 .skillIndex(buildSkillIndex(activationText))
                 .build());

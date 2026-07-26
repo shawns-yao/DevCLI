@@ -61,7 +61,7 @@ class AgentMemoryHintTest {
     }
 
     @Test
-    void shouldRefreshWorkingMemoryIntoSystemPromptBeforeNextToolIteration(@TempDir Path tempDir) {
+    void shouldCarryWorkingMemoryEvidenceIntoNextTurnContext(@TempDir Path tempDir) {
         Path sampleFile = tempDir.resolve("sample.txt");
         try {
             java.nio.file.Files.writeString(sampleFile, "react-working-memory-evidence");
@@ -86,7 +86,8 @@ class AgentMemoryHintTest {
                             20,
                             10
                     ),
-                    new LlmClient.ChatResponse("assistant", "已完成", null, 20, 10)
+                    new LlmClient.ChatResponse("assistant", "已完成", null, 20, 10),
+                    new LlmClient.ChatResponse("assistant", "第二轮完成", null, 20, 10)
             ));
             ToolRegistry tools = new ToolRegistry();
             tools.setProjectPath(tempDir.toString());
@@ -94,10 +95,25 @@ class AgentMemoryHintTest {
 
             agent.run("读取 sample.txt");
 
+            // 单轮内工具证据由 tool_result 原文承载，不再复制进 system prompt
             assertTrue(llmClient.messagesByCall.size() >= 2);
             String secondSystem = llmClient.messagesByCall.get(1).get(0).content();
-            assertTrue(secondSystem.contains("Working Memory"), secondSystem);
-            assertTrue(secondSystem.contains("react-working-memory-evidence"), secondSystem);
+            assertFalse(secondSystem.contains("react-working-memory-evidence"), secondSystem);
+            assertTrue(llmClient.messagesByCall.get(1).stream()
+                            .anyMatch(m -> m.content() != null
+                                    && m.content().contains("react-working-memory-evidence")),
+                    "工具证据应通过 tool_result 抵达 LLM");
+
+            // 跨轮由当轮上下文快照承载精确实体
+            agent.run("基于刚才读到的内容继续");
+            List<LlmClient.Message> lastCall = llmClient.messagesByCall.get(llmClient.messagesByCall.size() - 1);
+            String lastUser = lastCall.stream()
+                    .filter(m -> "user".equals(m.role()) && m.content() != null)
+                    .reduce((first, second) -> second)
+                    .map(LlmClient.Message::content)
+                    .orElse("");
+            assertTrue(lastUser.contains("Working Memory"), lastUser);
+            assertTrue(lastUser.contains("react-working-memory-evidence"), lastUser);
         } finally {
             if (agent != null) {
                 agent.close();
@@ -168,10 +184,15 @@ class AgentMemoryHintTest {
 
             agent.run("请检查 src/main/java/App.java");
 
-            String systemPrompt = llmClient.messagesByCall.get(0).get(0).content();
-            assertTrue(systemPrompt.contains("java-review"), systemPrompt);
-            assertTrue(systemPrompt.contains("global-skill"), systemPrompt);
-            assertFalse(systemPrompt.contains("docs-review"), systemPrompt);
+            // skill 索引按输入路径过滤的语义不变，载体改为当轮上下文快照
+            String turnContext = llmClient.messagesByCall.get(0).stream()
+                    .filter(m -> "user".equals(m.role()) && m.content() != null)
+                    .reduce((first, second) -> second)
+                    .map(LlmClient.Message::content)
+                    .orElse("");
+            assertTrue(turnContext.contains("java-review"), turnContext);
+            assertTrue(turnContext.contains("global-skill"), turnContext);
+            assertFalse(turnContext.contains("docs-review"), turnContext);
         } finally {
             if (agent != null) {
                 agent.close();

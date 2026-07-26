@@ -637,7 +637,7 @@ class AgentOrchestratorTest {
                         }
                         """);
             }
-            if (body.startsWith("原始任务：")) {
+            if (body.contains("原始任务：")) {
                 return response(approvedReviewJson());
             }
             if (body.contains("检查空工作区目录是否存在")) {
@@ -728,14 +728,14 @@ class AgentOrchestratorTest {
                         }
                         """);
             }
-            if (body.startsWith("原始任务：")) {
+            if (body.contains("原始任务：")) {
                 reviewerCalls.incrementAndGet();
                 return response(approvedReviewJson());
             }
             if (body.contains("最终集成")) {
                 return response("integration result");
             }
-            if (body.startsWith("Provider 未生成原生工具调用。只输出严格 JSON")) {
+            if (body.contains("Provider 未生成原生工具调用。只输出严格 JSON")) {
                 envelopeRepairs.incrementAndGet();
                 return response("{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}}");
             }
@@ -1408,8 +1408,12 @@ class AgentOrchestratorTest {
                     "parallel workers should share an identical frozen system prompt prefix");
             assertTrue(workerCalls.get(0).get(0).content().contains("稳定长期记忆"),
                     "parallel worker prefix should include sticky memory");
-            assertTrue(workerCalls.get(0).get(0).content().contains("用户最新输入"),
-                    "parallel worker prefix should include working memory");
+            assertFalse(workerCalls.get(0).get(0).content().contains("用户最新输入"),
+                    "working memory must stay out of the frozen prefix to keep it byte-stable");
+            assertTrue(DispatchingStubGLMClient.findLastUser(workerCalls.get(0)).contains("用户最新输入"),
+                    "first worker should see the frozen working memory snapshot in its turn context");
+            assertTrue(DispatchingStubGLMClient.findLastUser(workerCalls.get(1)).contains("用户最新输入"),
+                    "second worker should see the same frozen working memory snapshot");
             assertNotEquals(DispatchingStubGLMClient.findLastUser(workerCalls.get(0)),
                     DispatchingStubGLMClient.findLastUser(workerCalls.get(1)),
                     "task-specific suffixes should remain independent");
@@ -1472,20 +1476,25 @@ class AgentOrchestratorTest {
             orchestrator.run("测试 role scoped working memory");
         }
 
-        String plannerSystem = findSystemByLastUser(llmClient.calls, "请为以下任务制定执行计划");
-        assertTrue(plannerSystem.contains("agent_scope"), plannerSystem);
-        assertTrue(plannerSystem.contains("planner-worker-visible-event"), plannerSystem);
-        assertFalse(plannerSystem.contains("reviewer-worker-visible-evidence"), plannerSystem);
+        // 角色隔离语义不变，载体从 system prompt 改为当轮上下文快照（最后一条 user 消息）
+        String plannerTurn = findTurnContextByLastUser(llmClient.calls, "请为以下任务制定执行计划");
+        assertTrue(plannerTurn.contains("agent_scope"), plannerTurn);
+        assertTrue(plannerTurn.contains("planner-worker-visible-event"), plannerTurn);
+        assertFalse(plannerTurn.contains("reviewer-worker-visible-evidence"), plannerTurn);
 
+        String workerTurn = findTurnContextByLastUser(llmClient.calls, "当前任务：分析记忆隔离");
+        assertTrue(workerTurn.contains("agent_scope"), workerTurn);
+        assertTrue(workerTurn.contains("planner-worker-visible-event"), workerTurn);
+        assertTrue(workerTurn.contains("reviewer-worker-visible-evidence"), workerTurn);
+
+        String reviewerTurn = findTurnContextByLastUser(llmClient.calls, "必须调用工具检查真实产物");
+        assertTrue(reviewerTurn.contains("agent_scope"), reviewerTurn);
+        assertFalse(reviewerTurn.contains("planner-worker-visible-event"), reviewerTurn);
+        assertTrue(reviewerTurn.contains("reviewer-worker-visible-evidence"), reviewerTurn);
+
+        // 工作记忆不得回流到 system prompt，否则 messages[0] 每任务失配
         String workerSystem = findSystemByLastUser(llmClient.calls, "当前任务：分析记忆隔离");
-        assertTrue(workerSystem.contains("agent_scope"), workerSystem);
-        assertTrue(workerSystem.contains("planner-worker-visible-event"), workerSystem);
-        assertTrue(workerSystem.contains("reviewer-worker-visible-evidence"), workerSystem);
-
-        String reviewerSystem = findSystemByLastUser(llmClient.calls, "必须调用工具检查真实产物");
-        assertTrue(reviewerSystem.contains("agent_scope"), reviewerSystem);
-        assertFalse(reviewerSystem.contains("planner-worker-visible-event"), reviewerSystem);
-        assertTrue(reviewerSystem.contains("reviewer-worker-visible-evidence"), reviewerSystem);
+        assertFalse(workerSystem.contains("reviewer-worker-visible-evidence"), workerSystem);
     }
 
     @Test
@@ -1605,7 +1614,7 @@ class AgentOrchestratorTest {
                             }
                             """);
                 }
-                if (body.startsWith("原始任务：")) {
+                if (body.contains("原始任务：")) {
                     throw new LlmException(LlmErrorCode.NETWORK, "anthropic", "test-model", 0,
                             "connection reset", true, 0L, null);
                 }
@@ -1958,6 +1967,18 @@ class AgentOrchestratorTest {
                 .orElseThrow(() -> new AssertionError("未找到 user 包含: " + userNeedle));
     }
 
+    /**
+     * 取匹配调用的最后一条 user 消息内容。当轮上下文快照（记忆 / skill 索引 / 工作记忆）
+     * 以 append-only 方式前置在这条消息里，不再进 system prompt。
+     */
+    private static String findTurnContextByLastUser(List<List<LlmClient.Message>> calls, String userNeedle) {
+        return calls.stream()
+                .map(DispatchingStubGLMClient::findLastUser)
+                .filter(lastUser -> lastUser.contains(userNeedle))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("未找到 user 包含: " + userNeedle));
+    }
+
     @Test
     void dependencyStepContextShouldIncludeCompletedStepModifiedFiles(@TempDir File memoryDir) throws Exception {
         try (NoOpMemoryManager mm = new NoOpMemoryManager(memoryDir)) {
@@ -2021,9 +2042,10 @@ class AgentOrchestratorTest {
                     restoredWorkers.stream().map(SubAgent::getName).toList());
             assertEquals("worker-3", assigned.getName());
             assertEquals("worker-3", recovery.stepAssignments().get("step-1").workerAgentId());
-            Method systemPrompt = SubAgent.class.getDeclaredMethod("getSystemPrompt");
-            systemPrompt.setAccessible(true);
-            String workerPrompt = (String) systemPrompt.invoke(assigned);
+            // 恢复状态属任务级内容，随当轮上下文快照注入，不再进 system prompt
+            Method turnContext = SubAgent.class.getDeclaredMethod("buildTurnContext");
+            turnContext.setAccessible(true);
+            String workerPrompt = (String) turnContext.invoke(assigned);
             assertTrue(workerPrompt.contains("消息游标: 1"), workerPrompt);
             assertTrue(workerPrompt.contains("上次执行已修改服务接口"), workerPrompt);
         }

@@ -6,6 +6,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -15,20 +17,50 @@ class PromptAssemblerTest {
     Path tempDir;
 
     @Test
-    void assemblesBuiltinPromptWithDynamicSections() {
+    void assemblesBuiltinPromptWithSessionStableSectionsOnly() {
         PromptAssembler assembler = PromptAssembler.createDefault();
 
         String prompt = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
                 .memoryContext("## 相关记忆\n用户偏好中文。")
                 .externalContext("## MCP Resources\n- demo://resource")
                 .skillIndex("## 可用 Skills\n- web-access")
+                .workingMemory("## 证据\nWORKING_EVIDENCE")
                 .build());
 
         assertTrue(prompt.contains("## Language"));
         assertTrue(prompt.contains("## Mode: ReAct Agent"));
-        assertTrue(prompt.contains("用户偏好中文"));
+        // 会话级稳定内容留在 system prompt
         assertTrue(prompt.contains("demo://resource"));
-        assertTrue(prompt.contains("web-access"));
+        // 按轮次变化的内容不得进 system prompt，否则其后全部历史前缀失配
+        assertFalse(prompt.contains("用户偏好中文"));
+        assertFalse(prompt.contains("web-access"));
+        assertFalse(prompt.contains("WORKING_EVIDENCE"));
+    }
+
+    @Test
+    void turnContextCarriesPerTurnSections() {
+        PromptAssembler assembler = PromptAssembler.createDefault();
+
+        String turnContext = assembler.assembleTurnContext(PromptContext.builder()
+                .memoryContext("## 相关记忆\n用户偏好中文。")
+                .skillIndex("## 可用 Skills\n- web-access")
+                .workingMemory("## 证据\nWORKING_EVIDENCE")
+                .build());
+
+        assertTrue(turnContext.contains("## Turn Context"));
+        assertTrue(turnContext.contains("只有最后一份有效"),
+                "多份快照共存时必须显式标注取代关系，避免 LLM 把过期证据当现状");
+        assertTrue(turnContext.contains("用户偏好中文"));
+        assertTrue(turnContext.contains("web-access"));
+        assertTrue(turnContext.contains("WORKING_EVIDENCE"));
+    }
+
+    @Test
+    void turnContextIsEmptyWhenNoPerTurnContentExists() {
+        PromptAssembler assembler = PromptAssembler.createDefault();
+
+        assertEquals("", assembler.assembleTurnContext(PromptContext.empty()),
+                "三段都为空时不应注入空块污染消息");
     }
 
     @Test
@@ -80,7 +112,7 @@ class PromptAssemblerTest {
 
         String prompt = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
                 .stickyMemory("### 用户偏好\n- 用简体中文\n- 不引入 SymbolSolver")
-                .memoryContext("## 相关记忆\n历史项目 X")
+                .externalContext("## MCP Resources\n- demo://resource")
                 .build());
 
         // 必有 Sticky Memory 段
@@ -103,7 +135,7 @@ class PromptAssemblerTest {
 
         String prompt = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
                 .stickyMemory("")
-                .memoryContext("## 相关记忆\n仅长期记忆")
+                .externalContext("## MCP Resources\n- demo://resource")
                 .build());
 
         assertTrue(!prompt.contains("## Sticky Memory"),
@@ -111,38 +143,41 @@ class PromptAssemblerTest {
     }
 
     @Test
-    void fixedPrefixStaysStableWhenDynamicSectionsChange() {
-        // prompt cache 契约：自动前缀缓存按请求 token 前缀命中，固定头部（base/personality/mode/approval）
-        // 不能被每轮变化的 memory / workingMemory 内容污染，否则 prefix cache 从第一条 message 就 miss。
+    void systemPromptIsFullyIdenticalWhenOnlyPerTurnSectionsChange() {
+        // prompt cache 契约：自动前缀缓存按请求 token 前缀命中，而 system prompt 是整个请求的前缀。
+        // 只要它有任何一个字节变化，其后<b>全部对话历史</b>都会失配——把易变段放到 system prompt
+        // 内部尾部并不能解决问题。因此要求：轮次级内容变化时 system prompt 必须完全一致。
         PromptAssembler assembler = PromptAssembler.createDefault();
 
         String withA = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
                 .memoryContext("MEMORY_TOKEN_AAA")
                 .workingMemory("WORKING_TOKEN_AAA")
+                .skillIndex("SKILL_TOKEN_AAA")
                 .build());
         String withB = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
                 .memoryContext("MEMORY_TOKEN_BBB_totally_different")
                 .workingMemory("WORKING_TOKEN_BBB_totally_different")
+                .skillIndex("SKILL_TOKEN_BBB_totally_different")
                 .build());
 
-        String commonPrefix = longestCommonPrefix(withA, withB);
-
-        assertTrue(commonPrefix.contains("## Language"),
-                "固定头部应落在稳定前缀内，供自动前缀缓存命中");
-        assertTrue(!commonPrefix.contains("MEMORY_TOKEN_AAA"),
-                "memory 动态内容不应污染固定前缀");
-        assertTrue(!commonPrefix.contains("WORKING_TOKEN_AAA"),
-                "workingMemory 动态内容不应污染固定前缀");
-        assertTrue(commonPrefix.length() > 200,
-                "固定前缀应有实质长度供 prefix cache 命中，实际: " + commonPrefix.length());
+        assertEquals(withA, withB,
+                "轮次级内容变化不得改变 system prompt，否则其后全部历史前缀缓存失配");
+        assertTrue(withA.contains("## Language"));
+        assertTrue(withA.length() > 200,
+                "静态前缀应有实质长度供 prefix cache 命中，实际: " + withA.length());
     }
 
-    private static String longestCommonPrefix(String a, String b) {
-        int n = Math.min(a.length(), b.length());
-        int i = 0;
-        while (i < n && a.charAt(i) == b.charAt(i)) {
-            i++;
-        }
-        return a.substring(0, i);
+    @Test
+    void sessionStableSectionChangeIsAllowedToInvalidatePrefix() {
+        // sticky memory 属会话级稳定层，它真变化时前缀失配是正确且必要的
+        PromptAssembler assembler = PromptAssembler.createDefault();
+
+        String withSticky = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
+                .stickyMemory("STICKY_AAA")
+                .build());
+        String withoutSticky = assembler.assemble(PromptMode.AGENT, PromptContext.empty());
+
+        assertTrue(withSticky.contains("STICKY_AAA"));
+        assertFalse(withoutSticky.contains("STICKY_AAA"));
     }
 }

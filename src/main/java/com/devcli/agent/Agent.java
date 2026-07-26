@@ -93,7 +93,7 @@ public class Agent implements AutoCloseable {
             return new ToolRegistry.MemorySaveResult(result.stored(), result.message());
         });
         this.toolRegistry.setMemoryListHandler(memoryManager::listLongTermMemory);
-        conversationHistory.add(LlmClient.Message.system(buildSystemPrompt("")));
+        conversationHistory.add(LlmClient.Message.system(buildSystemPrompt()));
     }
 
     public void setLlmClient(LlmClient llmClient) {
@@ -194,13 +194,16 @@ public class Agent implements AutoCloseable {
         memoryManager.addUserMessage(userInput);
         storeExplicitBrowserMemoryHint(userInput);
 
-        // 检索相关长期记忆，注入到 system prompt
+        // system prompt 只放会话级稳定内容，仅在真变化时替换，保住前缀缓存
+        refreshSystemPromptIfChanged();
+
+        // 检索相关长期记忆，与 skill 索引、工作记忆一起作为当轮快照前置到 user 消息
         ContextProfile contextProfile = memoryManager.getContextProfile();
         String memoryContext = memoryManager.buildContextForQuery(userInput, contextProfile.memoryContextTokens());
-        updateSystemPromptWithMemory(memoryContext);
 
-        // 添加用户输入到历史（如有 skill body 注入，前置到原文之前）
-        String userMessageContent = prependSkillBodies(userInput);
+        // 添加用户输入到历史（当轮快照与 skill body 依次前置到原文之前）
+        String userMessageContent = prependTurnContext(
+                prependSkillBodies(userInput), buildTurnContext(memoryContext));
         conversationHistory.add(ImageReferenceParser.userMessage(
                 userMessageContent,
                 Path.of(toolRegistry.getProjectPath())));
@@ -254,7 +257,9 @@ public class Agent implements AutoCloseable {
 
                     @Override
                     public void beforeIteration(int iteration, AgentBudget currentBudget) {
-                        updateSystemPromptWithMemory(memoryContext);
+                        // 不在这里重建 system prompt：迭代内重建会让 messages[0] 每轮变化，
+                        // 其后全部历史前缀失配。工具证据本轮已在 tool_result 原文里，
+                        // 跨压缩边界由 ConversationHistoryCompactor 的 post_compact_restore 兜底。
                         injectPendingLspDiagnostics();
                         maybeCompactHistory();
                     }
@@ -431,20 +436,49 @@ public class Agent implements AutoCloseable {
     }
 
     /**
-     * 将记忆上下文注入到 system prompt 中（替换 conversationHistory[0]）
+     * 仅在 system prompt 内容真正变化时替换 conversationHistory[0]。
+     *
+     * <p>prompt cache 契约：system prompt 是整个请求的 token 前缀，逐字节稳定才能让其后的
+     * 全部对话历史命中自动前缀缓存。这里只包含会话级稳定内容（sticky / MCP 索引），
+     * 正常情况下每轮比较结果相同、不写入；只有 sticky 或 MCP 索引真变了才失配一次。
      */
-    private void updateSystemPromptWithMemory(String memoryContext) {
-        conversationHistory.set(0, LlmClient.Message.system(buildSystemPrompt(memoryContext)));
+    private void refreshSystemPromptIfChanged() {
+        String assembled = buildSystemPrompt();
+        LlmClient.Message current = conversationHistory.isEmpty() ? null : conversationHistory.get(0);
+        if (current != null && "system".equals(current.role()) && assembled.equals(current.content())) {
+            return;
+        }
+        conversationHistory.set(0, LlmClient.Message.system(assembled));
     }
 
-    private String buildSystemPrompt(String memoryContext) {
+    /**
+     * 组装 system prompt。按轮次变化的记忆 / skill 索引 / 工作记忆不在这里，
+     * 由 {@link #buildTurnContext(String)} 前置到当轮 user 消息。
+     */
+    private String buildSystemPrompt() {
         return promptAssembler.assemble(PromptMode.AGENT, PromptContext.builder()
-                .memoryContext(memoryContext)
                 .externalContext(buildExternalContext())
                 .stickyMemory(buildStickyMemory())
+                .build());
+    }
+
+    /**
+     * 组装当轮上下文快照（长期记忆检索结果 / skill 索引 / 工作记忆），
+     * 由调用方前置到当轮 user 消息内容里——append-only，不改写既有消息。
+     */
+    private String buildTurnContext(String memoryContext) {
+        return promptAssembler.assembleTurnContext(PromptContext.builder()
+                .memoryContext(memoryContext)
                 .workingMemory(memoryManager.buildWorkingMemorySection())
                 .skillIndex(buildSkillIndex())
                 .build());
+    }
+
+    private static String prependTurnContext(String content, String turnContext) {
+        if (turnContext == null || turnContext.isBlank()) {
+            return content;
+        }
+        return turnContext + "\n\n" + content;
     }
 
     private String buildStickyMemory() {

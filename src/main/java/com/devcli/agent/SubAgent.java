@@ -64,6 +64,7 @@ public class SubAgent {
     public record ForkContext(List<LlmClient.Message> sharedPrefix,
                               List<LlmClient.Tool> toolDefinitions,
                               String skillBodySnapshot,
+                              String turnContextSnapshot,
                               String modelName,
                               String providerName,
                               String fingerprint) {
@@ -71,10 +72,12 @@ public class SubAgent {
             sharedPrefix = List.copyOf(sharedPrefix == null ? List.of() : sharedPrefix);
             toolDefinitions = toolDefinitions == null ? null : List.copyOf(toolDefinitions);
             skillBodySnapshot = skillBodySnapshot == null ? "" : skillBodySnapshot;
+            turnContextSnapshot = turnContextSnapshot == null ? "" : turnContextSnapshot;
             modelName = modelName == null ? "" : modelName;
             providerName = providerName == null ? "" : providerName;
             fingerprint = fingerprint == null || fingerprint.isBlank()
-                    ? computeFingerprint(sharedPrefix, toolDefinitions, skillBodySnapshot, modelName, providerName)
+                    ? computeFingerprint(sharedPrefix, toolDefinitions, skillBodySnapshot,
+                    turnContextSnapshot, modelName, providerName)
                     : fingerprint;
         }
     }
@@ -159,8 +162,8 @@ public class SubAgent {
     }
 
     public void setRecoveryContext(String recoveryContext) {
+        // 恢复状态属于任务级内容，随当轮快照进入任务消息，不再触碰 system prompt
         this.recoveryContext = recoveryContext == null ? "" : recoveryContext.trim();
-        refreshSystemPrompt();
     }
 
     /**
@@ -175,12 +178,10 @@ public class SubAgent {
 
     public void setMemoryContextSupplier(Supplier<String> memoryContextSupplier) {
         this.memoryContextSupplier = memoryContextSupplier == null ? () -> "" : memoryContextSupplier;
-        refreshSystemPrompt();
     }
 
     public void setWorkingMemorySupplier(Supplier<String> workingMemorySupplier) {
         this.workingMemorySupplier = workingMemorySupplier == null ? () -> "" : workingMemorySupplier;
-        refreshSystemPrompt();
     }
 
     public void setPostCompactRestoreSupplier(Supplier<String> postCompactRestoreSupplier) {
@@ -196,8 +197,8 @@ public class SubAgent {
     }
 
     public void setSkillRegistry(SkillRegistry skillRegistry) {
+        // skill 索引按任务激活文本过滤，属任务级内容，随当轮快照注入
         this.skillRegistry = skillRegistry;
-        refreshSystemPrompt();
     }
 
     public void setSkillContextBuffer(SkillContextBuffer skillContextBuffer) {
@@ -205,13 +206,24 @@ public class SubAgent {
     }
 
     /**
-     * 根据角色获取系统提示词
+     * 根据角色获取系统提示词。<b>只含会话级稳定内容</b>——按任务变化的记忆检索 /
+     * skill 索引 / 工作记忆 / 恢复状态由 {@link #buildTurnContext()} 承载，
+     * 以 append-only 方式进入任务消息，避免 fork 共享前缀逐任务失配。
      */
     private String getSystemPrompt() {
         return promptAssembler.assemble(promptMode(), PromptContext.builder()
-                .memoryContext(buildMemoryContext())
                 .externalContext(buildExternalContext())
                 .stickyMemory(buildStickyMemory())
+                .build());
+    }
+
+    /**
+     * 组装按任务变化的上下文快照。fork 执行时由 {@link #createForkContext()} 冻结，
+     * 保证同批并行 Worker 看到同一份快照，同时不污染 system prompt 前缀。
+     */
+    private String buildTurnContext() {
+        return promptAssembler.assembleTurnContext(PromptContext.builder()
+                .memoryContext(buildMemoryContext())
                 .workingMemory(buildWorkingMemory())
                 .skillIndex(buildSkillIndex())
                 .build());
@@ -375,6 +387,13 @@ public class SubAgent {
         return skillBodies + "\n" + content;
     }
 
+    private static String prependTurnContext(String content, String turnContext) {
+        if (turnContext == null || turnContext.isBlank()) {
+            return content;
+        }
+        return turnContext + "\n\n" + content;
+    }
+
     private void refreshSystemPrompt() {
         if (!conversationHistory.isEmpty()) {
             conversationHistory.set(0, LlmClient.Message.system(getSystemPrompt()));
@@ -398,9 +417,11 @@ public class SubAgent {
         List<LlmClient.Message> sharedPrefix = List.of(LlmClient.Message.system(getSystemPrompt()));
         List<LlmClient.Tool> toolDefinitions = shouldUseTools() ? toolDefinitionsForRole() : null;
         String skillBodySnapshot = skillContextBuffer == null ? "" : skillContextBuffer.snapshot();
+        String turnContextSnapshot = buildTurnContext();
         String modelName = llmClient == null ? "" : llmClient.getModelName();
         String providerName = llmClient == null ? "" : llmClient.getProviderName();
-        return new ForkContext(sharedPrefix, toolDefinitions, skillBodySnapshot, modelName, providerName, null);
+        return new ForkContext(sharedPrefix, toolDefinitions, skillBodySnapshot, turnContextSnapshot,
+                modelName, providerName, null);
     }
 
     /**
@@ -459,9 +480,11 @@ public class SubAgent {
                                             ForkContext forkContext,
                                             LlmClient.ToolChoice initialToolChoice,
                                             String completionToolName) {
-        String taskContent = forkContext == null
+        // 当轮快照：非 fork 路径实时渲染，fork 路径用冻结快照（同批 Worker 一致且无并发读竞争）
+        String turnContext = forkContext == null ? buildTurnContext() : forkContext.turnContextSnapshot();
+        String taskContent = prependTurnContext(forkContext == null
                 ? prependSkillBodies(task.content(), true)
-                : prependSkillBodies(task.content(), forkContext.skillBodySnapshot());
+                : prependSkillBodies(task.content(), forkContext.skillBodySnapshot()), turnContext);
 
         // 将任务注入对话
         history.add(ImageReferenceParser.userMessage(
@@ -498,10 +521,8 @@ public class SubAgent {
 
                     @Override
                     public void beforeIteration(int iteration, AgentBudget currentBudget) {
-                        if (forkContext == null && !history.isEmpty()
-                                && "system".equals(history.get(0).role())) {
-                            history.set(0, LlmClient.Message.system(getSystemPrompt()));
-                        }
+                        // 不在迭代内重建 system prompt：messages[0] 每轮变化会让其后全部历史
+                        // 前缀失配。它现在只含会话级稳定内容，任务级内容已在任务消息的当轮快照里。
                         injectPendingLspDiagnostics(history, out);
                         maybeCompactHistory(history, out);
                     }
@@ -1014,6 +1035,7 @@ public class SubAgent {
     private static String computeFingerprint(List<LlmClient.Message> sharedPrefix,
                                              List<LlmClient.Tool> toolDefinitions,
                                              String skillBodySnapshot,
+                                             String turnContextSnapshot,
                                              String modelName,
                                              String providerName) {
         StringBuilder sb = new StringBuilder();
@@ -1034,7 +1056,8 @@ public class SubAgent {
                         .append('\n');
             }
         }
-        sb.append("skills=").append(skillBodySnapshot == null ? "" : skillBodySnapshot);
+        sb.append("skills=").append(skillBodySnapshot == null ? "" : skillBodySnapshot).append('\n');
+        sb.append("turnContext=").append(turnContextSnapshot == null ? "" : turnContextSnapshot);
         return sha256Prefix(sb.toString());
     }
 

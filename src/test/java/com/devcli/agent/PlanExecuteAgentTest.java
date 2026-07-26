@@ -82,10 +82,15 @@ class PlanExecuteAgentTest {
             assertTrue(section.contains("read_file"), "工具调用应记录到 working memory");
             assertTrue(section.contains("plan-memory-content"), "工具返回的文件原文应保留在 working memory");
             assertTrue(llmClient.messagesByCall.size() >= 2);
+            // 工作记忆改由任务消息的当轮快照承载，system prompt 保持逐字节稳定
             String secondSystem = llmClient.messagesByCall.get(1).get(0).content();
-            assertTrue(secondSystem.contains("Working Memory"), secondSystem);
-            assertTrue(secondSystem.contains("plan-memory-content"),
-                    "工具结果写入后，下一轮 task LLM 调用应刷新 Working Memory 段");
+            assertEquals(llmClient.messagesByCall.get(0).get(0).content(), secondSystem,
+                    "同一任务的迭代之间 system prompt 必须一致，否则任务历史前缀缓存失配");
+            // 任务级快照在任务开始时冻结；本任务内新产生的工具结果由 tool_result 原文承载
+            assertTrue(llmClient.messagesByCall.get(1).stream()
+                            .anyMatch(m -> "tool".equals(m.role()) && m.content() != null
+                                    && m.content().contains("plan-memory-content")),
+                    "工具结果应以 tool_result 原文进入下一轮 task LLM 调用");
             assertTrue(memoryManager.getWorkingMemory().getVolatileFacts().stream()
                     .anyMatch(f -> f.contains("请读取测试文件")),
                     "用户输入摘要应作为 volatile fact 记录");
