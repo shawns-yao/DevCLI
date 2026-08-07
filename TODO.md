@@ -16,8 +16,8 @@
 - 来源：Runtime API 之前每个 turn 通过无头执行入口重新构造 Agent，无法从 API 控制正在运行的会话队列
 - 影响范围：Runtime API 路由、RuntimeSessionTurnRunner、AgentSessionRuntime、RunEvent、Runtime API 测试和启动器
 - 已实现：Runtime API 通过持久 `RuntimeSessionTurnRunner` 为每个 thread 复用 `AgentSessionRuntime`；新增 `POST /v1/threads/{id}/steer` 与 `POST /v1/threads/{id}/follow-up`；两个入口复用 AgentTurnInbox，返回队列水位并写入 `queue.updated` 事件；旧 TurnRunner lambda 保持兼容，不支持队列时返回 501
-- 未实现：尚未提供队列清空、队列取消和 Runtime API 的 SSE 长连接推送；Runtime API 真实模型交互仍需现场验证
-- 验证建议：运行 RuntimeApiServerTest；再使用真实 API Key 启动 `serve --http` 验证 steering 在工具批次后注入、follow-up 在自然结束前注入
+- 未实现：Runtime API 仍未提供 SSE 长连接推送；真实模型交互仍需现场验证
+- 验证建议：运行 RuntimeApiServerTest；已覆盖 steer、follow-up、queue clear 和 cancel；再使用真实 API Key 启动 `serve --http` 验证 Steering 在工具批次后注入、Follow-up 在自然结束前注入
 - 风险：队列快照现在按 thread/branch 持久化，进程退出瞬间正在交付的消息仍以 turn 终态对账；大规模队列仍需分页和上限治理
 
 ## 2026-08-07 RunEvent 会话状态与自定义消息
