@@ -9,10 +9,10 @@ import com.devcli.browser.BrowserGuard;
 import com.devcli.browser.BrowserSession;
 import com.devcli.browser.SensitivePagePolicy;
 import com.devcli.config.DevCliConfig;
-import com.devcli.cli.turn.ActiveTurnCoordinator;
 import com.devcli.cli.turn.ActiveTurnInput;
 import com.devcli.cli.turn.PromptQueue;
 import com.devcli.cli.turn.TurnExecutionGuard;
+import com.devcli.agent.AgentTurnInbox;
 import com.devcli.hitl.HitlHandler;
 import com.devcli.hitl.HitlToolRegistry;
 import com.devcli.hitl.SwitchableHitlHandler;
@@ -358,7 +358,7 @@ public class Main {
             }
             boolean nextTaskUsePlanMode = false;
             boolean nextTaskUseTeamMode = false;
-            ActiveTurnCoordinator activeTurnCoordinator = new ActiveTurnCoordinator(ACTIVE_PROMPT_QUEUE_CAPACITY);
+            AgentTurnInbox turnInbox = reactAgent.getTurnInbox();
             String pendingDraft = "";
 
             // === TUI / CLI 分支判断 ===
@@ -391,7 +391,7 @@ public class Main {
 
             while (true) {
                 PromptInput promptInput;
-                PromptQueue.Entry queuedPrompt = activeTurnCoordinator.poll().orElse(null);
+                AgentTurnInbox.Item queuedPrompt = pollPendingAgentPrompt(turnInbox);
                 try {
                     if (queuedPrompt != null) {
                         promptInput = PromptInput.submitted(queuedPrompt.text());
@@ -823,7 +823,7 @@ public class Main {
                         renderer,
                         ui,
                         Path.of(reactAgent.getToolRegistry().getProjectPath()),
-                        activeTurnCoordinator,
+                        turnInbox,
                         acceptActiveTurnInput,
                         () -> snapshotService.runTurn(snapshotMode, taskInput, runTask::call));
                 String response = turnResult.response();
@@ -904,12 +904,21 @@ public class Main {
         return null;
     }
 
+    private static AgentTurnInbox.Item pollPendingAgentPrompt(AgentTurnInbox inbox) {
+        List<AgentTurnInbox.Item> steering = inbox.drainSteering();
+        if (!steering.isEmpty()) {
+            return steering.get(0);
+        }
+        List<AgentTurnInbox.Item> followUp = inbox.drainFollowUp();
+        return followUp.isEmpty() ? null : followUp.get(0);
+    }
+
     private static TurnRunResult runWithCancelSupport(Terminal terminal,
                                                       LineReader lineReader,
                                                       Renderer renderer,
                                                       PrintStream out,
                                                       Path projectPath,
-                                                      ActiveTurnCoordinator coordinator,
+                                                      AgentTurnInbox inbox,
                                                       boolean acceptActiveTurnInput,
                                                       Callable<String> task) {
         RunContext runContext = CancellationContext.startRunContext(projectPath);
@@ -978,24 +987,30 @@ public class Main {
                 if (renderer instanceof InlineRenderer inline) {
                     inline.clearAcceptedInput(activeInput);
                 }
-                ActiveTurnCoordinator.Submission submission = coordinator.submit(activeInput, cancelCurrent);
-                if (!submission.accepted()) {
-                    if (submission.action() == ActiveTurnInput.Action.IGNORE) {
-                        out.println("/now 需要提供立即执行的任务内容。");
-                    } else {
-                        out.println("未加入队列：" + submission.reason());
-                    }
+                ActiveTurnInput.Parsed parsed = ActiveTurnInput.parse(activeInput);
+                AgentTurnInbox.EnqueueResult queued = switch (parsed.action()) {
+                    case QUEUE -> inbox.enqueueFollowUp(parsed.text());
+                    case INTERRUPT -> inbox.enqueueSteering(parsed.text());
+                    case CANCEL -> new AgentTurnInbox.EnqueueResult(true, null, "", inbox.snapshot());
+                    case IGNORE -> new AgentTurnInbox.EnqueueResult(false, null, "消息不能为空", inbox.snapshot());
+                };
+                if (!queued.accepted()) {
+                    out.println(parsed.action() == ActiveTurnInput.Action.IGNORE
+                            ? "/now 需要提供立即执行的任务内容。"
+                            : "未加入队列：" + queued.reason());
                     continue;
                 }
-                if (submission.action() == ActiveTurnInput.Action.QUEUE) {
-                    out.println("已加入后续队列，当前等待 " + submission.queueSize() + " 项。");
+                if (parsed.action() == ActiveTurnInput.Action.QUEUE) {
+                    out.println("已加入后续队列，当前等待 " + queued.snapshot().size() + " 项。");
                     continue;
                 }
-                if (submission.action() == ActiveTurnInput.Action.INTERRUPT) {
+                if (parsed.action() == ActiveTurnInput.Action.INTERRUPT) {
+                    cancelCurrent.run();
                     return cancelledTurn("⏹️ 已取消当前任务，将立即执行新任务。", executionGuard);
                 }
-                if (submission.action() == ActiveTurnInput.Action.CANCEL) {
-                    return TurnRunResult.completed("⏹️ 已请求取消当前任务。");
+                if (parsed.action() == ActiveTurnInput.Action.CANCEL) {
+                    cancelCurrent.run();
+                    return cancelledTurn("⏹️ 已请求取消当前任务。", executionGuard);
                 }
             }
             return new TurnRunResult(future.get(), draft, true);
