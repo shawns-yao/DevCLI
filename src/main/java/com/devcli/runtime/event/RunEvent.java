@@ -60,6 +60,18 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
         }
     }
 
+    record QueueUpdated(String channel, int steeringPending, int followUpPending, String action) implements RunEvent {
+        public QueueUpdated {
+            channel = text(channel);
+            action = text(action);
+        }
+
+        @Override
+        public String type() {
+            return "queue.updated";
+        }
+    }
+
     record ToolCalls(List<ToolCallData> calls) implements RunEvent {
         public ToolCalls {
             calls = calls == null ? List.of() : List.copyOf(calls);

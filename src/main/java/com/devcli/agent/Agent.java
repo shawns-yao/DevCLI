@@ -65,6 +65,7 @@ public class Agent implements AutoCloseable {
     private final TraceRecorder traceRecorder = new TraceRecorder();
     private Supplier<Boolean> hitlEnabledSupplier = () -> false;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
+    private AgentTurnInbox turnInbox = new AgentTurnInbox();
     private String currentSkillActivationText = "";
 
     public Agent(LlmClient llmClient) {
@@ -151,6 +152,14 @@ public class Agent implements AutoCloseable {
 
     public void setRunEventSink(RunEventSink runEventSink) {
         this.runEventSink = runEventSink == null ? RunEventSink.NO_OP : runEventSink;
+    }
+
+    public void setTurnInbox(AgentTurnInbox turnInbox) {
+        this.turnInbox = turnInbox == null ? new AgentTurnInbox() : turnInbox;
+    }
+
+    public AgentTurnInbox getTurnInbox() {
+        return turnInbox;
     }
 
     /**
@@ -253,6 +262,30 @@ public class Agent implements AutoCloseable {
                         return iteration == 1
                                 ? effectiveInitialToolChoice
                                 : LlmClient.ToolChoice.AUTO;
+                    }
+
+                    @Override
+                    public List<AgentTurnInbox.Item> drainSteeringMessages() {
+                        return turnInbox.drainSteering();
+                    }
+
+                    @Override
+                    public List<AgentTurnInbox.Item> drainFollowUpMessages() {
+                        return turnInbox.drainFollowUp();
+                    }
+
+                    @Override
+                    public void queuedMessagesDelivered(AgentTurnInbox.Channel channel,
+                                                        List<AgentTurnInbox.Item> messages) {
+                        for (AgentTurnInbox.Item message : messages) {
+                            memoryManager.addUserMessage(message.text());
+                        }
+                        AgentTurnInbox.Snapshot snapshot = turnInbox.snapshot();
+                        runEventSink.emit(new RunEvent.QueueUpdated(
+                                channel.name().toLowerCase(java.util.Locale.ROOT),
+                                snapshot.steering().size(),
+                                snapshot.followUp().size(),
+                                "delivered"));
                     }
 
                     @Override

@@ -27,6 +27,11 @@ final class RunEventJsonCodec {
             payload.put("content", reasoning.content());
         } else if (event instanceof RunEvent.MessageDelta message) {
             payload.put("content", message.content());
+        } else if (event instanceof RunEvent.QueueUpdated queue) {
+            payload.put("channel", queue.channel());
+            payload.put("steering_pending", queue.steeringPending());
+            payload.put("follow_up_pending", queue.followUpPending());
+            payload.put("action", queue.action());
         } else if (event instanceof RunEvent.ToolCalls toolCalls) {
             ArrayNode calls = payload.putArray("calls");
             for (RunEvent.ToolCallData call : toolCalls.calls()) {

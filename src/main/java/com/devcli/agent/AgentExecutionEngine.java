@@ -45,6 +45,18 @@ final class AgentExecutionEngine<R> {
             return CancellationContext.isCancelled();
         }
 
+        default List<AgentTurnInbox.Item> drainSteeringMessages() {
+            return List.of();
+        }
+
+        default List<AgentTurnInbox.Item> drainFollowUpMessages() {
+            return List.of();
+        }
+
+        default void queuedMessagesDelivered(AgentTurnInbox.Channel channel,
+                                             List<AgentTurnInbox.Item> messages) {
+        }
+
         void beforeIteration(int iteration, AgentBudget budget);
 
         default void afterResponse(LlmClient.ChatResponse response, int iteration, AgentBudget budget) {
@@ -234,6 +246,8 @@ final class AgentExecutionEngine<R> {
                     if (completed.isPresent()) {
                         return completed.get();
                     }
+                    deliverQueuedMessages(delegate, AgentTurnInbox.Channel.STEERING,
+                            delegate.drainSteeringMessages());
                     continue;
                 }
 
@@ -248,6 +262,14 @@ final class AgentExecutionEngine<R> {
 
                 delegate.history().add(LlmClient.Message.assistant(
                         response.reasoningContent(), response.content()));
+                if (deliverQueuedMessages(delegate, AgentTurnInbox.Channel.STEERING,
+                        delegate.drainSteeringMessages())) {
+                    continue;
+                }
+                if (deliverQueuedMessages(delegate, AgentTurnInbox.Channel.FOLLOW_UP,
+                        delegate.drainFollowUpMessages())) {
+                    continue;
+                }
                 return delegate.completed(response, budget);
             } catch (IOException e) {
                 return delegate.failed(e, budget);
@@ -259,5 +281,18 @@ final class AgentExecutionEngine<R> {
         RunContext runContext = CancellationContext.currentRun();
         String runId = runContext == null ? "local" : runContext.runId();
         return runId + ":engine_" + engineId + ":iteration_" + iteration;
+    }
+
+    private boolean deliverQueuedMessages(Delegate<R> delegate,
+                                          AgentTurnInbox.Channel channel,
+                                          List<AgentTurnInbox.Item> items) {
+        if (items == null || items.isEmpty()) {
+            return false;
+        }
+        for (AgentTurnInbox.Item item : items) {
+            delegate.history().add(LlmClient.Message.user(item.text()));
+        }
+        delegate.queuedMessagesDelivered(channel, List.copyOf(items));
+        return true;
     }
 }
