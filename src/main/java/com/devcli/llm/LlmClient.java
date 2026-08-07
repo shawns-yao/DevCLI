@@ -44,8 +44,12 @@ public interface LlmClient {
 
     String getProviderName();
 
+    default ModelCapabilityRegistry.Capabilities capabilities() {
+        return ModelCapabilityRegistry.resolve(getProviderName(), getModelName());
+    }
+
     default int maxContextWindow() {
-        return 128_000;
+        return capabilities().contextWindow();
     }
 
     /**
@@ -53,15 +57,15 @@ public interface LlmClient {
      * 避免压缩后剩余窗口装不下模型回复。默认 8192，对齐请求默认 max_tokens。
      */
     default int maxOutputTokens() {
-        return 8_192;
+        return capabilities().maxOutputTokens();
     }
 
     default boolean supportsPromptCaching() {
-        return false;
+        return capabilities().promptCaching();
     }
 
     default String promptCacheMode() {
-        return "none";
+        return capabilities().promptCacheMode();
     }
 
     record ContentPart(String type, String text, String imageBase64, String imageUrl, String mimeType) {

@@ -9,7 +9,7 @@ public class LlmClientFactory {
     public static LlmClient create(String provider, DevCliConfig config) {
         if (provider == null) return null;
 
-        String normalized = normalizeProvider(provider);
+        String normalized = ModelCapabilityRegistry.normalizeProvider(provider);
         String configuredProvider = provider.trim().toLowerCase();
         String apiKey = config.getApiKey(normalized);
         if ((apiKey == null || apiKey.isBlank()) && !configuredProvider.equals(normalized)) {
@@ -50,17 +50,6 @@ public class LlmClientFactory {
         }
 
         return null;
-    }
-
-    private static String normalizeProvider(String provider) {
-        String normalized = provider.trim().toLowerCase();
-        return switch (normalized) {
-            case "stepfun", "step-fun" -> "step";
-            case "moonshot", "moonshotai", "moonshot-ai" -> "kimi";
-            case "gpt", "openai-compatible", "oai" -> "openai";
-            case "claude", "anthropic-messages" -> "anthropic";
-            default -> normalized;
-        };
     }
 
     private static String firstConfigured(String primary, String fallback) {

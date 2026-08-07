@@ -46,21 +46,6 @@ public class StepClient extends AbstractOpenAiCompatibleClient {
     }
 
     @Override
-    public int maxContextWindow() {
-        return 256_000;
-    }
-
-    @Override
-    public boolean supportsPromptCaching() {
-        return true;
-    }
-
-    @Override
-    public String promptCacheMode() {
-        return "step-prefix-cache";
-    }
-
-    @Override
     protected void customizeRequestBody(ObjectNode requestBody) {
         // StepFun 默认 reasoning_format=general，会返回 `reasoning` 字段；
         // deepseek-style 让它返回 DevCLI/DeepSeek 兼容的 `reasoning_content`。

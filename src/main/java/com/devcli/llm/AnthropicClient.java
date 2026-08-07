@@ -133,23 +133,8 @@ public class AnthropicClient implements LlmClient {
     }
 
     @Override
-    public int maxContextWindow() {
-        return 200_000;
-    }
-
-    @Override
     public int maxOutputTokens() {
         return maxOutputTokens;
-    }
-
-    @Override
-    public boolean supportsPromptCaching() {
-        return true;
-    }
-
-    @Override
-    public String promptCacheMode() {
-        return "anthropic-messages";
     }
 
     ObjectNode buildRequestBody(List<Message> messages, List<Tool> tools, ToolChoice toolChoice) {

@@ -61,21 +61,6 @@ public class OpenAiClient extends AbstractOpenAiCompatibleClient {
     }
 
     @Override
-    public int maxContextWindow() {
-        return 128_000;
-    }
-
-    @Override
-    public boolean supportsPromptCaching() {
-        return true;
-    }
-
-    @Override
-    public String promptCacheMode() {
-        return "openai-automatic-prefix-cache";
-    }
-
-    @Override
     protected void customizeRequestBody(ObjectNode requestBody) {
         // 某些网关(如 runanytime.hxi.me)要求指定分组/渠道名，否则默认分到 default 分组可能无权限
         // 通过 OPENAI_CHANNEL 或 OPENAI_GROUP 配置，常见值: Other / ClaudeCode / Codex

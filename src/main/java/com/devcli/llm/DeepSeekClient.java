@@ -52,21 +52,6 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
         return "deepseek";
     }
 
-    @Override
-    public int maxContextWindow() {
-        return 1_000_000;
-    }
-
-    @Override
-    public boolean supportsPromptCaching() {
-        return true;
-    }
-
-    @Override
-    public String promptCacheMode() {
-        return "automatic-prefix-cache";
-    }
-
     private static String toChatCompletionsUrl(String baseUrl) {
         String normalized = baseUrl != null && !baseUrl.isBlank() ? baseUrl.trim() : DEFAULT_API_URL;
         String withoutTrailingSlash = normalized.replaceAll("/+$", "");

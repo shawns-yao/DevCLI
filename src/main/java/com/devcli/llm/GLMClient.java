@@ -49,21 +49,6 @@ public class GLMClient extends AbstractOpenAiCompatibleClient {
     }
 
     @Override
-    public int maxContextWindow() {
-        return 200_000;
-    }
-
-    @Override
-    public boolean supportsPromptCaching() {
-        return true;
-    }
-
-    @Override
-    public String promptCacheMode() {
-        return "glm-prompt-cache";
-    }
-
-    @Override
     protected String toImageUrl(LlmClient.ContentPart part) {
         if (isGlm5v() && "image_base64".equals(part.type())) {
             return part.imageBase64();

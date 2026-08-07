@@ -48,21 +48,6 @@ public class KimiClient extends AbstractOpenAiCompatibleClient {
         return "kimi";
     }
 
-    @Override
-    public int maxContextWindow() {
-        return 256_000;
-    }
-
-    @Override
-    public boolean supportsPromptCaching() {
-        return true;
-    }
-
-    @Override
-    public String promptCacheMode() {
-        return "moonshot-context-cache";
-    }
-
     private static String toChatCompletionsUrl(String baseUrl) {
         String normalized = baseUrl != null && !baseUrl.isBlank() ? baseUrl.trim() : DEFAULT_BASE_URL;
         String withoutTrailingSlash = normalized.replaceAll("/+$", "");
