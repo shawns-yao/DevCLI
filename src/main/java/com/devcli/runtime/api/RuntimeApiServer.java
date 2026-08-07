@@ -1,6 +1,7 @@
 package com.devcli.runtime.api;
 
 import com.devcli.runtime.event.RunEvent;
+import com.devcli.agent.AgentTurnInbox;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
@@ -95,6 +96,14 @@ public class RuntimeApiServer implements AutoCloseable {
                 handleTurn(exchange, threadId(path));
                 return;
             }
+            if ("POST".equals(method) && path.matches("/v1/threads/[^/]+/steer")) {
+                handleQueue(exchange, threadId(path), AgentTurnInbox.Channel.STEERING);
+                return;
+            }
+            if ("POST".equals(method) && path.matches("/v1/threads/[^/]+/follow-up")) {
+                handleQueue(exchange, threadId(path), AgentTurnInbox.Channel.FOLLOW_UP);
+                return;
+            }
             if ("GET".equals(method) && path.matches("/v1/threads/[^/]+/events")) {
                 handleEvents(exchange, threadId(path));
                 return;
@@ -129,6 +138,38 @@ public class RuntimeApiServer implements AutoCloseable {
             return;
         }
         writeJson(exchange, 202, "{\"id\":\"" + turnId + "\",\"object\":\"turn\",\"status\":\"running\"}");
+    }
+
+    private void handleQueue(HttpExchange exchange, String threadId,
+                             AgentTurnInbox.Channel channel) throws IOException {
+        if (!store.exists(threadId)) {
+            writeJson(exchange, 404, "{\"error\":\"thread_not_found\"}");
+            return;
+        }
+        JsonNode body = MAPPER.readTree(exchange.getRequestBody());
+        String input = body.path("input").asText("");
+        if (input.isBlank()) {
+            writeJson(exchange, 400, "{\"error\":\"input_required\"}");
+            return;
+        }
+        TurnRunner.QueueResult result = channel == AgentTurnInbox.Channel.STEERING
+                ? runner.enqueueSteering(threadId, input)
+                : runner.enqueueFollowUp(threadId, input);
+        if (result.reason().startsWith("当前 Runtime runner")) {
+            writeJson(exchange, 501, "{\"error\":\"queue_not_supported\"}");
+            return;
+        }
+        if (!result.accepted()) {
+            writeJson(exchange, 400, "{\"error\":\""
+                    + escape(result.reason()) + "\"}");
+            return;
+        }
+        RunEvent.QueueUpdated event = new RunEvent.QueueUpdated(
+                channel.name(), result.steeringPending(), result.followUpPending(), "enqueued");
+        store.appendEvent(threadId, event.type(), RunEventJsonCodec.encode(event, ""));
+        writeJson(exchange, 202, "{\"accepted\":true,\"channel\":\""
+                + channel.name() + "\",\"steering_pending\":" + result.steeringPending()
+                + ",\"follow_up_pending\":" + result.followUpPending() + "}");
     }
 
     private void runTurn(String threadId, String turnId, String input) {

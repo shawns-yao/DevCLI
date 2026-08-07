@@ -1,5 +1,6 @@
 package com.devcli.runtime.api;
 
+import com.devcli.agent.AgentTurnInbox;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.CompactBoundaryMetadata;
 import com.devcli.runtime.event.RunEventSink;
@@ -16,6 +17,14 @@ import java.util.UUID;
 @FunctionalInterface
 public interface TurnRunner {
     TurnResult run(String threadId, String input, RunEventSink eventSink) throws Exception;
+
+    default QueueResult enqueueSteering(String threadId, String input) {
+        return QueueResult.unsupported(AgentTurnInbox.Channel.STEERING);
+    }
+
+    default QueueResult enqueueFollowUp(String threadId, String input) {
+        return QueueResult.unsupported(AgentTurnInbox.Channel.FOLLOW_UP);
+    }
 
     record TurnResult(String output, CheckpointCandidate checkpoint) {
         public TurnResult {
@@ -71,6 +80,27 @@ public interface TurnRunner {
             parentId = parentId == null ? "" : parentId.trim();
             role = role == null ? "" : role.trim();
             index = Math.max(0, index);
+        }
+    }
+
+    record QueueResult(boolean accepted, AgentTurnInbox.Channel channel,
+                       String reason, int steeringPending, int followUpPending) {
+        public QueueResult {
+            channel = channel == null ? AgentTurnInbox.Channel.FOLLOW_UP : channel;
+            reason = reason == null ? "" : reason;
+            steeringPending = Math.max(0, steeringPending);
+            followUpPending = Math.max(0, followUpPending);
+        }
+
+        public static QueueResult unsupported(AgentTurnInbox.Channel channel) {
+            return new QueueResult(false, channel, "当前 Runtime runner 不支持会话队列", 0, 0);
+        }
+
+        public static QueueResult from(AgentTurnInbox.EnqueueResult result,
+                                       AgentTurnInbox.Channel channel) {
+            AgentTurnInbox.Snapshot snapshot = result.snapshot();
+            return new QueueResult(result.accepted(), channel, result.reason(),
+                    snapshot.steering().size(), snapshot.followUp().size());
         }
     }
 }

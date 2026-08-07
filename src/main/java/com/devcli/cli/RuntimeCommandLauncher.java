@@ -5,11 +5,8 @@ import com.devcli.llm.LlmClient;
 import com.devcli.llm.LlmClientFactory;
 import com.devcli.runtime.HeadlessAgentRunner;
 import com.devcli.runtime.api.RuntimeApiServer;
-import com.devcli.runtime.api.RuntimeCheckpointCandidateFactory;
-import com.devcli.runtime.api.RuntimeCheckpointPolicy;
+import com.devcli.runtime.api.RuntimeSessionTurnRunner;
 import com.devcli.runtime.api.RuntimeThreadStore;
-import com.devcli.runtime.api.TurnRunner;
-import com.devcli.runtime.event.RunEventSink;
 import com.devcli.runtime.task.DurableTaskManager;
 
 import java.nio.file.Path;
@@ -44,14 +41,16 @@ final class RuntimeCommandLauncher {
         int port = parsePort(args, 8080);
         try {
             RuntimeThreadStore store = new RuntimeThreadStore(RuntimeThreadStore.defaultDbPath());
+            RuntimeSessionTurnRunner turnRunner = new RuntimeSessionTurnRunner(
+                    client, store, Path.of("."));
             RuntimeApiServer server = new RuntimeApiServer(
                     store,
-                    (threadId, input, eventSink) ->
-                            runTurn(threadId, input, eventSink, client, store),
+                    turnRunner,
                     port,
                     RuntimeApiServer.configuredApiKey());
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 server.close();
+                turnRunner.close();
                 store.close();
             }, "devcli-runtime-api-shutdown"));
             server.start();
@@ -98,25 +97,4 @@ final class RuntimeCommandLauncher {
                 List.of());
     }
 
-    private static TurnRunner.TurnResult runTurn(
-            String threadId, String prompt, RunEventSink eventSink,
-            LlmClient llmClient, RuntimeThreadStore store) {
-        RuntimeThreadStore.ContextView contextView = store.contextView(threadId);
-        List<LlmClient.Message> seed = new ArrayList<>(contextView.checkpointMessages());
-        for (RuntimeThreadStore.TurnRecord turn : contextView.turns()) {
-            seed.add(LlmClient.Message.user(turn.input()));
-            seed.add(LlmClient.Message.assistant(turn.output()));
-        }
-        HeadlessAgentRunner.RunResult runResult = HeadlessAgentRunner.runDetailed(
-                llmClient,
-                Path.of("."),
-                prompt,
-                seed,
-                RuntimeCheckpointPolicy.configuredTriggerTokens(),
-                eventSink);
-        TurnRunner.CheckpointCandidate checkpoint = RuntimeCheckpointCandidateFactory
-                .fromHistory(runResult.history(), runResult.compacted())
-                .orElse(null);
-        return new TurnRunner.TurnResult(runResult.output(), checkpoint);
-    }
 }

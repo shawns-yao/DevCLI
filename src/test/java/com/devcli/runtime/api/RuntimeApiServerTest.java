@@ -203,6 +203,59 @@ class RuntimeApiServerTest {
         }
     }
 
+    @Test
+    void exposesExplicitSteeringAndFollowUpQueueEndpoints(@TempDir Path tempDir) throws Exception {
+        AtomicReference<String> steering = new AtomicReference<>();
+        AtomicReference<String> followUp = new AtomicReference<>();
+        TurnRunner runner = new TurnRunner() {
+            @Override
+            public TurnResult run(String threadId, String input,
+                                  com.devcli.runtime.event.RunEventSink eventSink) {
+                return TurnResult.completed("ok");
+            }
+
+            @Override
+            public QueueResult enqueueSteering(String threadId, String input) {
+                steering.set(threadId + ":" + input);
+                return new QueueResult(true, com.devcli.agent.AgentTurnInbox.Channel.STEERING,
+                        "", 1, 0);
+            }
+
+            @Override
+            public QueueResult enqueueFollowUp(String threadId, String input) {
+                followUp.set(threadId + ":" + input);
+                return new QueueResult(true, com.devcli.agent.AgentTurnInbox.Channel.FOLLOW_UP,
+                        "", 1, 1);
+            }
+        };
+        try (RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"));
+             RuntimeApiServer server = new RuntimeApiServer(store, runner, 0, "secret")) {
+            server.start();
+            HttpClient client = HttpClient.newHttpClient();
+            String base = "http://127.0.0.1:" + server.port();
+            HttpResponse<String> created = client.send(
+                    request(base + "/v1/threads", "POST", "").build(),
+                    HttpResponse.BodyHandlers.ofString());
+            String threadId = extract(created.body(), "thread_");
+
+            HttpResponse<String> steeringResponse = client.send(request(
+                    base + "/v1/threads/" + threadId + "/steer", "POST",
+                    "{\"input\":\"interrupt now\"}").build(),
+                    HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> followUpResponse = client.send(request(
+                    base + "/v1/threads/" + threadId + "/follow-up", "POST",
+                    "{\"input\":\"continue later\"}").build(),
+                    HttpResponse.BodyHandlers.ofString());
+
+            assertEquals(202, steeringResponse.statusCode());
+            assertEquals(202, followUpResponse.statusCode());
+            assertEquals(threadId + ":interrupt now", steering.get());
+            assertEquals(threadId + ":continue later", followUp.get());
+            assertTrue(store.events(threadId, 0).stream()
+                    .anyMatch(event -> "queue.updated".equals(event.type())));
+        }
+    }
+
     private static String waitForSecondTurn(HttpClient client, String base, String threadId) throws Exception {
         long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
         while (System.nanoTime() < deadline) {

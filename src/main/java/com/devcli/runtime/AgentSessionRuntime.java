@@ -72,6 +72,14 @@ public final class AgentSessionRuntime implements AutoCloseable {
         return inbox;
     }
 
+    public void seedHistory(List<LlmClient.Message> messages) {
+        agent.seedHistory(messages);
+    }
+
+    public void setRunEventSink(RunEventSink eventSink) {
+        agent.setRunEventSink(eventSink);
+    }
+
     public synchronized CompletableFuture<RunResult> submit(String prompt) {
         if (activeRun.get() != null) {
             throw new IllegalStateException("Agent 会话已有正在运行的任务");
