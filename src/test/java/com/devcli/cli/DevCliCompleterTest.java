@@ -4,6 +4,7 @@ import org.jline.reader.Candidate;
 import org.jline.reader.ParsedLine;
 import org.junit.jupiter.api.Test;
 import com.devcli.mcp.resources.McpResourceDescriptor;
+import com.devcli.extension.ExtensionRegistry;
 import com.devcli.skill.Skill;
 
 import java.util.ArrayList;
@@ -92,6 +93,20 @@ class DevCliCompleterTest {
                 .findFirst()
                 .orElseThrow();
         assertEquals("浏览器和联网策略", candidate.descr());
+    }
+
+    @Test
+    void prefersUnifiedExtensionRegistryForSkillDiscovery() {
+        ExtensionRegistry registry = new ExtensionRegistry();
+        registry.register(ExtensionRegistry.fromSkill(skill("registry-skill", "统一目录")));
+        DevCliCompleter completer = new DevCliCompleter(List::of, List::of, () -> registry);
+        List<Candidate> candidates = new ArrayList<>();
+
+        completer.complete(null, parsed("/skill show reg", "reg"), candidates);
+
+        assertEquals("统一目录", candidates.stream()
+                .filter(c -> c.value().equals("registry-skill"))
+                .findFirst().orElseThrow().descr());
     }
 
     @Test

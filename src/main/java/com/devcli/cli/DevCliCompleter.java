@@ -1,5 +1,7 @@
 package com.devcli.cli;
 
+import com.devcli.extension.ExtensionContract;
+import com.devcli.extension.ExtensionRegistry;
 import com.devcli.mcp.mention.AtMentionCompleter;
 import com.devcli.mcp.resources.McpResourceDescriptor;
 import com.devcli.skill.Skill;
@@ -15,15 +17,24 @@ import java.util.function.Supplier;
 final class DevCliCompleter implements Completer {
     private final Supplier<List<McpResourceDescriptor>> resourceSupplier;
     private final Supplier<List<Skill>> skillSupplier;
+    private final Supplier<ExtensionRegistry> extensionRegistrySupplier;
 
     DevCliCompleter(Supplier<List<McpResourceDescriptor>> resourceSupplier) {
-        this(resourceSupplier, List::of);
+        this(resourceSupplier, List::of, () -> null);
     }
 
     DevCliCompleter(Supplier<List<McpResourceDescriptor>> resourceSupplier,
                     Supplier<List<Skill>> skillSupplier) {
+        this(resourceSupplier, skillSupplier, () -> null);
+    }
+
+    DevCliCompleter(Supplier<List<McpResourceDescriptor>> resourceSupplier,
+                    Supplier<List<Skill>> skillSupplier,
+                    Supplier<ExtensionRegistry> extensionRegistrySupplier) {
         this.resourceSupplier = resourceSupplier;
         this.skillSupplier = skillSupplier == null ? List::of : skillSupplier;
+        this.extensionRegistrySupplier = extensionRegistrySupplier == null
+                ? () -> null : extensionRegistrySupplier;
     }
 
     @Override
@@ -213,6 +224,18 @@ final class DevCliCompleter implements Completer {
     }
 
     private void addServerCandidates(List<Candidate> candidates, String prefix) {
+        ExtensionRegistry registry = extensionRegistrySupplier.get();
+        if (registry != null && !registry.list(ExtensionContract.Kind.MCP_SERVER).isEmpty()) {
+            for (ExtensionContract extension : registry.list(ExtensionContract.Kind.MCP_SERVER)) {
+                String name = extension.descriptor().name();
+                if (matches(name, prefix)) {
+                    candidates.add(new Candidate(name, name, "MCP server",
+                            extension.descriptor().metadata().getOrDefault("transport", ""),
+                            null, null, true));
+                }
+            }
+            return;
+        }
         List<String> servers = resourceSupplier.get().stream()
                 .map(McpResourceDescriptor::serverName)
                 .filter(name -> name != null && !name.isBlank())
@@ -227,6 +250,18 @@ final class DevCliCompleter implements Completer {
     }
 
     private void addSkillCandidates(List<Candidate> candidates, String prefix) {
+        ExtensionRegistry registry = extensionRegistrySupplier.get();
+        if (registry != null && !registry.list(ExtensionContract.Kind.SKILL).isEmpty()) {
+            for (ExtensionContract extension : registry.list(ExtensionContract.Kind.SKILL)) {
+                String name = extension.descriptor().name();
+                if (matches(name, prefix)) {
+                    candidates.add(new Candidate(name, name, "Skill",
+                            extension.descriptor().metadata().getOrDefault("description", ""),
+                            null, null, true));
+                }
+            }
+            return;
+        }
         for (Skill skill : skillSupplier.get()) {
             if (skill == null || !matches(skill.name(), prefix)) {
                 continue;

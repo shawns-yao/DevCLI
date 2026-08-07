@@ -9,6 +9,7 @@ import com.devcli.browser.BrowserGuard;
 import com.devcli.browser.BrowserSession;
 import com.devcli.browser.SensitivePagePolicy;
 import com.devcli.config.DevCliConfig;
+import com.devcli.extension.ExtensionRegistry;
 import com.devcli.cli.turn.ActiveTurnInput;
 import com.devcli.cli.turn.PromptQueue;
 import com.devcli.cli.turn.TurnExecutionGuard;
@@ -224,6 +225,7 @@ public class Main {
             BrowserConnectivityCheck browserConnectivityCheck = new BrowserConnectivityCheck();
             hitlToolRegistry.setBrowserGuard(new BrowserGuard(browserSession, new SensitivePagePolicy()));
             McpServerManager mcpServerManager = new McpServerManager(hitlToolRegistry, Path.of("."));
+            ExtensionRegistry extensionRegistry = new ExtensionRegistry();
             AtomicReference<SkillRegistry> skillRegistryRef = new AtomicReference<>();
             BrowserCommandHandler browserCommands = new BrowserCommandHandler(
                     browserSession, browserConnectivityCheck, mcpServerManager,
@@ -234,7 +236,8 @@ public class Main {
                     .terminal(terminal)
                     .history(new DevCliHistory())
                     .completer(new DevCliCompleter(mcpServerManager::resourceCandidates,
-                            () -> skillRegistryRef.get() == null ? List.of() : skillRegistryRef.get().allSkills()))
+                            () -> skillRegistryRef.get() == null ? List.of() : skillRegistryRef.get().allSkills(),
+                            () -> extensionRegistry))
                     .highlighter(new DevCliHighlighter())
                     .build();
             lineReader.option(LineReader.Option.BRACKETED_PASTE, true);
@@ -265,6 +268,8 @@ public class Main {
                     startupNote = bootstrapResult.message();
                 }
                 mcpServerManager.loadConfiguredServers();
+                mcpServerManager.servers().forEach(server -> extensionRegistry.registerOrReplace(
+                        ExtensionRegistry.fromMcpServer(server.name(), server.config())));
                 mcpServerManager.startAll(ui, mcpStartupWait());
                 shutdown.register(30, "mcpServerManager", mcpServerManager::close);
             } catch (Exception e) {
@@ -288,6 +293,10 @@ public class Main {
                     skillsCacheDir, userSkillsDir, projectSkillsDir, skillStateStore);
             skillRegistry.reload();
             skillRegistryRef.set(skillRegistry);
+            skillRegistry.allSkills().forEach(skill -> extensionRegistry.registerOrReplace(
+                    ExtensionRegistry.fromSkill(skill)));
+            slashCommandHints().forEach(hint -> extensionRegistry.registerOrReplace(
+                    ExtensionRegistry.command(hint.insertText(), hint.description())));
             com.devcli.skill.SkillContextBuffer skillContextBuffer = new com.devcli.skill.SkillContextBuffer();
             hitlToolRegistry.setSkillRegistry(skillRegistry);
             hitlToolRegistry.setSkillContextBuffer(skillContextBuffer);
