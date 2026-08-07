@@ -48,4 +48,15 @@ class RunEventJsonCodecTest {
         assertEquals("thread_1", payload.path("thread_id").asText());
         assertFalse(payload.has("turn_id"));
     }
+
+    @Test
+    void encodesQueueStateAndAction() throws Exception {
+        JsonNode payload = MAPPER.readTree(RunEventJsonCodec.encode(
+                new RunEvent.QueueUpdated("STEERING", 2, 1, "enqueued"), "turn_1"));
+
+        assertEquals("STEERING", payload.path("channel").asText());
+        assertEquals(2, payload.path("steering_pending").asInt());
+        assertEquals(1, payload.path("follow_up_pending").asInt());
+        assertEquals("enqueued", payload.path("action").asText());
+    }
 }
