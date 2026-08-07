@@ -34,6 +34,9 @@ class RuntimeCheckpointCandidateFactoryTest {
         assertEquals(4, candidate.messages().size());
         assertEquals(summary, candidate.summary());
         assertEquals(40_000, candidate.metadata().preTokens());
+        assertEquals(candidate.messages().size(), candidate.messageTree().size());
+        assertEquals("", candidate.messageTree().getFirst().parentId());
+        assertEquals(candidate.messageTree().get(0).id(), candidate.messageTree().get(1).parentId());
         assertTrue(candidate.messages().stream().noneMatch(message -> "system".equals(message.role())));
         assertTrue(candidate.messages().getLast().reasoningContent() == null
                 || candidate.messages().getLast().reasoningContent().isBlank());

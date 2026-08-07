@@ -97,6 +97,9 @@ class RuntimeThreadStoreTest {
             assertEquals(coverage, checkpoint.coveredThroughEventId());
             assertEquals(40_000, checkpoint.metadata().preTokens());
             assertEquals(summary, checkpoint.summary());
+            assertEquals(checkpoint.messages().size(), checkpoint.messageTree().size());
+            assertEquals("", checkpoint.messageTree().getFirst().parentId());
+            assertEquals(checkpoint.messageTree().get(0).id(), checkpoint.messageTree().get(1).parentId());
         }
     }
 

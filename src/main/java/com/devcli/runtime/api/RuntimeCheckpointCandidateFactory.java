@@ -35,8 +35,24 @@ public final class RuntimeCheckpointCandidateFactory {
             return Optional.of(new TurnRunner.CheckpointCandidate(
                     checkpointMessages,
                     message.content(),
-                    metadata.get()));
+                    metadata.get(),
+                    buildMessageTree(checkpointMessages)));
         }
         return Optional.empty();
+    }
+
+    private static List<TurnRunner.MessageTreeNode> buildMessageTree(
+            List<LlmClient.Message> messages) {
+        List<TurnRunner.MessageTreeNode> nodes = new ArrayList<>(messages.size());
+        String parentId = "";
+        for (int index = 0; index < messages.size(); index++) {
+            LlmClient.Message message = messages.get(index);
+            String role = message == null || message.role() == null ? "" : message.role();
+            String id = "checkpoint_" + index + "_" + Integer.toHexString(
+                    java.util.Objects.hash(role, message == null ? "" : message.content()));
+            nodes.add(new TurnRunner.MessageTreeNode(id, parentId, role, index));
+            parentId = id;
+        }
+        return List.copyOf(nodes);
     }
 }

@@ -40,10 +40,14 @@ public class RuntimeThreadStore implements AutoCloseable {
             List<LlmClient.Message> messages,
             String summary,
             CompactBoundaryMetadata metadata,
+            List<TurnRunner.MessageTreeNode> messageTree,
             Instant createdAt) {
         public RuntimeCheckpoint {
             messages = messages == null ? List.of() : List.copyOf(messages);
             summary = summary == null ? "" : summary;
+            metadata = metadata == null ? new CompactBoundaryMetadata(
+                    "unknown", "unknown", "unknown", 0, 0, 0, 0, 0, 0) : metadata;
+            messageTree = messageTree == null ? List.of() : List.copyOf(messageTree);
         }
     }
 
@@ -213,15 +217,16 @@ public class RuntimeThreadStore implements AutoCloseable {
         try (PreparedStatement ps = connection.prepareStatement("""
                 INSERT INTO runtime_checkpoints (
                     thread_id, covered_through_event_id, messages_json, summary,
-                    metadata_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    metadata_json, message_tree_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """)) {
             ps.setString(1, threadId);
             ps.setLong(2, coveredThroughEventId);
             ps.setString(3, MAPPER.writeValueAsString(candidate.messages()));
             ps.setString(4, candidate.summary());
             ps.setString(5, MAPPER.writeValueAsString(candidate.metadata()));
-            ps.setString(6, Instant.now().toString());
+            ps.setString(6, MAPPER.writeValueAsString(candidate.messageTree()));
+            ps.setString(7, Instant.now().toString());
             ps.executeUpdate();
         } catch (Exception e) {
             throw new IllegalStateException("写入 runtime checkpoint 失败: " + e.getMessage(), e);
@@ -232,6 +237,7 @@ public class RuntimeThreadStore implements AutoCloseable {
         try (PreparedStatement ps = connection.prepareStatement("""
                 SELECT id, thread_id, covered_through_event_id, messages_json,
                        summary, metadata_json, created_at
+                       , message_tree_json
                 FROM runtime_checkpoints
                 WHERE thread_id = ?
                 ORDER BY covered_through_event_id DESC, id DESC
@@ -245,6 +251,9 @@ public class RuntimeThreadStore implements AutoCloseable {
                                 new TypeReference<List<LlmClient.Message>>() {});
                         CompactBoundaryMetadata metadata = MAPPER.readValue(
                                 rs.getString("metadata_json"), CompactBoundaryMetadata.class);
+                        List<TurnRunner.MessageTreeNode> messageTree = MAPPER.readValue(
+                                rs.getString("message_tree_json"),
+                                new TypeReference<List<TurnRunner.MessageTreeNode>>() {});
                         return Optional.of(new RuntimeCheckpoint(
                                 rs.getLong("id"),
                                 rs.getString("thread_id"),
@@ -252,6 +261,7 @@ public class RuntimeThreadStore implements AutoCloseable {
                                 messages,
                                 rs.getString("summary"),
                                 metadata,
+                                messageTree,
                                 Instant.parse(rs.getString("created_at"))));
                     } catch (Exception corrupted) {
                         log.warn("解析 runtime checkpoint 失败，回退更早检查点: id={}", rs.getLong("id"));
@@ -290,11 +300,23 @@ public class RuntimeThreadStore implements AutoCloseable {
                         messages_json TEXT NOT NULL,
                         summary TEXT NOT NULL,
                         metadata_json TEXT NOT NULL,
+                        message_tree_json TEXT NOT NULL DEFAULT '[]',
                         created_at TEXT NOT NULL
                     )
                     """);
+            ensureColumn(stmt, "runtime_checkpoints", "message_tree_json",
+                    "TEXT NOT NULL DEFAULT '[]'");
             stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_checkpoint_coverage "
                     + "ON runtime_checkpoints(thread_id, covered_through_event_id)");
+        }
+    }
+
+    private static void ensureColumn(Statement statement, String table, String column,
+                                     String definition) throws SQLException {
+        try {
+            statement.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
+        } catch (SQLException ignored) {
+            // 已存在时保持兼容；SQLite 没有 IF NOT EXISTS 的 ADD COLUMN 语法。
         }
     }
 
