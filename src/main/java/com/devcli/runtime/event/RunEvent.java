@@ -10,7 +10,7 @@ import java.util.List;
  * Agent、Renderer 与 Runtime API 共享的强类型运行事件。
  */
 public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnStarted,
-        RunEvent.ReasoningDelta, RunEvent.MessageDelta, RunEvent.ToolCalls,
+        RunEvent.ReasoningDelta, RunEvent.MessageDelta, RunEvent.QueueUpdated, RunEvent.ToolCalls,
         RunEvent.ToolResults, RunEvent.TurnCompleted, RunEvent.TurnFailed,
         RunEvent.TurnRejected, RunEvent.CheckpointCreated, RunEvent.CheckpointFailed {
 

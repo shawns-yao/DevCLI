@@ -44,6 +44,7 @@ import java.util.HexFormat;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Supplier;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Agent 核心类 - 实现 ReAct 循环
@@ -66,6 +67,8 @@ public class Agent implements AutoCloseable {
     private Supplier<Boolean> hitlEnabledSupplier = () -> false;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
     private AgentTurnInbox turnInbox = new AgentTurnInbox();
+    private final AtomicReference<com.devcli.runtime.CancellationToken> activeCancellationToken =
+            new AtomicReference<>();
     private String currentSkillActivationText = "";
 
     public Agent(LlmClient llmClient) {
@@ -162,6 +165,17 @@ public class Agent implements AutoCloseable {
         return turnInbox;
     }
 
+    public void abort() {
+        com.devcli.runtime.CancellationToken token = activeCancellationToken.get();
+        if (token != null) {
+            token.cancel();
+        }
+    }
+
+    public boolean isRunning() {
+        return activeCancellationToken.get() != null;
+    }
+
     /**
      * 注入 HITL 启用状态的快照源，用于状态栏 / StatusInfo 显示。
      * Main 启动后用 {@code reactAgent.setHitlEnabledSupplier(hitlHandler::isEnabled)} 接进来。
@@ -192,6 +206,16 @@ public class Agent implements AutoCloseable {
      * 运行 Agent 循环，并允许受控执行入口约束首轮工具选择。
      */
     public String run(String userInput, LlmClient.ToolChoice initialToolChoice) {
+        com.devcli.runtime.CancellationToken inheritedToken = CancellationContext.current();
+        activeCancellationToken.set(inheritedToken);
+        try {
+            return runInternal(userInput, initialToolChoice);
+        } finally {
+            activeCancellationToken.compareAndSet(inheritedToken, null);
+        }
+    }
+
+    private String runInternal(String userInput, LlmClient.ToolChoice initialToolChoice) {
         LlmClient.ToolChoice effectiveInitialToolChoice = initialToolChoice == null
                 ? LlmClient.ToolChoice.AUTO
                 : initialToolChoice;

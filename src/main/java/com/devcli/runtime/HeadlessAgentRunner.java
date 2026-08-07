@@ -57,22 +57,19 @@ public final class HeadlessAgentRunner {
                                               List<LlmClient.Message> seedHistory,
                                               int checkpointTriggerTokens,
                                               RunEventSink eventSink) {
-        try (ToolRegistry registry = new ToolRegistry()) {
-            registry.setProjectPath(projectPath.toString());
-            try (Agent agent = new Agent(llmClient, registry)) {
-                agent.seedHistory(seedHistory);
-                agent.setRunEventSink(eventSink);
-                String output = agent.run(prompt);
-                boolean compactedAfterTurn = checkpointTriggerTokens > 0
-                        && agent.compactHistoryForPersistence(checkpointTriggerTokens);
-                List<LlmClient.Message> history = agent.getConversationHistory();
-                boolean compactedDuringTurn = hasNewCompactionBoundary(seedHistory, history);
-                String durableOutput = output == null || output.isBlank()
-                        ? latestAssistantContent(history)
-                        : output;
-                return new RunResult(
-                        durableOutput, history, compactedAfterTurn || compactedDuringTurn);
-            }
+        try (AgentSessionRuntime session = AgentSessionRuntime.create(llmClient, projectPath, eventSink)) {
+            Agent agent = session.agent();
+            agent.seedHistory(seedHistory);
+            String output = session.runBlocking(prompt).output();
+            boolean compactedAfterTurn = checkpointTriggerTokens > 0
+                    && agent.compactHistoryForPersistence(checkpointTriggerTokens);
+            List<LlmClient.Message> history = agent.getConversationHistory();
+            boolean compactedDuringTurn = hasNewCompactionBoundary(seedHistory, history);
+            String durableOutput = output == null || output.isBlank()
+                    ? latestAssistantContent(history)
+                    : output;
+            return new RunResult(
+                    durableOutput, history, compactedAfterTurn || compactedDuringTurn);
         }
     }
 
