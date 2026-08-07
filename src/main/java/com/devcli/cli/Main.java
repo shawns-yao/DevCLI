@@ -293,6 +293,7 @@ public class Main {
             hitlToolRegistry.setSkillContextBuffer(skillContextBuffer);
 
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
+            CliSessionArchive sessionArchive = CliSessionArchive.fromEnvironment();
             shutdown.register(20, "reactAgent", reactAgent::close);
             reactAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
             reactAgent.setSkillRegistry(skillRegistry);
@@ -461,7 +462,8 @@ public class Main {
                     }
                     case HISTORY_CLEAR -> {
                         clearLineReaderHistory(lineReader);
-                        ui.println("🧹 输入历史已清空\n");
+                        sessionArchive.clearAll();
+                        ui.println("🧹 输入历史和已启用的会话归档已清空\n");
                         continue;
                     }
                     case CONTEXT_STATUS -> {
@@ -835,6 +837,8 @@ public class Main {
                     ui.println(response);
                     ui.println();
                 }
+                sessionArchive.recordTurn(snapshotMode, submittedInput, taskInput, response,
+                        "react".equals(snapshotMode) ? reactAgent.getConversationHistory() : List.of());
                 if (!turnResult.executionQuiesced()) {
                     ui.println("取消后执行线程未在限定时间内退出，为避免上下文并发写入，DevCLI 已停止接收新任务。");
                     break;
@@ -1472,7 +1476,7 @@ public class Main {
                 new SlashCommandHint("/search ", "/search <查询>", "语义检索代码"),
                 new SlashCommandHint("/graph ", "/graph <类名>", "查看代码关系图谱"),
                 new SlashCommandHint("/clear", "/clear", "清空当前对话历史"),
-                new SlashCommandHint("/history clear", "/history clear", "清空本机输入历史"),
+                new SlashCommandHint("/history clear", "/history clear", "清空本机输入历史和会话归档"),
                 new SlashCommandHint("/context", "/context", "查看上下文和记忆状态"),
                 new SlashCommandHint("/memory", "/memory", "查看记忆状态"),
                 new SlashCommandHint("/memory organize", "/memory organize", "生成长期记忆整理计划"),
