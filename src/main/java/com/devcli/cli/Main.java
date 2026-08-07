@@ -18,6 +18,7 @@ import com.devcli.hitl.HitlToolRegistry;
 import com.devcli.hitl.SwitchableHitlHandler;
 import com.devcli.hitl.RendererHitlHandler;
 import com.devcli.hitl.TerminalHitlHandler;
+import com.devcli.hook.HookConfigLoader;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.LlmClientFactory;
 import com.devcli.render.Renderer;
@@ -294,6 +295,12 @@ public class Main {
             skillRegistryRef.set(skillRegistry);
             skillRegistry.allSkills().forEach(skill -> extensionRegistry.registerOrReplace(
                     ExtensionRegistry.fromSkill(skill)));
+            try {
+                HookConfigLoader.load(Path.of(".")).forEach(hook -> extensionRegistry.registerOrReplace(
+                        ExtensionRegistry.fromHook(hook)));
+            } catch (Exception e) {
+                startupNote = appendStartupNote(startupNote, "Hook 目录加载失败: " + e.getMessage());
+            }
             slashCommandHints().forEach(hint -> extensionRegistry.registerOrReplace(
                     ExtensionRegistry.command(hint.insertText(), hint.description())));
             com.devcli.skill.SkillContextBuffer skillContextBuffer = new com.devcli.skill.SkillContextBuffer();
