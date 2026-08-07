@@ -4,13 +4,16 @@ import com.devcli.llm.LlmClient;
 import com.devcli.tool.ToolRegistry;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Agent、Renderer 与 Runtime API 共享的强类型运行事件。
  */
 public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnStarted,
         RunEvent.ReasoningDelta, RunEvent.MessageDelta, RunEvent.QueueUpdated, RunEvent.ToolCalls,
+        RunEvent.SessionStateChanged, RunEvent.CustomMessage,
         RunEvent.ToolResults, RunEvent.TurnCompleted, RunEvent.TurnFailed,
         RunEvent.TurnRejected, RunEvent.CheckpointCreated, RunEvent.CheckpointFailed {
 
@@ -69,6 +72,37 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
         @Override
         public String type() {
             return "queue.updated";
+        }
+    }
+
+    record SessionStateChanged(String sessionId, String state, String reason) implements RunEvent {
+        public SessionStateChanged {
+            sessionId = text(sessionId);
+            state = text(state);
+            reason = text(reason);
+        }
+
+        @Override
+        public String type() {
+            return "session.state";
+        }
+    }
+
+    record CustomMessage(String messageType, String content, Map<String, String> attributes)
+            implements RunEvent {
+        public CustomMessage {
+            messageType = text(messageType);
+            content = text(content);
+            attributes = attributes == null ? Map.of() : Map.copyOf(new LinkedHashMap<>(attributes));
+        }
+
+        public CustomMessage(String messageType, String content) {
+            this(messageType, content, Map.of());
+        }
+
+        @Override
+        public String type() {
+            return "message.custom";
         }
     }
 

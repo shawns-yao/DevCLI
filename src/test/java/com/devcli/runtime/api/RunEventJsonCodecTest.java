@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -58,5 +59,20 @@ class RunEventJsonCodecTest {
         assertEquals(2, payload.path("steering_pending").asInt());
         assertEquals(1, payload.path("follow_up_pending").asInt());
         assertEquals("enqueued", payload.path("action").asText());
+    }
+
+    @Test
+    void encodesSessionStateAndCustomMessage() throws Exception {
+        JsonNode state = MAPPER.readTree(RunEventJsonCodec.encode(
+                new RunEvent.SessionStateChanged("thread_1", "running", "turn_started"), ""));
+        JsonNode custom = MAPPER.readTree(RunEventJsonCodec.encode(
+                new RunEvent.CustomMessage("lsp.diagnostic", "found issue",
+                        Map.of("severity", "warning")), "turn_1"));
+
+        assertEquals("thread_1", state.path("session_id").asText());
+        assertEquals("running", state.path("state").asText());
+        assertEquals("lsp.diagnostic", custom.path("message_type").asText());
+        assertEquals("found issue", custom.path("content").asText());
+        assertEquals("warning", custom.path("attributes").path("severity").asText());
     }
 }

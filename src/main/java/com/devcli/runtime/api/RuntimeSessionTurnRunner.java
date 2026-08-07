@@ -39,17 +39,24 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
     public TurnResult run(String threadId, String input, RunEventSink eventSink) {
         AgentSessionRuntime session = session(threadId);
         session.setRunEventSink(eventSink);
+        eventSink.emit(new com.devcli.runtime.event.RunEvent.SessionStateChanged(
+                threadId, "running", "turn_started"));
         List<LlmClient.Message> before = session.agent().getConversationHistory();
-        AgentSessionRuntime.RunResult result = session.runBlocking(input);
-        boolean compacted = checkpointTriggerTokens > 0
-                && session.agent().compactHistoryForPersistence(checkpointTriggerTokens);
-        List<LlmClient.Message> history = session.agent().getConversationHistory();
-        compacted |= hasNewCompactionBoundary(before, history);
-        TurnRunner.CheckpointCandidate checkpoint = RuntimeCheckpointCandidateFactory
-                .fromHistory(history, compacted)
-                .orElse(null);
-        String output = result.output().isBlank() ? latestAssistantContent(history) : result.output();
-        return new TurnResult(output, checkpoint);
+        try {
+            AgentSessionRuntime.RunResult result = session.runBlocking(input);
+            boolean compacted = checkpointTriggerTokens > 0
+                    && session.agent().compactHistoryForPersistence(checkpointTriggerTokens);
+            List<LlmClient.Message> history = session.agent().getConversationHistory();
+            compacted |= hasNewCompactionBoundary(before, history);
+            TurnRunner.CheckpointCandidate checkpoint = RuntimeCheckpointCandidateFactory
+                    .fromHistory(history, compacted)
+                    .orElse(null);
+            String output = result.output().isBlank() ? latestAssistantContent(history) : result.output();
+            return new TurnResult(output, checkpoint);
+        } finally {
+            eventSink.emit(new com.devcli.runtime.event.RunEvent.SessionStateChanged(
+                    threadId, "idle", "turn_finished"));
+        }
     }
 
     @Override

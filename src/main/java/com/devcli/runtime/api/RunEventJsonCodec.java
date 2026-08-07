@@ -32,6 +32,15 @@ final class RunEventJsonCodec {
             payload.put("steering_pending", queue.steeringPending());
             payload.put("follow_up_pending", queue.followUpPending());
             payload.put("action", queue.action());
+        } else if (event instanceof RunEvent.SessionStateChanged session) {
+            payload.put("session_id", session.sessionId());
+            payload.put("state", session.state());
+            payload.put("reason", session.reason());
+        } else if (event instanceof RunEvent.CustomMessage custom) {
+            payload.put("message_type", custom.messageType());
+            payload.put("content", custom.content());
+            ObjectNode attributes = payload.putObject("attributes");
+            custom.attributes().forEach(attributes::put);
         } else if (event instanceof RunEvent.ToolCalls toolCalls) {
             ArrayNode calls = payload.putArray("calls");
             for (RunEvent.ToolCallData call : toolCalls.calls()) {
