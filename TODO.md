@@ -7,7 +7,7 @@
 - 影响范围：AgentExecutionEngine、AgentTurnInbox、AgentSessionRuntime、CLI、无头 Runtime API、RunEvent 和会话测试
 - 已实现：Agent 执行层支持 Steering / Follow-up 双通道注入；CLI 活动输入复用 Agent 收件箱；无头执行复用统一 AgentSessionRuntime；运行事件支持 queue.updated；收件箱容量、优先级、批量消费和事件编码已有限定测试；Runtime checkpoint 已保存压缩 metadata，并增加稳定消息 id、parentId、role 和 index 的消息树快照，旧 SQLite 数据库启动时自动补列
 - 未实现：CLI 尚未提供 `/branch` 命令；Extension Contract 的 Hook 动态 reload 和完整生命周期同步尚未实现
-- 验证建议：运行收件箱与 RunEvent 编码限定测试；禁止以编译通过替代真实终端交互验证
+- 验证建议：运行收件箱与 RunEvent 编码限定测试；已通过 `mvn -DskipTests package` 和 plain renderer 的 `/help`、`/exit` 启动烟测；交互式方向键、底部 dock、HITL 按键仍需在真实终端现场验证
 - 风险：跨进程恢复不保存尚未交付的队列输入；Runtime API 和无头路径已使用会话运行时，CLI 已通过同步会话入口复用同一 RunContext
 
 ## 2026-08-07 Runtime API 显式会话队列
