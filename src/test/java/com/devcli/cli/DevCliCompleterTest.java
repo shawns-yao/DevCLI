@@ -130,6 +130,16 @@ class DevCliCompleterTest {
     }
 
     @Test
+    void completesBranchSubCommands() {
+        DevCliCompleter completer = new DevCliCompleter(List::of);
+        List<Candidate> candidates = new ArrayList<>();
+
+        completer.complete(null, parsed("/branch cr", "cr"), candidates);
+
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("create ")));
+    }
+
+    @Test
     void completesLocalPathMentions() {
         DevCliCompleter completer = new DevCliCompleter(List::of);
         List<Candidate> candidates = new ArrayList<>();

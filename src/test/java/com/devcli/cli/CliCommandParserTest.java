@@ -256,6 +256,17 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesBranchCommands() {
+        CliCommandParser.ParsedCommand status = CliCommandParser.parse("/branch");
+        assertEquals(CliCommandParser.CommandType.BRANCH, status.type());
+        assertEquals("status", status.payload());
+
+        CliCommandParser.ParsedCommand create = CliCommandParser.parse("/branch create feature-a");
+        assertEquals(CliCommandParser.CommandType.BRANCH, create.type());
+        assertEquals("create feature-a", create.payload());
+    }
+
+    @Test
     void parsesHitlOnCommand() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/hitl on");
 
