@@ -10,6 +10,16 @@
 - 验证建议：运行收件箱与 RunEvent 编码限定测试；禁止以编译通过替代真实终端交互验证
 - 风险：CLI 与 Runtime API 仍存在间接会话封装；当前队列状态事件主要覆盖交付路径，跨进程恢复不保存待处理输入
 
+## 2026-08-07 统一模型能力注册表
+
+- 状态：已实现
+- 来源：多个 Provider 客户端分别维护上下文窗口、缓存模式和能力常量，新增 OpenAI-compatible Provider 时容易出现策略分叉
+- 影响范围：LLM 客户端能力接口、Provider 工厂、ContextProfile、模型能力测试和文档
+- 已实现：新增 `ModelCapabilityRegistry`，统一解析 Provider 别名、上下文窗口、输出上限、prompt cache、工具调用、视觉和 reasoning 能力；内置 Provider 使用注册表默认值，允许按模型模式注册进程内覆盖规则；未知 Provider 使用安全通用默认值；`LlmClientFactory` 复用同一 Provider 规范化逻辑
+- 未实现：能力注册表尚未从外部配置文件动态加载；Provider 真实能力仍需按官方模型版本定期校准
+- 验证建议：运行模型能力、ContextProfile 和 LlmClientFactory 限定测试；不依赖真实 API Key
+- 风险：模型厂商升级规格后，内置窗口和能力声明可能滞后；自定义覆盖是进程内状态，不跨进程持久化
+
 ## 2026-08-03 Agent 面经能力筛选与记忆链路优化
 
 - 状态：已实现
