@@ -312,6 +312,7 @@ public class Main {
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
             AgentSessionRuntime reactSession = AgentSessionRuntime.adoptOwned(
                     reactAgent, Path.of(reactAgent.getToolRegistry().getProjectPath()));
+            CliConversationBranchManager branchManager = new CliConversationBranchManager(reactAgent);
             CliSessionArchive sessionArchive = CliSessionArchive.fromEnvironment();
             shutdown.register(20, "reactSession", reactSession::close);
             reactAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
@@ -719,6 +720,23 @@ public class Main {
                         ui.println(SkillCommandHandler.startupSummary(skillRegistry));
                         ui.println("✅ 下一轮 LLM 调用生效");
                         renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
+                        continue;
+                    }
+                    case BRANCH -> {
+                        try {
+                            String payload = command.payload() == null ? "status" : command.payload().trim();
+                            if (payload.equalsIgnoreCase("status") || payload.equalsIgnoreCase("list")) {
+                                ui.println(branchManager.status());
+                            } else if (payload.regionMatches(true, 0, "create ", 0, 7)) {
+                                ui.println(branchManager.create(payload.substring(7).trim()));
+                            } else if (payload.regionMatches(true, 0, "use ", 0, 4)) {
+                                ui.println(branchManager.use(payload.substring(4).trim()));
+                            } else {
+                                ui.println("用法: /branch | /branch create <name> | /branch use <name>");
+                            }
+                        } catch (IllegalArgumentException e) {
+                            ui.println("❌ " + e.getMessage());
+                        }
                         continue;
                     }
                     case INDEX_CODE -> {
@@ -1517,6 +1535,10 @@ public class Main {
                 new SlashCommandHint("/snapshot", "/snapshot", "查看最近 Side-Git 快照"),
                 new SlashCommandHint("/snapshot status", "/snapshot status", "查看 Side-Git 快照状态"),
                 new SlashCommandHint("/snapshot clean", "/snapshot clean", "清理当前项目 Side-Git 快照"),
+                new SlashCommandHint("/branch", "/branch", "查看当前对话分支"),
+                new SlashCommandHint("/branch status", "/branch status", "查看当前对话分支"),
+                new SlashCommandHint("/branch create ", "/branch create <name>", "从当前历史创建对话分支"),
+                new SlashCommandHint("/branch use ", "/branch use <name>", "切换到已有对话分支"),
                 new SlashCommandHint("/restore ", "/restore <N>", "恢复到最近第 N 个 pre-turn 快照"),
                 new SlashCommandHint("/index", "/index", "索引当前代码库"),
                 new SlashCommandHint("/index ", "/index [路径]", "索引指定路径代码库"),

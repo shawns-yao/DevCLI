@@ -63,7 +63,8 @@ final class DevCliCompleter implements Completer {
                 || completeSkill(input, candidates)
                 || completeTask(input, candidates)
                 || completeBrowser(input, candidates)
-                || completeSnapshot(input, candidates)) {
+                || completeSnapshot(input, candidates)
+                || completeBranch(input, candidates)) {
             return;
         }
 
@@ -192,6 +193,19 @@ final class DevCliCompleter implements Completer {
         addMatching(candidates, "快照", payload,
                 option("status", "查看 Side-Git 快照状态"),
                 option("clean", "清理当前项目快照"));
+        return true;
+    }
+
+    private boolean completeBranch(String input, List<Candidate> candidates) {
+        if (!input.equalsIgnoreCase("/branch") && !input.regionMatches(true, 0, "/branch ", 0, 8)) {
+            return false;
+        }
+        String payload = input.length() <= 8 ? "" : input.substring(8);
+        addMatching(candidates, "对话分支", payload,
+                option("status", "查看当前对话分支"),
+                option("list", "列出当前进程内的对话分支"),
+                option("create ", "从当前历史创建分支"),
+                option("use ", "切换到已有分支"));
         return true;
     }
 

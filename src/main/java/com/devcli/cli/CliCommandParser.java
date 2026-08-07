@@ -43,7 +43,8 @@ final class CliCommandParser {
         SKILL_ON,
         SKILL_OFF,
         SKILL_RELOAD,
-        CONFIG
+        CONFIG,
+        BRANCH
     }
 
     record ParsedCommand(CommandType type, String payload) {
@@ -252,6 +253,13 @@ final class CliCommandParser {
 
         if (trimmed.equalsIgnoreCase("/skill") || trimmed.equalsIgnoreCase("/skill list")) {
             return new ParsedCommand(CommandType.SKILL_LIST, null);
+        }
+
+        if (trimmed.equalsIgnoreCase("/branch")) {
+            return new ParsedCommand(CommandType.BRANCH, "status");
+        }
+        if (trimmed.regionMatches(true, 0, "/branch ", 0, 8)) {
+            return new ParsedCommand(CommandType.BRANCH, trimmed.substring(8).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/skill reload")) {
