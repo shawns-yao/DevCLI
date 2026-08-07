@@ -5,8 +5,8 @@
 - 状态：部分实现
 - 来源：参考 pi 的 Agent session facade 与 Steering / Follow-up 消息队列，将活动输入从 CLI 局部协调器下沉到 Agent 执行层
 - 影响范围：AgentExecutionEngine、AgentTurnInbox、AgentSessionRuntime、CLI、无头 Runtime API、RunEvent 和会话测试
-- 已实现：Agent 执行层支持 Steering / Follow-up 双通道注入；CLI 活动输入复用 Agent 收件箱；无头执行复用统一 AgentSessionRuntime；运行事件支持 queue.updated；收件箱容量、优先级、批量消费和事件编码已有限定测试
-- 未实现：Runtime API 尚未暴露显式 steer / follow-up 接口；checkpoint 尚未保存消息树 parentId 与压缩 metadata；对话分支和统一 Extension Contract 尚未实现
+- 已实现：Agent 执行层支持 Steering / Follow-up 双通道注入；CLI 活动输入复用 Agent 收件箱；无头执行复用统一 AgentSessionRuntime；运行事件支持 queue.updated；收件箱容量、优先级、批量消费和事件编码已有限定测试；Runtime checkpoint 已保存压缩 metadata，并增加稳定消息 id、parentId、role 和 index 的消息树快照，旧 SQLite 数据库启动时自动补列
+- 未实现：Runtime API 尚未暴露显式 steer / follow-up 接口；当前 checkpoint 只生成线性消息树，尚未提供分支创建与切换；统一 Extension Contract 尚未实现
 - 验证建议：运行收件箱与 RunEvent 编码限定测试；禁止以编译通过替代真实终端交互验证
 - 风险：CLI 与 Runtime API 仍存在间接会话封装；当前队列状态事件主要覆盖交付路径，跨进程恢复不保存待处理输入
 
