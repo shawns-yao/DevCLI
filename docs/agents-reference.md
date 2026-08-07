@@ -248,7 +248,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `RunEvent` 统一表达 reasoning/content delta、工具调用、工具结果、turn 终态和 checkpoint 事件；`AgentExecutionEngine` 将模型 StreamListener 回调转换为事件，再通过适配器投影到既有 Renderer 或 Runtime sink
 - `RunEvent` 另外提供 `session.state`（running / idle 等会话生命周期）和 `message.custom`（扩展消息类型、正文、字符串属性）；Runtime session turn 开始和结束会发布状态事件，自定义事件必须经过统一 JSON codec，不允许扩展直接拼接协议文本
 - 模型能力由 `ModelCapabilityRegistry` 统一解析 Provider 别名、上下文窗口、输出上限、prompt cache、工具调用、视觉和 reasoning 能力；`LlmClient` 的上下文策略默认从注册表读取，Provider 客户端只保留实例级差异（例如 Anthropic 的配置化输出上限）
-- Skill、Hook、MCP server 和 CLI command 的发现元数据统一通过 `ExtensionContract` / `ExtensionRegistry` 表达：稳定 id、kind、来源、启用状态、版本、能力和元数据；该目录契约不接管各自执行权限，Skill、Hook、MCP 和命令继续使用原有安全与策略管线
+- Skill、Hook、MCP server 和 CLI command 的发现元数据统一通过 `ExtensionContract` / `ExtensionRegistry` 表达：稳定 id、kind、来源、启用状态、版本、能力和元数据；Main 启动后把命令、Skill 和 MCP server 注册进目录，CLI Skill/MCP 补全优先从统一目录读取。该目录契约不接管各自执行权限，Skill、Hook、MCP 和命令继续使用原有安全与策略管线
 - Runtime JSON 投影集中维护协议字段和转义，每个 payload 固定携带 `schema_version=1`；工具 arguments 优先保持 JSON 对象，无法解析时保留原文本；工具结果携带 status、error_code、retryable、elapsed_millis 和 image_count，不持久化图片正文
 - Runtime runner 收到事件 sink 后可边执行边写入 SQLite/SSE；如果 Provider 没有产生 content delta，服务端才用最终输出补一个 `message.delta`，避免流式回答重复写入
 - 每次交互、后台任务和无头 turn 绑定独立 `RunContext`，其中包含项目路径与取消令牌；预先创建的线程池不读取其他运行的取消状态，线程中断也进入取消语义

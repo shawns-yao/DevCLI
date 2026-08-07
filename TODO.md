@@ -35,8 +35,8 @@
 - 状态：部分实现
 - 来源：Skill、Hook、MCP server 和 CLI command 分别维护名称、来源、启用状态和能力信息，发现与替换语义不一致
 - 影响范围：新增 extension 契约与注册表、Skill/Hook/MCP/CLI 适配器、后续补全与状态展示
-- 已实现：新增 `ExtensionContract` 和 `ExtensionRegistry`；统一四类扩展的 kind、稳定 id、name、version、source、enabled、capabilities、metadata；注册表提供去重注册、显式替换、按 kind/启用状态列举；现有 Skill、Hook、MCP server 和 command 均有适配器和限定测试
-- 未实现：Main、补全器和各模块生命周期尚未全面改为从注册表读取；扩展执行权限仍由原有 Skill allowedTools、Hook Policy、MCP trust policy 和命令解析链路分别治理
+- 已实现：新增 `ExtensionContract` 和 `ExtensionRegistry`；统一四类扩展的 kind、稳定 id、name、version、source、enabled、capabilities、metadata；注册表提供去重注册、显式替换、按 kind/启用状态列举；现有 Skill、Hook、MCP server 和 command 均有适配器；Main 启动时把命令、Skill 和 MCP server 注册到统一目录，CLI 补全优先从该目录读取 Skill/MCP 发现信息，并保留旧 supplier 回退
+- 未实现：Hook 生命周期尚未直接向统一目录同步动态 reload；扩展执行权限仍由原有 Skill allowedTools、Hook Policy、MCP trust policy 和命令解析链路分别治理
 - 验证建议：运行 ExtensionRegistryTest；后续接入调用方时，先保持旧执行管线不变，再逐个替换发现入口
 - 风险：注册表目前是进程内目录，不负责加载、执行或持久化；过早把执行权限塞入通用契约会削弱现有安全边界
 
