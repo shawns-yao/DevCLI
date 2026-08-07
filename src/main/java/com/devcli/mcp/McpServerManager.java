@@ -28,6 +28,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -52,6 +53,7 @@ public class McpServerManager implements AutoCloseable {
     private final Map<String, McpToolDiscoveryEntry> toolDiscoveryCache = new ConcurrentHashMap<>();
     private final Map<String, AtomicInteger> reconnectAttempts = new ConcurrentHashMap<>();
     private final Set<String> reconnectScheduled = ConcurrentHashMap.newKeySet();
+    private volatile Consumer<Collection<McpServer>> extensionObserver = ignored -> { };
     private final ScheduledExecutorService reconnectExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "devcli-mcp-reconnect");
         t.setDaemon(true);
@@ -68,10 +70,16 @@ public class McpServerManager implements AutoCloseable {
         this.configLoader = configLoader;
     }
 
+    public void setExtensionObserver(Consumer<Collection<McpServer>> observer) {
+        this.extensionObserver = observer == null ? ignored -> { } : observer;
+        notifyExtensionObserver();
+    }
+
     public void loadConfiguredServers() throws IOException {
         Map<String, McpServerConfig> configs = configLoader.load();
         servers.clear();
         configs.forEach((name, config) -> servers.put(name, new McpServer(name, config)));
+        notifyExtensionObserver();
     }
 
     public void startAll() {
@@ -200,6 +208,7 @@ public class McpServerManager implements AutoCloseable {
         server.config().setDisabled(false);
         reconnectAttempts.remove(name);
         start(server);
+        notifyExtensionObserver();
         return server.status() == McpServerStatus.READY
                 ? "✅ MCP server 已重启: " + name
                 : "❌ MCP server 重启失败: " + name + " - " + server.errorMessage();
@@ -242,6 +251,7 @@ public class McpServerManager implements AutoCloseable {
         server.errorMessage(null);
         reconnectScheduled.remove(name);
         reconnectAttempts.remove(name);
+        notifyExtensionObserver();
         return "⏸️ MCP server 已禁用: " + name;
     }
 
@@ -253,6 +263,7 @@ public class McpServerManager implements AutoCloseable {
         server.config().setDisabled(false);
         reconnectAttempts.remove(name);
         start(server);
+        notifyExtensionObserver();
         return server.status() == McpServerStatus.READY
                 ? "▶️ MCP server 已启用: " + name
                 : "❌ MCP server 启用失败: " + name + " - " + server.errorMessage();
@@ -274,6 +285,14 @@ public class McpServerManager implements AutoCloseable {
         return servers.values().stream()
                 .sorted(java.util.Comparator.comparing(McpServer::name))
                 .toList();
+    }
+
+    private void notifyExtensionObserver() {
+        try {
+            extensionObserver.accept(servers());
+        } catch (RuntimeException ignored) {
+            // 扩展目录是旁路可观测性，不能阻断 MCP 主执行链路。
+        }
     }
 
     public String formatStatus() {

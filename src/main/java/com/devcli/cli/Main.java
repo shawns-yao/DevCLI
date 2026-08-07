@@ -10,6 +10,7 @@ import com.devcli.browser.BrowserSession;
 import com.devcli.browser.SensitivePagePolicy;
 import com.devcli.config.DevCliConfig;
 import com.devcli.extension.ExtensionRegistry;
+import com.devcli.extension.ExtensionContract;
 import com.devcli.cli.turn.ActiveTurnInput;
 import com.devcli.cli.turn.TurnExecutionGuard;
 import com.devcli.agent.AgentTurnInbox;
@@ -226,6 +227,10 @@ public class Main {
             hitlToolRegistry.setBrowserGuard(new BrowserGuard(browserSession, new SensitivePagePolicy()));
             McpServerManager mcpServerManager = new McpServerManager(hitlToolRegistry, Path.of("."));
             ExtensionRegistry extensionRegistry = new ExtensionRegistry();
+            mcpServerManager.setExtensionObserver(servers -> extensionRegistry.replaceKind(
+                    ExtensionContract.Kind.MCP_SERVER,
+                    servers.stream().map(server -> ExtensionRegistry.fromMcpServer(
+                            server.name(), server.config())).toList()));
             AtomicReference<SkillRegistry> skillRegistryRef = new AtomicReference<>();
             BrowserCommandHandler browserCommands = new BrowserCommandHandler(
                     browserSession, browserConnectivityCheck, mcpServerManager,
@@ -268,8 +273,6 @@ public class Main {
                     startupNote = bootstrapResult.message();
                 }
                 mcpServerManager.loadConfiguredServers();
-                mcpServerManager.servers().forEach(server -> extensionRegistry.registerOrReplace(
-                        ExtensionRegistry.fromMcpServer(server.name(), server.config())));
                 mcpServerManager.startAll(ui, mcpStartupWait());
                 shutdown.register(30, "mcpServerManager", mcpServerManager::close);
             } catch (Exception e) {
