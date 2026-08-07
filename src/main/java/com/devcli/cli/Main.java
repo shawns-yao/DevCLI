@@ -38,6 +38,7 @@ import com.devcli.rag.CodeRelation;
 import com.devcli.rag.SearchResultFormatter;
 import com.devcli.runtime.CancellationContext;
 import com.devcli.runtime.CancellationToken;
+import com.devcli.runtime.AgentSessionRuntime;
 import com.devcli.runtime.RunContext;
 import com.devcli.runtime.task.DurableTaskManager;
 import com.devcli.runtime.task.TaskCommandFormatter;
@@ -300,8 +301,10 @@ public class Main {
             hitlToolRegistry.setSkillContextBuffer(skillContextBuffer);
 
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
+            AgentSessionRuntime reactSession = AgentSessionRuntime.adoptOwned(
+                    reactAgent, Path.of(reactAgent.getToolRegistry().getProjectPath()));
             CliSessionArchive sessionArchive = CliSessionArchive.fromEnvironment();
-            shutdown.register(20, "reactAgent", reactAgent::close);
+            shutdown.register(20, "reactSession", reactSession::close);
             reactAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
             reactAgent.setSkillRegistry(skillRegistry);
             reactAgent.setSkillContextBuffer(skillContextBuffer);
@@ -820,7 +823,7 @@ public class Main {
                     };
                 } else {
                     snapshotMode = "react";
-                    runTask = () -> reactAgent.run(taskInput);
+                    runTask = () -> reactSession.runInCurrentContext(taskInput).output();
                 }
                 SnapshotService snapshotService = reactAgent.getToolRegistry().getSnapshotService();
                 renderer.updateStatus(statusInfo(llmClient, hitlHandler, snapshotMode, mcpServerManager, skillRegistry));
@@ -852,7 +855,7 @@ public class Main {
                 }
             }
             ui.println("\n👋 再见!");
-            reactAgent.close();
+            reactSession.close();
             renderer.close();
 
         } catch (IOException e) {

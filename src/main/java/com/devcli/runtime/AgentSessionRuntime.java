@@ -44,6 +44,10 @@ public final class AgentSessionRuntime implements AutoCloseable {
         return new AgentSessionRuntime(agent, null, normalize(projectPath), false, false);
     }
 
+    public static AgentSessionRuntime adoptOwned(Agent agent, Path projectPath) {
+        return new AgentSessionRuntime(agent, null, normalize(projectPath), true, false);
+    }
+
     public AgentSessionRuntime(Agent agent, ToolRegistry toolRegistry, Path projectPath,
                                boolean ownsAgent, boolean ownsToolRegistry) {
         this.agent = Objects.requireNonNull(agent, "agent");
@@ -99,6 +103,39 @@ public final class AgentSessionRuntime implements AutoCloseable {
             throw new IllegalStateException("等待 Agent 会话结束时被中断", e);
         } catch (ExecutionException e) {
             throw new IllegalStateException("Agent 会话执行失败", e.getCause());
+        }
+    }
+
+    /**
+     * 在调用方已有 RunContext 时同步执行，保留同一取消令牌；CLI 的外层输入监听使用此入口。
+     */
+    public RunResult runInCurrentContext(String prompt) {
+        synchronized (this) {
+            if (activeRun.get() != null) {
+                throw new IllegalStateException("Agent 会话已有正在运行的任务");
+            }
+            CompletableFuture<RunResult> marker = new CompletableFuture<>();
+            activeRun.set(marker);
+            RunContext inherited = CancellationContext.currentRun();
+            boolean ownsContext = inherited == null;
+            RunContext context = ownsContext ? CancellationContext.startRunContext(projectPath) : inherited;
+            activeContext.set(context);
+            try {
+                String output = agent.run(prompt);
+                RunResult result = new RunResult(output, agent.getConversationHistory(), context.isCancelled());
+                marker.complete(result);
+                return result;
+            } catch (Throwable error) {
+                marker.completeExceptionally(error);
+                throw error instanceof RuntimeException runtime
+                        ? runtime : new IllegalStateException("Agent 会话执行失败", error);
+            } finally {
+                activeContext.compareAndSet(context, null);
+                activeRun.compareAndSet(marker, null);
+                if (ownsContext) {
+                    context.close();
+                }
+            }
         }
     }
 
