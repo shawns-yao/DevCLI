@@ -2,13 +2,13 @@
 
 ## 2026-08-07 Agent 会话运行时与双通道输入
 
-- 状态：部分实现
+- 状态：已实现（真实终端交互仍待现场验证）
 - 来源：参考 pi 的 Agent session facade 与 Steering / Follow-up 消息队列，将活动输入从 CLI 局部协调器下沉到 Agent 执行层
 - 影响范围：AgentExecutionEngine、AgentTurnInbox、AgentSessionRuntime、CLI、无头 Runtime API、RunEvent 和会话测试
 - 已实现：Agent 执行层支持 Steering / Follow-up 双通道注入；CLI 活动输入复用 Agent 收件箱；无头执行复用统一 AgentSessionRuntime；运行事件支持 queue.updated；收件箱容量、优先级、批量消费和事件编码已有限定测试；Runtime checkpoint 已保存压缩 metadata，并增加稳定消息 id、parentId、role 和 index 的消息树快照，旧 SQLite 数据库启动时自动补列
-- 未实现：当前 checkpoint 只生成线性消息树，尚未提供分支创建与切换；统一 Extension Contract 尚未实现
+- 未实现：CLI 尚未提供 `/branch` 命令；Extension Contract 的 Hook 动态 reload 和完整生命周期同步尚未实现
 - 验证建议：运行收件箱与 RunEvent 编码限定测试；禁止以编译通过替代真实终端交互验证
-- 风险：CLI 与 Runtime API 仍存在间接会话封装；当前队列状态事件主要覆盖交付路径，跨进程恢复不保存待处理输入
+- 风险：跨进程恢复不保存尚未交付的队列输入；Runtime API 和无头路径已使用会话运行时，CLI 已通过同步会话入口复用同一 RunContext
 
 ## 2026-08-07 Runtime API 显式会话队列
 
@@ -49,16 +49,6 @@
 - 未实现：CLI 尚未提供 `/branch` 命令；尚未实现分支重命名、删除和图形化展示；未对正在运行的 turn 允许强制切换分支
 - 验证建议：运行 RuntimeThreadStoreTest、RuntimeApiServerTest；真实模型下验证从 fork 前约束继续两条不同任务
 - 风险：分支切换只持久化已完成事件，尚未交付的 Steering / Follow-up 队列不会复制到新分支；大规模分支树仍需分页接口
-
-## 2026-08-07 移除旧 CLI 活动队列
-
-- 状态：已实现
-- 来源：活动输入已经下沉到 AgentTurnInbox，但旧 ActiveTurnCoordinator / PromptQueue 仍作为无生产调用的第二套队列模型存在
-- 影响范围：CLI 活动输入、旧队列类及其测试、编译回归
-- 已实现：删除旧 CLI 队列实现和对应测试，Main 只保留 AgentTurnInbox；Steering / Follow-up 的容量、优先级和取消语义统一由 Agent 执行层维护
-- 未实现：无
-- 验证建议：运行 AgentTurnInboxTest、RuntimeApiServerTest、DevCliCompleterTest，并进行真实终端交互验证
-- 风险：外部代码如果直接依赖旧的 com.devcli.cli.turn 队列类会在编译期失败；这些类此前没有生产调用，属于内部实现
 
 ## 2026-08-07 移除旧 CLI 活动队列
 
