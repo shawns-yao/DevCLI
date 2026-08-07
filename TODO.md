@@ -6,9 +6,19 @@
 - 来源：参考 pi 的 Agent session facade 与 Steering / Follow-up 消息队列，将活动输入从 CLI 局部协调器下沉到 Agent 执行层
 - 影响范围：AgentExecutionEngine、AgentTurnInbox、AgentSessionRuntime、CLI、无头 Runtime API、RunEvent 和会话测试
 - 已实现：Agent 执行层支持 Steering / Follow-up 双通道注入；CLI 活动输入复用 Agent 收件箱；无头执行复用统一 AgentSessionRuntime；运行事件支持 queue.updated；收件箱容量、优先级、批量消费和事件编码已有限定测试；Runtime checkpoint 已保存压缩 metadata，并增加稳定消息 id、parentId、role 和 index 的消息树快照，旧 SQLite 数据库启动时自动补列
-- 未实现：Runtime API 尚未暴露显式 steer / follow-up 接口；当前 checkpoint 只生成线性消息树，尚未提供分支创建与切换；统一 Extension Contract 尚未实现
+- 未实现：当前 checkpoint 只生成线性消息树，尚未提供分支创建与切换；统一 Extension Contract 尚未实现
 - 验证建议：运行收件箱与 RunEvent 编码限定测试；禁止以编译通过替代真实终端交互验证
 - 风险：CLI 与 Runtime API 仍存在间接会话封装；当前队列状态事件主要覆盖交付路径，跨进程恢复不保存待处理输入
+
+## 2026-08-07 Runtime API 显式会话队列
+
+- 状态：已实现
+- 来源：Runtime API 之前每个 turn 通过无头执行入口重新构造 Agent，无法从 API 控制正在运行的会话队列
+- 影响范围：Runtime API 路由、RuntimeSessionTurnRunner、AgentSessionRuntime、RunEvent、Runtime API 测试和启动器
+- 已实现：Runtime API 通过持久 `RuntimeSessionTurnRunner` 为每个 thread 复用 `AgentSessionRuntime`；新增 `POST /v1/threads/{id}/steer` 与 `POST /v1/threads/{id}/follow-up`；两个入口复用 AgentTurnInbox，返回队列水位并写入 `queue.updated` 事件；旧 TurnRunner lambda 保持兼容，不支持队列时返回 501
+- 未实现：尚未提供队列清空、队列取消和 Runtime API 的 SSE 长连接推送；Runtime API 真实模型交互仍需现场验证
+- 验证建议：运行 RuntimeApiServerTest；再使用真实 API Key 启动 `serve --http` 验证 steering 在工具批次后注入、follow-up 在自然结束前注入
+- 风险：RuntimeSessionTurnRunner 进程重启后依靠 SQLite checkpoint 和已完成 turn 重建会话，进程退出瞬间尚未交付的队列消息不会持久化
 
 ## 2026-08-07 统一模型能力注册表
 
