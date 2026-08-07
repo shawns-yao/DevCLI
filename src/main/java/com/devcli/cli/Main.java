@@ -11,7 +11,6 @@ import com.devcli.browser.SensitivePagePolicy;
 import com.devcli.config.DevCliConfig;
 import com.devcli.extension.ExtensionRegistry;
 import com.devcli.cli.turn.ActiveTurnInput;
-import com.devcli.cli.turn.PromptQueue;
 import com.devcli.cli.turn.TurnExecutionGuard;
 import com.devcli.agent.AgentTurnInbox;
 import com.devcli.hitl.HitlHandler;
@@ -122,7 +121,6 @@ public class Main {
     private static final String APP_ARROW_UP = "OA";
     private static final String APP_ARROW_DOWN = "OB";
     private static final int CTRL_O = 15;
-    private static final int ACTIVE_PROMPT_QUEUE_CAPACITY = 8;
     private static final long CANCEL_QUIESCE_TIMEOUT_SECONDS = 5;
     private static final String DEFAULT_CHROME_DEVTOOLS_MCP_JSON = """
             {
