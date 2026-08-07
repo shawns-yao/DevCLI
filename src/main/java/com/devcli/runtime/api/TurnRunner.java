@@ -26,6 +26,9 @@ public interface TurnRunner {
         return QueueResult.unsupported(AgentTurnInbox.Channel.FOLLOW_UP);
     }
 
+    default void resetSession(String threadId) {
+    }
+
     record TurnResult(String output, CheckpointCandidate checkpoint) {
         public TurnResult {
             output = output == null ? "" : output;

@@ -256,6 +256,52 @@ class RuntimeApiServerTest {
         }
     }
 
+    @Test
+    void createsListsAndActivatesConversationBranches(@TempDir Path tempDir) throws Exception {
+        AtomicReference<String> resetThread = new AtomicReference<>();
+        TurnRunner runner = new TurnRunner() {
+            @Override
+            public TurnResult run(String threadId, String input,
+                                  com.devcli.runtime.event.RunEventSink eventSink) {
+                return TurnResult.completed("ok");
+            }
+
+            @Override
+            public void resetSession(String threadId) {
+                resetThread.set(threadId);
+            }
+        };
+        try (RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"));
+             RuntimeApiServer server = new RuntimeApiServer(store, runner, 0, "secret")) {
+            server.start();
+            HttpClient client = HttpClient.newHttpClient();
+            String base = "http://127.0.0.1:" + server.port();
+            HttpResponse<String> created = client.send(
+                    request(base + "/v1/threads", "POST", "").build(),
+                    HttpResponse.BodyHandlers.ofString());
+            String threadId = extract(created.body(), "thread_");
+
+            HttpResponse<String> branchResponse = client.send(request(
+                    base + "/v1/threads/" + threadId + "/branches", "POST",
+                    "{\"name\":\"alternative\"}").build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(201, branchResponse.statusCode());
+            String branchId = extract(branchResponse.body(), "branch_");
+
+            HttpResponse<String> activate = client.send(request(
+                    base + "/v1/threads/" + threadId + "/branches/" + branchId + "/activate",
+                    "POST", "").build(), HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> branches = client.send(request(
+                    base + "/v1/threads/" + threadId + "/branches", "GET", "").build(),
+                    HttpResponse.BodyHandlers.ofString());
+
+            assertEquals(200, activate.statusCode());
+            assertEquals(threadId, resetThread.get());
+            assertTrue(branches.body().contains("\"active_branch_id\":\"" + branchId + "\""));
+            assertTrue(branches.body().contains("alternative"));
+        }
+    }
+
     private static String waitForSecondTurn(HttpClient client, String base, String threadId) throws Exception {
         long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
         while (System.nanoTime() < deadline) {

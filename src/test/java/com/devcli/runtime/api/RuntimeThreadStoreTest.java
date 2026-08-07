@@ -138,6 +138,30 @@ class RuntimeThreadStoreTest {
         }
     }
 
+    @Test
+    void branchesPreserveForkHistoryAndDivergeAfterActivation(@TempDir Path tempDir) throws Exception {
+        try (RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"))) {
+            String threadId = store.createThread();
+            long forkEventId = appendTurn(store, threadId, "t1", "shared", "shared answer");
+            RuntimeThreadStore.BranchRecord branch = store.createBranch(
+                    threadId, "alternative", forkEventId);
+
+            store.activateBranch(threadId, branch.id());
+            appendTurn(store, threadId, "t2", "branch input", "branch answer");
+            assertEquals(List.of("shared", "branch input"), store.turnHistory(threadId).stream()
+                    .map(RuntimeThreadStore.TurnRecord::input).toList());
+
+            store.activateBranch(threadId, "main");
+            appendTurn(store, threadId, "t3", "main input", "main answer");
+            assertEquals(List.of("shared", "main input"), store.turnHistory(threadId).stream()
+                    .map(RuntimeThreadStore.TurnRecord::input).toList());
+
+            store.activateBranch(threadId, branch.id());
+            assertEquals(List.of("shared", "branch input"), store.turnHistory(threadId).stream()
+                    .map(RuntimeThreadStore.TurnRecord::input).toList());
+        }
+    }
+
     private static long appendTurn(RuntimeThreadStore store, String threadId,
                                    String turnId, String input, String output) {
         store.appendEvent(threadId, "turn.started",

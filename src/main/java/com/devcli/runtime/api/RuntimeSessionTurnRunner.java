@@ -69,6 +69,14 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
         return enqueue(threadId, input, AgentTurnInbox.Channel.FOLLOW_UP);
     }
 
+    @Override
+    public void resetSession(String threadId) {
+        AgentSessionRuntime removed = sessions.remove(threadId);
+        if (removed != null) {
+            removed.close();
+        }
+    }
+
     private QueueResult enqueue(String threadId, String input, AgentTurnInbox.Channel channel) {
         AgentSessionRuntime session = session(threadId);
         AgentTurnInbox.EnqueueResult result = channel == AgentTurnInbox.Channel.STEERING

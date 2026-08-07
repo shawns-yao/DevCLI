@@ -108,6 +108,19 @@ public class RuntimeApiServer implements AutoCloseable {
                 handleEvents(exchange, threadId(path));
                 return;
             }
+            if ("GET".equals(method) && path.matches("/v1/threads/[^/]+/branches")) {
+                handleBranches(exchange, threadId(path));
+                return;
+            }
+            if ("POST".equals(method) && path.matches("/v1/threads/[^/]+/branches")) {
+                handleCreateBranch(exchange, threadId(path));
+                return;
+            }
+            if ("POST".equals(method)
+                    && path.matches("/v1/threads/[^/]+/branches/[^/]+/activate")) {
+                handleActivateBranch(exchange, threadId(path), branchId(path));
+                return;
+            }
             writeJson(exchange, 404, "{\"error\":\"not_found\"}");
         } catch (Exception e) {
             writeJson(exchange, 500, "{\"error\":\"" + escape(e.getMessage()) + "\"}");
@@ -221,6 +234,50 @@ public class RuntimeApiServer implements AutoCloseable {
         }
     }
 
+    private void handleBranches(HttpExchange exchange, String threadId) throws IOException {
+        if (!store.exists(threadId)) {
+            writeJson(exchange, 404, "{\"error\":\"thread_not_found\"}");
+            return;
+        }
+        var root = MAPPER.createObjectNode();
+        root.put("active_branch_id", store.activeBranchId(threadId));
+        var branches = root.putArray("branches");
+        for (RuntimeThreadStore.BranchRecord branch : store.branches(threadId)) {
+            var item = branches.addObject();
+            item.put("id", branch.id());
+            item.put("name", branch.name());
+            item.put("parent_branch_id", branch.parentBranchId());
+            item.put("fork_event_id", branch.forkEventId());
+            item.put("active", branch.active());
+            item.put("created_at", branch.createdAt().toString());
+        }
+        writeJson(exchange, 200, root.toString());
+    }
+
+    private void handleCreateBranch(HttpExchange exchange, String threadId) throws IOException {
+        if (!store.exists(threadId)) {
+            writeJson(exchange, 404, "{\"error\":\"thread_not_found\"}");
+            return;
+        }
+        JsonNode body = MAPPER.readTree(exchange.getRequestBody());
+        RuntimeThreadStore.BranchRecord branch = store.createBranch(
+                threadId, body.path("name").asText(""), body.path("from_event_id").asLong(0));
+        writeJson(exchange, 201, "{\"id\":\"" + branch.id()
+                + "\",\"parent_branch_id\":\"" + branch.parentBranchId()
+                + "\",\"fork_event_id\":" + branch.forkEventId() + "}");
+    }
+
+    private void handleActivateBranch(HttpExchange exchange, String threadId,
+                                      String branchId) throws IOException {
+        if (!store.exists(threadId)) {
+            writeJson(exchange, 404, "{\"error\":\"thread_not_found\"}");
+            return;
+        }
+        store.activateBranch(threadId, branchId);
+        runner.resetSession(threadId);
+        writeJson(exchange, 200, "{\"active_branch_id\":\"" + escape(branchId) + "\"}");
+    }
+
     private boolean authorized(HttpExchange exchange) {
         String auth = exchange.getRequestHeaders().getFirst("Authorization");
         String direct = exchange.getRequestHeaders().getFirst("X-DevCLI-API-Key");
@@ -230,6 +287,11 @@ public class RuntimeApiServer implements AutoCloseable {
     private static String threadId(String path) {
         String[] parts = path.split("/");
         return parts.length >= 4 ? parts[3] : "";
+    }
+
+    private static String branchId(String path) {
+        String[] parts = path.split("/");
+        return parts.length >= 6 ? parts[5] : "";
     }
 
     private static long parseAfter(String query) {
