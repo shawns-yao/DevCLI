@@ -525,8 +525,9 @@ DevCLI 的上下文分为四层：
 
 - `ConversationHistory（对话历史）`：真实 LLM messages，由压缩器治理窗口。
 - `WorkingMemory（工作记忆）`：当前会话工具证据、任务状态和临时事实，不跨会话持久化。用户显式要求“别管记忆”“忽略记忆”等时，本会话不注入长期记忆、通用 WorkingMemory 和角色裁剪后的 WorkingMemory。其中 `TaskLedger（任务账本）` 结构化记录计划执行进度，不进对话历史、压缩不触碰它；当前由 `/plan` 维护。Plan 与 Multi-Agent 的任务终态统一落在 `ExecutionArtifact`，只有主项目成功应用的 PatchSet 修改资源才写入运行态、checkpoint 和 WorkingMemory；checkpoint 版本 2 的 `RecoveryState` 负责跨进程恢复，旧 completed/failed 结构会先归一化。压缩后恢复上下文会按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 和 MCP 工具状态分节注入，并做预算控制与行级去重；microcompact 工具引用会按 storedPath / toolCallId 去重；Multi-Agent 会按 Planner / Worker / Reviewer 裁剪恢复内容，避免恢复段重复携带完整工具输出。压缩边界会同时记录全局 RAG 索引版本和当前会话 RAG 证据版本。
-- `SessionMemory（会话预摘要）`：当前进程内缓存压缩前置摘要，覆盖同一消息指纹且未过期时可被压缩器复用；默认 30 分钟过期。Plan / Multi-Agent turn 结束后会后台维护预摘要，避免主流程等待摘要 LLM 调用。
-- `LongTermMemory（长期记忆）`：跨会话稳定事实，SQLite 持久化，支持检索注入；写入前经过 `LongTermMemoryPolicy` 规则化分流，中英文显式低敏偏好/项目事实、稳定个人属性和多次重复出现的稳定事实可保存，反馈类事实按 `FEEDBACK` 类型落库，敏感或模糊新事实要求确认，中英文临时闲聊和低复用信息跳过；显式保存请求如果内容仍然明显临时或低复用，也先进入确认态而不是直接落库。`MemoryEvidence` 将 confidence、sourceQuote、reasoning、reviewState 和 conflictsWith 作为持久化契约；显式写入默认 REVIEWED，自动策略写入默认 UNREVIEWED，REJECTED 仅保留审计。`/memory organize` 生成结构化整理计划，`/memory organize apply` 只自动应用同主题、同类型、全部未审核、覆盖完整且计划置信度不低于 0.9 的合并；模型自报风险不作为放行依据，已审核条目始终在本次运行报告中标记为需要人工复核。命中 `subject（主题键）` 的事实写入时，同主题旧事实自动标记为 `superseded（已取代）`，检索只返回可召回条目（如 Fastjson → Jackson 选型切换）。与 WorkingMemory 临时事实语义重复的长期记忆不会重复注入 prompt。
+- `SessionMemory（会话预摘要）`：当前进程内缓存压缩前置摘要，覆盖同一消息指纹且未过期时可被压缩器复用；已有摘要覆盖当前历史前缀时，维护请求只携带旧摘要和新增消息，前缀变化后才回退全量摘要；维护指标记录模式、覆盖和增量消息数、输入估算、摘要长度及失败计数；默认 30 分钟过期。Plan / Multi-Agent turn 结束后会后台维护预摘要，避免主流程等待摘要 LLM 调用。
+- `LongTermMemory（长期记忆）`：跨会话稳定事实，SQLite 持久化，支持检索注入；统一意图分类器识别保存、删除、忽略、目录查看和历史依赖；检索结果保留语义分数、关键词分数和合并分数，并按最低分数、第一名分差和最大数量限制注入。写入前经过 `LongTermMemoryPolicy` 规则化分流；与 WorkingMemory 临时事实语义重复的长期记忆不会重复注入 prompt；普通请求不再附带长期记忆目录快照，只有明确查看、列出或审计记忆时才注入目录。
+- RAG 检索默认把 keyword / semantic / graph、RRF、rerank、最终选择和降级状态写入本机 JSONL 审计记录，不保存代码正文。普通 CLI 会话归档默认关闭；启用后 ReAct 保存脱敏模型消息，Plan / Team 保存顶层输入输出，不保存图片正文与 reasoning，并按保留期限自动清理。
 - `StickyMemory（强约束记忆）`：通过 `/save --pin` 保存，每轮全量注入 system prompt。
 
 保存长期事实：
