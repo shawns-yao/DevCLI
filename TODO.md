@@ -20,6 +20,16 @@
 - 验证建议：运行 RuntimeApiServerTest；再使用真实 API Key 启动 `serve --http` 验证 steering 在工具批次后注入、follow-up 在自然结束前注入
 - 风险：RuntimeSessionTurnRunner 进程重启后依靠 SQLite checkpoint 和已完成 turn 重建会话，进程退出瞬间尚未交付的队列消息不会持久化
 
+## 2026-08-07 RunEvent 会话状态与自定义消息
+
+- 状态：已实现
+- 来源：已有运行事件覆盖模型增量、工具和 turn 终态，但没有统一表达会话生命周期和扩展事件的协议
+- 影响范围：RunEvent、Runtime JSON 编码、RuntimeSessionTurnRunner、事件测试和架构文档
+- 已实现：新增 `session.state` 和 `message.custom` 强类型事件；Runtime 会话在 turn 开始/结束时发布 running/idle 状态；自定义消息支持稳定类型、正文和字符串属性，并统一经过 JSON codec
+- 未实现：CLI Renderer 尚未对所有自定义消息提供专用视觉渲染；事件 schema 仍为版本 1，尚未提供远端能力协商
+- 验证建议：运行 RunEventJsonCodecTest、RuntimeApiServerTest；真实 Runtime API 需要验证 SSE 中的状态事件顺序
+- 风险：第三方扩展提交过大的自定义属性仍需经过结果尺寸治理，当前 codec 只负责结构化编码
+
 ## 2026-08-07 统一模型能力注册表
 
 - 状态：已实现
