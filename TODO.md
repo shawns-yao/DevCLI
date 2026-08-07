@@ -46,9 +46,19 @@
 - 来源：Runtime thread 之前只有线性事件流，checkpoint 虽保存消息 parentId，但无法从历史位置创建独立后续对话
 - 影响范围：Runtime SQLite schema、事件与 checkpoint 归属、上下文恢复、RuntimeSessionTurnRunner、Runtime API 和测试
 - 已实现：新增 runtime branch 记录，包含 parent_branch_id、fork_event_id、name 和 active 状态；事件与 checkpoint 增加 branch_id；上下文按根到当前分支的 lineage 截取，fork 后主分支和子分支互不污染；提供分支创建、列举和激活接口；切换分支后关闭旧 AgentSessionRuntime，下一轮按目标分支重建；旧 SQLite 表启动时自动补列并把既有数据归入 main
-- 未实现：CLI 尚未提供 `/branch` 命令；尚未实现分支重命名、删除和图形化展示；未对正在运行的 turn 允许强制切换分支
-- 验证建议：运行 RuntimeThreadStoreTest、RuntimeApiServerTest；真实模型下验证从 fork 前约束继续两条不同任务
+- 未实现：尚未实现分支重命名、删除和图形化展示；未对正在运行的 turn 允许强制切换分支
+- 验证建议：运行 RuntimeThreadStoreTest、RuntimeApiServerTest、CliCommandParserTest、DevCliCompleterTest、CliConversationBranchManagerTest；真实模型下验证从 fork 前约束继续两条不同任务
 - 风险：分支切换不会复制父分支的待处理队列，避免把旧分支输入带入新分支；大规模分支树和队列仍需分页接口
+
+## 2026-08-07 CLI 对话分支
+
+- 状态：已实现（仅进程内快照）
+- 来源：Runtime API 已支持持久分支，CLI 需要提供一致的最小操作入口
+- 影响范围：CLI 命令解析、JLine 补全、Agent 历史切换和 CLI 测试
+- 已实现：新增 `/branch`、`/branch status`、`/branch create <name>`、`/branch use <name>`；分支名称经过长度和字符校验；CLI 只保存当前进程内的消息历史快照，不伪装成跨进程持久分支
+- 未实现：尚未接入 SQLite 持久化、分支重命名、删除、强制中断活动 turn 后切换和图形化分支树
+- 验证建议：运行 CLI 解析、补全和分支管理限定测试；真实终端验证 Tab 补全、切换后上下文隔离和活动 turn 边界
+- 风险：CLI 重启后分支快照丢失；当前实现不复制待处理 Steering / Follow-up 队列
 
 ## 2026-08-07 移除旧 CLI 活动队列
 

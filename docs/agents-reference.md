@@ -244,6 +244,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - Runtime API 另提供 `POST /v1/threads/{id}/queue/clear` 清空当前分支待处理队列，以及 `POST /v1/threads/{id}/cancel` 取消当前 turn；清空操作写入 `queue.updated(action=cleared)`，取消不伪造 turn 完成事件
 - Runtime 队列快照按 thread/branch 写入 SQLite；会话创建时恢复 Steering / Follow-up，入队和 turn 结束时重写当前分支快照。分支切换只恢复目标分支队列，不复制父分支待处理输入
 - Runtime thread 支持事件树分支：`GET/POST /v1/threads/{id}/branches` 列举或从当前可见事件创建分支，`POST /v1/threads/{id}/branches/{branchId}/activate` 切换活动分支；事件和 checkpoint 都保存 `branch_id`，恢复时按 parent_branch_id / fork_event_id lineage 截取，切换后关闭旧 session 并从目标分支重建
+- CLI 提供进程内对话分支命令：`/branch` 查看状态，`/branch create <name>` 从当前历史创建快照，`/branch use <name>` 切换历史；CLI 分支不写 SQLite，重启后丢失，也不复制待处理 Steering / Follow-up 队列
 - thread 上下文从 SQLite 恢复最新压缩检查点，并完整追加检查点覆盖事件之后的已完成 turn；没有检查点时恢复全部已完成 turn，不再固定保留最近 20 轮
 - 历史默认达到 32,000 token 时生成持久化检查点，`DEVCLI_RUNTIME_CHECKPOINT_TRIGGER_TOKENS` / `devcli.runtime.checkpoint.trigger.tokens` 可调整，最小 4,000；检查点保存压缩消息、覆盖事件、摘要、token 变化和 `CompactBoundaryMetadata` 运行态快照
 - 检查点候选会移除动态 system prompt、reasoning 和图片正文；同时保存压缩 metadata 与消息树快照（稳定 `id`、`parentId`、role、index），当前默认从压缩边界生成线性 parent 链，为后续分支恢复保留协议字段；旧 SQLite 数据库启动时自动补充 `message_tree_json` 列。保存发生在 `turn.completed` 事件之后，失败只写入 `thread.checkpoint.failed`；最新记录损坏时按时间回退到更早可解析检查点
