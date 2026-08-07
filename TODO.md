@@ -50,6 +50,26 @@
 - 验证建议：运行 RuntimeThreadStoreTest、RuntimeApiServerTest；真实模型下验证从 fork 前约束继续两条不同任务
 - 风险：分支切换只持久化已完成事件，尚未交付的 Steering / Follow-up 队列不会复制到新分支；大规模分支树仍需分页接口
 
+## 2026-08-07 移除旧 CLI 活动队列
+
+- 状态：已实现
+- 来源：活动输入已经下沉到 AgentTurnInbox，但旧 ActiveTurnCoordinator / PromptQueue 仍作为无生产调用的第二套队列模型存在
+- 影响范围：CLI 活动输入、旧队列类及其测试、编译回归
+- 已实现：删除旧 CLI 队列实现和对应测试，Main 只保留 AgentTurnInbox；Steering / Follow-up 的容量、优先级和取消语义统一由 Agent 执行层维护
+- 未实现：无
+- 验证建议：运行 AgentTurnInboxTest、RuntimeApiServerTest、DevCliCompleterTest，并进行真实终端交互验证
+- 风险：外部代码如果直接依赖旧的 com.devcli.cli.turn 队列类会在编译期失败；这些类此前没有生产调用，属于内部实现
+
+## 2026-08-07 移除旧 CLI 活动队列
+
+- 状态：已实现
+- 来源：活动输入已经下沉到 AgentTurnInbox，但旧 ActiveTurnCoordinator / PromptQueue 仍作为无生产调用的第二套队列模型存在
+- 影响范围：CLI 活动输入、旧队列类及其测试、编译回归
+- 已实现：删除旧 CLI 队列实现和对应测试，Main 只保留 AgentTurnInbox；Steering / Follow-up 的容量、优先级和取消语义统一由 Agent 执行层维护
+- 未实现：无
+- 验证建议：运行 AgentTurnInboxTest、RuntimeApiServerTest、DevCliCompleterTest，并进行真实终端交互验证
+- 风险：外部代码如果直接依赖旧的 com.devcli.cli.turn 队列类会在编译期失败；这些类此前没有生产调用，属于内部实现
+
 ## 2026-08-07 统一模型能力注册表
 
 - 状态：已实现
