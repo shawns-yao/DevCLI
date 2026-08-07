@@ -33,6 +33,14 @@ public final class ExtensionRegistry {
         extensions.put(extension.descriptor().id(), extension);
     }
 
+    public void replaceKind(ExtensionContract.Kind kind, Collection<ExtensionContract> replacements) {
+        Objects.requireNonNull(kind, "kind");
+        extensions.entrySet().removeIf(entry -> entry.getValue().descriptor().kind() == kind);
+        if (replacements != null) {
+            replacements.forEach(this::registerOrReplace);
+        }
+    }
+
     public Optional<ExtensionContract> find(String id) {
         return Optional.ofNullable(extensions.get(id));
     }

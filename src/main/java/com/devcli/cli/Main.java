@@ -296,8 +296,7 @@ public class Main {
             skillRegistry.allSkills().forEach(skill -> extensionRegistry.registerOrReplace(
                     ExtensionRegistry.fromSkill(skill)));
             try {
-                HookConfigLoader.load(Path.of(".")).forEach(hook -> extensionRegistry.registerOrReplace(
-                        ExtensionRegistry.fromHook(hook)));
+                syncHookExtensions(extensionRegistry);
             } catch (Exception e) {
                 startupNote = appendStartupNote(startupNote, "Hook 目录加载失败: " + e.getMessage());
             }
@@ -708,6 +707,11 @@ public class Main {
                     }
                     case SKILL_RELOAD -> {
                         skillRegistry.reload();
+                        try {
+                            syncHookExtensions(extensionRegistry);
+                        } catch (Exception e) {
+                            ui.println("⚠️ Hook 目录同步失败: " + e.getMessage());
+                        }
                         ui.println("🔄 已重新扫描 skill 目录");
                         ui.println(SkillCommandHandler.startupSummary(skillRegistry));
                         ui.println("✅ 下一轮 LLM 调用生效");
@@ -928,6 +932,14 @@ public class Main {
         }
         List<AgentTurnInbox.Item> followUp = inbox.drainFollowUp();
         return followUp.isEmpty() ? null : followUp.get(0);
+    }
+
+    private static void syncHookExtensions(ExtensionRegistry extensionRegistry) throws IOException {
+        extensionRegistry.replaceKind(
+                com.devcli.extension.ExtensionContract.Kind.HOOK,
+                HookConfigLoader.load(Path.of(".")).stream()
+                        .map(ExtensionRegistry::fromHook)
+                        .toList());
     }
 
     private static TurnRunResult runWithCancelSupport(Terminal terminal,

@@ -56,4 +56,23 @@ class ExtensionRegistryTest {
         assertTrue(registry.remove("command:/help"));
         assertFalse(registry.find("command:/help").isPresent());
     }
+
+    @Test
+    void replacesOneExtensionKindWithoutTouchingOtherKinds() {
+        ExtensionRegistry registry = new ExtensionRegistry();
+        registry.register(ExtensionRegistry.command("/help", "help"));
+        HookDefinition first = new HookDefinition("first", "first", HookEvent.TURN_START,
+                true, "list_dir", JsonNodeFactory.instance.objectNode(),
+                HookDefinition.FailureMode.WARN, false);
+        HookDefinition second = new HookDefinition("second", "second", HookEvent.TURN_END,
+                true, "list_dir", JsonNodeFactory.instance.objectNode(),
+                HookDefinition.FailureMode.WARN, false);
+
+        registry.replaceKind(ExtensionContract.Kind.HOOK,
+                List.of(ExtensionRegistry.fromHook(first), ExtensionRegistry.fromHook(second)));
+
+        assertEquals(1, registry.list(ExtensionContract.Kind.COMMAND).size());
+        assertEquals(2, registry.list(ExtensionContract.Kind.HOOK).size());
+        assertTrue(registry.find("hook:second").isPresent());
+    }
 }
