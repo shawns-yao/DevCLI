@@ -227,6 +227,17 @@ class RuntimeApiServerTest {
                 return new QueueResult(true, com.devcli.agent.AgentTurnInbox.Channel.FOLLOW_UP,
                         "", 1, 1);
             }
+
+            @Override
+            public QueueResult clearQueue(String threadId) {
+                return new QueueResult(true, com.devcli.agent.AgentTurnInbox.Channel.FOLLOW_UP,
+                        "cleared", 0, 0);
+            }
+
+            @Override
+            public boolean cancelCurrent(String threadId) {
+                return true;
+            }
         };
         try (RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"));
              RuntimeApiServer server = new RuntimeApiServer(store, runner, 0, "secret")) {
@@ -251,6 +262,14 @@ class RuntimeApiServerTest {
             assertEquals(202, followUpResponse.statusCode());
             assertEquals(threadId + ":interrupt now", steering.get());
             assertEquals(threadId + ":continue later", followUp.get());
+            HttpResponse<String> cleared = client.send(request(
+                    base + "/v1/threads/" + threadId + "/queue/clear", "POST", "").build(),
+                    HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> cancelled = client.send(request(
+                    base + "/v1/threads/" + threadId + "/cancel", "POST", "").build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, cleared.statusCode());
+            assertEquals(202, cancelled.statusCode());
             assertTrue(store.events(threadId, 0).stream()
                     .anyMatch(event -> "queue.updated".equals(event.type())));
         }

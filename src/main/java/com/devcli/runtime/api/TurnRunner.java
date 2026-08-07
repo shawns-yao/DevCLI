@@ -26,6 +26,14 @@ public interface TurnRunner {
         return QueueResult.unsupported(AgentTurnInbox.Channel.FOLLOW_UP);
     }
 
+    default QueueResult clearQueue(String threadId) {
+        return QueueResult.unsupported(AgentTurnInbox.Channel.FOLLOW_UP);
+    }
+
+    default boolean cancelCurrent(String threadId) {
+        return false;
+    }
+
     default void resetSession(String threadId) {
     }
 

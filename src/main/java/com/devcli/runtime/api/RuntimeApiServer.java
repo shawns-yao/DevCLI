@@ -104,6 +104,14 @@ public class RuntimeApiServer implements AutoCloseable {
                 handleQueue(exchange, threadId(path), AgentTurnInbox.Channel.FOLLOW_UP);
                 return;
             }
+            if ("POST".equals(method) && path.matches("/v1/threads/[^/]+/queue/clear")) {
+                handleClearQueue(exchange, threadId(path));
+                return;
+            }
+            if ("POST".equals(method) && path.matches("/v1/threads/[^/]+/cancel")) {
+                handleCancel(exchange, threadId(path));
+                return;
+            }
             if ("GET".equals(method) && path.matches("/v1/threads/[^/]+/events")) {
                 handleEvents(exchange, threadId(path));
                 return;
@@ -183,6 +191,31 @@ public class RuntimeApiServer implements AutoCloseable {
         writeJson(exchange, 202, "{\"accepted\":true,\"channel\":\""
                 + channel.name() + "\",\"steering_pending\":" + result.steeringPending()
                 + ",\"follow_up_pending\":" + result.followUpPending() + "}");
+    }
+
+    private void handleClearQueue(HttpExchange exchange, String threadId) throws IOException {
+        if (!store.exists(threadId)) {
+            writeJson(exchange, 404, "{\"error\":\"thread_not_found\"}");
+            return;
+        }
+        TurnRunner.QueueResult result = runner.clearQueue(threadId);
+        if (!result.accepted()) {
+            writeJson(exchange, 501, "{\"error\":\"queue_not_supported\"}");
+            return;
+        }
+        RunEvent.QueueUpdated event = new RunEvent.QueueUpdated(
+                "ALL", 0, 0, "cleared");
+        store.appendEvent(threadId, event.type(), RunEventJsonCodec.encode(event, ""));
+        writeJson(exchange, 200, "{\"cleared\":true}");
+    }
+
+    private void handleCancel(HttpExchange exchange, String threadId) throws IOException {
+        if (!store.exists(threadId)) {
+            writeJson(exchange, 404, "{\"error\":\"thread_not_found\"}");
+            return;
+        }
+        boolean cancelled = runner.cancelCurrent(threadId);
+        writeJson(exchange, 202, "{\"cancelled\":" + cancelled + "}");
     }
 
     private void runTurn(String threadId, String turnId, String input) {

@@ -71,6 +71,23 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
     }
 
     @Override
+    public QueueResult clearQueue(String threadId) {
+        AgentSessionRuntime session = session(threadId);
+        session.inbox().clear();
+        store.saveQueueSnapshot(threadId, session.inbox().snapshot());
+        return new QueueResult(true, AgentTurnInbox.Channel.FOLLOW_UP,
+                "cleared", 0, 0);
+    }
+
+    @Override
+    public boolean cancelCurrent(String threadId) {
+        AgentSessionRuntime session = session(threadId);
+        boolean running = session.isRunning();
+        session.abort();
+        return running;
+    }
+
+    @Override
     public void resetSession(String threadId) {
         AgentSessionRuntime removed = sessions.remove(threadId);
         if (removed != null) {
