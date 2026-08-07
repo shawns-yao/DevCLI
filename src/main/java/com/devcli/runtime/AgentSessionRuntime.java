@@ -88,9 +88,13 @@ public final class AgentSessionRuntime implements AutoCloseable {
         if (activeRun.get() != null) {
             throw new IllegalStateException("Agent 会话已有正在运行的任务");
         }
+        RunContext callerContext = CancellationContext.currentRun();
+        if (callerContext != null && !callerContext.projectPath().equals(projectPath)) {
+            throw new IllegalArgumentException("当前运行上下文项目路径不一致");
+        }
         CompletableFuture<RunResult> result = new CompletableFuture<>();
         activeRun.set(result);
-        executor.submit(() -> execute(prompt, result));
+        executor.submit(() -> execute(prompt, result, callerContext));
         return result;
     }
 
@@ -164,10 +168,17 @@ public final class AgentSessionRuntime implements AutoCloseable {
         }
     }
 
-    private void execute(String prompt, CompletableFuture<RunResult> result) {
-        RunContext context = CancellationContext.startRunContext(projectPath);
+    private void execute(String prompt, CompletableFuture<RunResult> result, RunContext callerContext) {
+        RunContext context = callerContext;
+        RunContext workerPrevious = null;
+        boolean ownsContext = context == null;
+        if (ownsContext) {
+            context = CancellationContext.startRunContext(projectPath);
+        } else {
+            workerPrevious = CancellationContext.bind(context);
+        }
         activeContext.set(context);
-        try (context) {
+        try {
             String output = agent.run(prompt);
             result.complete(new RunResult(output, agent.getConversationHistory(), context.isCancelled()));
         } catch (Throwable error) {
@@ -175,6 +186,11 @@ public final class AgentSessionRuntime implements AutoCloseable {
         } finally {
             activeContext.compareAndSet(context, null);
             activeRun.compareAndSet(result, null);
+            if (ownsContext) {
+                context.close();
+            } else {
+                CancellationContext.restore(workerPrevious);
+            }
         }
     }
 

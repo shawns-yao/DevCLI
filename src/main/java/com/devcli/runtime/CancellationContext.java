@@ -62,4 +62,26 @@ public final class CancellationContext {
             LOCAL.set(previous);
         }
     }
+
+    /**
+     * 将已有运行上下文绑定到另一个执行线程，返回该线程原先的上下文。
+     * 调用方不得在这里关闭传入上下文，只负责在任务结束后恢复返回值。
+     */
+    static RunContext bind(RunContext context) {
+        RunContext previous = LOCAL.get();
+        if (context == null) {
+            LOCAL.remove();
+        } else {
+            LOCAL.set(context);
+        }
+        return previous;
+    }
+
+    static void restore(RunContext context) {
+        if (context == null) {
+            LOCAL.remove();
+        } else {
+            LOCAL.set(context);
+        }
+    }
 }
