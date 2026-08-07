@@ -14,6 +14,7 @@ public class RetrievalFusion {
 
     private final int rrfK;
     private final Map<String, Candidate> candidates = new LinkedHashMap<>();
+    private final Map<String, List<VectorStore.SearchResult>> channelResults = new LinkedHashMap<>();
 
     public RetrievalFusion() {
         this(DEFAULT_RRF_K);
@@ -27,6 +28,7 @@ public class RetrievalFusion {
         if (rankedResults == null || rankedResults.isEmpty()) {
             return;
         }
+        channelResults.put(channel, List.copyOf(rankedResults));
         double weight = Math.max(0.0, channelWeight);
         for (int i = 0; i < rankedResults.size(); i++) {
             VectorStore.SearchResult result = rankedResults.get(i);
@@ -57,6 +59,11 @@ public class RetrievalFusion {
 
     public boolean isEmpty() {
         return candidates.isEmpty();
+    }
+
+    public Map<String, List<VectorStore.SearchResult>> channelResults() {
+        return channelResults.entrySet().stream().collect(java.util.stream.Collectors.toUnmodifiableMap(
+                Map.Entry::getKey, entry -> List.copyOf(entry.getValue())));
     }
 
     private double channelDiversityBoost(Candidate candidate) {

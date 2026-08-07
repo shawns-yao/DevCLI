@@ -14,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.time.Instant;
 
 /**
  * 代码检索器：语义检索 + 图谱检索的统一入口
@@ -32,6 +33,8 @@ public class CodeRetriever implements AutoCloseable {
      * 每次 search 入口重置，调用方据此向用户显式标记降级（不把降级结果伪装成完整 RAG）。
      */
     private boolean lastSemanticDegraded = false;
+    private boolean lastRerankDegraded = false;
+    private RetrievalAudit lastAudit = RetrievalAudit.empty();
 
     public CodeRetriever(String projectPath) throws SQLException {
         this.embeddingClient = new EmbeddingClient();
@@ -77,9 +80,14 @@ public class CodeRetriever implements AutoCloseable {
 
     public List<VectorStore.SearchResult> search(String query, int topK, CodeSearchOptions options) throws Exception {
         lastSemanticDegraded = false;
+        lastRerankDegraded = false;
         if (usesDocumentationSemanticRoute(query, options)) {
             List<VectorStore.SearchResult> semantic = safeSemanticResults(query, Math.max(topK * 3, topK));
-            return limitPerFile(semantic, topK, 2);
+            List<VectorStore.SearchResult> results = limitPerFile(semantic, topK, 2);
+            lastAudit = new RetrievalAudit(Instant.now(), query, options.mode().name(), topK,
+                    Map.of("semantic", summarize(semantic)), summarize(semantic), summarize(semantic),
+                    summarize(results), lastSemanticDegraded, false, rerankStrategy());
+            return results;
         }
         RetrievalFusion fusion = new RetrievalFusion();
 
@@ -92,7 +100,13 @@ public class CodeRetriever implements AutoCloseable {
 
         List<VectorStore.SearchResult> fused = fusion.rank(query, Math.max(topK * 3, topK));
         List<VectorStore.SearchResult> reranked = rerankOrFallback(query, fused, Math.max(topK * 3, topK));
-        return limitPerFile(reranked, topK, 2);
+        List<VectorStore.SearchResult> results = limitPerFile(reranked, topK, 2);
+        Map<String, List<AuditResult>> channels = new LinkedHashMap<>();
+        fusion.channelResults().forEach((name, values) -> channels.put(name, summarize(values)));
+        lastAudit = new RetrievalAudit(Instant.now(), query, options.mode().name(), topK,
+                Map.copyOf(channels), summarize(fused), summarize(reranked), summarize(results),
+                lastSemanticDegraded, lastRerankDegraded, rerankStrategy());
+        return results;
     }
 
     private boolean usesDocumentationSemanticRoute(String query, CodeSearchOptions options) {
@@ -110,6 +124,10 @@ public class CodeRetriever implements AutoCloseable {
 
     public String rerankStrategy() {
         return reranker.enabled() ? "cross_encoder:" + reranker.description() : "disabled";
+    }
+
+    public RetrievalAudit lastAudit() {
+        return lastAudit;
     }
 
     private void searchGeneral(String query, int topK, CodeSearchOptions options, RetrievalFusion fusion) throws Exception {
@@ -172,6 +190,7 @@ public class CodeRetriever implements AutoCloseable {
         try {
             return reranker.rerank(query, fused, limit);
         } catch (Exception e) {
+            lastRerankDegraded = true;
             log.warn("rerank 失败，回退到融合排序结果: {}", e.getMessage());
             return fused;
         }
@@ -393,6 +412,29 @@ public class CodeRetriever implements AutoCloseable {
     public List<SymbolInvalidation> relevantInvalidations(String query, int limit) throws SQLException {
         return vectorStore.getRelevantInvalidations(query, limit);
     }
+
+    private static List<AuditResult> summarize(List<VectorStore.SearchResult> results) {
+        if (results == null || results.isEmpty()) {
+            return List.of();
+        }
+        return results.stream().limit(30)
+                .map(result -> new AuditResult(result.filePath(), result.chunkType(), result.name(), result.similarity(),
+                        result.symbolVersion(), result.indexEpoch()))
+                .toList();
+    }
+
+    public record RetrievalAudit(Instant timestamp, String query, String mode, int requestedTopK,
+                                 Map<String, List<AuditResult>> channels,
+                                 List<AuditResult> fused, List<AuditResult> reranked, List<AuditResult> selected,
+                                 boolean semanticDegraded, boolean rerankDegraded, String rerankStrategy) {
+        static RetrievalAudit empty() {
+            return new RetrievalAudit(Instant.EPOCH, "", "", 0, Map.of(), List.of(), List.of(), List.of(),
+                    false, false, "disabled");
+        }
+    }
+
+    public record AuditResult(String filePath, String chunkType, String symbolName, double score,
+                              String symbolVersion, String indexEpoch) {}
 
     @Override
     public void close() throws Exception {

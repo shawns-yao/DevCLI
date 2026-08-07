@@ -15,6 +15,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -105,6 +106,24 @@ class MemoryManagerTest {
     }
 
     @Test
+    void sessionPreSummaryShouldExtendOnlyWhenCoveredMessagesRemainPrefix() {
+        SessionMemory sessionMemory = new SessionMemory();
+        List<LlmClient.Message> original = List.of(
+                LlmClient.Message.user("需求"),
+                LlmClient.Message.assistant("结果")
+        );
+        sessionMemory.recordPreSummary(original, "旧摘要");
+
+        List<LlmClient.Message> extended = new ArrayList<>(original);
+        extended.add(LlmClient.Message.user("新增需求"));
+        assertTrue(sessionMemory.findExtendablePreSummary(extended).isPresent());
+
+        List<LlmClient.Message> changedPrefix = new ArrayList<>(extended);
+        changedPrefix.set(0, LlmClient.Message.user("被修改的需求"));
+        assertTrue(sessionMemory.findExtendablePreSummary(changedPrefix).isEmpty());
+    }
+
+    @Test
     void maintainSessionPreSummaryAfterTurnTriggersOnTokenGrowth() {
         try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
              MemoryManager memoryManager = new MemoryManager(
@@ -175,6 +194,43 @@ class MemoryManagerTest {
                     .orElseThrow()
                     .summary()
                     .contains("TOOL PRE SUMMARY"));
+        }
+    }
+
+    @Test
+    void maintainSessionPreSummaryShouldMergeOnlyNewMessagesAfterFirstSummary() {
+        StubGLMClient llmClient = new StubGLMClient(List.of(
+                new LlmClient.ChatResponse("assistant", "FIRST SUMMARY", null, 100, 20),
+                new LlmClient.ChatResponse("assistant", "SECOND SUMMARY", null, 40, 10)
+        ));
+        try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(llmClient, 4096, 128000, ltm)) {
+            List<LlmClient.Message> firstHistory = new ArrayList<>(List.of(
+                    LlmClient.Message.system("SYSTEM_PROMPT"),
+                    LlmClient.Message.user("OLD_RAW_MARKER-" + longText(10_000)),
+                    LlmClient.Message.assistant(longText(10_000))
+            ));
+            assertEquals(MemoryManager.SessionPreSummaryMaintenanceResult.MAINTAINED,
+                    memoryManager.maintainSessionPreSummaryAfterTurn(firstHistory, 0, 0));
+
+            List<LlmClient.Message> extendedHistory = new ArrayList<>(firstHistory);
+            extendedHistory.add(LlmClient.Message.user("NEW_DELTA_MARKER"));
+            extendedHistory.add(LlmClient.Message.assistant("新增结果"));
+            assertEquals(MemoryManager.SessionPreSummaryMaintenanceResult.MAINTAINED,
+                    memoryManager.maintainSessionPreSummaryAfterTurn(extendedHistory, 4, 0));
+
+            String incrementalPrompt = llmClient.messagesByCall.get(1).get(1).content();
+            assertTrue(incrementalPrompt.contains("FIRST SUMMARY"));
+            assertTrue(incrementalPrompt.contains("NEW_DELTA_MARKER"));
+            assertFalse(incrementalPrompt.contains("OLD_RAW_MARKER"));
+            assertEquals("SECOND SUMMARY",
+                    memoryManager.getSessionMemory().currentPreSummary().orElseThrow().summary());
+            MemoryManager.SessionPreSummaryMetrics metrics = memoryManager.getSessionPreSummaryMetrics();
+            assertEquals("incremental", metrics.mode());
+            assertEquals(2, metrics.deltaMessages());
+            assertEquals(1, metrics.fullCount());
+            assertEquals(1, metrics.incrementalCount());
+            assertEquals(0, metrics.failureCount());
         }
     }
 
@@ -252,6 +308,33 @@ class MemoryManagerTest {
             assertTrue(context.contains("长期记忆索引快照"));
             assertTrue(context.contains("total: 1"));
             assertTrue(context.contains("派大星"));
+        }
+    }
+
+    @Test
+    void buildContextForQueryShouldNotInjectInventoryForUnrelatedRequest() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+            memoryManager.storeFact("用户的名称叫做派大星");
+
+            String context = memoryManager.buildContextForQuery("解释 Maven 生命周期", 512);
+
+            assertTrue(context.isBlank());
+        }
+    }
+
+    @Test
+    void buildContextForQueryShouldKeepRelevantMemoryWithoutInventory() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+            memoryManager.storeFact("项目默认使用 Java 17");
+
+            String context = memoryManager.buildContextForQuery("项目使用哪个 Java 版本", 512);
+
+            assertTrue(context.contains("项目默认使用 Java 17"));
+            assertFalse(context.contains("长期记忆索引快照"));
         }
     }
 
@@ -677,6 +760,7 @@ class MemoryManagerTest {
 
     private static final class StubGLMClient extends GLMClient {
         private final Queue<ChatResponse> responses;
+        private final List<List<Message>> messagesByCall = new ArrayList<>();
 
         private StubGLMClient(List<ChatResponse> responses) {
             super("test-key");
@@ -690,6 +774,7 @@ class MemoryManagerTest {
 
         @Override
         public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException {
+            messagesByCall.add(List.copyOf(messages));
             ChatResponse response = responses.poll();
             if (response == null) {
                 throw new IOException("缺少预设响应");

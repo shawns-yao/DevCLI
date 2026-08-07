@@ -185,4 +185,24 @@ class MemoryRetrieverTest {
         assertFalse(results.isEmpty());
         assertEquals("f1", results.get(0).getId());
     }
+
+    @Test
+    void filtersLowScoreLargeGapAndCapsInjectedMemories() {
+        longTerm.store(new MemoryEntry("f1", "第一条偏好", MemoryEntry.MemoryType.FACT, null, 10));
+        longTerm.store(new MemoryEntry("f2", "第二条偏好", MemoryEntry.MemoryType.FACT, null, 10));
+        longTerm.store(new MemoryEntry("f3", "第三条偏好", MemoryEntry.MemoryType.FACT, null, 10));
+        MemoryRetriever strictRetriever = new MemoryRetriever(longTerm, 0.50, 0.20, 2);
+        strictRetriever.setSemanticSearch((query, topK) -> java.util.List.of(
+                new MemoryRetriever.SemanticHit("f1", 0.90),
+                new MemoryRetriever.SemanticHit("f2", 0.75),
+                new MemoryRetriever.SemanticHit("f3", 0.40)));
+
+        var ranked = strictRetriever.retrieveLongTermRanked("完全无关键词命中的问题", 10);
+
+        assertEquals(2, ranked.size());
+        assertEquals("f1", ranked.get(0).entry().getId());
+        assertEquals(0.765, ranked.get(0).semanticScore(), 0.001,
+                "语义分数应乘以记忆证据权重后参与过滤");
+        assertEquals("f2", ranked.get(1).entry().getId());
+    }
 }

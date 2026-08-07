@@ -13,10 +13,12 @@ import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Memory 管理器 —— Memory 系统的门面类。
@@ -51,6 +53,10 @@ public class MemoryManager implements AutoCloseable {
     private final LongTermMemory longTermMemory;
     private final MemoryRetriever retriever;
     private final ExecutorService sessionPreSummaryExecutor;
+    private final AtomicLong preSummaryFullCount = new AtomicLong();
+    private final AtomicLong preSummaryIncrementalCount = new AtomicLong();
+    private final AtomicLong preSummaryFailureCount = new AtomicLong();
+    private volatile SessionPreSummaryMetrics lastPreSummaryMetrics = SessionPreSummaryMetrics.empty();
     // Bug #12 修复：使用 ConcurrentHashMap 支持 Multi-Agent 并发调用
     private final Map<String, Integer> memoryCandidateOccurrences = new java.util.concurrent.ConcurrentHashMap<>();
     /** recurrence 候选计数器的容量上限，防止长会话下无界增长。 */
@@ -447,11 +453,16 @@ public class MemoryManager implements AutoCloseable {
         }
         int safeBudget = Math.max(64, maxTokens);
         List<String> volatileFacts = workingMemory.getVolatileFacts();
-        String inventory = buildLongTermMemoryInventorySnapshot(5, Math.min(256, safeBudget), volatileFacts);
+        String inventory = MemoryIntentClassifier.classify(query) == MemoryIntentClassifier.Intent.INVENTORY
+                ? buildLongTermMemoryInventorySnapshot(5, Math.min(256, safeBudget), volatileFacts)
+                : "";
         int relevantBudget = Math.max(0, safeBudget - MemoryEntry.estimateTokens(inventory));
         String relevant = relevantBudget == 0 ? "" : retriever.buildContextForQuery(query, relevantBudget, volatileFacts);
         if (relevant.isBlank()) {
             return inventory;
+        }
+        if (inventory.isBlank()) {
+            return relevant.trim();
         }
         return inventory + "\n\n" + relevant.trim();
     }
@@ -566,18 +577,56 @@ public class MemoryManager implements AutoCloseable {
             return SessionPreSummaryMaintenanceResult.SKIPPED_BELOW_THRESHOLD;
         }
         try {
-            LlmClient.ChatResponse response = llmClient.chat(List.of(
-                    LlmClient.Message.system("你是会话预摘要维护器。请保留用户目标、关键决策、文件路径、工具结果和未完成事项，输出简洁中文摘要。"),
-                    LlmClient.Message.user("请为以下会话内容生成可供后续上下文压缩复用的预摘要：\n\n"
-                            + renderMessagesForPreSummary(coveredMessages))
-            ), List.of());
+            Optional<SessionMemory.PreSummary> incrementalBase =
+                    sessionMemory.findExtendablePreSummary(coveredMessages);
+            List<LlmClient.Message> summaryRequest;
+            String maintenanceMode;
+            int deltaMessageCount;
+            if (incrementalBase.isPresent()) {
+                SessionMemory.PreSummary base = incrementalBase.get();
+                List<LlmClient.Message> deltaMessages =
+                        coveredMessages.subList(base.messageCount(), coveredMessages.size());
+                maintenanceMode = "incremental";
+                deltaMessageCount = deltaMessages.size();
+                summaryRequest = List.of(
+                        LlmClient.Message.system("你是会话增量预摘要维护器。请把旧摘要与新增消息合并为一份完整替代摘要，保留用户目标、关键决策、文件路径、工具结果、约束和未完成事项，不要只输出本次增量。"),
+                        LlmClient.Message.user("旧摘要：\n" + base.summary()
+                                + "\n\n新增消息：\n" + renderMessagesForPreSummary(deltaMessages))
+                );
+            } else {
+                maintenanceMode = "full";
+                deltaMessageCount = coveredMessages.size();
+                summaryRequest = List.of(
+                        LlmClient.Message.system("你是会话预摘要维护器。请保留用户目标、关键决策、文件路径、工具结果、约束和未完成事项，输出简洁中文摘要。"),
+                        LlmClient.Message.user("请为以下会话内容生成可供后续上下文压缩复用的预摘要：\n\n"
+                                + renderMessagesForPreSummary(coveredMessages))
+                );
+            }
+            LlmClient.ChatResponse response = llmClient.chat(summaryRequest, List.of());
             String summary = response.content();
             if (summary == null || summary.isBlank()) {
+                preSummaryFailureCount.incrementAndGet();
                 return SessionPreSummaryMaintenanceResult.FAILED;
             }
             sessionMemory.recordPreSummary(coveredMessages, summary);
+            if ("incremental".equals(maintenanceMode)) {
+                preSummaryIncrementalCount.incrementAndGet();
+            } else {
+                preSummaryFullCount.incrementAndGet();
+            }
+            lastPreSummaryMetrics = new SessionPreSummaryMetrics(
+                    maintenanceMode,
+                    coveredMessages.size(),
+                    deltaMessageCount,
+                    TokenBudget.estimateMessagesTokens(summaryRequest),
+                    summary.length(),
+                    preSummaryFullCount.get(),
+                    preSummaryIncrementalCount.get(),
+                    preSummaryFailureCount.get(),
+                    Instant.now());
             return SessionPreSummaryMaintenanceResult.MAINTAINED;
         } catch (IOException | RuntimeException e) {
+            preSummaryFailureCount.incrementAndGet();
             log.warn("session pre-summary maintenance failed", e);
             return SessionPreSummaryMaintenanceResult.FAILED;
         }
@@ -632,13 +681,7 @@ public class MemoryManager implements AutoCloseable {
     }
 
     private static boolean hasIgnoreMemoryIntent(String content) {
-        String lower = content.toLowerCase(java.util.Locale.ROOT);
-        return content.contains("忘记记忆")
-                || content.contains("别管记忆")
-                || content.contains("不要使用记忆")
-                || content.contains("忽略记忆")
-                || lower.contains("ignore memory")
-                || lower.contains("forget memory");
+        return MemoryIntentClassifier.classify(content) == MemoryIntentClassifier.Intent.IGNORE;
     }
 
     private static WorkingMemory.View viewForAgent(String agentType) {
@@ -689,9 +732,17 @@ public class MemoryManager implements AutoCloseable {
      * 获取记忆系统的整体状态
      */
     public String getSystemStatus() {
+        SessionPreSummaryMetrics metrics = lastPreSummaryMetrics;
         return "上下文策略: " + contextProfile.summary() + "\n" +
                 workingMemory.getStatusSummary() + "\n" +
                 longTermMemory.getStatusSummary() + "\n" +
+                "会话预摘要: mode=" + metrics.mode()
+                + ", covered=" + metrics.coveredMessages()
+                + ", delta=" + metrics.deltaMessages()
+                + ", input≈" + metrics.inputTokenEstimate()
+                + ", summaryChars=" + metrics.summaryChars()
+                + ", full/incremental/failed=" + metrics.fullCount() + "/"
+                + metrics.incrementalCount() + "/" + metrics.failureCount() + "\n" +
                 tokenBudget.getUsageReport();
     }
 
@@ -713,6 +764,16 @@ public class MemoryManager implements AutoCloseable {
     public MemoryRetriever getRetriever() { return retriever; }
     public TokenBudget getTokenBudget() { return tokenBudget; }
     public ContextProfile getContextProfile() { return contextProfile; }
+    public SessionPreSummaryMetrics getSessionPreSummaryMetrics() { return lastPreSummaryMetrics; }
+
+    public record SessionPreSummaryMetrics(String mode, int coveredMessages, int deltaMessages,
+                                           int inputTokenEstimate, int summaryChars,
+                                           long fullCount, long incrementalCount, long failureCount,
+                                           Instant updatedAt) {
+        static SessionPreSummaryMetrics empty() {
+            return new SessionPreSummaryMetrics("none", 0, 0, 0, 0, 0, 0, 0, Instant.EPOCH);
+        }
+    }
 
     public enum SessionPreSummaryMaintenanceResult {
         MAINTAINED,

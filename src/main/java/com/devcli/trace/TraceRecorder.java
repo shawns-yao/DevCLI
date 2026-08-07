@@ -1,6 +1,7 @@
 package com.devcli.trace;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.devcli.policy.SensitiveDataRedactor;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -86,16 +87,6 @@ public class TraceRecorder {
     }
 
     static String sanitize(String text) {
-        if (text == null) {
-            return null;
-        }
-        String sanitized = text.replaceAll("(?i)Bearer\\s+[^\\s\"'}]+", "Bearer ***");
-        sanitized = sanitized.replaceAll(
-                "(?i)(\"?(?:token|key|password|secret|api_key)\"?\\s*[:=]\\s*\")([^\"]+)(\")",
-                "$1***$3");
-        sanitized = sanitized.replaceAll(
-                "(?i)(\\b(?:token|key|password|secret|api_key)\\b\\s*[:=]\\s*)([^\\s,}]+)",
-                "$1***");
-        return sanitized;
+        return SensitiveDataRedactor.redact(text);
     }
 }

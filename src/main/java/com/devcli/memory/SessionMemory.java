@@ -62,6 +62,29 @@ public class SessionMemory {
         return Optional.of(preSummary);
     }
 
+    /**
+     * 返回能够作为增量摘要基线的预摘要。
+     *
+     * <p>只有已覆盖消息仍然是当前消息列表的完整前缀时才允许复用，避免历史被修改、
+     * 压缩或重放后把不相关摘要继续叠加。</p>
+     */
+    public synchronized Optional<PreSummary> findExtendablePreSummary(List<LlmClient.Message> messages) {
+        if (preSummary == null || messages == null || messages.isEmpty()) {
+            return Optional.empty();
+        }
+        if (isExpired(preSummary)) {
+            preSummary = null;
+            return Optional.empty();
+        }
+        if (preSummary.messageCount <= 0 || preSummary.messageCount >= messages.size()) {
+            return Optional.empty();
+        }
+        String prefixFingerprint = fingerprint(messages.subList(0, preSummary.messageCount));
+        return preSummary.fingerprint.equals(prefixFingerprint)
+                ? Optional.of(preSummary)
+                : Optional.empty();
+    }
+
     public synchronized Optional<PreSummary> currentPreSummary() {
         if (preSummary != null && isExpired(preSummary)) {
             preSummary = null;

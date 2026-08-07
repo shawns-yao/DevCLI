@@ -10,7 +10,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
+import java.util.Locale;
 
 /**
  * 长期记忆检索器。
@@ -32,6 +32,9 @@ import java.util.stream.Collectors;
  */
 public class MemoryRetriever {
     private static final Logger log = LoggerFactory.getLogger(MemoryRetriever.class);
+    private static final double DEFAULT_MIN_SCORE = 0.25;
+    private static final double DEFAULT_MAX_SCORE_GAP = 0.60;
+    private static final int DEFAULT_MAX_INJECTED = 5;
 
     private final LongTermMemory longTermMemory;
     /**
@@ -39,9 +42,22 @@ public class MemoryRetriever {
      * {@code (query, topK) -> List<SemanticHit>} 函数接进来；不接时返回空，自动 fallback 关键词。
      */
     private SemanticSearch semanticSearch = (query, topK) -> List.of();
+    private final double minScore;
+    private final double maxScoreGap;
+    private final int maxInjected;
 
     public MemoryRetriever(LongTermMemory longTermMemory) {
+        this(longTermMemory,
+                readDouble("devcli.memory.retrieval.min.score", "DEVCLI_MEMORY_RETRIEVAL_MIN_SCORE", DEFAULT_MIN_SCORE),
+                readDouble("devcli.memory.retrieval.max.score.gap", "DEVCLI_MEMORY_RETRIEVAL_MAX_SCORE_GAP", DEFAULT_MAX_SCORE_GAP),
+                readInt("devcli.memory.retrieval.max.injected", "DEVCLI_MEMORY_RETRIEVAL_MAX_INJECTED", DEFAULT_MAX_INJECTED));
+    }
+
+    MemoryRetriever(LongTermMemory longTermMemory, double minScore, double maxScoreGap, int maxInjected) {
         this.longTermMemory = longTermMemory;
+        this.minScore = Math.max(0, minScore);
+        this.maxScoreGap = Math.max(0, maxScoreGap);
+        this.maxInjected = Math.max(1, maxInjected);
     }
 
     /**
@@ -61,6 +77,13 @@ public class MemoryRetriever {
      * 语义路径扩展召回，关键词路径保留精确命中，最终按合并分数去重返回。
      */
     public List<MemoryEntry> retrieveLongTerm(String query, int limit) {
+        return retrieveLongTermRanked(query, limit).stream().map(RankedMemory::entry).toList();
+    }
+
+    public List<RankedMemory> retrieveLongTermRanked(String query, int limit) {
+        if (query == null || query.isBlank() || limit <= 0) {
+            return List.of();
+        }
         Map<String, MemoryEntry> byId = new HashMap<>();
         for (MemoryEntry entry : longTermMemory.getAll()) {
             // 只把可召回事实纳入候选：被 supersede 或明确拒绝的条目不会注入 prompt
@@ -79,7 +102,7 @@ public class MemoryRetriever {
                 if (entry != null) {
                     double semanticScore = Math.max(0, hit.similarity())
                             * entry.getEvidence().retrievalWeight();
-                    mergeScore(scoredById, entry, semanticScore);
+                    mergeScore(scoredById, entry, semanticScore, 0);
                 }
             }
             if (log.isDebugEnabled() && !scoredById.isEmpty()) {
@@ -93,15 +116,23 @@ public class MemoryRetriever {
             double keywordScore = computeRelevanceScore(entry, query) * 1.2
                     * entry.getEvidence().retrievalWeight();
             if (keywordScore > 0) {
-                mergeScore(scoredById, entry, keywordScore);
+                mergeScore(scoredById, entry, 0, keywordScore);
             }
         }
 
-        return scoredById.values().stream()
+        List<RankedMemory> ranked = scoredById.values().stream()
                 .sorted(Comparator.comparingDouble(ScoredEntry::score).reversed())
-                .limit(limit)
-                .map(ScoredEntry::entry)
-                .collect(Collectors.toList());
+                .map(entry -> new RankedMemory(entry.entry(), entry.score(), entry.semanticScore(), entry.keywordScore()))
+                .toList();
+        if (ranked.isEmpty()) {
+            return List.of();
+        }
+        double topScore = ranked.get(0).score();
+        return ranked.stream()
+                .filter(result -> result.score() >= minScore)
+                .filter(result -> topScore - result.score() <= maxScoreGap)
+                .limit(Math.min(limit, maxInjected))
+                .toList();
     }
 
     /**
@@ -112,7 +143,7 @@ public class MemoryRetriever {
     }
 
     public String buildContextForQuery(String query, int maxTokens, Collection<String> suppressedFacts) {
-        List<MemoryEntry> relevant = retrieveLongTerm(query, 10);
+        List<RankedMemory> relevant = retrieveLongTermRanked(query, maxInjected);
         if (relevant.isEmpty()) return "";
 
         StringBuilder context = new StringBuilder();
@@ -124,13 +155,15 @@ public class MemoryRetriever {
         int preambleTokens = MemoryEntry.estimateTokens(context.toString());
         int usedTokens = preambleTokens;
         int appended = 0;
-        for (MemoryEntry entry : relevant) {
+        for (RankedMemory ranked : relevant) {
+            MemoryEntry entry = ranked.entry();
             if (MemoryFactDeduper.duplicatesAny(entry.getContent(), suppressedFacts)) {
                 continue;
             }
             if (usedTokens + entry.getTokenCount() > maxTokens) break;
 
             context.append("- [").append(entry.getType())
+                    .append("; score=").append(String.format(Locale.ROOT, "%.3f", ranked.score()))
                     .append("; confidence=").append(entry.getEvidence().confidence())
                     .append("; review=").append(entry.getEvidence().reviewState())
                     .append("] ").append(entry.getContent()).append("\n");
@@ -178,13 +211,41 @@ public class MemoryRetriever {
         return keywordScore * timeDecay;
     }
 
-    private void mergeScore(Map<String, ScoredEntry> scoredById, MemoryEntry entry, double score) {
+    private void mergeScore(Map<String, ScoredEntry> scoredById, MemoryEntry entry,
+                            double semanticScore, double keywordScore) {
         ScoredEntry existing = scoredById.get(entry.getId());
-        double mergedScore = score + (existing == null ? 0 : existing.score());
-        scoredById.put(entry.getId(), new ScoredEntry(entry, mergedScore));
+        double mergedSemantic = semanticScore + (existing == null ? 0 : existing.semanticScore());
+        double mergedKeyword = keywordScore + (existing == null ? 0 : existing.keywordScore());
+        scoredById.put(entry.getId(), new ScoredEntry(entry, mergedSemantic, mergedKeyword));
     }
 
-    private record ScoredEntry(MemoryEntry entry, double score) {}
+    private static double readDouble(String property, String env, double fallback) {
+        String value = System.getProperty(property);
+        if (value == null || value.isBlank()) value = System.getenv(env);
+        try {
+            return value == null || value.isBlank() ? fallback : Double.parseDouble(value.trim());
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
+    }
+
+    private static int readInt(String property, String env, int fallback) {
+        String value = System.getProperty(property);
+        if (value == null || value.isBlank()) value = System.getenv(env);
+        try {
+            return value == null || value.isBlank() ? fallback : Integer.parseInt(value.trim());
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
+    }
+
+    public record RankedMemory(MemoryEntry entry, double score, double semanticScore, double keywordScore) {}
+
+    private record ScoredEntry(MemoryEntry entry, double semanticScore, double keywordScore) {
+        double score() {
+            return semanticScore + keywordScore;
+        }
+    }
 
     /**
      * PR-C 语义检索通道。Main 启动时把 EmbeddingClient + MemoryVectorStore 包成 lambda

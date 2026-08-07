@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RetrievalFusionTest {
 
@@ -20,6 +21,17 @@ class RetrievalFusionTest {
         List<VectorStore.SearchResult> ranked = fusion.rank("UserService 在哪里定义", 2);
 
         assertEquals("UserService", ranked.get(0).name());
+    }
+
+    @Test
+    void exposesImmutableChannelSnapshotsForAudit() {
+        RetrievalFusion fusion = new RetrievalFusion();
+        fusion.addChannel("semantic", List.of(result("UserService", 0.8)), 1.0);
+
+        var channels = fusion.channelResults();
+
+        assertEquals(1, channels.get("semantic").size());
+        assertTrue(channels.containsKey("semantic"));
     }
 
     private VectorStore.SearchResult result(String name, double score) {

@@ -14,7 +14,7 @@ public final class ExplicitMemoryHints {
 
     public static String browserLoginFact(String userInput, List<String> recentTexts) {
         String current = userInput == null ? "" : userInput;
-        if (!hasExplicitRememberIntent(current) || !mentionsBrowserLoginReuse(current)) {
+        if (!MemoryIntentClassifier.hasSaveIntent(current) || !mentionsBrowserLoginReuse(current)) {
             return null;
         }
         String joined = String.join("\n", recentTexts == null ? List.of() : recentTexts) + "\n" + current;
@@ -28,16 +28,6 @@ public final class ExplicitMemoryHints {
         String label = host.contains("yuque.com") ? "（语雀）" : "";
         String separator = label.isEmpty() ? " 时" : "时";
         return "访问 " + host + label + separator + "优先复用用户已登录的 Chrome 登录态。";
-    }
-
-    private static boolean hasExplicitRememberIntent(String text) {
-        return text.contains("记一下")
-                || text.contains("记住")
-                || text.contains("记下来")
-                || text.contains("以后记得")
-                || text.contains("下次记得")
-                || text.contains("保存这个偏好")
-                || text.contains("保存到长期记忆");
     }
 
     private static boolean mentionsBrowserLoginReuse(String text) {

@@ -3,6 +3,7 @@ package com.devcli.tool.provider;
 import com.devcli.rag.CodeRetriever;
 import com.devcli.rag.RagEvidencePayload;
 import com.devcli.rag.RagEvidenceSideChannel;
+import com.devcli.rag.RagRetrievalAuditRecorder;
 import com.devcli.rag.SearchResultFormatter;
 import com.devcli.rag.SymbolInvalidation;
 import com.devcli.rag.VectorStore;
@@ -17,6 +18,7 @@ import java.util.Map;
 public final class RagToolProvider implements ToolProvider, AutoCloseable {
     private CodeRetriever cachedCodeRetriever;
     private String cachedCodeRetrieverProjectPath = "";
+    private final RagRetrievalAuditRecorder auditRecorder = new RagRetrievalAuditRecorder();
 
     @Override
     public void register(ToolContext context) {
@@ -83,6 +85,7 @@ public final class RagToolProvider implements ToolProvider, AutoCloseable {
                 if (results.isEmpty()) {
                     results = retriever.search(query, topK, "general", 1);
                 }
+                auditRecorder.record(retriever.lastAudit());
                 List<SymbolInvalidation> invalidations =
                         retriever.relevantInvalidations(query, Math.min(topK, 10));
                 return formatSearchResult(query, results, invalidations, retriever.lastSemanticDegraded());
