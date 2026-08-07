@@ -1,5 +1,6 @@
 package com.devcli.runtime.api;
 
+import com.devcli.agent.AgentTurnInbox;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.CompactBoundaryMetadata;
 import com.devcli.runtime.event.RunEvent;
@@ -193,6 +194,82 @@ public class RuntimeThreadStore implements AutoCloseable {
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new IllegalStateException("切换 runtime branch 失败: " + e.getMessage(), e);
+        }
+    }
+
+    public synchronized AgentTurnInbox.Snapshot queueSnapshot(String threadId) {
+        String branchId = activeBranchId(threadId);
+        List<AgentTurnInbox.Item> steering = new ArrayList<>();
+        List<AgentTurnInbox.Item> followUp = new ArrayList<>();
+        try (PreparedStatement ps = connection.prepareStatement("""
+                SELECT sequence, channel, text, created_at
+                FROM runtime_queues
+                WHERE thread_id = ? AND branch_id = ?
+                ORDER BY sequence
+                """)) {
+            ps.setString(1, threadId);
+            ps.setString(2, branchId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    AgentTurnInbox.Item item = new AgentTurnInbox.Item(
+                            rs.getLong("sequence"),
+                            AgentTurnInbox.Channel.valueOf(rs.getString("channel")),
+                            rs.getString("text"),
+                            Instant.parse(rs.getString("created_at")));
+                    if (item.channel() == AgentTurnInbox.Channel.STEERING) steering.add(item);
+                    else followUp.add(item);
+                }
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("读取 runtime queue 失败: " + e.getMessage(), e);
+        }
+        return new AgentTurnInbox.Snapshot(steering, followUp,
+                AgentTurnInbox.DEFAULT_CAPACITY);
+    }
+
+    public synchronized void saveQueueSnapshot(String threadId, AgentTurnInbox.Snapshot snapshot) {
+        String branchId = activeBranchId(threadId);
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement delete = connection.prepareStatement(
+                    "DELETE FROM runtime_queues WHERE thread_id = ? AND branch_id = ?")) {
+                delete.setString(1, threadId);
+                delete.setString(2, branchId);
+                delete.executeUpdate();
+            }
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO runtime_queues(
+                        thread_id, branch_id, sequence, channel, text, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """)) {
+                List<AgentTurnInbox.Item> items = new ArrayList<>();
+                if (snapshot != null) {
+                    items.addAll(snapshot.steering());
+                    items.addAll(snapshot.followUp());
+                }
+                for (AgentTurnInbox.Item item : items) {
+                    insert.setString(1, threadId);
+                    insert.setString(2, branchId);
+                    insert.setLong(3, item.sequence());
+                    insert.setString(4, item.channel().name());
+                    insert.setString(5, item.text());
+                    insert.setString(6, item.queuedAt().toString());
+                    insert.addBatch();
+                }
+                insert.executeBatch();
+            }
+            connection.commit();
+        } catch (SQLException e) {
+            try {
+                connection.rollback();
+            } catch (SQLException ignored) {
+            }
+            throw new IllegalStateException("写入 runtime queue 失败: " + e.getMessage(), e);
+        } finally {
+            try {
+                connection.setAutoCommit(true);
+            } catch (SQLException ignored) {
+            }
         }
     }
 
@@ -496,6 +573,17 @@ public class RuntimeThreadStore implements AutoCloseable {
                         fork_event_id INTEGER NOT NULL DEFAULT 0,
                         created_at TEXT NOT NULL,
                         PRIMARY KEY(thread_id, id)
+                    )
+                    """);
+            stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS runtime_queues (
+                        thread_id TEXT NOT NULL,
+                        branch_id TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        channel TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY(thread_id, branch_id, sequence)
                     )
                     """);
             ensureColumn(stmt, "runtime_threads", "active_branch_id",

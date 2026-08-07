@@ -1,6 +1,7 @@
 package com.devcli.runtime.api;
 
 import com.devcli.llm.LlmClient;
+import com.devcli.agent.AgentTurnInbox;
 import com.devcli.memory.CompactBoundaryMetadata;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -159,6 +160,28 @@ class RuntimeThreadStoreTest {
             store.activateBranch(threadId, branch.id());
             assertEquals(List.of("shared", "branch input"), store.turnHistory(threadId).stream()
                     .map(RuntimeThreadStore.TurnRecord::input).toList());
+        }
+    }
+
+    @Test
+    void persistsQueueSnapshotPerActiveBranch(@TempDir Path tempDir) throws Exception {
+        Path db = tempDir.resolve("runtime.db");
+        String threadId;
+        try (RuntimeThreadStore store = new RuntimeThreadStore(db)) {
+            threadId = store.createThread();
+            AgentTurnInbox inbox = new AgentTurnInbox();
+            inbox.enqueueSteering("interrupt");
+            inbox.enqueueFollowUp("continue");
+            store.saveQueueSnapshot(threadId, inbox.snapshot());
+            assertEquals(List.of("interrupt"), store.queueSnapshot(threadId).steering()
+                    .stream().map(AgentTurnInbox.Item::text).toList());
+        }
+        try (RuntimeThreadStore reopened = new RuntimeThreadStore(db)) {
+            AgentTurnInbox.Snapshot snapshot = reopened.queueSnapshot(threadId);
+            assertEquals(List.of("interrupt"), snapshot.steering().stream()
+                    .map(AgentTurnInbox.Item::text).toList());
+            assertEquals(List.of("continue"), snapshot.followUp().stream()
+                    .map(AgentTurnInbox.Item::text).toList());
         }
     }
 

@@ -54,6 +54,7 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
             String output = result.output().isBlank() ? latestAssistantContent(history) : result.output();
             return new TurnResult(output, checkpoint);
         } finally {
+            store.saveQueueSnapshot(threadId, session.inbox().snapshot());
             eventSink.emit(new com.devcli.runtime.event.RunEvent.SessionStateChanged(
                     threadId, "idle", "turn_finished"));
         }
@@ -82,6 +83,9 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
         AgentTurnInbox.EnqueueResult result = channel == AgentTurnInbox.Channel.STEERING
                 ? session.inbox().enqueueSteering(input)
                 : session.inbox().enqueueFollowUp(input);
+        if (result.accepted()) {
+            store.saveQueueSnapshot(threadId, session.inbox().snapshot());
+        }
         return QueueResult.from(result, channel);
     }
 
@@ -99,6 +103,9 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
                 seed.add(LlmClient.Message.assistant(turn.output()));
             }
             session.seedHistory(seed);
+            AgentTurnInbox.Snapshot queued = store.queueSnapshot(id);
+            queued.steering().forEach(item -> session.inbox().enqueueSteering(item.text()));
+            queued.followUp().forEach(item -> session.inbox().enqueueFollowUp(item.text()));
             return session;
         });
     }
