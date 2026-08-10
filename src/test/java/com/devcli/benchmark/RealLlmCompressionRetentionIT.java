@@ -3,11 +3,14 @@ package com.devcli.benchmark;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.devcli.agent.Agent;
 import com.devcli.config.DevCliConfig;
+import com.devcli.context.ContextProfile;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.LlmClientFactory;
 import com.devcli.memory.ConversationHistoryCompactor;
 import com.devcli.memory.TokenBudget;
+import com.devcli.tool.ToolRegistry;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -15,11 +18,13 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -59,54 +64,57 @@ class RealLlmCompressionRetentionIT {
     private static final int LLM_QA_TIMEOUT_MS = 300_000;
 
     @Test
-    @DisplayName("生产真实 230k 阈值下，多轮 LLM 压缩后关键事实仍能被语义检索回")
+    @DisplayName("真实五轮对话每轮自动压缩后关键事实保留率")
     void multiRoundCompressionPreservesKeyFacts() throws Exception {
+        Assumptions.assumeTrue(Boolean.getBoolean("devcli.benchmark.compression"),
+                "set -Ddevcli.benchmark.compression=true to run real compression benchmark");
         LlmClient llm = resolveRealLlmClientOrSkip();
-        // Kimi 256k window × 90% = 230_400；不直接读 llm.maxContextWindow() 是因为本地代理
-        // model name 是 gemini，window 不一定是 Kimi 真实值。这里固定到 Kimi 生产阈值。
-        final int productionTrigger = 230_000;
-        final int targetTokensBeforeFirstCompact = productionTrigger + 5_000;
-
-        // ===== 1. 把 18 个事实分片到 ~80 轮对话里，灌噪声直到达到 230k 才第一次撞阈值 =====
         List<FactCase> facts = scenarioFacts();
-        List<LlmClient.Message> history = buildLongConversation(facts, targetTokensBeforeFirstCompact);
-        int initialTokens = TokenBudget.estimateMessagesTokens(history);
-        assertTrue(initialTokens >= productionTrigger,
-                "初始 history 必须 ≥ 230k 才能在生产阈值下触发压缩，实际 " + initialTokens);
-
-        // ===== 2. 真实生产阈值多轮压缩 =====
-        ConversationHistoryCompactor compactor = new ConversationHistoryCompactor(llm, 3);
+        final int testWindow = 12_000;
+        final int trigger = ContextProfile.custom(testWindow, 4_000).compressionTriggerTokens();
+        Agent agent = new Agent(llm, new ToolRegistry());
+        agent.getMemoryManager().applyContextProfile(ContextProfile.custom(testWindow, 4_000));
+        agent.getMemoryManager().getContextProfile();
         List<CompactionPhase> phases = new ArrayList<>();
-        int compactedTimes = 0;
-        long compactStart = System.currentTimeMillis();
-        for (int round = 0; round < 8; round++) {
-            int beforeTokens = TokenBudget.estimateMessagesTokens(history);
-            int beforeMessages = history.size();
-            boolean compacted = compactor.compactIfNeeded(history, productionTrigger);
-            if (!compacted) {
-                // 没撞阈值就再灌一批对话再试
-                appendAdditionalTurns(history, round + 1, facts, productionTrigger);
-                if (TokenBudget.estimateMessagesTokens(history) < productionTrigger) {
-                    break; // 灌完都没到，认了
-                }
-                continue;
+        long conversationStart = System.currentTimeMillis();
+        List<String> roundResponses = new ArrayList<>();
+        List<LlmClient.Message> history;
+        try {
+            for (int warmup = 1; warmup <= 4; warmup++) {
+                agent.run(buildWarmupRoundPrompt(warmup, trigger), LlmClient.ToolChoice.AUTO);
             }
-            compactedTimes++;
-            int afterTokens = TokenBudget.estimateMessagesTokens(history);
-            phases.add(new CompactionPhase(round + 1, beforeTokens, afterTokens,
-                    beforeMessages, history.size()));
-            // 压缩成功后，再追加对话直到再次撞 230k，逼出下一次压缩
-            appendAdditionalTurns(history, round + 1, facts, productionTrigger);
-            if (compactedTimes >= 5) break;
+            int observedCompactions = 0;
+            for (int round = 1; round <= 5; round++) {
+                List<LlmClient.Message> before = historySnapshot(agent);
+                int beforeTokens = TokenBudget.estimateMessagesTokens(before);
+                String beforeBoundary = compactionBoundarySignature(before);
+                String prompt = buildConversationRoundPrompt(round, facts, trigger);
+                roundResponses.add(agent.run(prompt, LlmClient.ToolChoice.AUTO));
+                List<LlmClient.Message> after = historySnapshot(agent);
+                int afterTokens = TokenBudget.estimateMessagesTokens(after);
+                String afterBoundary = compactionBoundarySignature(after);
+                boolean compactedThisRound = !afterBoundary.isBlank()
+                        && !afterBoundary.equals(beforeBoundary);
+                if (compactedThisRound) {
+                    observedCompactions++;
+                }
+                phases.add(new CompactionPhase(round, beforeTokens, afterTokens,
+                        before.size(), after.size(), observedCompactions, compactedThisRound));
+            }
+            history = historySnapshot(agent);
+        } finally {
+            agent.close();
         }
-        long compactElapsed = System.currentTimeMillis() - compactStart;
+        long conversationElapsed = System.currentTimeMillis() - conversationStart;
 
-        // ===== 3. 协议不变量 + 单调性硬断言 =====
         assertProtocolIntegrity(history);
-        assertCompactionMonotonicity(phases);
-        assertTrue(compactedTimes >= 1,
-                "至少要发生 1 次真实压缩；实际 " + compactedTimes
-                        + " 次。可能 history 没堆到 230k，调大 fillerNoise size。");
+        assertEquals(5, phases.size(), "实验协议必须完成五轮真实对话");
+        assertEquals(5, phases.get(phases.size() - 1).observedCompactions,
+                "五轮评测对话后必须观察到五次边界更新");
+        for (CompactionPhase phase : phases) {
+            assertTrue(phase.compactedThisRound,
+                    "第 " + phase.round + " 轮未观察到本轮自动压缩");
+        }
 
         // ===== 4. 让同一个 LLM 基于压缩后的 history 回答 20 条 QA =====
         long qaStart = System.currentTimeMillis();
@@ -123,8 +131,8 @@ class RealLlmCompressionRetentionIT {
 
         // ===== 5. 输出报告（控制台 + benchmark 目录 JSON），方便人工审阅 =====
         double retention = facts.isEmpty() ? 1.0 : (double) passed / facts.size();
-        Path report = writeReport(llm, facts, phases, qaResults, initialTokens,
-                retention, compactElapsed, qaElapsed);
+        Path report = writeRoundBasedReport(llm, facts, phases, qaResults, trigger,
+                retention, conversationElapsed, qaElapsed, roundResponses);
         StringBuilder tierLine = new StringBuilder();
         for (Tier tier : Tier.values()) {
             long total = qaResults.stream().filter(r -> r.fact.tier == tier).count();
@@ -135,8 +143,8 @@ class RealLlmCompressionRetentionIT {
         System.out.printf(Locale.ROOT,
                 "Real LLM compression retention: %d/%d (%.1f%%) over %d compactions; "
                         + "init=%d tokens; tiers:%s; compact=%dms; qa=%dms; report=%s%n",
-                passed, facts.size(), retention * 100, compactedTimes,
-                initialTokens, tierLine, compactElapsed, qaElapsed, report);
+                passed, facts.size(), retention * 100, phases.size(),
+                phases.get(0).beforeTokens, tierLine, conversationElapsed, qaElapsed, report);
 
         assertTrue(retention >= RETENTION_THRESHOLD,
                 String.format(Locale.ROOT,
@@ -151,11 +159,11 @@ class RealLlmCompressionRetentionIT {
     private static LlmClient resolveRealLlmClientOrSkip() {
         // .env 里实际启用的是 KIMI_API_KEY + KIMI_BASE_URL（指向本地 LLM 代理）
         DevCliConfig config = DevCliConfig.load();
-        String preferred = System.getProperty("devcli.it.compression.provider", "kimi");
+        String preferred = System.getProperty("devcli.it.compression.provider", "openai");
         LlmClient client = LlmClientFactory.create(preferred, config);
         if (client == null) {
             // fallback：依次尝试其他 provider
-            for (String p : List.of("glm", "deepseek", "step")) {
+            for (String p : List.of("anthropic", "kimi", "glm", "deepseek", "step")) {
                 client = LlmClientFactory.create(p, config);
                 if (client != null) break;
             }
@@ -181,13 +189,66 @@ class RealLlmCompressionRetentionIT {
     // 长会话与事实场景
     // ------------------------------------------------------------------
 
+    private static String buildConversationRoundPrompt(int round, List<FactCase> facts, int trigger) {
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("这是同一场真实长会话的第 ").append(round).append(" 轮。")
+                .append("请基于已有上下文继续推进，不要调用工具，只用简体中文简短回复。")
+                .append("本轮新增记录如下：\n");
+        int start = (round - 1) * 6;
+        int end = Math.min(facts.size(), start + 6);
+        for (int i = start; i < end; i++) {
+            prompt.append("- ").append(facts.get(i).statement).append('\n');
+        }
+        prompt.append("请确认已理解本轮记录，并说明后续会遵守这些约束。\n");
+        int targetRoundTokens = trigger + 2_000;
+        while (TokenBudget.estimateMessagesTokens(
+                List.of(LlmClient.Message.user(prompt.toString()))) < targetRoundTokens) {
+            prompt.append("本轮讨论补充：保持已有结论，不改变未被明确覆盖的约束；")
+                    .append("先核对上下文，再给出简洁答复；不要引入新的依赖或未经确认的假设。\n");
+        }
+        return prompt.toString();
+    }
+
+    private static String buildWarmupRoundPrompt(int round, int trigger) {
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("这是正式评测前的连续会话准备轮次 ").append(round).append("。")
+                .append("请只确认收到，不调用工具。当前仅讨论测试方法、输出格式和回归节奏，不包含待评分关键事实。\n");
+        int targetRoundTokens = trigger + 2_000;
+        while (TokenBudget.estimateMessagesTokens(
+                List.of(LlmClient.Message.user(prompt.toString()))) < targetRoundTokens) {
+            prompt.append("准备讨论：保持测试步骤可复现，记录输入规模、执行耗时和失败原因；")
+                    .append("本段不代表产品约束，也不参与最终事实保留率评分。\n");
+        }
+        return prompt.toString();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<LlmClient.Message> historySnapshot(Agent agent) throws Exception {
+        Field field = Agent.class.getDeclaredField("conversationHistory");
+        field.setAccessible(true);
+        return List.copyOf((List<LlmClient.Message>) field.get(agent));
+    }
+
+    private static String compactionBoundarySignature(List<LlmClient.Message> history) {
+        for (LlmClient.Message message : history) {
+            String content = message.content();
+            if (content != null && content.contains("<compact_boundary>")) {
+                return content;
+            }
+        }
+        return "";
+    }
+
     /**
-     * 18 个事实分 4 档难度，模拟真实 Agent 长会话里的不同信号强度：
+     * 30 个预先构造并固定的关键事实，覆盖不同信号强度和简历声明中的关键类别：
      * <ul>
      *   <li><b>EASY (5)</b>：明确决策类，对话里被反复引用 — 摘要器强项</li>
      *   <li><b>MEDIUM (5)</b>：单次提及但带语义锚点（"我们决定"/"最终选用"）</li>
      *   <li><b>HARD_ENTITY (5)</b>：埋在工具结果、tool_call args、stack trace 里的精确实体</li>
      *   <li><b>HARD_OVERRIDE (3)</b>：早期一个值，中后期被覆盖；只有最新值算正确</li>
+     *   <li><b>COMMAND_PARAM (4)</b>：命令及精确参数</li>
+     *   <li><b>PATH_VERSION (4)</b>：文件路径、端口和版本号</li>
+     *   <li><b>BUSINESS_CONSTRAINT (4)</b>：用户明确下达的禁止项和业务限制</li>
      * </ul>
      * 题目尽量不复用 fact 原文里的关键词，避免变成关键词检索题。
      */
@@ -275,6 +336,57 @@ class RealLlmCompressionRetentionIT {
                 "OVERRIDE: chunk_size 从 256 改到 512，最终定 384 平衡速度和召回",
                 "chunk_size 最后定多少？",
                 List.of("384")));
+
+        facts.add(new FactCase(Tier.COMMAND_PARAM,
+                "生产构建固定使用 mvn -Pprod -DskipTests package",
+                "生产构建的完整 Maven 参数是什么？",
+                List.of("-Pprod", "-DskipTests", "package")));
+        facts.add(new FactCase(Tier.COMMAND_PARAM,
+                "运行内存回归时必须追加 -Ddevcli.benchmark.memory=true",
+                "内存回归需要追加哪个系统属性？",
+                List.of("-Ddevcli.benchmark.memory=true")));
+        facts.add(new FactCase(Tier.COMMAND_PARAM,
+                "容器预检查命令使用 mvn -q -DskipTests test-compile",
+                "容器预检查使用什么命令？",
+                List.of("-DskipTests", "test-compile")));
+        facts.add(new FactCase(Tier.COMMAND_PARAM,
+                "Runtime API 启动参数固定为 serve --http --port 8080",
+                "Runtime API 使用什么启动参数？",
+                List.of("serve", "--http", "--port 8080")));
+
+        facts.add(new FactCase(Tier.PATH_VERSION,
+                "生产运行时配置文件固定为 Config/runtime-prod.yaml",
+                "生产运行时读取哪个配置文件？",
+                List.of("Config/runtime-prod.yaml")));
+        facts.add(new FactCase(Tier.PATH_VERSION,
+                "评测原始报告保存在 target/benchmark-reports/session-42.json",
+                "session-42 的原始评测报告在哪里？",
+                List.of("target/benchmark-reports/session-42.json")));
+        facts.add(new FactCase(Tier.PATH_VERSION,
+                "本轮兼容基线使用 Java 17.0.12",
+                "本轮兼容基线使用哪个 Java 版本？",
+                List.of("17.0.12")));
+        facts.add(new FactCase(Tier.PATH_VERSION,
+                "MCP schema 协议版本固定为 2025-06-18",
+                "MCP schema 固定使用哪个协议版本？",
+                List.of("2025-06-18")));
+
+        facts.add(new FactCase(Tier.BUSINESS_CONSTRAINT,
+                "用户明确要求不要修改 billing 模块",
+                "哪个模块明确禁止修改？",
+                List.of("billing", "不要", "禁止")));
+        facts.add(new FactCase(Tier.BUSINESS_CONSTRAINT,
+                "未经用户批准禁止推送远程仓库",
+                "代码提交后能否直接推送远程仓库？",
+                List.of("禁止", "推送")));
+        facts.add(new FactCase(Tier.BUSINESS_CONSTRAINT,
+                "任何数据库操作都必须由用户在 VSCode 终端执行",
+                "数据库相关操作应该由谁在哪里执行？",
+                List.of("用户", "VSCode", "终端")));
+        facts.add(new FactCase(Tier.BUSINESS_CONSTRAINT,
+                "订单状态只能从 PAID 迁移到 FULFILLED，禁止回退到 CREATED",
+                "订单 PAID 后允许迁移到什么状态，禁止回退到什么状态？",
+                List.of("FULFILLED", "CREATED", "禁止")));
 
         return facts;
     }
@@ -429,6 +541,13 @@ class RealLlmCompressionRetentionIT {
         turn++;
         injectUser(history, turn, "回归怎么跑？");
         injectAssistant(history, turn, facts.get(9).statement);  // mvn test RealLlmCompressionRetentionIT
+
+        // 固定评测集新增的命令、路径版本和业务约束。每条只出现一次，避免重复强化。
+        for (int factIndex = 18; factIndex < facts.size(); factIndex++) {
+            turn++;
+            injectUser(history, turn, facts.get(factIndex).statement);
+            injectAssistant(history, turn, "已记录该约束。");
+        }
 
         // EASY-1 / EASY-2 第二次复述
         turn++;
@@ -639,6 +758,9 @@ class RealLlmCompressionRetentionIT {
         root.put("provider", llm.getProviderName());
         root.put("initial_tokens", initialTokens);
         root.put("fact_count", facts.size());
+        root.put("fact_source", "synthetic scenario authored in test code; human annotation not yet recorded");
+        root.put("annotation_method", "automated LLM QA plus keyword acceptance; not independent human review");
+        root.put("human_review_completed", false);
         root.put("compaction_count", phases.size());
         root.put("compactions", phases.size());
         root.put("retention_ratio", retention);
@@ -678,12 +800,69 @@ class RealLlmCompressionRetentionIT {
         return file;
     }
 
+    private Path writeRoundBasedReport(LlmClient llm, List<FactCase> facts,
+                                       List<CompactionPhase> phases,
+                                       List<QaResult> qaResults,
+                                       int triggerTokens,
+                                       double retention,
+                                       long conversationMs,
+                                       long qaMs,
+                                       List<String> roundResponses) throws IOException {
+        Path dir = Path.of(System.getProperty("devcli.benchmark.report.dir",
+                Path.of("target", "benchmark-reports").toString()));
+        Files.createDirectories(dir);
+        Path file = dir.resolve("real-llm-compression-retention.json");
+        ObjectNode root = JSON.createObjectNode();
+        root.put("model", llm.getModelName());
+        root.put("provider", llm.getProviderName());
+        root.put("experiment_protocol", "five real Agent.run conversation rounds; each round crosses the configured trigger and is compacted by Agent.maybeCompactHistory");
+        root.put("conversation_round_count", 5);
+        root.put("warmup_round_count", 4);
+        root.put("compaction_count", phases.isEmpty() ? 0 : phases.get(phases.size() - 1).observedCompactions);
+        root.put("context_window_for_experiment", 12_000);
+        root.put("compression_trigger_tokens", triggerTokens);
+        root.put("fact_count", facts.size());
+        root.put("fact_source", "fixed scenario facts authored before execution; no facts were added during QA");
+        root.put("annotation_method", "automated answer check against predeclared keywords; human review not claimed");
+        root.put("human_review_completed", false);
+        root.put("retention_ratio", retention);
+        root.put("conversation_ms", conversationMs);
+        root.put("qa_ms", qaMs);
+        ArrayNode rounds = root.putArray("rounds");
+        for (int i = 0; i < phases.size(); i++) {
+            CompactionPhase phase = phases.get(i);
+            ObjectNode node = rounds.addObject();
+            node.put("round", phase.round);
+            node.put("before_tokens", phase.beforeTokens);
+            node.put("after_tokens", phase.afterTokens);
+            node.put("before_messages", phase.beforeMessages);
+            node.put("after_messages", phase.afterMessages);
+            node.put("observed_compactions", phase.observedCompactions);
+            node.put("compacted_this_round", phase.compactedThisRound);
+            node.put("agent_response_chars", roundResponses.get(i) == null ? 0 : roundResponses.get(i).length());
+        }
+        ArrayNode qa = root.putArray("qa");
+        for (QaResult result : qaResults) {
+            ObjectNode node = qa.addObject();
+            node.put("tier", result.fact.tier.name());
+            node.put("question", result.fact.question);
+            node.put("expected_keywords", String.join("|", result.fact.expectedKeywords));
+            node.put("answer", result.answer);
+            node.put("passed", result.passed);
+            node.put("elapsed_ms", result.elapsedMs);
+            node.put("diagnosis", result.diagnosis);
+        }
+        Files.writeString(file, JSON.writerWithDefaultPrettyPrinter().writeValueAsString(root));
+        return file;
+    }
+
     // ------------------------------------------------------------------
     // 数据类型
     // ------------------------------------------------------------------
 
     private enum Tier {
-        EASY, MEDIUM, HARD_ENTITY, HARD_OVERRIDE
+        EASY, MEDIUM, HARD_ENTITY, HARD_OVERRIDE,
+        COMMAND_PARAM, PATH_VERSION, BUSINESS_CONSTRAINT
     }
 
     private static final class FactCase {
@@ -706,14 +885,24 @@ class RealLlmCompressionRetentionIT {
         final int afterTokens;
         final int beforeMessages;
         final int afterMessages;
+        final int observedCompactions;
+        final boolean compactedThisRound;
 
         CompactionPhase(int round, int beforeTokens, int afterTokens,
                         int beforeMessages, int afterMessages) {
+            this(round, beforeTokens, afterTokens, beforeMessages, afterMessages, 0, false);
+        }
+
+        CompactionPhase(int round, int beforeTokens, int afterTokens,
+                        int beforeMessages, int afterMessages,
+                        int observedCompactions, boolean compactedThisRound) {
             this.round = round;
             this.beforeTokens = beforeTokens;
             this.afterTokens = afterTokens;
             this.beforeMessages = beforeMessages;
             this.afterMessages = afterMessages;
+            this.observedCompactions = observedCompactions;
+            this.compactedThisRound = compactedThisRound;
         }
     }
 
