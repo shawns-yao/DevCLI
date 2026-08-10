@@ -45,19 +45,19 @@ CodeSearchNet Java 公共 test split 采样 50 条，Top-K 固定为 5：
 
 ### Context Compression
 
-2026-08-10 使用 `gpt-5.6-terra` 重构并重新执行：先通过 4 轮真实 `Agent.run` 对话建立连续会话，再执行 5 轮正式对话；每轮输入均跨过受控的 6,000 token 自动压缩阈值，并由生产入口 `Agent.maybeCompactHistory` 触发一次摘要更新。30 条预先固定事实保留 29 条，自动问答保真率为 96.7%。该结果未经过人工复核，不等同于 236k 生产窗口结果。
+2026-08-10 使用 `gpt-5.6-terra` 和 256k 上下文窗口重新执行。压缩阈值固定为 80%，即 204,800 token；每轮先追加单条低于 microcompact 阈值的确定性 user/assistant 对话消息，使历史重新增长到阈值以上，再执行一次正式 `Agent.run`，由生产入口 `Agent.maybeCompactHistory` 自动压缩。五轮压缩前 token 分别为 227,989、230,239、207,355、209,733、209,365，压缩后分别降至 53,843、56,002、58,354、58,010、54,707。30 条预先固定事实保留 28 条，自动问答保真率为 93.3%。该结果尚未经过人工复核。
 
 | 难度层 | 通过数 |
 | --- | ---: |
 | EASY | 5/5 |
-| MEDIUM | 5/5 |
+| MEDIUM | 4/5 |
 | HARD_ENTITY | 4/5 |
 | HARD_OVERRIDE | 3/3 |
 | COMMAND_PARAM | 4/4 |
 | PATH_VERSION | 4/4 |
 | BUSINESS_CONSTRAINT | 4/4 |
 
-唯一失败位于 HARD_ENTITY 类。旧版 236k 历史反复调用压缩器的 21/30、70.0%，以及更早的 17/18、94.4%，均不再作为当前简历结论。
+失败分别位于 MEDIUM 和 HARD_ENTITY 类。旧版 12k 受控窗口的 29/30、96.7%，旧版 236k 历史反复调用压缩器的 21/30、70.0%，以及更早的 17/18、94.4%，均不再作为当前简历结论。
 
 ### Agent
 
