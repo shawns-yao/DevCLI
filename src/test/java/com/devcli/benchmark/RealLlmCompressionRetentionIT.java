@@ -8,6 +8,7 @@ import com.devcli.config.DevCliConfig;
 import com.devcli.context.ContextProfile;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.LlmClientFactory;
+import com.devcli.memory.CompactBoundaryMetadata;
 import com.devcli.memory.ConversationHistoryCompactor;
 import com.devcli.memory.TokenBudget;
 import com.devcli.tool.ToolRegistry;
@@ -64,42 +65,43 @@ class RealLlmCompressionRetentionIT {
     private static final int LLM_QA_TIMEOUT_MS = 300_000;
 
     @Test
-    @DisplayName("真实五轮对话每轮自动压缩后关键事实保留率")
+    @DisplayName("256k窗口达到80%阈值后连续五轮自动压缩的关键事实保留率")
     void multiRoundCompressionPreservesKeyFacts() throws Exception {
         Assumptions.assumeTrue(Boolean.getBoolean("devcli.benchmark.compression"),
                 "set -Ddevcli.benchmark.compression=true to run real compression benchmark");
         LlmClient llm = resolveRealLlmClientOrSkip();
         List<FactCase> facts = scenarioFacts();
-        final int testWindow = 12_000;
-        final int trigger = ContextProfile.custom(testWindow, 4_000).compressionTriggerTokens();
+        final int testWindow = 256_000;
+        final ContextProfile benchmarkProfile = benchmarkContextProfile(testWindow, 0.80);
+        final int trigger = benchmarkProfile.compressionTriggerTokens();
         Agent agent = new Agent(llm, new ToolRegistry());
-        agent.getMemoryManager().applyContextProfile(ContextProfile.custom(testWindow, 4_000));
-        agent.getMemoryManager().getContextProfile();
+        agent.getMemoryManager().applyContextProfile(benchmarkProfile);
         List<CompactionPhase> phases = new ArrayList<>();
         long conversationStart = System.currentTimeMillis();
         List<String> roundResponses = new ArrayList<>();
         List<LlmClient.Message> history;
         try {
-            for (int warmup = 1; warmup <= 4; warmup++) {
-                agent.run(buildWarmupRoundPrompt(warmup, trigger), LlmClient.ToolChoice.AUTO);
-            }
             int observedCompactions = 0;
             for (int round = 1; round <= 5; round++) {
+                appendConversationUntilTrigger(agent, round, trigger);
                 List<LlmClient.Message> before = historySnapshot(agent);
                 int beforeTokens = TokenBudget.estimateMessagesTokens(before);
                 String beforeBoundary = compactionBoundarySignature(before);
-                String prompt = buildConversationRoundPrompt(round, facts, trigger);
+                String prompt = buildConversationRoundPrompt(round, facts);
                 roundResponses.add(agent.run(prompt, LlmClient.ToolChoice.AUTO));
                 List<LlmClient.Message> after = historySnapshot(agent);
                 int afterTokens = TokenBudget.estimateMessagesTokens(after);
                 String afterBoundary = compactionBoundarySignature(after);
                 boolean compactedThisRound = !afterBoundary.isBlank()
                         && !afterBoundary.equals(beforeBoundary);
+                CompactBoundaryMetadata boundary = compactionBoundary(after);
                 if (compactedThisRound) {
                     observedCompactions++;
                 }
                 phases.add(new CompactionPhase(round, beforeTokens, afterTokens,
-                        before.size(), after.size(), observedCompactions, compactedThisRound));
+                        before.size(), after.size(), observedCompactions, compactedThisRound,
+                        boundary == null ? 0 : boundary.preTokens(),
+                        boundary == null ? 0 : boundary.postTokens()));
             }
             history = historySnapshot(agent);
         } finally {
@@ -114,6 +116,11 @@ class RealLlmCompressionRetentionIT {
         for (CompactionPhase phase : phases) {
             assertTrue(phase.compactedThisRound,
                     "第 " + phase.round + " 轮未观察到本轮自动压缩");
+            assertTrue(phase.compactionPreTokens >= trigger,
+                    "第 " + phase.round + " 轮未达到80%压缩阈值，实际 "
+                            + phase.compactionPreTokens + " < " + trigger);
+            assertTrue(phase.compactionPostTokens < phase.compactionPreTokens,
+                    "第 " + phase.round + " 轮压缩后 token 未下降");
         }
 
         // ===== 4. 让同一个 LLM 基于压缩后的 history 回答 20 条 QA =====
@@ -189,7 +196,16 @@ class RealLlmCompressionRetentionIT {
     // 长会话与事实场景
     // ------------------------------------------------------------------
 
-    private static String buildConversationRoundPrompt(int round, List<FactCase> facts, int trigger) {
+    private static ContextProfile benchmarkContextProfile(int contextWindow, double triggerRatio) {
+        int agentBudget = (int) Math.floor(contextWindow * 0.8);
+        int shortTermBudget = (int) Math.floor(contextWindow * 0.45);
+        int memoryContextTokens = Math.min(5_000, contextWindow / 200);
+        return new ContextProfile(contextWindow, agentBudget, triggerRatio,
+                shortTermBudget, memoryContextTokens, true,
+                false, "none", 8_192);
+    }
+
+    private static String buildConversationRoundPrompt(int round, List<FactCase> facts) {
         StringBuilder prompt = new StringBuilder();
         prompt.append("这是同一场真实长会话的第 ").append(round).append(" 轮。")
                 .append("请基于已有上下文继续推进，不要调用工具，只用简体中文简短回复。")
@@ -200,26 +216,36 @@ class RealLlmCompressionRetentionIT {
             prompt.append("- ").append(facts.get(i).statement).append('\n');
         }
         prompt.append("请确认已理解本轮记录，并说明后续会遵守这些约束。\n");
-        int targetRoundTokens = trigger + 2_000;
-        while (TokenBudget.estimateMessagesTokens(
-                List.of(LlmClient.Message.user(prompt.toString()))) < targetRoundTokens) {
-            prompt.append("本轮讨论补充：保持已有结论，不改变未被明确覆盖的约束；")
-                    .append("先核对上下文，再给出简洁答复；不要引入新的依赖或未经确认的假设。\n");
-        }
         return prompt.toString();
     }
 
-    private static String buildWarmupRoundPrompt(int round, int trigger) {
-        StringBuilder prompt = new StringBuilder();
-        prompt.append("这是正式评测前的连续会话准备轮次 ").append(round).append("。")
-                .append("请只确认收到，不调用工具。当前仅讨论测试方法、输出格式和回归节奏，不包含待评分关键事实。\n");
-        int targetRoundTokens = trigger + 2_000;
-        while (TokenBudget.estimateMessagesTokens(
-                List.of(LlmClient.Message.user(prompt.toString()))) < targetRoundTokens) {
-            prompt.append("准备讨论：保持测试步骤可复现，记录输入规模、执行耗时和失败原因；")
-                    .append("本段不代表产品约束，也不参与最终事实保留率评分。\n");
+    @SuppressWarnings("unchecked")
+    private static void appendConversationUntilTrigger(Agent agent, int round, int trigger) throws Exception {
+        Field field = Agent.class.getDeclaredField("conversationHistory");
+        field.setAccessible(true);
+        List<LlmClient.Message> history = (List<LlmClient.Message>) field.get(agent);
+        int turn = round * 10_000;
+        while (TokenBudget.estimateMessagesTokens(history) < trigger + 2_000) {
+            turn++;
+            history.add(LlmClient.Message.user(growthMessage(round, turn, true)));
+            history.add(LlmClient.Message.assistant(growthMessage(round, turn, false)));
         }
-        return prompt.toString();
+    }
+
+    private static String growthMessage(int round, int turn, boolean user) {
+        StringBuilder text = new StringBuilder(20_000);
+        text.append("[compression cycle ").append(round).append(" growth turn ")
+                .append(turn).append(user ? " user] " : " assistant] ");
+        while (text.length() < 20_000) {
+            if (user) {
+                text.append("本段用于把真实会话重新增长到压缩阈值，讨论测试执行记录、失败分类、")
+                        .append("输出格式和回归节奏，不新增产品事实，也不覆盖已经确认的业务约束；");
+            } else {
+                text.append("已记录当前测试过程，后续继续核对输入规模、阶段耗时和验证结果，")
+                        .append("本段不作为待评分事实，不改变此前已经确认的结论；");
+            }
+        }
+        return text.substring(0, 20_000);
     }
 
     @SuppressWarnings("unchecked")
@@ -237,6 +263,17 @@ class RealLlmCompressionRetentionIT {
             }
         }
         return "";
+    }
+
+    private static CompactBoundaryMetadata compactionBoundary(List<LlmClient.Message> history) {
+        for (LlmClient.Message message : history) {
+            CompactBoundaryMetadata metadata = CompactBoundaryMetadata
+                    .parseFromSummaryMessage(message.content()).orElse(null);
+            if (metadata != null) {
+                return metadata;
+            }
+        }
+        return null;
     }
 
     /**
@@ -815,11 +852,12 @@ class RealLlmCompressionRetentionIT {
         ObjectNode root = JSON.createObjectNode();
         root.put("model", llm.getModelName());
         root.put("provider", llm.getProviderName());
-        root.put("experiment_protocol", "five real Agent.run conversation rounds; each round crosses the configured trigger and is compacted by Agent.maybeCompactHistory");
+        root.put("experiment_protocol", "256k context window; before each of five measured Agent.run rounds, deterministic user and assistant conversation turns regrow history to the 80 percent trigger; production Agent.maybeCompactHistory performs one real-model compaction per round");
         root.put("conversation_round_count", 5);
-        root.put("warmup_round_count", 4);
+        root.put("growth_message_source", "deterministic realistic dialogue pairs under the microcompact per-message limit");
         root.put("compaction_count", phases.isEmpty() ? 0 : phases.get(phases.size() - 1).observedCompactions);
-        root.put("context_window_for_experiment", 12_000);
+        root.put("context_window_for_experiment", 256_000);
+        root.put("compression_trigger_ratio", 0.80);
         root.put("compression_trigger_tokens", triggerTokens);
         root.put("fact_count", facts.size());
         root.put("fact_source", "fixed scenario facts authored before execution; no facts were added during QA");
@@ -839,6 +877,8 @@ class RealLlmCompressionRetentionIT {
             node.put("after_messages", phase.afterMessages);
             node.put("observed_compactions", phase.observedCompactions);
             node.put("compacted_this_round", phase.compactedThisRound);
+            node.put("compaction_pre_tokens", phase.compactionPreTokens);
+            node.put("compaction_post_tokens", phase.compactionPostTokens);
             node.put("agent_response_chars", roundResponses.get(i) == null ? 0 : roundResponses.get(i).length());
         }
         ArrayNode qa = root.putArray("qa");
@@ -887,15 +927,19 @@ class RealLlmCompressionRetentionIT {
         final int afterMessages;
         final int observedCompactions;
         final boolean compactedThisRound;
+        final int compactionPreTokens;
+        final int compactionPostTokens;
 
         CompactionPhase(int round, int beforeTokens, int afterTokens,
                         int beforeMessages, int afterMessages) {
-            this(round, beforeTokens, afterTokens, beforeMessages, afterMessages, 0, false);
+            this(round, beforeTokens, afterTokens, beforeMessages, afterMessages,
+                    0, false, 0, 0);
         }
 
         CompactionPhase(int round, int beforeTokens, int afterTokens,
                         int beforeMessages, int afterMessages,
-                        int observedCompactions, boolean compactedThisRound) {
+                        int observedCompactions, boolean compactedThisRound,
+                        int compactionPreTokens, int compactionPostTokens) {
             this.round = round;
             this.beforeTokens = beforeTokens;
             this.afterTokens = afterTokens;
@@ -903,6 +947,8 @@ class RealLlmCompressionRetentionIT {
             this.afterMessages = afterMessages;
             this.observedCompactions = observedCompactions;
             this.compactedThisRound = compactedThisRound;
+            this.compactionPreTokens = compactionPreTokens;
+            this.compactionPostTokens = compactionPostTokens;
         }
     }
 
