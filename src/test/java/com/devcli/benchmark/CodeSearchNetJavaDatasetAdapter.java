@@ -7,9 +7,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Random;
 
 /**
  * Converts CodeSearchNet Java rows into a small synthetic Java project that DevCLI's
@@ -48,10 +52,14 @@ final class CodeSearchNetJavaDatasetAdapter {
         if (!language.isBlank() && !"java".equalsIgnoreCase(language)) {
             return Optional.empty();
         }
-        String function = firstNonBlank(text(row, "whole_func_string"), text(row, "func_code_string"));
+        String function = firstNonBlank(text(row, "func_code_string"), text(row, "whole_func_string"));
         String documentation = text(row, "func_documentation_string");
         String functionName = text(row, "func_name");
-        if (function.isBlank() || functionName.isBlank()) {
+        if (function.isBlank() || functionName.isBlank() || documentation.isBlank()) {
+            return Optional.empty();
+        }
+        function = stripLeadingDocumentation(function);
+        if (function.isBlank()) {
             return Optional.empty();
         }
 
@@ -61,8 +69,8 @@ final class CodeSearchNetJavaDatasetAdapter {
         String className = className(index, originalPath, functionName);
         String packageName = "codesearchnet." + sanitizeIdentifier(repository.isBlank() ? "sample" : repository);
         String sourcePath = "src/main/java/" + packageName.replace('.', '/') + "/" + className + ".java";
-        String source = renderSource(packageName, className, documentation, function);
-        String query = documentation.isBlank() ? methodName : documentation;
+        String source = renderSource(packageName, className, function);
+        String query = documentation;
         String id = (repository + ":" + originalPath + ":" + functionName).replaceAll("^:+|:+$", "");
         if (id.isBlank()) {
             id = "codesearchnet-java-" + index;
@@ -89,17 +97,61 @@ final class CodeSearchNetJavaDatasetAdapter {
         }
     }
 
-    private static String renderSource(String packageName, String className, String documentation, String function) {
+    static EvaluationSet selectEvaluationCases(List<SourceCase> cases,
+                                               int corpusLimit,
+                                               int queryLimit,
+                                               long seed) {
+        if (cases == null || cases.isEmpty() || corpusLimit <= 0 || queryLimit <= 0) {
+            return new EvaluationSet(List.of(), List.of());
+        }
+
+        Map<String, SourceCase> uniqueByCode = new LinkedHashMap<>();
+        for (SourceCase sourceCase : cases) {
+            if (sourceCase == null || sourceCase.source().isBlank() || sourceCase.query().isBlank()) {
+                continue;
+            }
+            uniqueByCode.putIfAbsent(normalizeCode(sourceCase.source()), sourceCase);
+        }
+
+        List<SourceCase> shuffled = new ArrayList<>(uniqueByCode.values());
+        Collections.shuffle(shuffled, new Random(seed));
+        List<SourceCase> corpus = List.copyOf(shuffled.subList(0, Math.min(corpusLimit, shuffled.size())));
+
+        Map<String, List<SourceCase>> byRepository = new LinkedHashMap<>();
+        corpus.stream()
+                .sorted(java.util.Comparator.comparing(SourceCase::repositoryName)
+                        .thenComparing(SourceCase::id))
+                .forEach(sourceCase -> byRepository
+                        .computeIfAbsent(repositoryKey(sourceCase), ignored -> new ArrayList<>())
+                        .add(sourceCase));
+        byRepository.forEach((repository, repositoryCases) ->
+                Collections.shuffle(repositoryCases, new Random(seed ^ repository.hashCode())));
+
+        List<SourceCase> queries = new ArrayList<>();
+        int round = 0;
+        while (queries.size() < Math.min(queryLimit, corpus.size())) {
+            boolean added = false;
+            for (List<SourceCase> repositoryCases : byRepository.values()) {
+                if (round < repositoryCases.size()) {
+                    queries.add(repositoryCases.get(round));
+                    added = true;
+                    if (queries.size() >= Math.min(queryLimit, corpus.size())) {
+                        break;
+                    }
+                }
+            }
+            if (!added) {
+                break;
+            }
+            round++;
+        }
+        return new EvaluationSet(corpus, List.copyOf(queries));
+    }
+
+    private static String renderSource(String packageName, String className, String function) {
         StringBuilder source = new StringBuilder();
         source.append("package ").append(packageName).append(";\n\n");
         source.append("public class ").append(className).append(" {\n");
-        if (!documentation.isBlank()) {
-            source.append("    /**\n");
-            for (String line : documentation.replace("*/", "* /").split("\\R")) {
-                source.append("     * ").append(line.strip()).append("\n");
-            }
-            source.append("     */\n");
-        }
         for (String line : function.split("\\R", -1)) {
             source.append("    ").append(line).append("\n");
         }
@@ -158,6 +210,43 @@ final class CodeSearchNetJavaDatasetAdapter {
         return sanitized;
     }
 
+    private static String stripLeadingDocumentation(String function) {
+        String stripped = function == null ? "" : function;
+        stripped = stripped.replaceFirst("(?s)^\\s*/\\*\\*.*?\\*/\\s*", "");
+        stripped = stripped.replaceFirst("(?s)^\\s*(?://[^\\r\\n]*(?:\\R|$))+\\s*", "");
+        return stripped.trim();
+    }
+
+    private static String normalizeCode(String source) {
+        return source == null ? "" : source.replaceAll("\\s+", " ").trim();
+    }
+
+    static boolean hasQueryTextLeak(SourceCase sourceCase) {
+        if (sourceCase == null) {
+            return false;
+        }
+        String query = normalizeLeakText(sourceCase.query());
+        if (query.isBlank()) {
+            return false;
+        }
+        return normalizeLeakText(sourceCase.source()).contains(query);
+    }
+
+    private static String normalizeLeakText(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.toLowerCase(Locale.ROOT)
+                .replaceAll("\\s+", " ")
+                .replaceAll("[\\p{Punct}\\p{IsPunctuation}]+$", "")
+                .trim();
+    }
+
+    private static String repositoryKey(SourceCase sourceCase) {
+        String repository = sourceCase.repositoryName();
+        return repository == null || repository.isBlank() ? "unknown" : repository;
+    }
+
     private static String firstNonBlank(String first, String second) {
         return first != null && !first.isBlank() ? first : second == null ? "" : second;
     }
@@ -174,5 +263,12 @@ final class CodeSearchNetJavaDatasetAdapter {
                       String source,
                       String query,
                       String goldName) {
+    }
+
+    record EvaluationSet(List<SourceCase> corpus, List<SourceCase> queries) {
+        EvaluationSet {
+            corpus = List.copyOf(corpus == null ? List.of() : corpus);
+            queries = List.copyOf(queries == null ? List.of() : queries);
+        }
     }
 }

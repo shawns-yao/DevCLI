@@ -96,32 +96,89 @@ class RagRetrievalBenchmarkIT {
                         List.of("PromptAssembler.assemble", "PromptRepository.systemPrompt", "PromptContext")),
                 new QueryCase("OrderService checkout 依赖哪些下游服务", "call_chain", 3,
                         List.of("OrderService.checkout", "PaymentGateway.charge", "InventoryService.reserve"))
-        ));
+        ), 5, 0L, true);
     }
 
     private static BenchmarkDataset codeSearchNetJavaDataset(Path tempDir) throws Exception {
-        int length = Math.max(1, Integer.getInteger("devcli.benchmark.rag.codesearchnet.length", 50));
-        int offset = Math.max(0, Integer.getInteger("devcli.benchmark.rag.codesearchnet.offset", 0));
-        String url = "https://datasets-server.huggingface.co/rows?dataset=code-search-net/code_search_net"
-                + "&config=java&split=test&offset=" + offset + "&length=" + length;
-        HttpRequest request = HttpRequest.newBuilder(URI.create(url)).GET().build();
-        HttpResponse<String> response = HttpClient.newHttpClient()
-                .send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-        if (response.statusCode() / 100 != 2) {
-            throw new IOException("CodeSearchNet Java rows request failed: HTTP "
-                    + response.statusCode() + " - " + response.body());
-        }
+        int corpusLimit = Math.max(100, Integer.getInteger(
+                "devcli.benchmark.rag.codesearchnet.corpus", 1_000));
+        int queryLimit = Math.max(10, Integer.getInteger(
+                "devcli.benchmark.rag.codesearchnet.queries", 200));
+        long seed = Long.getLong("devcli.benchmark.rag.codesearchnet.seed", 20_260_809L);
+        ObjectNode rows = loadCodeSearchNetRows(Math.max(corpusLimit * 2, queryLimit));
         List<CodeSearchNetJavaDatasetAdapter.SourceCase> sourceCases =
-                CodeSearchNetJavaDatasetAdapter.fromHuggingFaceRows(JSON.readTree(response.body()), length);
+                CodeSearchNetJavaDatasetAdapter.fromHuggingFaceRows(rows, Integer.MAX_VALUE);
         if (sourceCases.isEmpty()) {
             throw new IOException("CodeSearchNet Java rows response did not contain usable Java functions");
         }
-        Path project = tempDir.resolve("codesearchnet-java-public");
-        CodeSearchNetJavaDatasetAdapter.writeSyntheticProject(project, sourceCases);
-        List<QueryCase> queries = sourceCases.stream()
-                .map(sourceCase -> new QueryCase(sourceCase.query(), "definition", 0, List.of(sourceCase.goldName())))
+        CodeSearchNetJavaDatasetAdapter.EvaluationSet evaluation =
+                CodeSearchNetJavaDatasetAdapter.selectEvaluationCases(
+                        sourceCases, corpusLimit, queryLimit, seed);
+        if (evaluation.corpus().size() < corpusLimit || evaluation.queries().size() < queryLimit) {
+            throw new IOException("CodeSearchNet Java usable rows are insufficient: corpus="
+                    + evaluation.corpus().size() + "/" + corpusLimit
+                    + ", queries=" + evaluation.queries().size() + "/" + queryLimit);
+        }
+        List<String> leakedCaseIds = evaluation.corpus().stream()
+                .filter(CodeSearchNetJavaDatasetAdapter::hasQueryTextLeak)
+                .map(CodeSearchNetJavaDatasetAdapter.SourceCase::id)
                 .toList();
-        return new BenchmarkDataset("codesearchnet-java-public", "public_codesearchnet_java", project, queries);
+        boolean queryTextExcludedFromSource = leakedCaseIds.isEmpty();
+        if (!queryTextExcludedFromSource) {
+            throw new IOException("CodeSearchNet evaluation rejected because query text appears in indexed source: "
+                    + leakedCaseIds.stream().limit(10).toList());
+        }
+        Path project = tempDir.resolve("codesearchnet-java-public");
+        CodeSearchNetJavaDatasetAdapter.writeSyntheticProject(project, evaluation.corpus());
+        List<QueryCase> queries = evaluation.queries().stream()
+                .map(sourceCase -> new QueryCase(
+                        sourceCase.query(), "definition", 0, List.of(sourceCase.goldName()),
+                        sourceCase.id(), sourceCase.repositoryName()))
+                .toList();
+        return new BenchmarkDataset(
+                "codesearchnet-java-public", "public_codesearchnet_java", project, queries,
+                evaluation.corpus().size(), seed, queryTextExcludedFromSource);
+    }
+
+    private static ObjectNode loadCodeSearchNetRows(int requestedRows) throws Exception {
+        String configuredFile = System.getProperty("devcli.benchmark.rag.codesearchnet.file", "").trim();
+        if (!configuredFile.isBlank()) {
+            Path file = Path.of(configuredFile).toAbsolutePath().normalize();
+            ObjectNode root = (ObjectNode) JSON.readTree(Files.readString(file, StandardCharsets.UTF_8));
+            if (!root.path("rows").isArray()) {
+                throw new IOException("CodeSearchNet rows file must contain a rows array: " + file);
+            }
+            return root;
+        }
+
+        ObjectNode root = JSON.createObjectNode();
+        ArrayNode rows = root.putArray("rows");
+        HttpClient client = HttpClient.newHttpClient();
+        int offset = Math.max(0, Integer.getInteger("devcli.benchmark.rag.codesearchnet.offset", 0));
+        int remaining = requestedRows;
+        while (remaining > 0) {
+            int pageSize = Math.min(100, remaining);
+            String url = "https://datasets-server.huggingface.co/rows?dataset=code-search-net/code_search_net"
+                    + "&config=java&split=test&offset=" + offset + "&length=" + pageSize;
+            HttpRequest request = HttpRequest.newBuilder(URI.create(url)).GET().build();
+            HttpResponse<String> response = client.send(
+                    request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (response.statusCode() / 100 != 2) {
+                throw new IOException("CodeSearchNet Java rows request failed: HTTP "
+                        + response.statusCode() + " - " + response.body());
+            }
+            ArrayNode page = (ArrayNode) JSON.readTree(response.body()).path("rows");
+            if (page.isEmpty()) {
+                break;
+            }
+            page.forEach(rows::add);
+            offset += page.size();
+            remaining -= page.size();
+            if (page.size() < pageSize) {
+                break;
+            }
+        }
+        return root;
     }
 
     private static BenchmarkDataset devCliSourceDataset() {
@@ -137,7 +194,7 @@ class RagRetrievalBenchmarkIT {
                         List.of("CodeAnalyzer", "CodeAnalyzer.resolveCallee", "ClasspathEpoch")),
                 new QueryCase("MemoryManager 如何把 RAG evidence symbolVersion negativeFact 写入记忆", "call_chain", 2,
                         List.of("MemoryManager", "MemoryManager.storeFactWithPolicy", "LongTermMemoryPolicy"))
-        ));
+        ), 5, 0L, true);
     }
 
     private static void writeSampleProject(Path root) throws Exception {
@@ -309,6 +366,9 @@ class RagRetrievalBenchmarkIT {
         root.put("embedding_provider", embeddingClient.getProvider());
         root.put("embedding_model", embeddingClient.getModel());
         root.put("top_k", TOP_K);
+        root.put("corpus_case_count", dataset.corpusCaseCount());
+        root.put("query_sampling_seed", dataset.samplingSeed());
+        root.put("query_text_excluded_from_source", dataset.queryTextExcludedFromSource());
         root.put("ranking_strategy", "semantic baseline vs keyword + semantic + bounded graph + RRF + symbol-aware boost + optional cross-encoder rerank");
         root.put("rerank_strategy", rerankStrategy);
         root.put("chunk_count", indexResult.chunkCount());
@@ -318,6 +378,8 @@ class RagRetrievalBenchmarkIT {
         for (QueryScore score : scores) {
             ObjectNode node = queries.addObject();
             node.put("query", score.queryCase().query());
+            node.put("case_id", score.queryCase().caseId());
+            node.put("repository", score.queryCase().repositoryName());
             node.put("mode", score.queryCase().mode());
             node.put("graph_depth", score.queryCase().graphDepth());
             node.putPOJO("gold_chain", score.queryCase().goldNames());
@@ -435,10 +497,24 @@ class RagRetrievalBenchmarkIT {
         return Math.round(value * 10_000.0) / 10_000.0;
     }
 
-    private record BenchmarkDataset(String name, String type, Path projectRoot, List<QueryCase> queryCases) {
+    private record BenchmarkDataset(String name,
+                                    String type,
+                                    Path projectRoot,
+                                    List<QueryCase> queryCases,
+                                    int corpusCaseCount,
+                                    long samplingSeed,
+                                    boolean queryTextExcludedFromSource) {
     }
 
-    private record QueryCase(String query, String mode, Integer graphDepth, List<String> goldNames) {
+    private record QueryCase(String query,
+                             String mode,
+                             Integer graphDepth,
+                             List<String> goldNames,
+                             String caseId,
+                             String repositoryName) {
+        private QueryCase(String query, String mode, Integer graphDepth, List<String> goldNames) {
+            this(query, mode, graphDepth, goldNames, "", "");
+        }
     }
 
     private record QueryScore(QueryCase queryCase,
