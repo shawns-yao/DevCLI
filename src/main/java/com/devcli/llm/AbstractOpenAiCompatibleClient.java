@@ -197,7 +197,8 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
             }
 
             List<ToolCall> toolCalls = buildToolCalls(toolAccumulators);
-            if (content.isEmpty() && reasoning.isEmpty() && toolCalls.isEmpty()) {
+            if (content.isEmpty() && reasoning.isEmpty()
+                    && (toolCalls == null || toolCalls.isEmpty())) {
                 throw LlmErrors.malformedResponse(getProviderName(), getModelName(),
                         "empty assistant response", null);
             }
