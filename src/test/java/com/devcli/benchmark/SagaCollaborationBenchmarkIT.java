@@ -52,7 +52,9 @@ class SagaCollaborationBenchmarkIT {
     void compareSingleAndMultiAgentOnSaga() throws Exception {
         Assumptions.assumeTrue(Boolean.getBoolean("devcli.benchmark.saga"),
                 "set -Ddevcli.benchmark.saga=true to run the real LLM Saga benchmark");
-        LlmClient llm = LlmClientFactory.createFromConfig(DevCliConfig.load());
+        DevCliConfig config = DevCliConfig.load();
+        String provider = System.getProperty("devcli.it.saga.provider", "openai");
+        LlmClient llm = LlmClientFactory.create(provider, config);
         Assumptions.assumeTrue(llm != null, "no configured LLM client");
         Assumptions.assumeTrue(ToolProvider.getSystemJavaCompiler() != null,
                 "JDK compiler is required for hidden validation");
@@ -66,6 +68,8 @@ class SagaCollaborationBenchmarkIT {
         System.out.println("Saga collaboration benchmark report: " + report);
         System.out.println(Files.readString(report));
         assertTrue(Files.exists(report));
+        assertTrue(single.llmRunCompleted(), "single Agent LLM run was incomplete; report=" + report);
+        assertTrue(team.llmRunCompleted(), "multi-Agent LLM run was incomplete; report=" + report);
     }
 
     @Test
@@ -131,8 +135,18 @@ class SagaCollaborationBenchmarkIT {
         } catch (IOException ignored) {
             // Benchmark diagnostics must not affect scoring.
         }
-        return new RunResult(mode, workspace, elapsedMs(started), !output.contains("LLM run failed"), output,
+        return new RunResult(mode, workspace, elapsedMs(started), isValidLlmRun(output), output,
                 evaluate(workspace));
+    }
+
+    private static boolean isValidLlmRun(String output) {
+        if (output == null || output.isBlank()) return false;
+        return !output.contains("LLM run failed")
+                && !output.contains("调用 LLM 失败")
+                && !output.contains("规划阶段失败")
+                && !output.contains("[code=NETWORK")
+                && !output.contains("[code=TIMEOUT")
+                && !output.contains("[code=RATE_LIMITED");
     }
 
     private static String prompt(String mode) {
