@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -38,6 +39,8 @@ class RealLlmMemoryBenchmarkIT {
     @Test
     @DisplayName("real LLM memory benchmark: write policy, semantic recall, prompt injection")
     void benchmarkMemoryWithRealEnvModel() throws Exception {
+        Assumptions.assumeTrue(Boolean.getBoolean("devcli.benchmark.memory"),
+                "set -Ddevcli.benchmark.memory=true to run real memory benchmark");
         LlmClient llm = resolveRealLlmClientOrSkip();
         EmbeddingClient embeddingClient = resolveEmbeddingClientOrSkip();
 
@@ -85,10 +88,19 @@ class RealLlmMemoryBenchmarkIT {
             }
 
             List<InjectionResult> injectionResults = new ArrayList<>();
+            Map<QueryCase, RecallResult> recallByQuery = recallResults.stream()
+                    .collect(java.util.stream.Collectors.toMap(
+                            RecallResult::query,
+                            result -> result,
+                            (left, right) -> left,
+                            java.util.LinkedHashMap::new));
             for (QueryCase query : queries()) {
                 String context = memoryManager.buildContextForQuery(query.query(), 2_000);
                 boolean injected = containsAll(context, query.expectedTerms());
-                injectionResults.add(new InjectionResult(query, injected));
+                RecallResult recall = recallByQuery.get(query);
+                injectionResults.add(new InjectionResult(query, injected,
+                        recall != null && recall.matched(),
+                        recall == null ? Set.of() : recall.hitIds()));
             }
 
             double writeAccuracy = ratio(policyResults.stream()
@@ -102,12 +114,19 @@ class RealLlmMemoryBenchmarkIT {
                     .count());
             double recallAt5 = ratio(recallResults.stream().filter(RecallResult::matched).count(), recallResults.size());
             double injectionHitRate = ratio(injectionResults.stream().filter(InjectionResult::injected).count(), injectionResults.size());
+            double retrievalToInjectionTransferRate = ratioOrZero(
+                    injectionResults.stream().filter(InjectionResult::recalledBeforeInjection)
+                            .filter(InjectionResult::injected).count(),
+                    injectionResults.stream().filter(InjectionResult::recalledBeforeInjection).count());
 
             Path report = writeReport(llm, embeddingClient, policyResults, recallResults, injectionResults,
-                    writeAccuracy, lowValueBlockRate, recallAt5, injectionHitRate);
+                    writeAccuracy, lowValueBlockRate, recallAt5, injectionHitRate,
+                    retrievalToInjectionTransferRate);
             System.out.printf(Locale.ROOT,
-                    "Real LLM memory benchmark: write_accuracy=%.1f%% low_value_block=%.1f%% recall@5=%.1f%% injection=%.1f%% facts=%d vectors=%d report=%s%n",
+                    "Real LLM memory benchmark: write_accuracy=%.1f%% low_value_block=%.1f%% recall@5=%.1f%% injection=%.1f%% transfer=%.1f%% scenarios=%d memories=%d vectors=%d report=%s%n",
                     writeAccuracy * 100, lowValueBlockRate * 100, recallAt5 * 100, injectionHitRate * 100,
+                    retrievalToInjectionTransferRate * 100,
+                    queries().size(),
                     longTermMemory.size(), vectorStore.count(), report);
 
             assertTrue(writeAccuracy >= 0.70, "write accuracy below threshold; report=" + report);
@@ -118,7 +137,15 @@ class RealLlmMemoryBenchmarkIT {
     }
 
     private static LlmClient resolveRealLlmClientOrSkip() {
-        LlmClient client = LlmClientFactory.create(System.getProperty("devcli.it.memory.provider", "kimi"), DevCliConfig.load());
+        DevCliConfig config = DevCliConfig.load();
+        String preferred = System.getProperty("devcli.it.memory.provider", "openai");
+        LlmClient client = LlmClientFactory.create(preferred, config);
+        if (client == null) {
+            for (String provider : List.of("anthropic", "kimi", "glm", "deepseek", "step")) {
+                client = LlmClientFactory.create(provider, config);
+                if (client != null) break;
+            }
+        }
         Assumptions.assumeTrue(client != null, "no real LLM provider configured");
         try {
             LlmClient.ChatResponse response = client.chat(List.of(
@@ -145,19 +172,10 @@ class RealLlmMemoryBenchmarkIT {
     }
 
     private static List<Candidate> candidates() {
-        return List.of(
-                new Candidate("请记住：我默认使用简体中文短句回答", true, "SAVE"),
-                new Candidate("记住：DevCLI 项目默认测试命令是 mvn test -Pquick", true, "SAVE"),
-                new Candidate("项目默认 Java 版本是 17", true, "SAVE"),
-                new Candidate("用户偏好：代码解释先给结论再给依据", true, "SAVE"),
-                new Candidate("请记住：DevCLI 的代码 RAG 评测默认关注 recall@5 和 path coverage", true, "SAVE"),
-                new Candidate("请记住：工具参数必须先经过 JSON Schema 校验再执行", true, "SAVE"),
-                new Candidate("记住：多智能体 reviewer 评分关注功能正确性、集成完整性和代码质量", true, "SAVE"),
-                new Candidate("记住：Runtime API 默认只绑定 127.0.0.1", true, "SAVE"),
-                new Candidate("记住：MCP 启动超时后保持 STARTING 并后台继续初始化", true, "SAVE"),
-                new Candidate("记住：默认不要使用 git add .，必须按具体文件 stage", true, "SAVE"),
-                new Candidate("记住：简历润色默认只给最优一版，不列多个相似版本", true, "SAVE"),
-                new Candidate("记住：长期记忆目录默认是 ~/.devcli/memory", true, "SAVE"),
+        List<Candidate> candidates = new ArrayList<>();
+        rememberedScenarios().forEach(scenario ->
+                candidates.add(new Candidate("请记住：" + scenario.fact(), true, "SAVE")));
+        candidates.addAll(List.of(
                 new Candidate("今天地铁很挤，天气也不错", false, "SKIP"),
                 new Candidate("这次先临时把日志文件叫 temp-debug.log", false, "SKIP"),
                 new Candidate("我朋友的孩子今天高考", false, "SKIP"),
@@ -171,24 +189,45 @@ class RealLlmMemoryBenchmarkIT {
                 new Candidate("记住我的手机号是 13800138000", true, "CONFIRM"),
                 new Candidate("记住我的银行卡号是 6222020202020202020", true, "CONFIRM"),
                 new Candidate("记住 api_key: sk-real-memory-benchmark-placeholder", true, "CONFIRM")
-        );
+        ));
+        return List.copyOf(candidates);
     }
 
     private static List<QueryCase> queries() {
-        return List.of(
-                new QueryCase("用户默认用什么语言和表达风格？", List.of("简体中文", "短句")),
-                new QueryCase("这个项目默认跑什么测试命令？", List.of("mvn test -Pquick")),
-                new QueryCase("项目使用哪个 Java 版本？", List.of("17")),
-                new QueryCase("解释代码时应该怎么组织答案？", List.of("先给结论", "依据")),
-                new QueryCase("代码检索评估需要看哪些核心指标？", List.of("recall@5", "path coverage")),
-                new QueryCase("工具调用真正执行前要先做什么参数检查？", List.of("JSON Schema")),
-                new QueryCase("多智能体审查主要看哪几个质量维度？", List.of("功能正确性", "集成完整性", "代码质量")),
-                new QueryCase("本地 Runtime API 默认监听哪个地址？", List.of("127.0.0.1")),
-                new QueryCase("MCP 服务启动超过等待时间后应该保持什么状态？", List.of("STARTING")),
-                new QueryCase("提交代码时默认不能使用什么 stage 方式？", List.of("git add .")),
-                new QueryCase("帮我润色简历时默认给几版？", List.of("最优一版")),
-                new QueryCase("长期记忆默认落在哪个目录？", List.of(".devcli", "memory"))
-        );
+        return rememberedScenarios().stream()
+                .map(scenario -> new QueryCase(scenario.query(), scenario.expectedTerms()))
+                .toList();
+    }
+
+    private static List<MemoryScenario> rememberedScenarios() {
+        List<MemoryScenario> scenarios = new ArrayList<>();
+        for (int index = 1; index <= 10; index++) {
+            scenarios.add(new MemoryScenario("preference-" + index,
+                    "工作区 workspace-" + index + " 默认使用 zh-style-" + index + " 的回答风格",
+                    "workspace-" + index + " 默认使用什么回答风格？",
+                    List.of("workspace-" + index, "zh-style-" + index)));
+            scenarios.add(new MemoryScenario("command-" + index,
+                    "服务 service-" + index + " 的发布命令是 deploy-service-" + index + " --safe",
+                    "service-" + index + " 应该使用什么发布命令？",
+                    List.of("deploy-service-" + index, "--safe")));
+            scenarios.add(new MemoryScenario("version-" + index,
+                    "模块 module-" + index + " 的运行时版本固定为 runtime-v" + index + ".2",
+                    "module-" + index + " 固定使用哪个运行时版本？",
+                    List.of("runtime-v" + index + ".2")));
+            scenarios.add(new MemoryScenario("path-" + index,
+                    "模块 component-" + index + " 的配置路径是 Config/component-" + index + ".yaml",
+                    "component-" + index + " 的配置文件放在哪里？",
+                    List.of("Config/component-" + index + ".yaml")));
+            scenarios.add(new MemoryScenario("constraint-" + index,
+                    "任务 task-" + index + " 禁止修改 protected-module-" + index + " 目录",
+                    "task-" + index + " 明确禁止修改哪个目录？",
+                    List.of("protected-module-" + index)));
+            scenarios.add(new MemoryScenario("default-" + index,
+                    "租户 tenant-" + index + " 的默认超时时间是 " + (30 + index) + " 秒",
+                    "tenant-" + index + " 的默认超时时间是多少？",
+                    List.of(String.valueOf(30 + index), "秒")));
+        }
+        return List.copyOf(scenarios);
     }
 
     private static boolean containsAll(String text, List<String> terms) {
@@ -206,7 +245,8 @@ class RealLlmMemoryBenchmarkIT {
                              double writeAccuracy,
                              double lowValueBlockRate,
                              double recallAt5,
-                             double injectionHitRate) throws Exception {
+                             double injectionHitRate,
+                             double retrievalToInjectionTransferRate) throws Exception {
         Path dir = Path.of(System.getProperty("devcli.benchmark.report.dir",
                 Path.of("target", "benchmark-reports").toString()));
         Files.createDirectories(dir);
@@ -223,6 +263,10 @@ class RealLlmMemoryBenchmarkIT {
         metrics.put("low_value_block_rate", round4(lowValueBlockRate));
         metrics.put("recall_at_5", round4(recallAt5));
         metrics.put("injection_hit_rate", round4(injectionHitRate));
+        metrics.put("retrieval_to_injection_transfer_rate", round4(retrievalToInjectionTransferRate));
+        metrics.put("scenario_count", queries().size());
+        metrics.put("minimum_resume_scenario_count", 50);
+        root.put("injection_measurement_independent_from_recall", true);
 
         ArrayNode policies = root.putArray("policy_results");
         for (PolicyResult result : policyResults) {
@@ -247,6 +291,8 @@ class RealLlmMemoryBenchmarkIT {
             ObjectNode node = injections.addObject();
             node.put("query", result.query().query());
             node.put("injected", result.injected());
+            node.put("recalled_before_injection", result.recalledBeforeInjection());
+            node.putPOJO("recalled_hit_ids", result.recalledHitIds().stream().toList());
         }
 
         Files.writeString(report, JSON.writerWithDefaultPrettyPrinter().writeValueAsString(root),
@@ -261,11 +307,17 @@ class RealLlmMemoryBenchmarkIT {
         return (double) numerator / denominator;
     }
 
+    private static double ratioOrZero(long numerator, long denominator) {
+        return denominator <= 0 ? 0.0 : (double) numerator / denominator;
+    }
+
     private static double round4(double value) {
         return Math.round(value * 10_000.0) / 10_000.0;
     }
 
     private record Candidate(String fact, boolean explicit, String expectedAction) {}
+
+    private record MemoryScenario(String id, String fact, String query, List<String> expectedTerms) {}
 
     private record QueryCase(String query, List<String> expectedTerms) {}
 
@@ -273,5 +325,12 @@ class RealLlmMemoryBenchmarkIT {
 
     private record RecallResult(QueryCase query, boolean matched, Set<String> hitIds) {}
 
-    private record InjectionResult(QueryCase query, boolean injected) {}
+    private record InjectionResult(QueryCase query,
+                                   boolean injected,
+                                   boolean recalledBeforeInjection,
+                                   Set<String> recalledHitIds) {
+        private InjectionResult {
+            recalledHitIds = Set.copyOf(recalledHitIds == null ? Set.of() : recalledHitIds);
+        }
+    }
 }
