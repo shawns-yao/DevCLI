@@ -1,5 +1,14 @@
 # TODO
 
+## 2026-08-11 上下文压缩预算治理优化
+
+- 状态：已实现并通过限定回归
+- 已实现：原文尾部从固定轮次近似策略收紧为严格 token 预算；user 边界超预算时继续前移，单条大消息无法切分时保留头尾并落盘可恢复引用；SessionMemory 支持前缀预摘要增量复用；默认每 5 次成功压缩执行一次摘要重建；压缩阈值扣除当前工具定义和输出预留
+- 验证：`ConversationHistoryCompactorTest`、`ContextProfileTest`、`TokenBudgetTest` 共 47 项通过；Maven 全量回归通过
+- 未验证：优化后的 256k 真实模型评测连续两次在探活阶段收到空 assistant response，测试按协议跳过；旧 93.3% 只保留为 2026-08-10 基线，不能声称已被本次实现重新验证
+- 影响范围：ConversationHistoryCompactor、ContextProfile、TokenBudget、ReAct、Plan、SubAgent 的请求前压缩阈值
+- 剩余风险：Provider 原生 tokenizer 与本地估算可能存在偏差；周期性重建无法恢复既没有摘要也没有落盘引用的历史内容
+
 ## 2026-08-09 四项简历实验重测
 
 - 状态：四项均已进入真实模型执行；并发、压缩、长期记忆已形成有效报告，Saga 多智能体形成有效单侧结果，但同轮单 Agent 连续因模型链路未完整结束而无法形成有效配对

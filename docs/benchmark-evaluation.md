@@ -47,6 +47,8 @@ CodeSearchNet Java 公共 test split 采样 50 条，Top-K 固定为 5：
 
 2026-08-10 使用 `gpt-5.6-terra` 和 256k 上下文窗口重新执行。压缩阈值固定为 80%，即 204,800 token；每轮先追加单条低于 microcompact 阈值的确定性 user/assistant 对话消息，使历史重新增长到阈值以上，再执行一次正式 `Agent.run`，由生产入口 `Agent.maybeCompactHistory` 自动压缩。五轮压缩前 token 分别为 227,989、230,239、207,355、209,733、209,365，压缩后分别降至 53,843、56,002、58,354、58,010、54,707。30 条预先固定事实保留 28 条，自动问答保真率为 93.3%。该结果尚未经过人工复核。
 
+2026-08-11 完成严格原文 token 预算、大消息可恢复落盘、周期性摘要重建和工具定义预算扣除后，真实模型复跑连续两次在探活阶段返回空 assistant response，评测按协议跳过。因此 93.3% 仍是 2026-08-10 实现的有效基线，不代表新实现已经取得相同结果；新报告生成前不得覆盖或外推该数字。
+
 | 难度层 | 通过数 |
 | --- | ---: |
 | EASY | 5/5 |
@@ -175,7 +177,8 @@ Context Compression：
 
 ```powershell
 mvn -q "-Dtest=RealLlmCompressionRetentionIT" -DskipTests=false `
-  "-Ddevcli.it.compression.provider=anthropic" test
+  "-Ddevcli.benchmark.compression=true" `
+  "-Ddevcli.it.compression.provider=openai" test
 ```
 
 Agent 五任务：
