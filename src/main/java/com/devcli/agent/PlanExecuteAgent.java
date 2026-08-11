@@ -10,6 +10,8 @@ import com.devcli.memory.CompactBoundaryRuntimeState;
 import com.devcli.memory.ConversationHistoryCompactor;
 import com.devcli.memory.MemoryManager;
 import com.devcli.memory.PostCompactRestoreContext;
+import com.devcli.memory.TokenBudget;
+import com.devcli.context.ContextProfile;
 import com.devcli.plan.*;
 import com.devcli.prompt.PromptAssembler;
 import com.devcli.prompt.PromptContext;
@@ -192,7 +194,10 @@ public class PlanExecuteAgent {
 
     private void maybeCompactHistory(List<LlmClient.Message> messages, PrintStream out) {
         if (historyCompactor == null) return;
-        int trigger = memoryManager.getContextProfile().compressionTriggerTokens();
+        ContextProfile profile = memoryManager.getContextProfile();
+        int toolDefinitionTokens = TokenBudget.estimateToolDefinitionsTokens(
+                toolRegistry.getToolDefinitions());
+        int trigger = profile.historyTriggerTokens(toolDefinitionTokens);
         try {
             historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(toolRegistry.getProjectPath()));
             boolean compacted = historyCompactor.compactIfNeeded(messages, trigger);

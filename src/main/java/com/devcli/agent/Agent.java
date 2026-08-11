@@ -11,6 +11,7 @@ import com.devcli.memory.ConversationHistoryCompactor;
 import com.devcli.memory.ExplicitMemoryHints;
 import com.devcli.memory.MemoryManager;
 import com.devcli.memory.PostCompactRestoreContext;
+import com.devcli.memory.TokenBudget;
 import com.devcli.prompt.PromptAssembler;
 import com.devcli.prompt.PromptContext;
 import com.devcli.prompt.PromptMode;
@@ -550,7 +551,10 @@ public class Agent implements AutoCloseable {
 
     private void maybeCompactHistory() {
         if (historyCompactor == null) return;
-        int trigger = memoryManager.getContextProfile().compressionTriggerTokens();
+        ContextProfile profile = memoryManager.getContextProfile();
+        int toolDefinitionTokens = TokenBudget.estimateToolDefinitionsTokens(
+                toolRegistry.getToolDefinitions());
+        int trigger = profile.historyTriggerTokens(toolDefinitionTokens);
         try {
             String projectPath = toolRegistry.getProjectPath();
             if (projectPath != null) {

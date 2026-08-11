@@ -11,6 +11,7 @@ import com.devcli.lsp.LspDiagnosticReport;
 import com.devcli.memory.CompactBoundaryRuntimeState;
 import com.devcli.memory.ConversationHistoryCompactor;
 import com.devcli.memory.PostCompactRestoreContext;
+import com.devcli.memory.TokenBudget;
 import com.devcli.context.ContextProfile;
 import com.devcli.prompt.PromptAssembler;
 import com.devcli.prompt.PromptContext;
@@ -349,7 +350,10 @@ public class SubAgent {
         if (profile == null) return;
         try {
             historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(toolRegistry.getProjectPath()));
-            boolean compacted = historyCompactor.compactIfNeeded(history, profile.compressionTriggerTokens());
+            int toolDefinitionTokens = TokenBudget.estimateToolDefinitionsTokens(
+                    toolRegistry.getToolDefinitions());
+            boolean compacted = historyCompactor.compactIfNeeded(
+                    history, profile.historyTriggerTokens(toolDefinitionTokens));
             if (compacted && out != null) {
                 out.println("📦 [" + name + "] 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
             }

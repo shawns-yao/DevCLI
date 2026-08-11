@@ -84,6 +84,18 @@ public record ContextProfile(
         return Math.min(ratioTrigger, reserveTrigger);
     }
 
+    /**
+     * 根据当前请求额外占用的 token 重新计算 conversationHistory 的触发阈值。
+     *
+     * <p>工具定义不属于 history，但同样占用模型窗口。完整请求达到比例阈值或
+     * 输出预留下限时都应触发压缩，因此额外请求 token 必须从最终触发值中扣除，
+     * 不能只从模型窗口扣除，否则大窗口下的比例阈值会漏算工具定义。
+     */
+    public int historyTriggerTokens(int additionalRequestTokens) {
+        int additional = Math.max(0, additionalRequestTokens);
+        return Math.max(1, compressionTriggerTokens() - additional);
+    }
+
     public String summary() {
         return "window: " + maxContextWindow
                 + " | 压缩阈值: " + compressionTriggerTokens() + " tokens (≤" + (int) (compressionTriggerRatio * 100)

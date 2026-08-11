@@ -125,6 +125,28 @@ public class TokenBudget {
         return total;
     }
 
+    /**
+     * 估算当前请求中工具定义占用的 token。工具定义不在 conversationHistory 内，
+     * 但同样计入模型上下文窗口，因此压缩阈值计算不能忽略它们。
+     */
+    public static int estimateToolDefinitionsTokens(List<LlmClient.Tool> tools) {
+        if (tools == null || tools.isEmpty()) {
+            return 0;
+        }
+        int total = 0;
+        for (LlmClient.Tool tool : tools) {
+            if (tool == null) {
+                continue;
+            }
+            StringBuilder definition = new StringBuilder();
+            definition.append(tool.name() == null ? "" : tool.name()).append('\n')
+                    .append(tool.description() == null ? "" : tool.description()).append('\n')
+                    .append(tool.parameters() == null ? "" : tool.parameters().toString());
+            total += MemoryEntry.estimateTokens(definition.toString());
+        }
+        return total + tools.size() * 4;
+    }
+
     private static int estimateImageTokens(LlmClient.ContentPart part) {
         if (part.imageBase64() != null && !part.imageBase64().isBlank()) {
             int bytes = (int) (part.imageBase64().length() * 3L / 4L);

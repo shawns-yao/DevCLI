@@ -24,12 +24,12 @@ import java.util.function.Supplier;
  * <p>v3 重构（路径 B）：旧版本曾与 {@code ContextCompressor + ConversationMemory} 双轨并存，
  * 后者只压旁路笔记本不影响 LLM 输入，已删除。本类是真正治理 LLM 输入窗口的唯一压缩点。
  *
- * <p>第 0 层 microcompact：在任何 LLM 摘要之前，先把单条超大消息（通常是大工具结果）头尾截断
+ * <p>第 0 层 microcompact：在任何 LLM 摘要之前，先把单条超大消息头尾截断并将完整原文落盘
  * （{@link #microcompactOversizeMessages}，不调 LLM、不删消息）。这既能在很多情况下直接把 token
  * 压回阈值、省掉摘要，又保证后续保留区不被单条巨型消息撑爆（避免单条 100k 导致 splitIdx==systemEnd
- * 而 skip）。MVP 用头尾截断，预留 offload 落盘（可重新取回）的扩展点。
+ * 而跳过压缩）；上下文中的边界标记保留原始长度与可恢复路径。
  *
- * 算法（v2，PR-1）：
+ * 算法：
  * 1. 估算 conversationHistory 当前 token，未达 trigger 直接返回 false
  * 2. <b>token 预算保留区</b>：从尾巴往前累计 token，到 retainRecentTokens 时停在
  *    最近的 user 消息边界，作为 splitIdx
@@ -45,7 +45,6 @@ import java.util.function.Supplier;
  * - 历史首次压缩时使用 Map-Reduce（整段历史进 LLM 视野，不 first-N 截断）
  * - 后续压缩使用增量更新（基于上轮摘要 + 仅新增消息），避免摘要套娃稀释老事实
  * - first-N 字符截断在多轮压缩下信息保留率会塌到 16% 量级（实测）
- * - Map-Reduce 朴素版多轮压缩到 27.8%；增量摘要预期突破 40%+
  * - 摘要输出为固定九段结构化（{@link RollingSummary}，对标 Claude Code /compact 模板）；
  *   超长时先由 {@link SummaryGarbageCollector} 程序化按段裁剪（不调 LLM），不够再 LLM recompress 兜底
  */
@@ -83,6 +82,8 @@ public class ConversationHistoryCompactor {
     private static final int MICRO_COMPACT_LAST_TAIL_CHARS = 3_000;
     /** 按轮次清理旧工具结果时保留最近多少个 user round 不动。 */
     private static final int MICRO_COMPACT_RETAIN_RECENT_TOOL_ROUNDS = 2;
+    /** 普通用户/助手大消息的可恢复落盘目录。 */
+    static final String MICROCOMPACT_MESSAGE_OUTPUTS_DIR = ".devcli/microcompact_message_outputs";
 
     /** 单片送 LLM 的字符上限。控制单次摘要请求不会撑爆 LLM window。 */
     private static final int MAP_CHUNK_CHARS = 60_000;
@@ -117,6 +118,8 @@ public class ConversationHistoryCompactor {
      * 再压缩失败时保留原摘要并打日志，不阻断压缩主流程。
      */
     static final int MAX_SUMMARY_CHARS = 16_000;
+    /** 每完成 K 次增量压缩，执行一次摘要重建，避免增量误差无限累积。 */
+    static final int DEFAULT_FULL_RECOMPACT_INTERVAL = 5;
 
     /**
      * 连续压缩失败上限。达到后本会话停止再次尝试压缩，避免在不可恢复的窗口溢出
@@ -269,6 +272,9 @@ public class ConversationHistoryCompactor {
      * {@link #compactIfNeeded} 直接返回 false，不再调 LLM。
      */
     private int consecutiveFailures = 0;
+    /** 已成功完成的历史压缩次数，用于周期性摘要重建。 */
+    private int successfulCompactions = 0;
+    private int fullRecompactInterval = DEFAULT_FULL_RECOMPACT_INTERVAL;
 
     /**
      * 上次降级截断的时间戳（毫秒）。用于冷却期判断，避免降级循环。
@@ -299,6 +305,11 @@ public class ConversationHistoryCompactor {
 
     public void setLlmClient(LlmClient llmClient) {
         this.llmClient = llmClient;
+    }
+
+    /** 配置周期性摘要重建间隔；传入 0 表示关闭周期性重建。 */
+    public void setFullRecompactInterval(int interval) {
+        this.fullRecompactInterval = Math.max(0, interval);
     }
 
     public void setSessionMemory(SessionMemory sessionMemory) {
@@ -381,6 +392,7 @@ public class ConversationHistoryCompactor {
 
         // 1) token 预算保留区：从尾巴往前累计 token，落在 user 边界
         int splitIdx = findSplitIdxByTokenBudget(history, systemEnd, retainRecentTokens);
+        splitIdx = fitRecentTailWithinTokenBudget(history, systemEnd, splitIdx, retainRecentTokens);
         if (splitIdx <= systemEnd) {
             log.info("compactIfNeeded skip: cannot find safe splitIdx > systemEnd={}", systemEnd);
             // 这不是 LLM 调用失败，是结构性无法压缩（如全是 system 或 retainTokens 过大）。
@@ -390,6 +402,11 @@ public class ConversationHistoryCompactor {
 
         // 2) 识别 history 头是否已有"上一轮摘要" + 它的位置
         PreviousSummary prev = detectPreviousSummary(history, systemEnd);
+        PreviousSummary summaryBase = prev;
+        boolean periodicFullRecompact = summaryBase != null
+                && fullRecompactInterval > 0
+                && successfulCompactions > 0
+                && successfulCompactions % fullRecompactInterval == 0;
 
         // 3) oldMsgs：[systemEnd 之后到 splitIdx 之前] 的所有消息
         //    若有 prev 摘要，oldMsgs 包括 prev 那条 user 消息（增量摘要 prompt 会把它单独识别出来当 base）
@@ -398,16 +415,30 @@ public class ConversationHistoryCompactor {
 
         // 4) 摘要：优先复用会话预摘要，否则走增量 vs 全量 Map-Reduce。
         String summary = null;
-        if (prev == null && sessionMemory != null) {
+        if (summaryBase == null && !periodicFullRecompact && sessionMemory != null) {
             var reusablePreSummary = sessionMemory.findReusablePreSummary(oldMsgs);
             if (reusablePreSummary.isPresent()) {
                 summary = reusablePreSummary.get().summary();
                 log.info("reuse session memory pre-summary for {} old messages",
                         reusablePreSummary.get().messageCount());
+            } else {
+                var extendablePreSummary = sessionMemory.findExtendablePreSummary(oldMsgs);
+                if (extendablePreSummary.isPresent()) {
+                    int absoluteEnd = systemEnd + extendablePreSummary.get().messageCount();
+                    summaryBase = new PreviousSummary(
+                            systemEnd, absoluteEnd, extendablePreSummary.get().summary());
+                    log.info("extend session memory pre-summary from {} to {} old messages",
+                            extendablePreSummary.get().messageCount(), oldMsgs.size());
+                }
             }
         }
+        periodicFullRecompact = summaryBase != null
+                && fullRecompactInterval > 0
+                && successfulCompactions > 0
+                && successfulCompactions % fullRecompactInterval == 0;
         if (summary == null) {
-            SummaryAttempt attempt = summarizeWithPtlRetry(prev, history, splitIdx, oldMsgs);
+            SummaryAttempt attempt = summarizeWithPtlRetry(
+                    periodicFullRecompact ? null : summaryBase, history, splitIdx, oldMsgs);
             if (attempt.terminated()) {
                 // attempt 内部已经 recordFailure
                 return false;
@@ -448,7 +479,7 @@ public class ConversationHistoryCompactor {
         CompactBoundaryMetadata metadata = new CompactBoundaryMetadata(
                 "history",
                 "token_threshold",
-                prev != null ? "incremental" : "full",
+                periodicFullRecompact ? "periodic-full" : (summaryBase != null ? "incremental" : "full"),
                 currentTokens,
                 afterTokens,
                 originalMessages,
@@ -471,10 +502,11 @@ public class ConversationHistoryCompactor {
             log.info("conversation compaction succeeded; reset failure counter from {}", consecutiveFailures);
             consecutiveFailures = 0;
         }
+        successfulCompactions++;
         log.info(String.format(Locale.ROOT,
                 "compacted conversationHistory: tokens %d -> %d, messages %d -> %d, mode=%s, summary chars %d",
                 currentTokens, afterTokens, oldMsgs.size() + systemEnd, rebuilt.size(),
-                prev != null ? "incremental" : "full",
+                periodicFullRecompact ? "periodic-full" : (summaryBase != null ? "incremental" : "full"),
                 summary.length()));
         return true;
     }
@@ -522,8 +554,7 @@ public class ConversationHistoryCompactor {
      * 不调 LLM、不删消息（保持 tool_call/tool_result 配对），是最廉价的一层压缩，先于任何 LLM
      * 摘要执行，也用于熔断/冷却期降级。
      *
-     * <p>MVP 用头尾截断；后续可把 {@link #compactOversizeContent} 换成"原文 offload 落盘、
-     * context 留路径引用（可重新取回）"的实现，即 Claude Code 式 microcompaction。
+     * <p>普通文本和工具结果都会保留头尾，并在 context 中写入可重新读取的落盘路径。
      *
      * <p>保护规则：
      * <ul>
@@ -551,7 +582,7 @@ public class ConversationHistoryCompactor {
             int tail = isLast ? MICRO_COMPACT_LAST_TAIL_CHARS : MICRO_COMPACT_TAIL_CHARS;
             String compacted = "tool".equals(msg.role()) && msg.toolCallId() != null
                     ? compactOversizeToolContent(msg.toolCallId(), content, head, tail)
-                    : compactOversizeContent(content, head, tail);
+                    : compactOversizeMessageContent(i, msg, content, head, tail);
             if (compacted.length() < content.length()) {
                 history.set(i, new LlmClient.Message(
                         msg.role(), compacted, msg.reasoningContent(), msg.toolCalls(), msg.toolCallId()));
@@ -661,10 +692,64 @@ public class ConversationHistoryCompactor {
         }
     }
 
+    private String compactOversizeMessageContent(int index,
+                                                 LlmClient.Message message,
+                                                 String content,
+                                                 int headChars,
+                                                 int tailChars) {
+        String messageId = (message.role() == null ? "message" : message.role())
+                + "-" + index + "-" + content.length() + "-" + Integer.toUnsignedString(content.hashCode());
+        Path outputFile = persistMicrocompactMessageContent(messageId, content);
+        if (outputFile == null) {
+            return compactOversizeContent(content, headChars, tailChars);
+        }
+        return compactOversizeContent(
+                content,
+                headChars,
+                tailChars,
+                "\n\n" + renderMicrocompactMessageBoundary(messageId, content.length(), outputFile)
+                        + "[完整消息已落盘；可用 read_file 读取 storedPath。]");
+    }
+
+    private Path persistMicrocompactMessageContent(String messageId, String content) {
+        if (microcompactOutputRoot == null) {
+            return null;
+        }
+        try {
+            Path outputDir = microcompactOutputRoot
+                    .resolve(MICROCOMPACT_MESSAGE_OUTPUTS_DIR)
+                    .resolve(MICROCOMPACT_SESSION_ID);
+            Files.createDirectories(outputDir);
+            Path outputFile = outputDir.resolve(sanitizeFileName(messageId) + ".txt")
+                    .toAbsolutePath()
+                    .normalize();
+            if (!outputFile.startsWith(microcompactOutputRoot)) {
+                return null;
+            }
+            Files.writeString(outputFile, content, StandardCharsets.UTF_8);
+            return outputFile;
+        } catch (IOException | RuntimeException e) {
+            log.warn("failed to persist microcompact message {}; fallback to inline excerpt",
+                    messageId, e);
+            return null;
+        }
+    }
+
     private static String renderMicrocompactBoundary(String toolCallId, int originalChars, Path outputFile) {
         return "<microcompact_boundary>\n"
                 + "type=tool_result\n"
                 + "toolCallId=" + toolCallId + "\n"
+                + "originalChars=" + originalChars + "\n"
+                + "storedPath=" + outputFile + "\n"
+                + "</microcompact_boundary>\n";
+    }
+
+    private static String renderMicrocompactMessageBoundary(String messageId,
+                                                             int originalChars,
+                                                             Path outputFile) {
+        return "<microcompact_boundary>\n"
+                + "type=message\n"
+                + "messageId=" + messageId + "\n"
                 + "originalChars=" + originalChars + "\n"
                 + "storedPath=" + outputFile + "\n"
                 + "</microcompact_boundary>\n";
@@ -903,6 +988,99 @@ public class ConversationHistoryCompactor {
         }
         // 累计不够 retain，且没找到任何 user：返回 systemEnd 让调用方跳过
         return systemEnd;
+    }
+
+    /**
+     * user 边界对齐会带来一个常见超预算场景：边界所在的单条消息本身就大于尾部预算。
+     * 先把边界向后移动，尽量把最旧的保留轮次送入摘要；只剩单条大消息时再做可恢复截断。
+     */
+    private int fitRecentTailWithinTokenBudget(List<LlmClient.Message> history,
+                                               int systemEnd,
+                                               int splitIdx,
+                                               int retainTokens) {
+        if (splitIdx <= systemEnd) {
+            return splitIdx;
+        }
+        while (estimateRangeTokens(history, splitIdx, history.size()) > retainTokens) {
+            int nextUser = findNextUserBoundary(history, splitIdx + 1);
+            if (nextUser < 0) {
+                break;
+            }
+            splitIdx = nextUser;
+        }
+
+        int tailTokens = estimateRangeTokens(history, splitIdx, history.size());
+        if (tailTokens <= retainTokens) {
+            return splitIdx;
+        }
+
+        // 没有可再前移的安全 user 边界时，只压缩保留区最旧消息，优先保留最新内容。
+        for (int i = splitIdx; i < history.size() && tailTokens > retainTokens; i++) {
+            LlmClient.Message message = history.get(i);
+            if (message.content() == null || message.content().isBlank()
+                    || message.hasContentParts()) {
+                continue;
+            }
+            int messageTokens = TokenBudget.estimateMessagesTokens(List.of(message));
+            int allowed = Math.max(128, messageTokens - (tailTokens - retainTokens));
+            if (allowed >= messageTokens) {
+                continue;
+            }
+            String compacted = compactMessageToTokenBudget(i, message, allowed);
+            if (compacted.length() < message.content().length()) {
+                history.set(i, new LlmClient.Message(
+                        message.role(), compacted, message.reasoningContent(),
+                        message.toolCalls(), message.toolCallId()));
+                tailTokens = estimateRangeTokens(history, splitIdx, history.size());
+            }
+        }
+        return splitIdx;
+    }
+
+    private static int findNextUserBoundary(List<LlmClient.Message> history, int start) {
+        for (int i = Math.max(0, start); i < history.size(); i++) {
+            if ("user".equals(history.get(i).role())) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static int estimateRangeTokens(List<LlmClient.Message> history, int start, int end) {
+        if (start >= end) {
+            return 0;
+        }
+        return TokenBudget.estimateMessagesTokens(history.subList(start, end));
+    }
+
+    private String compactMessageToTokenBudget(int index,
+                                               LlmClient.Message message,
+                                               int targetTokens) {
+        String content = message.content();
+        String messageId = (message.role() == null ? "message" : message.role())
+                + "-budget-" + index + "-" + content.length()
+                + "-" + Integer.toUnsignedString(content.hashCode());
+        Path outputFile = persistMicrocompactMessageContent(messageId, content);
+        String marker = outputFile == null
+                ? "\n\n[... 消息已按原文 token 预算截断 %d 字符；中间内容不可直接展示 ...]"
+                : "\n\n" + renderMicrocompactMessageBoundary(messageId, content.length(), outputFile)
+                        + "[完整消息已落盘；可用 read_file 读取 storedPath。]";
+        int retainedChars = Math.min(content.length() - 1,
+                Math.max(256, Math.max(1, targetTokens) * 3));
+        String candidate = content;
+        for (int attempt = 0; attempt < 10; attempt++) {
+            int head = Math.max(64, retainedChars / 2);
+            int tail = Math.max(64, retainedChars - head);
+            candidate = compactOversizeContent(content, head, tail, marker);
+            int estimated = TokenBudget.estimateMessagesTokens(List.of(
+                    new LlmClient.Message(message.role(), candidate,
+                            message.reasoningContent(), message.toolCalls(), message.toolCallId())));
+            if (estimated <= targetTokens || retainedChars <= 256) {
+                return candidate;
+            }
+            retainedChars = Math.max(256, retainedChars * 3 / 4);
+        }
+        return candidate;
     }
 
     /**
