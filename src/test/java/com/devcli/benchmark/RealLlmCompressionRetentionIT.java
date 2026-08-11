@@ -73,8 +73,12 @@ class RealLlmCompressionRetentionIT {
         List<FactCase> facts = scenarioFacts();
         final int testWindow = 256_000;
         final ContextProfile benchmarkProfile = benchmarkContextProfile(testWindow, 0.80);
-        final int trigger = benchmarkProfile.compressionTriggerTokens();
-        Agent agent = new Agent(llm, new ToolRegistry());
+        final int requestedTrigger = benchmarkProfile.compressionTriggerTokens();
+        ToolRegistry registry = new ToolRegistry();
+        Agent agent = new Agent(llm, registry);
+        final int toolDefinitionTokens = TokenBudget.estimateToolDefinitionsTokens(
+                registry.getToolDefinitions());
+        final int trigger = benchmarkProfile.historyTriggerTokens(toolDefinitionTokens);
         agent.getMemoryManager().applyContextProfile(benchmarkProfile);
         List<CompactionPhase> phases = new ArrayList<>();
         long conversationStart = System.currentTimeMillis();
@@ -138,7 +142,8 @@ class RealLlmCompressionRetentionIT {
 
         // ===== 5. 输出报告（控制台 + benchmark 目录 JSON），方便人工审阅 =====
         double retention = facts.isEmpty() ? 1.0 : (double) passed / facts.size();
-        Path report = writeRoundBasedReport(llm, facts, phases, qaResults, trigger,
+        Path report = writeRoundBasedReport(llm, facts, phases, qaResults,
+                requestedTrigger, trigger, toolDefinitionTokens,
                 retention, conversationElapsed, qaElapsed, roundResponses);
         StringBuilder tierLine = new StringBuilder();
         for (Tier tier : Tier.values()) {
@@ -840,7 +845,9 @@ class RealLlmCompressionRetentionIT {
     private Path writeRoundBasedReport(LlmClient llm, List<FactCase> facts,
                                        List<CompactionPhase> phases,
                                        List<QaResult> qaResults,
+                                       int requestedTriggerTokens,
                                        int triggerTokens,
+                                       int toolDefinitionTokens,
                                        double retention,
                                        long conversationMs,
                                        long qaMs,
@@ -858,7 +865,9 @@ class RealLlmCompressionRetentionIT {
         root.put("compaction_count", phases.isEmpty() ? 0 : phases.get(phases.size() - 1).observedCompactions);
         root.put("context_window_for_experiment", 256_000);
         root.put("compression_trigger_ratio", 0.80);
-        root.put("compression_trigger_tokens", triggerTokens);
+        root.put("requested_compression_trigger_tokens", requestedTriggerTokens);
+        root.put("history_compression_trigger_tokens", triggerTokens);
+        root.put("tool_definition_tokens", toolDefinitionTokens);
         root.put("fact_count", facts.size());
         root.put("fact_source", "fixed scenario facts authored before execution; no facts were added during QA");
         root.put("annotation_method", "automated answer check against predeclared keywords; human review not claimed");

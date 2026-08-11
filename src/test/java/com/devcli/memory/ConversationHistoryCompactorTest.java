@@ -84,6 +84,47 @@ class ConversationHistoryCompactorTest {
     }
 
     @Test
+    void oversizedRecentMessageIsBoundedByTokenBudgetAndStored(@TempDir Path tempDir) throws IOException {
+        StubCompactor c = new StubCompactor("SUMMARY", 3_000, true);
+        c.setMicrocompactOutputRoot(tempDir);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("SYSTEM"));
+        history.add(LlmClient.Message.user("old question " + longText(5_000)));
+        history.add(LlmClient.Message.assistant("old answer " + longText(5_000)));
+        history.add(LlmClient.Message.user("large current upload " + longText(20_000)));
+        history.add(LlmClient.Message.assistant("current answer"));
+
+        assertTrue(c.compactIfNeeded(history, 100));
+        int tailStart = 3;
+        int tailTokens = TokenBudget.estimateMessagesTokens(
+                history.subList(tailStart, history.size()));
+        assertTrue(tailTokens <= 3_000,
+                "最新原文区不能因单条大消息突破 token 预算，实际=" + tailTokens);
+        assertTrue(history.get(tailStart).content().contains("storedPath="),
+                "被截断的普通消息必须保留可恢复落盘引用");
+        assertTrue(Files.walk(tempDir)
+                .anyMatch(path -> path.toString().contains("microcompact_message_outputs")
+                        && Files.isRegularFile(path)));
+    }
+
+    @Test
+    void performsPeriodicFullRecompactAfterIncrementalCompactions() {
+        StubCompactor c = new StubCompactor("SUMMARY", 3_000, true);
+        c.setFullRecompactInterval(2);
+        List<LlmClient.Message> history = buildBigHistory();
+
+        assertTrue(c.compactIfNeeded(history, 100));
+        appendRound(history, 10);
+        assertTrue(c.compactIfNeeded(history, 100));
+        assertEquals(1, c.incrementalCalls.get());
+        appendRound(history, 20);
+        assertTrue(c.compactIfNeeded(history, 100));
+        assertEquals(2, c.summarizeCalls.get(),
+                "第三次压缩应按间隔执行周期性全量摘要重建");
+        assertTrue(history.get(1).content().contains("mode=periodic-full"));
+    }
+
+    @Test
     void runtimeCompactionRestoresMissingCriticalConstraintsBeforeCommit() {
         StubCompactor c = new StubCompactor("摘要遗漏了所有约束", 3_000, true);
         List<LlmClient.Message> history = new ArrayList<>();
@@ -158,7 +199,8 @@ class ConversationHistoryCompactorTest {
         assertTrue(metadata.preTokens() > metadata.postTokens());
         assertEquals(13, metadata.originalMessages());
         assertEquals(history.size(), metadata.rebuiltMessages());
-        assertEquals(4, metadata.retainedMessages());
+        assertEquals(2, metadata.retainedMessages(),
+                "严格 token 尾部预算下只保留最后一轮完整 user/assistant");
         assertEquals("MOCK SUMMARY OF OLD CONTENT".length(), metadata.summaryChars());
         assertEquals("MOCK SUMMARY OF OLD CONTENT",
                 CompactBoundaryMetadata.stripBoundaryBlock(
@@ -204,7 +246,7 @@ class ConversationHistoryCompactorTest {
             history.add(LlmClient.Message.user("Q" + i + ": " + longText(5_000)));
             history.add(LlmClient.Message.assistant("A" + i + ": " + longText(5_000)));
         }
-        sessionMemory.recordPreSummary(history.subList(1, 9), "SESSION PRE SUMMARY");
+        sessionMemory.recordPreSummary(history.subList(1, 11), "SESSION PRE SUMMARY");
 
         boolean compacted = c.compactIfNeeded(history, 100);
 
@@ -215,6 +257,25 @@ class ConversationHistoryCompactorTest {
                 .parseFromSummaryMessage(history.get(1).content())
                 .orElseThrow();
         assertEquals("SESSION PRE SUMMARY".length(), metadata.summaryChars());
+    }
+
+    @Test
+    void extendsSessionMemoryPreSummaryWhenStrictTailMovesSplitBoundary() {
+        SessionMemory sessionMemory = new SessionMemory();
+        StubCompactor c = new StubCompactor("EXTENDED SUMMARY", 3_000, true);
+        c.setSessionMemory(sessionMemory);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("SYSTEM_PROMPT"));
+        for (int i = 0; i < 6; i++) {
+            history.add(LlmClient.Message.user("Q" + i + ": " + longText(5_000)));
+            history.add(LlmClient.Message.assistant("A" + i + ": " + longText(5_000)));
+        }
+        sessionMemory.recordPreSummary(history.subList(1, 9), "SESSION PREFIX SUMMARY");
+
+        assertTrue(c.compactIfNeeded(history, 100));
+        assertEquals(1, c.incrementalCalls.get(),
+                "尾部预算变化后应基于前缀预摘要增量处理新增旧消息");
+        assertTrue(history.get(1).content().contains("EXTENDED SUMMARY"));
     }
 
     @Test
@@ -236,7 +297,7 @@ class ConversationHistoryCompactorTest {
         assertTrue(history.get(3).content().contains("src/Main.java"));
         assertEquals("assistant", history.get(4).role());
         assertEquals("user", history.get(5).role(), "恢复上下文后保留尾部仍应以 user 起头");
-        assertTrue(history.get(5).content().startsWith("Q4"));
+        assertTrue(history.get(5).content().startsWith("Q5"));
     }
 
     @Test
@@ -775,6 +836,11 @@ class ConversationHistoryCompactorTest {
             history.add(LlmClient.Message.assistant("A" + i + " " + longText(2_000)));
         }
         return history;
+    }
+
+    private static void appendRound(List<LlmClient.Message> history, int id) {
+        history.add(LlmClient.Message.user("new question " + id + " " + longText(2_000)));
+        history.add(LlmClient.Message.assistant("new answer " + id + " " + longText(2_000)));
     }
 
     /** 测试用 stub：summarize 返回固定字符串，避免真实 LLM 依赖。 */

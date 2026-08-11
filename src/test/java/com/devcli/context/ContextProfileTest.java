@@ -103,4 +103,20 @@ class ContextProfileTest {
         ContextProfile profile = ContextProfile.from(new GLMClient("test-key"));
         assertEquals(8_192, profile.outputReserveTokens());
     }
+
+    @Test
+    void historyTriggerAccountsForToolDefinitionTokens() {
+        ContextProfile profile = ContextProfile.custom(128_000, 4_000);
+
+        assertEquals(108_000, profile.compressionTriggerTokens());
+        assertEquals(100_000, profile.historyTriggerTokens(8_000));
+    }
+
+    @Test
+    void historyTriggerSubtractsToolsWhenRatioThresholdDominates() {
+        ContextProfile profile = ContextProfile.custom(256_000, 4_000);
+
+        assertEquals(230_400, profile.compressionTriggerTokens());
+        assertEquals(222_400, profile.historyTriggerTokens(8_000));
+    }
 }

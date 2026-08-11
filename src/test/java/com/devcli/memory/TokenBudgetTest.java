@@ -46,6 +46,18 @@ class TokenBudgetTest {
     }
 
     @Test
+    void shouldEstimateToolDefinitionTokens() {
+        LlmClient.Tool tool = new LlmClient.Tool(
+                "read_file",
+                "读取项目文件",
+                com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()
+                        .put("type", "object")
+                        .put("required", "path"));
+
+        assertTrue(TokenBudget.estimateToolDefinitionsTokens(List.of(tool)) > 4);
+    }
+
+    @Test
     void shouldGenerateUsageReport() {
         TokenBudget budget = new TokenBudget(128000);
         budget.recordUsage(1000, 500);
