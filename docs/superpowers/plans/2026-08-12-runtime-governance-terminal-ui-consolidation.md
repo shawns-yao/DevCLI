@@ -1,6 +1,6 @@
 # DevCLI 运行治理与终端界面收敛实施计划
 
-> **执行要求：** 本计划必须分阶段实施。每个阶段先完成代码，再统一执行该阶段限定测试；禁止在功能尚未完成时启动项目或提前运行全量测试。
+> **执行要求：** 当前只允许更新并冻结设计文档。阶段 5A 及之后的代码实现必须取得用户明确同意后才能开始；获得授权后仍需分阶段实施。全部功能完成前禁止启动项目或运行测试，最终统一验证。
 
 **目标：** 删除重复能力，统一会话、执行、预算、安全、恢复和观测模型，并把终端界面重构为消费同一运行状态的 JLine 内联控制台。
 
@@ -11,6 +11,14 @@
 ---
 
 ## 一、设计结论
+
+### 1.0 实施授权门禁
+
+- 本文档中的未勾选事项均为候选设计，不代表已经实施。
+- 用户明确回复同意实施前，不修改阶段 5A 及之后涉及的源代码、测试代码、配置或依赖。
+- 授权按已冻结范围生效；实施中发现需要扩大范围时，先更新设计并再次取得同意。
+- 文档更新、静态差异检查和 Git 文档提交不视为功能实现。
+- 结构化执行统一入口已在本次流程澄清前完成并提交；后续阶段严格执行本门禁。
 
 ### 1.1 产品能力保留、合并与删除
 
@@ -584,6 +592,90 @@ Agent、Plan、Team 和工具不得直接调用 UI 方法或写 stdout；它们�
 
 阶段结果（2026-08-12）：CLI 与旧 TUI 兼容入口都只选择 `ExecutionReviewPolicy` 并进入 `StructuredExecution`；`PlanExecuteAgent` 与 `AgentOrchestrator` 降为内部策略适配器。公共执行内核继续由 `AgentExecutionEngine`、`ExecutionGraph`、`ExecutionArtifact`、`WorkspaceExecutionSession`、`ToolRegistry` 和 `MemoryManager` 提供。按照用户要求，本阶段只完成测试契约和静态差异检查，测试留到全部功能统一完成后执行。
 
+### 阶段 5A：循环收敛与证据门禁
+
+**目标：** 防止重复观察造成无限循环，同时避免用全局最小轮数强迫普通问答调用无意义工具。
+
+**设计边界：**
+
+- 复用 `AgentBudget` 的硬轮数、相同工具参数指纹和重复错误熔断，不再新增第二套 MaxIterations。
+- 新增有界 `ObservationFingerprint` 与 `LoopProgressGuard`；只保存归一化摘要或指纹，不复制完整工具结果。
+- 连续观察高度相似时，第一次要求更换查询、工具或验证路径；策略切换后仍没有新证据才终止。
+- `EvidenceRequirement` 按任务意图和结构化步骤类型启用：代码分析至少需要成功读取或检索证据，修改任务需要成功副作用和验证证据，稳定知识问答不强制工具。
+- 不把隐藏思考原文再次注入 Prompt；工具调用仍与当前 assistant reasoning/content 保持同一消息协议，只校验声明目标与实际行动是否一致。
+
+**步骤：**
+
+- [ ] 为观察文本建立去时间戳、空白、路径噪声和截断标记的低成本归一化。
+- [ ] 用有界 token 集合相似度或 SimHash 判断“没有新增信息”，避免调用 embedding 增加成本。
+- [ ] 增加 `strategy_change_required`、`observation_stagnant` 和 `evidence_missing` 运行事件。
+- [ ] 将证据门禁接入 ReAct、Plan task 和 Worker 的统一执行出口，替代各路径零散判断。
+- [ ] 在基础工具策略 Prompt 中增加“观察等价时必须换方法”，但确定性 Guard 仍是唯一强制出口。
+- [ ] 所有功能统一完成后运行 AgentBudget、AgentExecutionEngine、ReAct、Plan 和 Team 限定测试。
+
+### 阶段 5B：统一工具契约与参数模型
+
+**目标：** 把工具说明、参数、能力和执行约束收敛为一份不可矛盾的契约。
+
+**目标结构：**
+
+```text
+ToolContract
+├── identity: name / version / source
+├── discovery: description / category / capabilities
+├── inputSchema: JSON Schema
+├── effect: ToolEffect
+├── availability: credential references / provider state
+└── executionPolicy: timeout / quota / concurrency / cost
+```
+
+**设计边界：**
+
+- `ToolEffect` 与 `ExecutionSecurityPolicy` 继续作为危险性和沙箱决策的唯一来源，不新增 `dangerous`、`sandboxed` 布尔字段。
+- `ToolOutput` 继续表达 status、errorCode、retryable、正文、图片、修改资源和强类型旁路载荷；耗时保留在 `ToolExecutionResult`，不复制到自由 metadata。
+- 工具内部 LLM Token 必须进入共享 `RunBudget`；工具固定费用使用整数最小货币单位和明确币种，禁止使用 `double` 猜价。
+- 参数支持 default、enum、minimum、maximum、pattern 和长度边界；未知字段继续拒绝。
+- 只允许无损格式归一化，例如明确的数字字符串转整数；越界值不静默 clamp，副作用参数必须返回结构化校验失败。
+- 参数 description 必须说明使用场景、格式、边界和示例；新增静态契约审计，不靠运行时猜测质量。
+
+**步骤：**
+
+- [ ] 新增不可变 `ToolContract`、`ToolIdentity`、`ToolCategory`、`ToolExecutionPolicy` 和 `ToolCost`。
+- [ ] 扩展 `ToolParameter` 或迁移到统一 JSON Schema builder，保留旧构造器兼容窗口。
+- [ ] 为认证要求保存凭据引用和可用状态，不读取或暴露密钥正文。
+- [ ] 增加 `AUTH_REQUIRED`、`RATE_LIMITED`、`TOOL_UNAVAILABLE` 和 `COST_BUDGET_EXCEEDED` 等稳定错误码。
+- [ ] 让内置工具、MCP 工具和 resource 虚拟工具通过同一契约投影给 LLM。
+- [ ] 所有功能统一完成后运行 schema、ToolOutput、MCP validator 和工具 Provider 契约测试。
+
+### 阶段 5C：工具注册、发现与按需暴露
+
+**目标：** 降低工具选择噪声，防止重复注册和动态刷新破坏调用一致性。
+
+**步骤：**
+
+- [ ] `ToolRegistry` 保存 contract + executor，并建立 category、capability、source、version 和 schema fingerprint 索引。
+- [ ] 同名注册默认拒绝；只有显式、同来源、版本可判定的替换才允许，MCP server 刷新继续原子替换自己的命名空间。
+- [ ] 暴露顺序固定为：能力范围 → Skill 白名单 → Project Trust/凭据可用性 → 任务意图/步骤类型 → 剩余预算 → 相关性排序。
+- [ ] 保留 `search_tools` 和 MCP 按需激活；3 至 5 个工具只作为简单任务经验值，不设固定上限，最终上限由模型能力与任务配置决定。
+- [ ] 功能相近工具采用内置优先级和来源说明，不因类别相同直接删除有不同认证或语义的工具。
+- [ ] 记录工具被展示或隐藏的稳定原因，供可观测投影使用。
+- [ ] 所有功能统一完成后运行 ToolRegistry、tool search、动态 MCP 刷新和 Skill 权限测试。
+
+### 阶段 5D：逐工具运行治理
+
+**目标：** 单工具与并行工具共享一致的限流、超时、并发、成本和失败语义。
+
+**步骤：**
+
+- [ ] 所有工具调用统一经过逐工具 timeout；修复当前单工具调用只受底层实现约束、批次工具才有统一超时的问题。
+- [ ] 使用 token bucket 或真实滚动窗口实现 run/agent/credential/provider 多级配额，不采用只记录上次调用时间的伪滑动窗口。
+- [ ] 用公平 semaphore 限制逐工具和逐 provider 并发，限流结果携带 `retryAfter`。
+- [ ] 外部工具执行前向 `RunBudget` 预留费用，完成后按实际值结算；未知价格在严格预算档位下不得伪装为零成本。
+- [ ] 只有幂等、无副作用且结构化标记 retryable 的调用可自动重试，并继续占用 Attempt 与预算。
+- [ ] CPU、内存等硬限制只对进程或容器工具声明和执行；JVM 进程内工具不虚假声称具有独立内存隔离。
+- [ ] 超时返回后仍可能运行的非协作线程视为运行时缺陷，优先使用原生 HTTP/MCP/进程取消并在关闭时对账。
+- [ ] 所有功能统一完成后运行 timeout、quota、concurrency、cost、retry 和 cancellation 测试。
+
 ### 阶段 6：持久 Session Tree 替换 CLI 进程内分支
 
 **目标：** 统一 CLI 与 Runtime API 的消息树和分支模型。
@@ -726,6 +818,10 @@ Agent、Plan、Team 和工具不得直接调用 UI 方法或写 stdout；它们�
 | 维度 | 必须证明 |
 | --- | --- |
 | 功能收敛 | 只有 ReAct 与 StructuredExecution 两类执行语义；CLI 不再有进程内分支 |
+| 循环收敛 | 重复工具、重复错误和相似观察都能有界退出；证据型任务不能无证据完成 |
+| 工具契约 | 元数据、Schema、能力和执行约束只有一个事实来源；安全字段不会互相矛盾 |
+| 工具选择 | LLM 只看到当前能力和任务相关工具，未知工具仍可通过 search_tools 按需激活 |
+| 工具治理 | 单个与并行调用都受逐工具超时、配额、并发和成本约束 |
 | 成本 | 所有 LLM 调用和重试均计入 RunBudget；硬预算并发安全 |
 | 安全 | 默认副作用隔离；未信任项目不启动可执行资源；策略拒绝不可由 HITL 绕过 |
 | 可靠性 | RunStore 是本地运行事实来源；崩溃恢复不重复提交、不重置预算 |

@@ -13,8 +13,10 @@
 - Temporal 决策：当前本地版不引入；未来服务端出现跨机器 Worker、长时间审批、定时器和故障转移需求时，可实现 `TemporalWorkflowRuntime` 替换本地调度，禁止与 DurableTaskManager 叠加；Temporal history 只保存控制状态和 Artifact 引用
 - 影响范围：agent、runtime、budget、security、tool、workspace、snapshot、trace、render、tui、cli、配置、测试和文档
 - 已实现：产品入口统一为 `StructuredExecution`；`/run --review=plan|team` 选择审查策略，`/plan` 与 `/team` 暂时保留为兼容别名；内部继续复用 `PlanExecuteAgent` 和 `AgentOrchestrator` 两种策略适配器，不虚假合并差异状态机
-- 后续纳入：观察结果相似性收敛、证据型任务工具门禁，以及工具契约中的参数边界、逐工具限流/超时和外部调用成本；复用既有 ToolEffect、ExecutionSecurityPolicy、JSON Schema、ToolOutput 与 RunBudget，不建立重复危险标记或第二套预算
-- 未实现：观察相似性与工具契约增强、Session Tree、可观测性收敛和 UI 重构
+- 方案修订（2026-08-12）：先补齐观察结果相似性收敛和证据型任务门禁；再统一 ToolContract、参数边界、注册冲突、分类索引、按任务暴露、逐工具限流/超时/并发和外部调用成本；最后实施 Session Tree、可观测性和 UI。复用既有 ToolEffect、ExecutionSecurityPolicy、JSON Schema、ToolOutput、search_tools 与 RunBudget，不建立重复危险标记或第二套预算
+- 实施门禁：当前只更新设计文档；循环收敛、工具治理、Session Tree、可观测性和 UI 的代码与测试代码均需用户明确同意后才能开始。结构化执行统一入口已在流程澄清前提交，后续不再沿用先实现后确认的方式
+- 明确排除：不为普通问答设置全局 MinIterations；不静默 clamp 越界参数；不把“只暴露 3 至 5 个工具”设为固定规则；不为 JVM 进程内工具虚假承诺独立内存上限；不重复注入隐藏思考原文
+- 未实现：循环收敛与证据门禁、工具契约与执行治理、Session Tree、可观测性收敛和 UI 重构
 - 验证计划：功能统一完成前不执行测试；全部功能结束后统一执行安全、quick、phase22、Runtime、Plan/Team 和全量回归；获得用户许可后再启动真实终端验收
 - 剩余风险：安全阶段尚未执行测试；Plan/Team 公共链抽取、持久 Session Tree 和 Lanterna 删除均涉及较大影响范围，必须分阶段提交并保留兼容窗口
 
