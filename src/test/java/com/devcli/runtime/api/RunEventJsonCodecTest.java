@@ -13,6 +13,21 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RunEventJsonCodecTest {
+
+    @Test
+    void envelopeUsesSchemaV2AndPersistsCorrelationFields() throws Exception {
+        JsonNode payload = MAPPER.readTree(RunEventJsonCodec.encode(
+                new RunEvent.TurnStarted("task"),
+                new com.devcli.observability.RunTelemetry(
+                        "run-1", "turn-1", "step-1", "agent-1", "attempt-1", "trace-1")));
+        assertEquals(2, payload.path("schema_version").asInt());
+        assertEquals("run-1", payload.path("run_id").asText());
+        assertEquals("turn-1", payload.path("turn_id").asText());
+        assertEquals("step-1", payload.path("step_id").asText());
+        assertEquals("agent-1", payload.path("agent_id").asText());
+        assertEquals("attempt-1", payload.path("attempt_id").asText());
+        assertEquals("trace-1", payload.path("trace_id").asText());
+    }
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Test
@@ -23,7 +38,7 @@ class RunEventJsonCodecTest {
 
         JsonNode payload = MAPPER.readTree(RunEventJsonCodec.encode(event, "turn_1"));
 
-        assertEquals(1, payload.path("schema_version").asInt());
+        assertEquals(2, payload.path("schema_version").asInt());
         assertEquals("turn_1", payload.path("turn_id").asText());
         assertEquals("call_1", payload.path("calls").get(0).path("id").asText());
         assertEquals("read_file", payload.path("calls").get(0).path("name").asText());

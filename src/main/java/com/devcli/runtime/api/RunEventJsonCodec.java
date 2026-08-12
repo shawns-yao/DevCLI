@@ -1,10 +1,13 @@
 package com.devcli.runtime.api;
 
 import com.devcli.runtime.event.RunEvent;
+import com.devcli.observability.RunTelemetry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.util.ArrayList;
+import java.util.List;
 
 /** Runtime API 运行事件的稳定 JSON 投影。 */
 final class RunEventJsonCodec {
@@ -14,11 +17,19 @@ final class RunEventJsonCodec {
     }
 
     static String encode(RunEvent event, String turnId) {
+        return encode(event, new RunTelemetry("", turnId, "", "", "", ""));
+    }
+
+    static String encode(RunEvent event, RunTelemetry telemetry) {
         ObjectNode payload = MAPPER.createObjectNode();
-        payload.put("schema_version", 1);
-        if (turnId != null && !turnId.isBlank()) {
-            payload.put("turn_id", turnId);
-        }
+        payload.put("schema_version", 2);
+        RunTelemetry context = telemetry == null ? RunTelemetry.empty() : telemetry;
+        putIfPresent(payload, "run_id", context.runId());
+        putIfPresent(payload, "turn_id", context.turnId());
+        putIfPresent(payload, "step_id", context.stepId());
+        putIfPresent(payload, "agent_id", context.agentId());
+        putIfPresent(payload, "attempt_id", context.attemptId());
+        putIfPresent(payload, "trace_id", context.traceId());
         if (event instanceof RunEvent.ThreadCreated created) {
             payload.put("thread_id", created.threadId());
         } else if (event instanceof RunEvent.TurnStarted started) {
@@ -78,7 +89,7 @@ final class RunEventJsonCodec {
             payload.put("covered_through_event_id", checkpoint.coveredThroughEventId());
             payload.put("error", checkpoint.error());
         } else if (event instanceof RunEvent.BudgetConfigured budget) {
-            payload.put("run_id", budget.runId());
+            putIfAbsent(payload, "run_id", budget.runId());
             payload.put("tier", budget.tier());
             payload.put("max_total_tokens", budget.maxTotalTokens());
             payload.put("max_llm_calls", budget.maxLlmCalls());
@@ -86,7 +97,7 @@ final class RunEventJsonCodec {
             payload.put("max_wall_clock_millis", budget.maxWallClockMillis());
             payload.put("max_estimated_cost", budget.maxEstimatedCost());
         } else if (event instanceof RunEvent.BudgetUsageUpdated budget) {
-            payload.put("run_id", budget.runId());
+            putIfAbsent(payload, "run_id", budget.runId());
             payload.put("phase", budget.phase());
             payload.put("agent", budget.agent());
             payload.put("attempt", budget.attempt());
@@ -99,14 +110,14 @@ final class RunEventJsonCodec {
             payload.put("currency", budget.currency());
             payload.put("decision", budget.decision());
         } else if (event instanceof RunEvent.BudgetThresholdReached budget) {
-            payload.put("run_id", budget.runId());
+            putIfAbsent(payload, "run_id", budget.runId());
             payload.put("threshold", budget.threshold());
             payload.put("reason", budget.reason());
         } else if (event instanceof RunEvent.BudgetExhausted budget) {
-            payload.put("run_id", budget.runId());
+            putIfAbsent(payload, "run_id", budget.runId());
             payload.put("reason", budget.reason());
         } else if (event instanceof RunEvent.LlmRequestCompleted request) {
-            payload.put("run_id", request.runId());
+            putIfAbsent(payload, "run_id", request.runId());
             payload.put("phase", request.phase());
             payload.put("agent", request.agent());
             payload.put("attempt", request.attempt());
@@ -116,8 +127,8 @@ final class RunEventJsonCodec {
             payload.put("output_tokens", request.outputTokens());
             payload.put("cached_input_tokens", request.cachedInputTokens());
         } else if (event instanceof RunEvent.AttemptStarted attempt) {
-            payload.put("run_id", attempt.runId());
-            payload.put("attempt_id", attempt.attemptId());
+            putIfAbsent(payload, "run_id", attempt.runId());
+            putIfAbsent(payload, "attempt_id", attempt.attemptId());
             payload.put("parent_attempt_id", attempt.parentAttemptId());
             payload.put("kind", attempt.kind());
             payload.put("scope", attempt.scope());
@@ -125,15 +136,15 @@ final class RunEventJsonCodec {
             payload.put("sequence", attempt.sequence());
             payload.put("backoff_millis", attempt.backoffMillis());
         } else if (event instanceof RunEvent.RetryScheduled retry) {
-            payload.put("run_id", retry.runId());
+            putIfAbsent(payload, "run_id", retry.runId());
             payload.put("kind", retry.kind());
             payload.put("scope", retry.scope());
             payload.put("reason", retry.reason());
             payload.put("next_sequence", retry.nextSequence());
             payload.put("backoff_millis", retry.backoffMillis());
         } else if (event instanceof RunEvent.AttemptFinished attempt) {
-            payload.put("run_id", attempt.runId());
-            payload.put("attempt_id", attempt.attemptId());
+            putIfAbsent(payload, "run_id", attempt.runId());
+            putIfAbsent(payload, "attempt_id", attempt.attemptId());
             payload.put("parent_attempt_id", attempt.parentAttemptId());
             payload.put("kind", attempt.kind());
             payload.put("scope", attempt.scope());
@@ -141,13 +152,13 @@ final class RunEventJsonCodec {
             payload.put("status", attempt.status());
             payload.put("outcome", attempt.outcome());
         } else if (event instanceof RunEvent.RecoveryReconciled recovery) {
-            payload.put("run_id", recovery.runId());
+            putIfAbsent(payload, "run_id", recovery.runId());
             payload.put("checkpoint_ref", recovery.checkpointRef());
             payload.put("patch_journal_action", recovery.patchJournalAction());
             payload.put("decision", recovery.decision());
             payload.put("reason", recovery.reason());
         } else if (event instanceof RunEvent.SecurityDecisionMade security) {
-            payload.put("run_id", security.runId());
+            putIfAbsent(payload, "run_id", security.runId());
             payload.put("tool", security.tool());
             payload.put("domain", security.domain());
             payload.put("profile", security.profile());
@@ -155,14 +166,28 @@ final class RunEventJsonCodec {
             payload.put("approval_required", security.approvalRequired());
             payload.put("reason", security.reason());
         } else if (event instanceof RunEvent.SandboxExecution sandbox) {
-            payload.put("run_id", sandbox.runId());
+            putIfAbsent(payload, "run_id", sandbox.runId());
             payload.put("command_profile", sandbox.commandProfile());
             payload.put("state", sandbox.state());
             payload.put("reason", sandbox.reason());
+        } else if (event instanceof RunEvent.RecoveryReferenceUpdated reference) {
+            putIfAbsent(payload, "run_id", reference.runId());
+            payload.put("checkpoint_ref", reference.checkpointRef());
+            payload.put("patch_journal_ref", reference.patchJournalRef());
+            payload.put("snapshot_ref", reference.snapshotRef());
+            payload.put("state", reference.state());
         } else {
             throw new IllegalArgumentException("不支持的运行事件: " + event.getClass().getName());
         }
         return payload.toString();
+    }
+
+    private static void putIfPresent(ObjectNode payload, String name, String value) {
+        if (value != null && !value.isBlank()) payload.put(name, value);
+    }
+
+    private static void putIfAbsent(ObjectNode payload, String name, String value) {
+        if (!payload.has(name)) putIfPresent(payload, name, value);
     }
 
     private static JsonNode parseArguments(String argumentsJson) {
@@ -174,5 +199,128 @@ final class RunEventJsonCodec {
         } catch (Exception ignored) {
             return MAPPER.getNodeFactory().textNode(argumentsJson);
         }
+    }
+
+    static RunTelemetry telemetry(String data) {
+        try {
+            JsonNode payload = MAPPER.readTree(data == null ? "{}" : data);
+            return new RunTelemetry(
+                    payload.path("run_id").asText(""), payload.path("turn_id").asText(""),
+                    payload.path("step_id").asText(""), payload.path("agent_id").asText(""),
+                    payload.path("attempt_id").asText(""), payload.path("trace_id").asText(""));
+        } catch (Exception ignored) {
+            return RunTelemetry.empty();
+        }
+    }
+
+    static RunEvent decode(String type, String data) throws java.io.IOException {
+        JsonNode payload = MAPPER.readTree(data == null ? "{}" : data);
+        return switch (type == null ? "" : type) {
+            case "thread.created" -> new RunEvent.ThreadCreated(payload.path("thread_id").asText(""));
+            case "turn.started" -> new RunEvent.TurnStarted(payload.path("input").asText(""));
+            case "reasoning.delta" -> new RunEvent.ReasoningDelta(payload.path("content").asText(""));
+            case "message.delta" -> new RunEvent.MessageDelta(payload.path("content").asText(""));
+            case "turn.completed" -> new RunEvent.TurnCompleted(payload.path("status").asText("completed"));
+            case "turn.failed" -> new RunEvent.TurnFailed(payload.path("error").asText(""));
+            case "turn.rejected" -> new RunEvent.TurnRejected(payload.path("error").asText(""));
+            case "session.state" -> new RunEvent.SessionStateChanged(
+                    payload.path("session_id").asText(""), payload.path("state").asText(""),
+                    payload.path("reason").asText(""));
+            case "queue.updated" -> new RunEvent.QueueUpdated(
+                    payload.path("channel").asText(""), payload.path("steering_pending").asInt(),
+                    payload.path("follow_up_pending").asInt(), payload.path("action").asText(""));
+            case "message.custom" -> decodeCustomMessage(payload);
+            case "tool.calls" -> decodeToolCalls(payload);
+            case "tool.results" -> decodeToolResults(payload);
+            case "budget.configured" -> new RunEvent.BudgetConfigured(
+                    payload.path("run_id").asText(""), payload.path("tier").asText(""),
+                    payload.path("max_total_tokens").asLong(), payload.path("max_llm_calls").asLong(),
+                    payload.path("max_tool_calls").asLong(), payload.path("max_wall_clock_millis").asLong(),
+                    payload.path("max_estimated_cost").asText(""));
+            case "budget.usage.updated" -> new RunEvent.BudgetUsageUpdated(
+                    payload.path("run_id").asText(""), payload.path("phase").asText(""),
+                    payload.path("agent").asText(""), payload.path("attempt").asText(""),
+                    payload.path("input_tokens").asLong(), payload.path("output_tokens").asLong(),
+                    payload.path("cached_input_tokens").asLong(), payload.path("llm_calls").asLong(),
+                    payload.path("tool_calls").asLong(), payload.path("estimated_cost").asText(""),
+                    payload.path("currency").asText(""), payload.path("decision").asText(""));
+            case "budget.exhausted" -> new RunEvent.BudgetExhausted(
+                    payload.path("run_id").asText(""), payload.path("reason").asText(""));
+            case "budget.threshold.reached" -> new RunEvent.BudgetThresholdReached(
+                    payload.path("run_id").asText(""), payload.path("threshold").asText(""),
+                    payload.path("reason").asText(""));
+            case "llm.request.completed" -> new RunEvent.LlmRequestCompleted(
+                    payload.path("run_id").asText(""), payload.path("phase").asText(""),
+                    payload.path("agent").asText(""), payload.path("attempt").asText(""),
+                    payload.path("provider").asText(""), payload.path("model").asText(""),
+                    payload.path("input_tokens").asLong(), payload.path("output_tokens").asLong(),
+                    payload.path("cached_input_tokens").asLong());
+            case "retry.scheduled" -> new RunEvent.RetryScheduled(
+                    payload.path("run_id").asText(""), payload.path("kind").asText(""),
+                    payload.path("scope").asText(""), payload.path("reason").asText(""),
+                    payload.path("next_sequence").asInt(), payload.path("backoff_millis").asLong());
+            case "attempt.started" -> new RunEvent.AttemptStarted(
+                    payload.path("run_id").asText(""), payload.path("attempt_id").asText(""),
+                    payload.path("parent_attempt_id").asText(""), payload.path("kind").asText(""),
+                    payload.path("scope").asText(""), payload.path("reason").asText(""),
+                    payload.path("sequence").asInt(), payload.path("backoff_millis").asLong());
+            case "attempt.finished" -> new RunEvent.AttemptFinished(
+                    payload.path("run_id").asText(""), payload.path("attempt_id").asText(""),
+                    payload.path("parent_attempt_id").asText(""), payload.path("kind").asText(""),
+                    payload.path("scope").asText(""), payload.path("sequence").asInt(),
+                    payload.path("status").asText(""), payload.path("outcome").asText(""));
+            case "recovery.reconciled" -> new RunEvent.RecoveryReconciled(
+                    payload.path("run_id").asText(""), payload.path("checkpoint_ref").asText(""),
+                    payload.path("patch_journal_action").asText(""), payload.path("decision").asText(""),
+                    payload.path("reason").asText(""));
+            case "security.decision" -> new RunEvent.SecurityDecisionMade(
+                    payload.path("run_id").asText(""), payload.path("tool").asText(""),
+                    payload.path("domain").asText(""), payload.path("profile").asText(""),
+                    payload.path("allowed").asBoolean(), payload.path("approval_required").asBoolean(),
+                    payload.path("reason").asText(""));
+            case "sandbox.execution" -> new RunEvent.SandboxExecution(
+                    payload.path("run_id").asText(""), payload.path("command_profile").asText(""),
+                    payload.path("state").asText(""), payload.path("reason").asText(""));
+            case "thread.checkpoint.created" -> new RunEvent.CheckpointCreated(
+                    payload.path("covered_through_event_id").asLong(), payload.path("pre_tokens").asInt(),
+                    payload.path("post_tokens").asInt(), payload.path("semantic_guard").asText(""));
+            case "thread.checkpoint.failed" -> new RunEvent.CheckpointFailed(
+                    payload.path("covered_through_event_id").asLong(), payload.path("error").asText(""));
+            case "recovery.reference.updated" -> new RunEvent.RecoveryReferenceUpdated(
+                    payload.path("run_id").asText(""), payload.path("checkpoint_ref").asText(""),
+                    payload.path("patch_journal_ref").asText(""), payload.path("snapshot_ref").asText(""),
+                    payload.path("state").asText(""));
+            default -> new RunEvent.CustomMessage(type, payload.path("content").asText(""));
+        };
+    }
+
+    private static RunEvent.CustomMessage decodeCustomMessage(JsonNode payload) {
+        java.util.Map<String, String> attributes = new java.util.LinkedHashMap<>();
+        payload.path("attributes").fields().forEachRemaining(entry ->
+                attributes.put(entry.getKey(), entry.getValue().asText("")));
+        return new RunEvent.CustomMessage(payload.path("message_type").asText(""),
+                payload.path("content").asText(""), attributes);
+    }
+
+    private static RunEvent.ToolCalls decodeToolCalls(JsonNode payload) {
+        List<RunEvent.ToolCallData> calls = new ArrayList<>();
+        for (JsonNode item : payload.path("calls")) {
+            calls.add(new RunEvent.ToolCallData(item.path("id").asText(""),
+                    item.path("name").asText(""), item.path("arguments").toString()));
+        }
+        return new RunEvent.ToolCalls(calls);
+    }
+
+    private static RunEvent.ToolResults decodeToolResults(JsonNode payload) {
+        List<RunEvent.ToolResultData> results = new ArrayList<>();
+        for (JsonNode item : payload.path("results")) {
+            results.add(new RunEvent.ToolResultData(
+                    item.path("id").asText(""), item.path("name").asText(""),
+                    item.path("arguments").toString(), item.path("result").asText(""),
+                    item.path("status").asText(""), item.path("error_code").asText(""),
+                    item.path("retryable").asBoolean(), item.path("elapsed_millis").asLong(),
+                    item.path("image_count").asInt()));
+        }
+        return new RunEvent.ToolResults(results);
     }
 }

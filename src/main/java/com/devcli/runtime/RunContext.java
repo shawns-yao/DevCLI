@@ -4,6 +4,8 @@ import com.devcli.budget.PricingCatalog;
 import com.devcli.budget.RunBudget;
 import com.devcli.budget.RunBudgetPolicy;
 import com.devcli.runtime.event.RunEventSink;
+import com.devcli.observability.MetricRecorder;
+import com.devcli.observability.RunTelemetry;
 
 import java.nio.file.Path;
 import java.math.BigDecimal;
@@ -28,6 +30,8 @@ public final class RunContext implements AutoCloseable {
     private volatile RunEventSink eventSink = RunEventSink.NO_OP;
     private volatile AttemptPersistence attemptPersistence = AttemptPersistence.NO_OP;
     private volatile RunPersistenceSink persistenceSink = RunPersistenceSink.NO_OP;
+    private volatile MetricRecorder metricRecorder = MetricRecorder.NO_OP;
+    private volatile RunTelemetry telemetry;
     private volatile String parentAttemptId = "";
     private final RunContext previous;
     private final Deque<AutoCloseable> ownedResources = new ArrayDeque<>();
@@ -47,6 +51,7 @@ public final class RunContext implements AutoCloseable {
                 ? RunBudget.create(this.runId, RunBudgetPolicy.fromConfiguration(), PricingCatalog.empty())
                 : restoreBudget(this.runId, restoredBudgetState);
         this.previous = previous;
+        this.telemetry = new RunTelemetry(this.runId, "", "", "", "", this.runId);
     }
 
     public String runId() {
@@ -81,11 +86,28 @@ public final class RunContext implements AutoCloseable {
         return parentAttemptId;
     }
 
+    public RunTelemetry telemetry() {
+        return telemetry;
+    }
+
+    public MetricRecorder metricRecorder() {
+        return metricRecorder;
+    }
+
+    public RunContext configureObservability(RunTelemetry telemetry, MetricRecorder metrics) {
+        this.telemetry = (telemetry == null ? RunTelemetry.empty() : telemetry)
+                .merge(this.telemetry);
+        this.metricRecorder = MetricRecorder.safe(metrics);
+        return this;
+    }
+
     public RunContext configureRuntimeServices(RunEventSink events,
                                                AttemptPersistence attempts,
                                                RunPersistenceSink persistence,
                                                String parentAttemptId) {
-        this.eventSink = events == null ? RunEventSink.NO_OP : events;
+        RunEventSink configured = events == null ? RunEventSink.NO_OP : events;
+        this.eventSink = telemetry == null
+                ? configured : RunEventSink.contextual(configured, telemetry);
         this.attemptPersistence = attempts == null ? AttemptPersistence.NO_OP : attempts;
         this.persistenceSink = persistence == null ? RunPersistenceSink.NO_OP : persistence;
         this.parentAttemptId = parentAttemptId == null ? "" : parentAttemptId;

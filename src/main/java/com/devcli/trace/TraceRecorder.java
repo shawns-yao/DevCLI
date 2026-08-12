@@ -2,6 +2,7 @@ package com.devcli.trace;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.policy.SensitiveDataRedactor;
+import com.devcli.observability.TraceSpan;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -13,8 +14,11 @@ import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class TraceRecorder {
+    private static final Logger log = LoggerFactory.getLogger(TraceRecorder.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.ROOT);
     private static final int MAX_FIELD_CHARS = 1200;
@@ -42,6 +46,7 @@ public class TraceRecorder {
         payload.put("traceId", context.traceId());
         payload.put("phase", context.phase());
         payload.put("event", event);
+        putTelemetry(payload, context.telemetry());
         if (fields != null) {
             fields.forEach((key, value) -> payload.put(key, sanitizeValue(value)));
         }
@@ -52,8 +57,20 @@ public class TraceRecorder {
                         StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             }
         } catch (IOException e) {
-            System.err.println("⚠️ Trace 写入失败: " + e.getMessage());
+            log.warn("Trace 写入失败: {}", e.getMessage());
         }
+    }
+
+    public void record(TraceSpan span) {
+        if (span == null) return;
+        Map<String, Object> fields = new LinkedHashMap<>(span.attributes());
+        fields.put("parentSpanId", span.parentSpanId());
+        fields.put("startedAt", span.startedAt().toString());
+        fields.put("endedAt", span.endedAt().toString());
+        fields.put("durationMs", span.durationMillis());
+        fields.put("status", span.status());
+        record(new TraceContext(span.context().traceId(), span.name(), span.context()),
+                "span.completed", fields);
     }
 
     private Path todayFile() {
@@ -77,6 +94,20 @@ public class TraceRecorder {
             return truncate(sanitize(text));
         }
         return value;
+    }
+
+    private static void putTelemetry(Map<String, Object> payload,
+                                     com.devcli.observability.RunTelemetry telemetry) {
+        if (telemetry == null) return;
+        putIfPresent(payload, "runId", telemetry.runId());
+        putIfPresent(payload, "turnId", telemetry.turnId());
+        putIfPresent(payload, "stepId", telemetry.stepId());
+        putIfPresent(payload, "agentId", telemetry.agentId());
+        putIfPresent(payload, "attemptId", telemetry.attemptId());
+    }
+
+    private static void putIfPresent(Map<String, Object> payload, String name, String value) {
+        if (value != null && !value.isBlank()) payload.put(name, value);
     }
 
     private static String truncate(String text) {

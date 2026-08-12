@@ -3,6 +3,8 @@ package com.devcli.runtime.api;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.CompactBoundaryMetadata;
 import com.devcli.runtime.event.RunEvent;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -18,6 +20,37 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.*;
 
 class RuntimeApiServerTest {
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Test
+    void exposesProjectedRunSnapshot() throws Exception {
+        Path db = tempDir.resolve("runtime-snapshot.db");
+        try (RuntimeThreadStore store = new RuntimeThreadStore(db)) {
+            String threadId = store.createThread();
+            com.devcli.observability.RunTelemetry telemetry =
+                    new com.devcli.observability.RunTelemetry(
+                            "run-snapshot", "turn-snapshot", "", "", "", "trace-snapshot");
+            store.appendEvent(threadId, "turn.started", RunEventJsonCodec.encode(
+                    new RunEvent.TurnStarted("task"), telemetry));
+            store.appendEvent(threadId, "budget.usage.updated", RunEventJsonCodec.encode(
+                    new RunEvent.BudgetUsageUpdated("run-snapshot", "react", "", "",
+                            10, 5, 2, 1, 0, "0.01", "USD", "CONTINUE"), telemetry));
+
+            TurnRunner runner = (id, input, sink) -> TurnRunner.TurnResult.completed("");
+            try (RuntimeApiServer server = new RuntimeApiServer(store, runner, 0, "secret")) {
+                server.start();
+                HttpResponse<String> response = HttpClient.newHttpClient().send(
+                        request("http://127.0.0.1:" + server.port() + "/v1/threads/" + threadId
+                                        + "/snapshot?run_id=run-snapshot", "GET", "").build(),
+                        HttpResponse.BodyHandlers.ofString());
+                assertEquals(200, response.statusCode());
+                JsonNode snapshot = MAPPER.readTree(response.body());
+                assertEquals("run-snapshot", snapshot.path("context").path("runId").asText());
+                assertEquals(15, snapshot.path("inputTokens").asLong()
+                        + snapshot.path("outputTokens").asLong());
+            }
+        }
+    }
 
     @Test
     void exposesThreadTurnAndSseEvents(@TempDir Path tempDir) throws Exception {

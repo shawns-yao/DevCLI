@@ -7,6 +7,7 @@ import com.devcli.runtime.store.RunSubmission;
 import com.devcli.runtime.store.SubmissionSource;
 import com.devcli.runtime.event.RunEvent;
 import com.devcli.runtime.event.RunEventSink;
+import com.devcli.observability.RunTelemetry;
 import com.devcli.runtime.store.AttemptStatus;
 
 import java.nio.file.Path;
@@ -115,6 +116,7 @@ public final class RunCoordinator {
 
     private ClaimedRunContext bind(RunStore.ClaimedRun claimed, RunEventSink events) {
         RunRecord run = claimed.run();
+        RunEventSink eventSink = events == null ? RunEventSink.NO_OP : events;
         Path projectPath = run.projectPath().isBlank()
                 ? Path.of(System.getProperty("user.dir")) : Path.of(run.projectPath());
         RunContext context = CancellationContext.startRunContext(
@@ -124,19 +126,31 @@ public final class RunCoordinator {
             public boolean saveRecoveryReferences(String checkpointRef, String patchJournalRef,
                                                   String snapshotRef) {
                 RunRecord current = store.find(run.id()).orElse(null);
-                return current != null && store.saveRecoveryReferences(
+                boolean saved = current != null && store.saveRecoveryReferences(
                         current.id(), current.version(),
                         preserveBlank(checkpointRef, current.checkpointRef()),
                         preserveBlank(patchJournalRef, current.patchJournalRef()),
                         preserveBlank(snapshotRef, current.snapshotRef()));
+                if (saved) {
+                    eventSink.emit(new RunEvent.RecoveryReferenceUpdated(
+                            run.id(), checkpointRef, patchJournalRef, snapshotRef, "saved"));
+                }
+                return saved;
             }
 
             @Override
             public boolean clearRecoveryReferences(boolean checkpoint, boolean patchJournal,
                                                    boolean snapshot) {
                 RunRecord current = store.find(run.id()).orElse(null);
-                return current != null && store.clearRecoveryReferences(
+                boolean cleared = current != null && store.clearRecoveryReferences(
                         current.id(), current.version(), checkpoint, patchJournal, snapshot);
+                if (cleared) {
+                    eventSink.emit(new RunEvent.RecoveryReferenceUpdated(
+                            run.id(), checkpoint ? "<cleared>" : current.checkpointRef(),
+                            patchJournal ? "<cleared>" : current.patchJournalRef(),
+                            snapshot ? "<cleared>" : current.snapshotRef(), "cleared"));
+                }
+                return cleared;
             }
         };
         AttemptPersistence attempts = new AttemptPersistence() {
@@ -155,7 +169,10 @@ public final class RunCoordinator {
                 store.finishNestedAttempt(attemptId, status, outcome);
             }
         };
-        context.configureRuntimeServices(events, attempts, persistence, claimed.attempt().id());
+        context.configureObservability(new RunTelemetry(
+                run.id(), "", "", "", claimed.attempt().id(), run.id()),
+                com.devcli.observability.MetricRecorder.NO_OP);
+        context.configureRuntimeServices(eventSink, attempts, persistence, claimed.attempt().id());
         return new ClaimedRunContext(claimed, context);
     }
 

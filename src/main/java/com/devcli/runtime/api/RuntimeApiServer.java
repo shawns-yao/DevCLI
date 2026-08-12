@@ -121,6 +121,10 @@ public class RuntimeApiServer implements AutoCloseable {
                 handleEvents(exchange, threadId(path));
                 return;
             }
+            if ("GET".equals(method) && path.matches("/v1/threads/[^/]+/snapshot")) {
+                handleSnapshot(exchange, threadId(path));
+                return;
+            }
             if ("GET".equals(method) && path.matches("/v1/threads/[^/]+/branches")) {
                 handleBranches(exchange, threadId(path));
                 return;
@@ -164,7 +168,7 @@ public class RuntimeApiServer implements AutoCloseable {
                     fatal -> failRejectedRun(threadId, turnId, runId, "fatal_runtime_error"));
         } catch (RejectedExecutionException e) {
             runCoordinator.cancel(runId, "runtime_busy", null);
-            new RuntimeEventPublisher(store, threadId, turnId)
+            new RuntimeEventPublisher(store, threadId, turnId, runId)
                     .emit(new RunEvent.TurnRejected("runtime_busy"));
             writeJson(exchange, 429, "{\"error\":\"runtime_busy\"}");
             return;
@@ -230,7 +234,7 @@ public class RuntimeApiServer implements AutoCloseable {
     }
 
     private void runTurn(String threadId, String turnId, String runId, String input) {
-        RuntimeEventPublisher events = new RuntimeEventPublisher(store, threadId, turnId);
+        RuntimeEventPublisher events = new RuntimeEventPublisher(store, threadId, turnId, runId);
         RunCoordinator.ClaimedRunContext claimed = runCoordinator
                 .claim(runId, "runtime-api-" + threadId, events).orElse(null);
         if (claimed == null) {
@@ -273,7 +277,7 @@ public class RuntimeApiServer implements AutoCloseable {
 
     private void failRejectedRun(String threadId, String turnId, String runId, String reason) {
         runCoordinator.cancel(runId, reason, null);
-        new RuntimeEventPublisher(store, threadId, turnId).emit(new RunEvent.TurnFailed(reason));
+        new RuntimeEventPublisher(store, threadId, turnId, runId).emit(new RunEvent.TurnFailed(reason));
     }
 
     private boolean persistCheckpoint(RuntimeEventPublisher events, String threadId,
@@ -307,6 +311,27 @@ public class RuntimeApiServer implements AutoCloseable {
         try (OutputStream os = exchange.getResponseBody()) {
             os.write(body);
         }
+    }
+
+    private void handleSnapshot(HttpExchange exchange, String threadId) throws IOException {
+        if (!store.exists(threadId)) {
+            writeJson(exchange, 404, "{\"error\":\"thread_not_found\"}");
+            return;
+        }
+        String runId = queryValue(exchange.getRequestURI().getQuery(), "run_id");
+        writeJson(exchange, 200, MAPPER.writeValueAsString(store.runSnapshot(threadId, runId)));
+    }
+
+    private static String queryValue(String query, String name) {
+        if (query == null || query.isBlank()) return "";
+        for (String part : query.split("&")) {
+            int separator = part.indexOf('=');
+            String key = separator < 0 ? part : part.substring(0, separator);
+            if (!name.equals(key)) continue;
+            String value = separator < 0 ? "" : part.substring(separator + 1);
+            return java.net.URLDecoder.decode(value, StandardCharsets.UTF_8);
+        }
+        return "";
     }
 
     private void handleBranches(HttpExchange exchange, String threadId) throws IOException {

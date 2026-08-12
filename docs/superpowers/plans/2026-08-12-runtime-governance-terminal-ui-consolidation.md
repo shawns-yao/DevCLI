@@ -716,10 +716,10 @@ ToolContract
 
 **步骤：**
 
-- [ ] 先建立字段关联、脱敏和失败不影响业务终态测试。
-- [ ] 所有事件补齐 run/turn/step/agent/attempt 上下文。
-- [ ] 将预算、沙箱、重试、恢复和快照接入事件。
-- [ ] 增加 `/status`、`/inspect`、`/logs` 查询模型。
+- [x] 建立字段关联、脱敏和失败不影响业务终态测试。
+- [x] 通过 RunEventEnvelope 为事件补齐 run/turn/step/agent/attempt/trace 上下文。
+- [x] 将预算、沙箱、重试、恢复、checkpoint 与 Side-Git 引用接入统一投影。
+- [x] 增加 Runtime `GET /v1/threads/{id}/snapshot` 查询模型；CLI 查询入口随终端 UI 阶段收敛。
 - [ ] 完成阶段功能后统一运行 event、trace、audit、runtime API 限定测试。
 
 ### 阶段 8：终端 UI 重构

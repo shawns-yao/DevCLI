@@ -4,6 +4,9 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.browser.BrowserAuditMetadata;
+import com.devcli.observability.RunTelemetry;
+import com.devcli.runtime.CancellationContext;
+import com.devcli.runtime.RunContext;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -15,6 +18,8 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 危险工具调用的结构化审计日志。
@@ -34,6 +39,7 @@ import java.util.Locale;
  * - {@code error}：工具执行抛异常或超时
  */
 public class AuditLog {
+    private static final Logger log = LoggerFactory.getLogger(AuditLog.class);
 
     public static final String APPROVER_HITL = "hitl";
     public static final String APPROVER_POLICY = "policy";
@@ -65,17 +71,24 @@ public class AuditLog {
 
     public void record(AuditEntry entry) {
         if (entry == null) return;
+        RunContext run = CancellationContext.currentRun();
+        RunTelemetry telemetry = run == null ? RunTelemetry.empty() : run.telemetry();
+        record(new CorrelatedAuditEntry(telemetry, entry));
+    }
+
+    public void record(CorrelatedAuditEntry correlated) {
+        if (correlated == null || correlated.entry() == null) return;
         try {
             synchronized (writeLock) {
                 Files.createDirectories(auditDir);
                 Path file = todayFile();
-                String json = mapper.writeValueAsString(entry);
+                String json = mapper.writeValueAsString(correlated);
                 Files.writeString(file, json + System.lineSeparator(),
                         StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             }
         } catch (IOException e) {
             // 审计失败不能影响主流程
-            System.err.println("⚠️ 审计日志写入失败: " + e.getMessage());
+            log.warn("审计日志写入失败: {}", e.getMessage());
         }
     }
 
@@ -95,7 +108,12 @@ public class AuditLog {
                 String line = lines.get(i);
                 if (line.isBlank()) continue;
                 try {
-                    entries.add(mapper.readValue(line, new TypeReference<AuditEntry>() {}));
+                    com.fasterxml.jackson.databind.JsonNode node = mapper.readTree(line);
+                    if (node.has("entry")) {
+                        entries.add(mapper.treeToValue(node.path("entry"), AuditEntry.class));
+                    } else {
+                        entries.add(mapper.treeToValue(node, AuditEntry.class));
+                    }
                 } catch (Exception ignored) {
                     // 单行格式错误跳过，不影响其他记录
                 }
@@ -138,6 +156,13 @@ public class AuditLog {
                 "(?i)(\\b(?:token|key|password|secret|authorization)\\b\\s*[:=]\\s*)([^\\s,}]+)",
                 "$1***");
         return sanitized;
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record CorrelatedAuditEntry(RunTelemetry context, AuditEntry entry) {
+        public CorrelatedAuditEntry {
+            context = context == null ? RunTelemetry.empty() : context;
+        }
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)

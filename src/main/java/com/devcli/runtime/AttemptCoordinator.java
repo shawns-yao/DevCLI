@@ -3,6 +3,7 @@ package com.devcli.runtime;
 import com.devcli.runtime.event.RunEvent;
 import com.devcli.runtime.event.RunEventSink;
 import com.devcli.runtime.store.AttemptStatus;
+import com.devcli.observability.RunTelemetry;
 
 import java.util.Objects;
 import java.util.UUID;
@@ -43,7 +44,7 @@ public final class AttemptCoordinator {
                 attemptId, runId, parentAttemptId, normalized, text(scope), text(reason),
                 normalizedSequence, Math.max(0, backoffMillis));
         persistence.started(attempt);
-        events.emit(new RunEvent.AttemptStarted(
+        RunEventSink.emit(events, attemptTelemetry(attemptId, scope), new RunEvent.AttemptStarted(
                 runId, attemptId, parentAttemptId, normalized.name(), text(scope), text(reason),
                 normalizedSequence, Math.max(0, backoffMillis)));
         return new AttemptScope(attemptId, normalized, text(scope), normalizedSequence);
@@ -86,7 +87,7 @@ public final class AttemptCoordinator {
             AttemptStatus attemptStatus = "COMPLETED".equals(status)
                     ? AttemptStatus.COMPLETED : AttemptStatus.FAILED;
             persistence.finished(attemptId, attemptStatus, text(outcome));
-            events.emit(new RunEvent.AttemptFinished(
+            RunEventSink.emit(events, attemptTelemetry(attemptId, scope), new RunEvent.AttemptFinished(
                     runId, attemptId, parentAttemptId, kind.name(), scope,
                     sequence, status, text(outcome)));
         }
@@ -104,5 +105,9 @@ public final class AttemptCoordinator {
 
     private static String text(String value) {
         return value == null ? "" : value;
+    }
+
+    private RunTelemetry attemptTelemetry(String attemptId, String scope) {
+        return new RunTelemetry(runId, "", text(scope), "", attemptId, "");
     }
 }

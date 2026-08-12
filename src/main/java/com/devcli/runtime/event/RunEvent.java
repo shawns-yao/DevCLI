@@ -20,7 +20,8 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
         RunEvent.BudgetThresholdReached, RunEvent.BudgetExhausted,
         RunEvent.LlmRequestCompleted, RunEvent.AttemptStarted,
         RunEvent.RetryScheduled, RunEvent.AttemptFinished, RunEvent.RecoveryReconciled,
-        RunEvent.SecurityDecisionMade, RunEvent.SandboxExecution {
+        RunEvent.SecurityDecisionMade, RunEvent.SandboxExecution,
+        RunEvent.RecoveryReferenceUpdated {
 
     String type();
 
@@ -390,6 +391,21 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
 
         @Override
         public String type() { return "sandbox.execution"; }
+    }
+
+    record RecoveryReferenceUpdated(String runId, String checkpointRef,
+                                    String patchJournalRef, String snapshotRef,
+                                    String state) implements RunEvent {
+        public RecoveryReferenceUpdated {
+            runId = text(runId);
+            checkpointRef = text(checkpointRef);
+            patchJournalRef = text(patchJournalRef);
+            snapshotRef = text(snapshotRef);
+            state = text(state);
+        }
+
+        @Override
+        public String type() { return "recovery.reference.updated"; }
     }
 
     record ToolCallData(String id, String name, String argumentsJson) {

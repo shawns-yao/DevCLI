@@ -4,6 +4,8 @@ import com.devcli.agent.AgentTurnInbox;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.CompactBoundaryMetadata;
 import com.devcli.runtime.event.RunEvent;
+import com.devcli.render.state.RunProjection;
+import com.devcli.render.state.RunSnapshot;
 import com.devcli.runtime.store.SqliteRunStore;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -379,6 +381,42 @@ public class RuntimeThreadStore implements AutoCloseable {
      */
     public synchronized List<TurnRecord> turnHistory(String threadId) {
         return turnHistoryAfter(threadId, 0);
+    }
+
+    /** 从持久事件重建当前活动分支的运行快照。 */
+    public synchronized RunSnapshot runSnapshot(String threadId) {
+        RunProjection projection = new RunProjection();
+        for (RuntimeEvent event : events(threadId, 0)) {
+            try {
+                RunEvent decoded = RunEventJsonCodec.decode(event.type(), event.data());
+                projection.emit(new com.devcli.observability.RunEventEnvelope(
+                        com.devcli.observability.RunEventEnvelope.CURRENT_SCHEMA_VERSION,
+                        RunEventJsonCodec.telemetry(event.data()), event.id(),
+                        event.createdAt(), decoded));
+            } catch (Exception error) {
+                log.warn("运行快照跳过不可解析事件: id={}, type={}", event.id(), event.type());
+            }
+        }
+        return projection.snapshot();
+    }
+
+    public synchronized RunSnapshot runSnapshot(String threadId, String runId) {
+        String target = runId == null ? "" : runId.trim();
+        if (target.isBlank()) return runSnapshot(threadId);
+        RunProjection projection = new RunProjection();
+        for (RuntimeEvent event : events(threadId, 0)) {
+            try {
+                com.devcli.observability.RunTelemetry telemetry = RunEventJsonCodec.telemetry(event.data());
+                if (!target.equals(telemetry.runId())) continue;
+                projection.emit(new com.devcli.observability.RunEventEnvelope(
+                        com.devcli.observability.RunEventEnvelope.CURRENT_SCHEMA_VERSION,
+                        telemetry, event.id(), event.createdAt(),
+                        RunEventJsonCodec.decode(event.type(), event.data())));
+            } catch (Exception error) {
+                log.warn("运行快照跳过不可解析事件: id={}, type={}", event.id(), event.type());
+            }
+        }
+        return projection.snapshot();
     }
 
     /** 当前可见会话路径中的 user/assistant 消息节点，可作为精确 fork 锚点。 */
