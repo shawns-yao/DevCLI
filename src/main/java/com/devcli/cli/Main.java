@@ -1069,11 +1069,13 @@ public class Main {
                     SubmissionSource.CLI, projectPath,
                     runPrompt == null || runPrompt.isBlank() ? "interactive-turn" : runPrompt,
                     "", idempotencyKey);
-            claimedRun = localRunCoordinator.claim(submitted.id(), "cli-interactive").orElseThrow();
+            claimedRun = localRunCoordinator.claim(
+                    submitted.id(), "cli-interactive", renderer.eventSink()).orElseThrow();
         } catch (Exception error) {
             throw new IllegalStateException("初始化本地 Run 失败: " + error.getMessage(), error);
         }
         RunContext runContext = claimedRun.context();
+        runContext.eventSink().emit(new com.devcli.runtime.event.RunEvent.TurnStarted(runPrompt));
         CancellationToken token = runContext.cancellationToken();
         ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
             Thread thread = new Thread(r, "devcli-agent-runner");
@@ -1082,7 +1084,14 @@ public class Main {
         });
         AtomicBoolean taskCompleted = new AtomicBoolean(false);
         TurnExecutionGuard executionGuard = new TurnExecutionGuard();
-        Future<String> future = executor.submit(executionGuard.wrap(task, () -> {
+        Future<String> future = executor.submit(executionGuard.wrap(() -> {
+            RunContext previous = CancellationContext.bind(runContext);
+            try {
+                return task.call();
+            } finally {
+                CancellationContext.restore(previous);
+            }
+        }, () -> {
             taskCompleted.set(true);
             if (acceptActiveTurnInput) {
                 wakeActiveTurnReader(terminal, lineReader);
@@ -1199,6 +1208,14 @@ public class Main {
                         localRunCoordinator.complete(claimedRun, RunStatus.FAILED, "", error.getMessage());
                     }
                 }
+            }
+            var terminalRun = localRunStore.find(claimedRun.run().id()).orElse(claimedRun.run());
+            if (terminalRun.status() == RunStatus.COMPLETED) {
+                runContext.eventSink().emit(new com.devcli.runtime.event.RunEvent.TurnCompleted("completed"));
+            } else if (terminalRun.status() == RunStatus.CANCELED) {
+                runContext.eventSink().emit(new com.devcli.runtime.event.RunEvent.TurnFailed("cancelled"));
+            } else if (terminalRun.status() == RunStatus.FAILED) {
+                runContext.eventSink().emit(new com.devcli.runtime.event.RunEvent.TurnFailed(terminalRun.error()));
             }
             claimedRun.close();
             localRunStore.close();

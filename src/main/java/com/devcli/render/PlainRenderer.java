@@ -7,6 +7,11 @@ import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.llm.LlmClient;
 import com.devcli.util.AnsiStyle;
+import com.devcli.render.state.RunProjection;
+import com.devcli.render.state.RunSnapshot;
+import com.devcli.runtime.event.RunEvent;
+import com.devcli.runtime.event.RunEventSink;
+import com.devcli.observability.RunEventEnvelope;
 import org.jline.reader.EndOfFileException;
 import org.jline.reader.LineReader;
 import org.jline.reader.UserInterruptException;
@@ -24,7 +29,7 @@ import java.util.Map;
 /**
  * Plain 渲染器：纯 println 模式，等价 phase-15 行为，无折叠、无状态栏。
  *
- * <p>同时充当 inline / lanterna 两套实现的回退基线——任何高级特性都退化成普通文本。
+ * <p>同时充当 inline 的回退基线，任何高级特性都退化成普通文本。
  */
 public final class PlainRenderer implements Renderer {
 
@@ -33,6 +38,9 @@ public final class PlainRenderer implements Renderer {
     private final PrintStream out;
     private final BufferedReader in;
     private volatile LineReader lineReader;
+    private final RunProjection runProjection = new RunProjection();
+    private final RunEventSink projectionSink = new ProjectionSink();
+    private volatile RunSnapshot runSnapshot = RunSnapshot.empty();
 
     public PlainRenderer() {
         this(System.out, new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)));
@@ -106,6 +114,35 @@ public final class PlainRenderer implements Renderer {
     @Override
     public void updateStatus(StatusInfo status) {
         // plain 模式没有状态栏
+    }
+
+    @Override
+    public void renderSnapshot(RunSnapshot snapshot) {
+        if (snapshot == null) return;
+        this.runSnapshot = snapshot;
+    }
+
+    @Override
+    public RunEventSink eventSink() {
+        return projectionSink;
+    }
+
+    RunSnapshot currentRunSnapshot() {
+        return runSnapshot;
+    }
+
+    private final class ProjectionSink implements RunEventSink {
+        @Override
+        public void emit(RunEvent event) {
+            runProjection.emit(event);
+            renderSnapshot(runProjection.snapshot());
+        }
+
+        @Override
+        public void emit(RunEventEnvelope envelope) {
+            runProjection.emit(envelope);
+            renderSnapshot(runProjection.snapshot());
+        }
     }
 
     @Override

@@ -311,7 +311,10 @@ public class Agent implements AutoCloseable {
 
                     @Override
                     public RunEventSink eventSink() {
-                        return RunEventSink.composite(runEventSink, streamRenderer);
+                        RunEventSink projection = runEventSink == RunEventSink.NO_OP
+                                ? renderer().eventSink()
+                                : RunEventSink.NO_OP;
+                        return RunEventSink.composite(runEventSink, projection, streamRenderer);
                     }
 
                     @Override

@@ -1,6 +1,8 @@
 package com.devcli.render.inline;
 
 import com.devcli.render.StatusInfo;
+import com.devcli.render.state.RunSnapshot;
+import com.devcli.observability.RunTelemetry;
 import org.jline.terminal.Size;
 import org.jline.terminal.Terminal;
 import org.junit.jupiter.api.Test;
@@ -89,6 +91,37 @@ class BottomStatusBarTest {
         assertEquals(2, lines.size());
         assertTrue(lines.get(0).toString().contains("YOLO"), "status row should show current mode");
         assertTrue(lines.get(1).toAnsi().contains("[2m"), "footer row should use subtle style");
+    }
+
+    @Test
+    void snapshotDockPrioritizesModePhaseSecurityAndTrace() {
+        StatusInfo info = StatusInfo.tokens("glm-5.1", 200_000L, 0, 0, 0,
+                null, false, 0, "idle");
+        RunSnapshot snapshot = new RunSnapshot(4,
+                new RunTelemetry("run", "turn", "step", "worker", "attempt", "trace-123456789"),
+                "running", "worker", "read file", 120, 30, 10, 2, 1,
+                "0.01", "USD", "CONTINUE", "sandboxed:allowed", "docker:started",
+                "", "", "checkpoint", "snapshot", java.util.List.of(), java.util.Map.of(),
+                java.time.Instant.now());
+        String top = BottomStatusBar.formatStatusLine(info, snapshot, 120);
+        String bottom = BottomStatusBar.formatFooterLine(info, snapshot, 120);
+        assertTrue(top.contains("YOLO"), top);
+        assertTrue(top.contains("worker"), top);
+        assertTrue(top.contains("sandboxed:allowed"), top);
+        assertTrue(bottom.contains("trace trace-1234"), bottom);
+    }
+
+    @Test
+    void narrowDockDropsLowPriorityEnvironmentBeforeCoreState() {
+        StatusInfo info = StatusInfo.active("glm-5.1", 200_000L, false, "worker")
+                .withEnvironment("MCP 12/12", "Skill 20/20");
+        RunSnapshot snapshot = new RunSnapshot(2, RunTelemetry.empty(), "running", "worker", "",
+                0, 0, 0, 0, 0, "", "", "", "sandboxed:allowed", "", "", "",
+                "", "", "", java.util.List.of(), java.util.Map.of(), java.time.Instant.now());
+        String top = BottomStatusBar.formatStatusLine(info, snapshot, 36);
+        assertTrue(top.contains("YOLO"), top);
+        assertTrue(top.contains("sandboxed"), top);
+        assertFalse(top.contains("MCP servers"), top);
     }
 
     @Test

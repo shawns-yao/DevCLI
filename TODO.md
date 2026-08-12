@@ -18,9 +18,10 @@
 - 明确排除：不为普通问答设置全局 MinIterations；不静默 clamp 越界参数；不把“只暴露 3 至 5 个工具”设为固定规则；不为 JVM 进程内工具虚假承诺独立内存上限；不重复注入隐藏思考原文
 - 已实现（2026-08-12）：CLI 按项目稳定复用 Runtime SQLite 会话；`/session status|tree|fork|use` 支持跨进程分支、消息节点投影与节点 fork；`/clear` 创建空白持久分支；普通 turn 只写事件，只有新压缩边界写 checkpoint；取消和失败 turn 不写 completed 历史；Session Tree 不恢复工作区，Side-Git 职责不变；`RuntimeThreadStore` 是统一数据库上的会话存储门面，未并入 RunStore 接口
 - 已实现（2026-08-12）：RunEvent 使用 schema v2 关联 run/turn/step/agent/attempt/trace；新增 RunTelemetry、TraceSpan、MetricRecorder、RunProjection 与 RunSnapshot；预算、安全、沙箱、重试、恢复、checkpoint 和 Side-Git 引用进入统一投影；Runtime API 提供持久快照查询；Trace、Metric、Audit 继续使用专用职责和存储，写入失败不影响业务终态
-- 未实现：循环收敛与证据门禁、工具契约与执行治理、终端 UI 对 RunSnapshot 的消费重构和 Lanterna 删除
+- 已实现（2026-08-12）：Inline 与 Plain 共用 RunProjection/RunSnapshot；终端划分 stable transcript、live activity、input line、bottom dock 四个所有权区域；Agent、CLI 和工具状态经 RunEventSink 驱动快照，底部 dock 按宽度优先保留模式、阶段、安全域、token、成本和 trace；HITL 与 palette 统一由 InteractionController 读取
+- 未实现：循环收敛与证据门禁、工具契约与执行治理、Lanterna 和到期兼容层删除
 - 验证计划：功能统一完成前不执行测试；全部功能结束后统一执行安全、quick、phase22、Runtime、Plan/Team 和全量回归；获得用户许可后再启动真实终端验收
-- 剩余风险：功能统一完成前尚未执行测试；Session Tree 的消息节点来自已完成 turn 事件，不保存未完成推理分叉；可观测性、UI 和 Lanterna 删除仍待实施
+- 剩余风险：功能统一完成前尚未执行测试；Session Tree 的消息节点来自已完成 turn 事件，不保存未完成推理分叉；Lanterna 和到期兼容层仍待删除；真实终端交互仍待最终验收
 
 ## 2026-08-11 上下文压缩预算治理优化
 

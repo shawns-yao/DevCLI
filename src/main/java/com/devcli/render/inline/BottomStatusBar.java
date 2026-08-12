@@ -1,6 +1,7 @@
 package com.devcli.render.inline;
 
 import com.devcli.render.StatusInfo;
+import com.devcli.render.state.RunSnapshot;
 import org.jline.terminal.Terminal;
 import org.jline.utils.InfoCmp;
 import org.jline.utils.AttributedString;
@@ -31,6 +32,7 @@ public final class BottomStatusBar implements AutoCloseable {
     private final Terminal terminal;
     private final PrintStream out;
     private volatile StatusInfo current;
+    private volatile RunSnapshot runSnapshot = RunSnapshot.empty();
     private Status status;
     private volatile boolean started;
     private volatile boolean closed;
@@ -64,6 +66,11 @@ public final class BottomStatusBar implements AutoCloseable {
         renderDock();
     }
 
+    public void updateSnapshot(RunSnapshot snapshot) {
+        this.runSnapshot = snapshot == null ? RunSnapshot.empty() : snapshot;
+        renderDock();
+    }
+
     /** 当前 StatusInfo 快照，供 thinking 面板等组件复用同一份格式化结果。 */
     public StatusInfo currentStatus() {
         return current;
@@ -88,23 +95,23 @@ public final class BottomStatusBar implements AutoCloseable {
     private void renderDock() {
         StatusInfo info = current;
         Status dock = status;
-        if (info == null || dock == null || closed || !started) {
+        if ((info == null && runSnapshot.version() == 0) || dock == null || closed || !started) {
             return;
         }
         int cols = TerminalCapabilities.safeSize(terminal).getColumns();
         synchronized (out) {
-            dock.update(formatStatusLines(info, cols));
+            dock.update(formatStatusLines(info, runSnapshot, cols));
         }
     }
 
     private void moveCursorToDockInputRow() {
         StatusInfo info = current;
-        if (info == null || closed || !started) {
+        if ((info == null && runSnapshot.version() == 0) || closed || !started) {
             return;
         }
         int rows = TerminalCapabilities.safeSize(terminal).getRows();
         int cols = TerminalCapabilities.safeSize(terminal).getColumns();
-        int dockRows = formatStatusLines(info, cols).size() + 1; // JLine Status border.
+        int dockRows = formatStatusLines(info, runSnapshot, cols).size() + 1;
         int inputRow = inputDockRow(rows, dockRows);
         synchronized (out) {
             terminal.puts(InfoCmp.Capability.cursor_address, inputRow, 0);
@@ -126,36 +133,11 @@ public final class BottomStatusBar implements AutoCloseable {
     }
 
     static String formatStatusLine(StatusInfo info, int cols) {
-        String mode = info.hitlEnabled() ? "HITL Ctrl+Y for YOLO" : "YOLO Ctrl+Y to enable HITL";
-        String right = environmentSummary(info);
-        if (right.isBlank()) {
-            return fitToColumns(" " + mode, cols);
-        }
-        int gap = Math.max(1, cols - visibleLength(mode) - visibleLength(right) - 2);
-        return fitToColumns(" " + mode + " ".repeat(gap) + right + " ", cols);
+        return formatStatusLine(info, RunSnapshot.empty(), cols);
     }
 
     static String formatFooterLine(StatusInfo info, int cols) {
-        String model = info.model() == null || info.model().isBlank() ? "Auto Model" : info.model().trim();
-        String phase = info.phase() == null || info.phase().isBlank() ? "idle" : info.phase().trim();
-        StringBuilder sb = new StringBuilder(" Auto Model · ");
-        sb.append(model);
-        appendField(sb, phase);
-        appendField(sb, contextSegment(info));
-        if (info.inputTokens() > 0 || info.outputTokens() > 0 || info.cachedInputTokens() > 0) {
-            appendField(sb, "in " + formatTokens(info.inputTokens()) + " out " + formatTokens(info.outputTokens()));
-            if (info.cachedInputTokens() > 0) {
-                sb.append(" cache ").append(formatTokens(info.cachedInputTokens()));
-            }
-            if (info.estimatedCost() != null && !info.estimatedCost().isBlank()) {
-                sb.append(" · ").append(info.estimatedCost().trim());
-            }
-        }
-        if (info.elapsedMillis() > 0) {
-            appendField(sb, formatElapsed(info.elapsedMillis()));
-        }
-        appendField(sb, compactCwd());
-        return fitToColumns(sb.toString(), cols);
+        return formatFooterLine(info, RunSnapshot.empty(), cols);
     }
 
     private static void appendField(StringBuilder sb, String value) {
@@ -182,10 +164,74 @@ public final class BottomStatusBar implements AutoCloseable {
     }
 
     static List<AttributedString> formatStatusLines(StatusInfo info, int cols) {
+        return formatStatusLines(info, RunSnapshot.empty(), cols);
+    }
+
+    static List<AttributedString> formatStatusLines(StatusInfo info, RunSnapshot snapshot, int cols) {
+        StatusInfo safe = info == null ? StatusInfo.idle("Auto Model", 0, false) : info;
         return List.of(
-                new AttributedString(formatStatusLine(info, cols), AttributedStyle.DEFAULT),
-                new AttributedString(formatFooterLine(info, cols), AttributedStyle.DEFAULT.faint())
+                new AttributedString(formatStatusLine(safe, snapshot, cols), AttributedStyle.DEFAULT),
+                new AttributedString(formatFooterLine(safe, snapshot, cols), AttributedStyle.DEFAULT.faint())
         );
+    }
+
+    static String formatStatusLine(StatusInfo info, RunSnapshot snapshot, int cols) {
+        String mode = info.hitlEnabled() ? "HITL Ctrl+Y for AUTO" : "YOLO Ctrl+Y to enable HITL";
+        String phase = snapshot == null || snapshot.phase().isBlank() ? info.phase() : snapshot.phase();
+        String security = snapshot == null ? "" : snapshot.securityDomain();
+        String recovery = snapshot == null ? "" : snapshot.recoveryState();
+        String left = joinFields(mode, phase, security, recovery);
+        String right = environmentSummary(info);
+        String rendered = fitPriority(left, right, cols);
+        if (cols < 48 && !security.isBlank() && !rendered.contains(security)) {
+            rendered = fitPriority(joinFields(mode, security), "", cols);
+        }
+        return rendered;
+    }
+
+    static String formatFooterLine(StatusInfo info, RunSnapshot snapshot, int cols) {
+        String model = info.model() == null || info.model().isBlank() ? "Auto Model" : info.model().trim();
+        long input = snapshot == null || snapshot.version() == 0 ? info.inputTokens() : snapshot.inputTokens();
+        long output = snapshot == null || snapshot.version() == 0 ? info.outputTokens() : snapshot.outputTokens();
+        String cost = snapshot == null || snapshot.estimatedCost().isBlank()
+                ? info.estimatedCost() : snapshot.estimatedCost();
+        String trace = snapshot == null ? "" : compactId(snapshot.context().traceId());
+        String phase = snapshot == null || snapshot.phase().isBlank() ? info.phase() : snapshot.phase();
+        StringBuilder line = new StringBuilder("Auto Model · ").append(model);
+        appendField(line, phase);
+        appendField(line, contextSegment(info));
+        if (input > 0 || output > 0) {
+            String tokens = "in " + formatTokens(input) + " out " + formatTokens(output);
+            long cached = snapshot == null || snapshot.version() == 0
+                    ? info.cachedInputTokens() : snapshot.cachedInputTokens();
+            if (cached > 0) tokens += " cache " + formatTokens(cached);
+            appendField(line, tokens);
+        }
+        appendField(line, cost);
+        if (info.elapsedMillis() > 0) appendField(line, formatElapsed(info.elapsedMillis()));
+        appendField(line, trace.isBlank() ? "" : "trace " + trace);
+        appendField(line, compactCwd());
+        return fitToColumns(" " + line, cols);
+    }
+
+    private static String joinFields(String... values) {
+        return java.util.Arrays.stream(values)
+                .filter(value -> value != null && !value.isBlank())
+                .collect(java.util.stream.Collectors.joining(" · "));
+    }
+
+    private static String fitPriority(String left, String right, int cols) {
+        if (right == null || right.isBlank()) return fitToColumns(" " + left, cols);
+        int gap = Math.max(1, cols - visibleLength(left) - visibleLength(right) - 2);
+        if (gap == 1 && visibleLength(left) + visibleLength(right) + 2 > cols) {
+            return fitToColumns(" " + left, cols);
+        }
+        return fitToColumns(" " + left + " ".repeat(gap) + right + " ", cols);
+    }
+
+    private static String compactId(String value) {
+        if (value == null || value.isBlank()) return "";
+        return value.length() <= 10 ? value : value.substring(0, 10);
     }
 
     static int inputDockRow(int terminalRows, int dockRows) {
@@ -233,7 +279,8 @@ public final class BottomStatusBar implements AutoCloseable {
     }
 
     private static String contextSegment(StatusInfo info) {
-        long total = Math.max(0L, info.totalTokens());
+        long total = Math.max(Math.max(0L, info.totalTokens()),
+                Math.max(0L, info.inputTokens()) + Math.max(0L, info.outputTokens()));
         long window = Math.max(0L, info.contextWindow());
         int percent = window <= 0L ? 0 : (int) Math.min(100L, Math.round(total * 100.0 / window));
         int filled = window <= 0L ? 0 : (int) Math.min(CONTEXT_BAR_WIDTH,

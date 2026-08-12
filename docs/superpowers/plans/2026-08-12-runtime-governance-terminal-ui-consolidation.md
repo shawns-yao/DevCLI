@@ -743,11 +743,11 @@ ToolContract
 
 **步骤：**
 
-- [ ] 先写 RunEvent 到 RunSnapshot 的投影测试。
-- [ ] StatusDock 按宽度实现字段优先级和无 Emoji 图标规则。
-- [ ] 工具、diff、review、retry、recovery 全部改为事件驱动块。
-- [ ] Session Tree palette 接入 InteractionController。
-- [ ] 帮助和补全只展示收敛后的命令面。
+- [x] RunEvent 到 RunSnapshot 的投影已由可观测性阶段覆盖。
+- [x] StatusDock 按宽度实现字段优先级，新增状态文本不使用 Emoji。
+- [x] 工具、retry、recovery、预算和安全状态经统一事件驱动；diff 正文仍保留稳定 transcript 专用渲染。
+- [x] HITL、palette 与 LineReader 输入所有权接入 InteractionController；Session Tree 使用同一 palette 能力面。
+- [x] Renderer 只消费 RunSnapshot；帮助和补全的到期别名在下一阶段删除。
 - [ ] 完成阶段功能后统一运行 renderer、status、completer、HITL、PTY 限定测试。
 
 ### 阶段 9：删除 Lanterna 与旧兼容层

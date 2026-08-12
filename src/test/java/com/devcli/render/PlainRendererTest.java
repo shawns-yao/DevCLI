@@ -3,6 +3,7 @@ package com.devcli.render;
 import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.llm.LlmClient;
+import com.devcli.runtime.event.RunEvent;
 import org.jline.reader.LineReader;
 import org.junit.jupiter.api.Test;
 
@@ -20,6 +21,20 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class PlainRendererTest {
+
+    @Test
+    void consumesRunEventsThroughSnapshotProjection() {
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+        PlainRenderer renderer = new PlainRenderer(
+                new PrintStream(sink, true, StandardCharsets.UTF_8),
+                new BufferedReader(new StringReader("")));
+        renderer.eventSink().emit(new RunEvent.TurnStarted("task"));
+        renderer.eventSink().emit(new RunEvent.BudgetUsageUpdated(
+                "run", "react", "", "", 20, 5, 0, 1, 0,
+                "0.01", "USD", "CONTINUE"));
+        assertEquals("running", renderer.currentRunSnapshot().state());
+        assertEquals(25, renderer.currentRunSnapshot().totalTokens());
+    }
 
     @Test
     void streamReturnsConfiguredPrintStream() {

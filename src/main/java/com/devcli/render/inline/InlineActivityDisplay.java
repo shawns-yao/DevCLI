@@ -1,6 +1,7 @@
 package com.devcli.render.inline;
 
 import org.jline.terminal.Terminal;
+import com.devcli.render.state.RunSnapshot;
 import org.jline.utils.AttributedString;
 import org.jline.utils.AttributedStyle;
 
@@ -41,6 +42,7 @@ final class InlineActivityDisplay implements AutoCloseable {
     private long startedNanos;
     private int frame;
     private int renderedRows;
+    private RunSnapshot snapshot = RunSnapshot.empty();
 
     InlineActivityDisplay(Terminal terminal, PrintStream renderLock) {
         this(terminal, renderLock, null);
@@ -66,6 +68,14 @@ final class InlineActivityDisplay implements AutoCloseable {
         if (active && !closed) {
             renderLocked();
         }
+    }
+
+    synchronized void updateSnapshot(RunSnapshot snapshot) {
+        this.snapshot = snapshot == null ? RunSnapshot.empty() : snapshot;
+        if (!this.snapshot.activity().isBlank()) {
+            this.label = this.snapshot.activity();
+        }
+        if (active && !closed) renderLocked();
     }
 
     synchronized void begin(String label) {

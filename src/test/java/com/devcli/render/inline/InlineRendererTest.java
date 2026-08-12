@@ -4,6 +4,7 @@ import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.llm.LlmClient;
 import com.devcli.render.StatusInfo;
+import com.devcli.runtime.event.RunEvent;
 import org.jline.reader.LineReader;
 import org.jline.terminal.Size;
 import org.jline.terminal.Terminal;
@@ -24,6 +25,20 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class InlineRendererTest {
+
+    @Test
+    void runEventsDriveSharedSnapshotState() {
+        Terminal terminal = Mockito.mock(Terminal.class);
+        Mockito.when(terminal.getType()).thenReturn("dumb");
+        Mockito.when(terminal.getSize()).thenReturn(new Size(80, 24));
+        InlineRenderer renderer = new InlineRenderer(terminal,
+                new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+        renderer.eventSink().emit(new RunEvent.TurnStarted("task"));
+        renderer.eventSink().emit(new RunEvent.SecurityDecisionMade(
+                "run", "write_file", "project-patch", "isolated", true, false, "allowed"));
+        assertEquals("running", renderer.currentRunSnapshot().state());
+        assertEquals("project-patch:allowed", renderer.currentRunSnapshot().securityDomain());
+    }
 
     @Test
     void onAnsiTerminalEnablesStatusBar() {

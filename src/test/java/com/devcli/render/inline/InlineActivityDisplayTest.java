@@ -1,6 +1,8 @@
 package com.devcli.render.inline;
 
 import com.devcli.render.StatusInfo;
+import com.devcli.render.state.RunSnapshot;
+import com.devcli.observability.RunTelemetry;
 import org.jline.terminal.Size;
 import org.jline.terminal.Terminal;
 import org.junit.jupiter.api.Test;
@@ -82,6 +84,21 @@ class InlineActivityDisplayTest {
         String output = terminalSink.toString(StandardCharsets.UTF_8);
         assertFalse(output.contains("DevCLI"),
                 "idle activity display must not paint when status updates: " + output);
+    }
+
+    @Test
+    void snapshotActivityUpdatesLiveLabelWithoutWritingTranscript() throws Exception {
+        ByteArrayOutputStream terminalSink = new ByteArrayOutputStream();
+        Terminal terminal = mockAnsiTerminal(terminalSink);
+        try (InlineActivityDisplay display = new InlineActivityDisplay(terminal,
+                new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8))) {
+            display.begin("Thinking");
+            display.updateSnapshot(new RunSnapshot(2, RunTelemetry.empty(), "running", "tool",
+                    "tool read_file", 0, 0, 0, 0, 1, "", "", "", "", "", "", "",
+                    "", "", "", java.util.List.of(), java.util.Map.of(), java.time.Instant.now()));
+            terminal.writer().flush();
+        }
+        assertTrue(terminalSink.toString(StandardCharsets.UTF_8).contains("tool read_file"));
     }
 
     private static Terminal mockAnsiTerminal(ByteArrayOutputStream sink) {

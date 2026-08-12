@@ -6,6 +6,11 @@ import com.devcli.llm.LlmClient;
 import com.devcli.render.PlainRenderer;
 import com.devcli.render.Renderer;
 import com.devcli.render.StatusInfo;
+import com.devcli.render.state.RunProjection;
+import com.devcli.render.state.RunSnapshot;
+import com.devcli.runtime.event.RunEvent;
+import com.devcli.runtime.event.RunEventSink;
+import com.devcli.observability.RunEventEnvelope;
 import com.devcli.util.AnsiStyle;
 import org.jline.reader.LineReader;
 import org.jline.reader.Widget;
@@ -23,9 +28,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Inline 流式渲染器：默认形态。
  *
- * <p>不进 alternate screen，主屏直接输出；输入期状态区紧跟当前 prompt 渲染。
- * 工具调用块、行内 diff、HITL 单字符提示、palette 等高级特性在 Day 3 / Day 4 落地，
- * 现阶段对应方法委托给 {@link PlainRenderer} 兜底。
+ * <p>不进 alternate screen。stable transcript 只追加正文，live activity 只重绘自身区域，
+ * LineReader 独占输入行，JLine Status 独占底部 dock；HITL 与 palette 由统一交互控制器读取。
  */
 public final class InlineRenderer implements Renderer {
 
@@ -37,6 +41,10 @@ public final class InlineRenderer implements Renderer {
     private final PrintStream out;
     private final Object transcriptLock = new Object();
     private final InlineActivityDisplay activityDisplay;
+    private final TranscriptView transcriptView;
+    private final ActivityView activityView;
+    private final StatusDock statusDock;
+    private final InteractionController interactionController;
     private final List<TranscriptEntry> transcript = new ArrayList<>();
     private final AtomicBoolean startupScreenPrinted = new AtomicBoolean(true);
     private volatile LineReader lineReader;
@@ -44,6 +52,9 @@ public final class InlineRenderer implements Renderer {
     private boolean redrawing;
     private volatile boolean started;
     private volatile boolean closed;
+    private final RunProjection runProjection = new RunProjection();
+    private final RunEventSink projectionSink = new ProjectionSink();
+    private volatile RunSnapshot runSnapshot = RunSnapshot.empty();
 
     // —— 代码块折叠状态机字段（仅供 createTranscriptStream 内部使用）——
     private final StringBuilder lineBuffer = new StringBuilder();
@@ -69,6 +80,10 @@ public final class InlineRenderer implements Renderer {
         this.activityDisplay = statusBar == null
                 ? null
                 : new InlineActivityDisplay(terminal, out, statusBar);
+        this.transcriptView = new TranscriptView(out);
+        this.activityView = new ActivityView(activityDisplay);
+        this.statusDock = new StatusDock(statusBar);
+        this.interactionController = new InteractionController(out, terminal);
         this.blockRegistry = new BlockRegistry();
         this.stream = createTranscriptStream(out);
     }
@@ -181,6 +196,7 @@ public final class InlineRenderer implements Renderer {
     @Override
     public void bindLineReader(LineReader lineReader) {
         this.lineReader = lineReader;
+        this.interactionController.bind(lineReader);
     }
 
     /**
@@ -276,19 +292,47 @@ public final class InlineRenderer implements Renderer {
     }
 
     @Override
-    public ApprovalResult promptApproval(ApprovalRequest request) {
-        if (terminal == null) {
-            return fallback.promptApproval(request);
+    public void renderSnapshot(RunSnapshot snapshot) {
+        if (snapshot == null || closed) return;
+        this.runSnapshot = snapshot;
+        statusDock.render(snapshot);
+        if (activityDisplay == null || activityDisplay.isActive()) {
+            activityView.render(snapshot);
         }
-        return new InlineApprovalPrompter(out, terminal, lineReader).prompt(request);
+        transcriptView.renderTerminalState(snapshot);
+    }
+
+    @Override
+    public RunEventSink eventSink() {
+        return projectionSink;
+    }
+
+    public RunSnapshot currentRunSnapshot() {
+        return runSnapshot;
+    }
+
+    private final class ProjectionSink implements RunEventSink {
+        @Override
+        public void emit(RunEvent event) {
+            runProjection.emit(event);
+            renderSnapshot(runProjection.snapshot());
+        }
+
+        @Override
+        public void emit(RunEventEnvelope envelope) {
+            runProjection.emit(envelope);
+            renderSnapshot(runProjection.snapshot());
+        }
+    }
+
+    @Override
+    public ApprovalResult promptApproval(ApprovalRequest request) {
+        return interactionController.promptApproval(request, fallback::promptApproval);
     }
 
     @Override
     public int openPalette(String title, List<String> items) {
-        if (terminal == null) {
-            return fallback.openPalette(title, items);
-        }
-        return new SlashPalette(out, terminal).open(title, items);
+        return interactionController.openPalette(title, items, fallback::openPalette);
     }
 
     /** 测试可见：当前实例是否启动了 status bar。 */
@@ -469,8 +513,7 @@ public final class InlineRenderer implements Renderer {
             reader.printAbove(text.replace("\r\n", "\n").replace('\r', '\n'));
             return;
         }
-        out.print(text);
-        out.flush();
+        transcriptView.append(text);
     }
 
     private static String joinLines(List<String> lines) {
