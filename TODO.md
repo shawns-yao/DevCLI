@@ -1,5 +1,21 @@
 # TODO
 
+## 2026-08-12 运行治理、能力收敛与终端界面重构
+
+- 状态：设计方案已完成，尚未实施
+- 设计文档：`docs/superpowers/plans/2026-08-12-runtime-governance-terminal-ui-consolidation.md`
+- 目标：删除重复能力，合并 Plan/Team 的公共执行链，使用持久 Session Tree 取代 CLI 进程内分支，保留 Side-Git、PatchSet、Checkpoint 各自不可替代的恢复职责；终端只保留 Inline 与 Plain
+- 成本控制：新增统一 RunBudget、预算档位、并行原子账本和 PricingCatalog；Planner、Worker、Reviewer、压缩与重试全部计入同一 run，未知模型不得展示猜测价格
+- 安全性：新增 Project Trust 与统一 ExecutionSecurityPolicy；ReAct 命令默认沙箱执行，项目写入使用工作区事务与 PatchSet；HITL 不得绕过策略拒绝
+- 可靠性：统一 RuntimeThreadStore、DurableTaskManager 与普通运行状态为 RunStore；保留 AgentCheckpoint、Patch Journal 和 Side-Git 专用职责；统一 attempt、重试分类、恢复对账和幂等语义
+- 可观测性：RunEvent 作为 UI 和 Runtime 状态事实，Trace、Metric、Audit 保持专用存储；统一 run/turn/step/agent/attempt 关联，并增加预算、沙箱、重试、恢复和快照事件
+- UI：重构为 stable transcript、live activity、input line、bottom dock 四区；展示执行模式、上下文占用、Run 预算、金额、安全域、持久化状态和 trace id；新增持久 Session Tree，删除 Lanterna 全屏 TUI
+- Temporal 决策：当前本地版不引入；未来服务端出现跨机器 Worker、长时间审批、定时器和故障转移需求时，可实现 `TemporalWorkflowRuntime` 替换本地调度，禁止与 DurableTaskManager 叠加；Temporal history 只保存控制状态和 Artifact 引用
+- 影响范围：agent、runtime、budget、security、tool、workspace、snapshot、trace、render、tui、cli、配置、测试和文档
+- 未实现：本条全部为待实施设计；实施前需要先处理或隔离当前工作区已有 Multi-Agent 未提交改动
+- 验证计划：各阶段完成后统一运行限定测试，全部功能结束后执行 quick、phase22、Runtime、Plan/Team 和全量回归；获得用户许可后再启动真实终端验收
+- 剩余风险：数据库迁移、ReAct 写入事务化、Plan/Team 公共链抽取和 Lanterna 删除均涉及较大影响范围，必须分阶段提交并保留兼容窗口
+
 ## 2026-08-11 上下文压缩预算治理优化
 
 - 状态：已实现并通过限定回归
