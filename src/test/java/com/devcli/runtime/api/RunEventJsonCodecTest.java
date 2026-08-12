@@ -90,4 +90,26 @@ class RunEventJsonCodecTest {
         assertEquals(3, payload.path("llm_calls").asLong());
         assertEquals("unknown", payload.path("estimated_cost").asText());
     }
+
+    @Test
+    void encodesAttemptRetryAndRecoveryCorrelation() throws Exception {
+        JsonNode attempt = MAPPER.readTree(RunEventJsonCodec.encode(
+                new RunEvent.AttemptStarted(
+                        "run_1", "attempt_2", "attempt_1", "CORRECTION", "step_1",
+                        "reviewer_rejected", 2, 0), "turn_1"));
+        JsonNode retry = MAPPER.readTree(RunEventJsonCodec.encode(
+                new RunEvent.RetryScheduled(
+                        "run_1", "INFRASTRUCTURE_RETRY", "llm",
+                        "RATE_LIMITED", 3, 800), "turn_1"));
+        JsonNode recovery = MAPPER.readTree(RunEventJsonCodec.encode(
+                new RunEvent.RecoveryReconciled(
+                        "run_1", "agent-checkpoint:orch", "ROLLED_BACK",
+                        "ALLOW", "safe_recovery_point"), ""));
+
+        assertEquals("attempt_2", attempt.path("attempt_id").asText());
+        assertEquals("attempt_1", attempt.path("parent_attempt_id").asText());
+        assertEquals("CORRECTION", attempt.path("kind").asText());
+        assertEquals(800, retry.path("backoff_millis").asLong());
+        assertEquals("ROLLED_BACK", recovery.path("patch_journal_action").asText());
+    }
 }

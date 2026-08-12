@@ -3,9 +3,17 @@ package com.devcli.llm;
 import com.devcli.budget.PricingCatalog;
 import com.devcli.budget.RunBudget;
 import com.devcli.budget.RunBudgetPolicy;
+import com.devcli.runtime.CancellationContext;
+import com.devcli.runtime.RunContext;
+import com.devcli.runtime.RunCoordinator;
+import com.devcli.runtime.store.RunSubmission;
+import com.devcli.runtime.store.SqliteRunStore;
+import com.devcli.runtime.store.SubmissionSource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -107,5 +115,48 @@ class LlmRetryExecutorTest {
 
         assertEquals(LlmErrorCode.NETWORK, error.code());
         assertEquals(true, error.retryable());
+    }
+
+    @Test
+    void doesNotRetryTransientCodeAfterStreamingDisablesRetry() {
+        AtomicInteger calls = new AtomicInteger();
+        assertThrows(LlmException.class, () -> LlmRetryExecutor.execute(
+                "openai", "model", new LlmRetryPolicy(3, 1, 4, 0.0),
+                millis -> { }, () -> {
+                    calls.incrementAndGet();
+                    throw new LlmException(LlmErrorCode.SERVER_ERROR, "openai", "model",
+                            500, "stream failed", true, 0L, null).afterResponseStarted();
+                }));
+        assertEquals(1, calls.get());
+    }
+
+    @Test
+    void persistsInfrastructureAttemptsInCurrentRun(@TempDir Path tempDir) throws Exception {
+        try (SqliteRunStore store = new SqliteRunStore(tempDir.resolve("runtime.db"))) {
+            var submitted = store.submit(new RunSubmission(
+                    "run_retry_persist", SubmissionSource.CLI, "", tempDir,
+                    "retry", "", ""));
+            RunCoordinator coordinator = new RunCoordinator(store);
+            try (RunCoordinator.ClaimedRunContext claimed = coordinator
+                    .claim(submitted.id(), "test-worker").orElseThrow()) {
+                AtomicInteger calls = new AtomicInteger();
+                String result = LlmRetryExecutor.execute(
+                        "openai", "model", new LlmRetryPolicy(2, 1, 2, 0.0),
+                        millis -> { }, () -> {
+                            if (calls.incrementAndGet() == 1) {
+                                throw new LlmException(LlmErrorCode.NETWORK, "openai", "model",
+                                        0, "network", true, 0L, null);
+                            }
+                            return "ok";
+                        });
+                assertEquals("ok", result);
+                assertEquals(3, store.attempts(submitted.id()).size());
+                assertEquals("INFRASTRUCTURE_RETRY",
+                        store.attempts(submitted.id()).get(2).kind().name());
+                assertEquals(claimed.attempt().id(),
+                        store.attempts(submitted.id()).get(2).parentAttemptId());
+            }
+            assertEquals(null, CancellationContext.currentRun());
+        }
     }
 }

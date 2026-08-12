@@ -1,6 +1,8 @@
 package com.devcli.runtime.store;
 
 import com.devcli.runtime.RunContext;
+import com.devcli.runtime.AttemptKind;
+import com.devcli.runtime.AttemptPersistence;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
 
@@ -12,6 +14,8 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.nio.ByteBuffer;
+import java.security.MessageDigest;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -22,7 +26,7 @@ import java.util.UUID;
 /** SQLite 本地 RunStore。单连接由同步方法串行使用，跨进程状态竞争依赖 version/CAS。 */
 public final class SqliteRunStore implements RunStore {
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final int SCHEMA_VERSION = 1;
+    private static final int SCHEMA_VERSION = 2;
 
     private final Path dbPath;
     private final Connection connection;
@@ -128,16 +132,25 @@ public final class SqliteRunStore implements RunStore {
     @Override
     public synchronized Optional<ClaimedRun> claimNext(
             SubmissionSource source, String workerId, Duration leaseDuration) {
-        return claim(source, null, workerId, leaseDuration);
+        return claim(source, null, RunStatus.ENQUEUED, workerId, leaseDuration);
     }
 
     @Override
     public synchronized Optional<ClaimedRun> claimNextById(
             String runId, String workerId, Duration leaseDuration) {
-        return claim(null, requireText(runId, "runId"), workerId, leaseDuration);
+        return claim(null, requireText(runId, "runId"), RunStatus.ENQUEUED,
+                workerId, leaseDuration);
+    }
+
+    @Override
+    public synchronized Optional<ClaimedRun> claimRecoveryById(
+            String runId, String workerId, Duration leaseDuration) {
+        return claim(null, requireText(runId, "runId"), RunStatus.RECOVERY_REQUIRED,
+                workerId, leaseDuration);
     }
 
     private Optional<ClaimedRun> claim(SubmissionSource source, String runId,
+                                       RunStatus requiredStatus,
                                        String workerId, Duration leaseDuration) {
         String worker = requireText(workerId, "workerId");
         Duration lease = positiveLease(leaseDuration);
@@ -146,7 +159,8 @@ public final class SqliteRunStore implements RunStore {
         try {
             connection.setAutoCommit(false);
             RunRecord candidate = runId == null
-                    ? selectClaimCandidate(source) : selectClaimCandidate(runId);
+                    ? selectClaimCandidate(source, requiredStatus)
+                    : selectClaimCandidate(runId, requiredStatus);
             if (candidate == null) {
                 connection.commit();
                 return Optional.empty();
@@ -174,18 +188,22 @@ public final class SqliteRunStore implements RunStore {
             }
             try (PreparedStatement insert = connection.prepareStatement("""
                     INSERT INTO run_attempts(
-                        id, run_id, sequence, status, worker_id, reason,
+                        id, run_id, sequence, parent_attempt_id, kind, scope,
+                        logical_sequence, status, worker_id, reason, backoff_millis,
                         lease_expires_at, started_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, '', ?, ?, ?)
+                    ) VALUES (?, ?, ?, '', ?, 'run', ?, ?, ?, '', 0, ?, ?, ?)
                     """)) {
                 insert.setString(1, attemptId);
                 insert.setString(2, candidate.id());
                 insert.setLong(3, sequence);
-                insert.setString(4, AttemptStatus.RUNNING.value());
-                insert.setString(5, worker);
-                insert.setString(6, expiresAt.toString());
-                insert.setString(7, now.toString());
-                insert.setString(8, now.toString());
+                insert.setString(4, candidate.status() == RunStatus.RECOVERY_REQUIRED
+                        ? AttemptKind.RECOVERY.name() : AttemptKind.INITIAL.name());
+                insert.setLong(5, sequence);
+                insert.setString(6, AttemptStatus.RUNNING.value());
+                insert.setString(7, worker);
+                insert.setString(8, expiresAt.toString());
+                insert.setString(9, now.toString());
+                insert.setString(10, now.toString());
                 insert.executeUpdate();
             }
             connection.commit();
@@ -291,7 +309,7 @@ public final class SqliteRunStore implements RunStore {
                 default -> AttemptStatus.FAILED;
             };
             try (PreparedStatement updateAttempt = connection.prepareStatement("""
-                    UPDATE run_attempts SET status = ?, reason = ?, finished_at = ?, updated_at = ?
+                    UPDATE run_attempts SET status = ?, outcome = ?, finished_at = ?, updated_at = ?
                     WHERE id = ? AND run_id = ? AND status = ?
                     """)) {
                 updateAttempt.setString(1, attemptStatus.value());
@@ -464,7 +482,7 @@ public final class SqliteRunStore implements RunStore {
                     update.executeUpdate();
                 }
                 try (PreparedStatement attempt = connection.prepareStatement("""
-                        UPDATE run_attempts SET status = ?, reason = ?, finished_at = ?, updated_at = ?
+                        UPDATE run_attempts SET status = ?, outcome = ?, finished_at = ?, updated_at = ?
                         WHERE run_id = ? AND sequence = ? AND status = ?
                         """)) {
                     attempt.setString(1, AttemptStatus.ABANDONED.value());
@@ -490,7 +508,9 @@ public final class SqliteRunStore implements RunStore {
     @Override
     public synchronized Optional<AttemptRecord> currentAttempt(String runId) {
         try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT * FROM run_attempts WHERE run_id = ? ORDER BY sequence DESC LIMIT 1
+                SELECT * FROM run_attempts
+                WHERE run_id = ? AND lease_expires_at IS NOT NULL
+                ORDER BY sequence DESC LIMIT 1
                 """)) {
             statement.setString(1, runId);
             try (ResultSet rows = statement.executeQuery()) {
@@ -498,6 +518,75 @@ public final class SqliteRunStore implements RunStore {
             }
         } catch (SQLException error) {
             throw storageFailure("读取 Run Attempt", error);
+        }
+    }
+
+    @Override
+    public synchronized List<AttemptRecord> attempts(String runId) {
+        List<AttemptRecord> result = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT * FROM run_attempts WHERE run_id = ? ORDER BY started_at, id
+                """)) {
+            statement.setString(1, runId);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) result.add(readAttempt(rows));
+            }
+            return List.copyOf(result);
+        } catch (SQLException error) {
+            throw storageFailure("列出 Run Attempt", error);
+        }
+    }
+
+    @Override
+    public synchronized void startNestedAttempt(AttemptPersistence.AttemptData attempt) {
+        Instant now = Instant.now();
+        try (PreparedStatement insert = connection.prepareStatement("""
+                INSERT OR IGNORE INTO run_attempts(
+                    id, run_id, sequence, parent_attempt_id, kind, scope,
+                    logical_sequence, status, worker_id, reason, backoff_millis,
+                    lease_expires_at, started_at, updated_at
+                ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, NULL, ?, ?
+                WHERE EXISTS (SELECT 1 FROM runs WHERE id = ?)
+                """)) {
+            insert.setString(1, attempt.id());
+            insert.setString(2, attempt.runId());
+            insert.setLong(3, nestedStorageSequence(attempt.id()));
+            insert.setString(4, attempt.parentAttemptId());
+            insert.setString(5, attempt.kind().name());
+            insert.setString(6, attempt.scope());
+            insert.setInt(7, attempt.sequence());
+            insert.setString(8, AttemptStatus.RUNNING.value());
+            insert.setString(9, attempt.reason());
+            insert.setLong(10, attempt.backoffMillis());
+            insert.setString(11, now.toString());
+            insert.setString(12, now.toString());
+            insert.setString(13, attempt.runId());
+            if (insert.executeUpdate() != 1) {
+                throw new IllegalStateException("Attempt 所属 Run 不存在: " + attempt.runId());
+            }
+        } catch (SQLException error) {
+            throw storageFailure("保存嵌套 Attempt", error);
+        }
+    }
+
+    @Override
+    public synchronized void finishNestedAttempt(String attemptId, AttemptStatus status, String outcome) {
+        AttemptStatus terminal = status == null || !status.terminal()
+                ? AttemptStatus.FAILED : status;
+        Instant now = Instant.now();
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE run_attempts SET status = ?, outcome = ?, finished_at = ?, updated_at = ?
+                WHERE id = ? AND lease_expires_at IS NULL AND status = ?
+                """)) {
+            update.setString(1, terminal.value());
+            update.setString(2, text(outcome));
+            update.setString(3, now.toString());
+            update.setString(4, now.toString());
+            update.setString(5, attemptId);
+            update.setString(6, AttemptStatus.RUNNING.value());
+            update.executeUpdate();
+        } catch (SQLException error) {
+            throw storageFailure("完成嵌套 Attempt", error);
         }
     }
 
@@ -598,28 +687,27 @@ public final class SqliteRunStore implements RunStore {
         }
     }
 
-    private RunRecord selectClaimCandidate(SubmissionSource source) throws SQLException {
+    private RunRecord selectClaimCandidate(SubmissionSource source, RunStatus requiredStatus)
+            throws SQLException {
         String sql = source == null
-                ? "SELECT * FROM runs WHERE status IN (?, ?) ORDER BY created_at, id LIMIT 1"
-                : "SELECT * FROM runs WHERE source = ? AND status IN (?, ?) ORDER BY created_at, id LIMIT 1";
+                ? "SELECT * FROM runs WHERE status = ? ORDER BY created_at, id LIMIT 1"
+                : "SELECT * FROM runs WHERE source = ? AND status = ? ORDER BY created_at, id LIMIT 1";
         try (PreparedStatement select = connection.prepareStatement(sql)) {
             int index = 1;
             if (source != null) select.setString(index++, source.value());
-            select.setString(index++, RunStatus.ENQUEUED.value());
-            select.setString(index, RunStatus.RECOVERY_REQUIRED.value());
+            select.setString(index, requiredStatus.value());
             try (ResultSet rows = select.executeQuery()) {
                 return rows.next() ? readRun(rows) : null;
             }
         }
     }
 
-    private RunRecord selectClaimCandidate(String runId) throws SQLException {
+    private RunRecord selectClaimCandidate(String runId, RunStatus requiredStatus) throws SQLException {
         try (PreparedStatement select = connection.prepareStatement("""
-                SELECT * FROM runs WHERE id = ? AND status IN (?, ?) LIMIT 1
+                SELECT * FROM runs WHERE id = ? AND status = ? LIMIT 1
                 """)) {
             select.setString(1, runId);
-            select.setString(2, RunStatus.ENQUEUED.value());
-            select.setString(3, RunStatus.RECOVERY_REQUIRED.value());
+            select.setString(2, requiredStatus.value());
             try (ResultSet rows = select.executeQuery()) {
                 return rows.next() ? readRun(rows) : null;
             }
@@ -681,9 +769,15 @@ public final class SqliteRunStore implements RunStore {
                         id TEXT PRIMARY KEY,
                         run_id TEXT NOT NULL,
                         sequence INTEGER NOT NULL,
+                        logical_sequence INTEGER NOT NULL DEFAULT 1,
+                        parent_attempt_id TEXT NOT NULL DEFAULT '',
+                        kind TEXT NOT NULL DEFAULT 'INITIAL',
+                        scope TEXT NOT NULL DEFAULT '',
                         status TEXT NOT NULL,
                         worker_id TEXT NOT NULL,
                         reason TEXT NOT NULL DEFAULT '',
+                        outcome TEXT NOT NULL DEFAULT '',
+                        backoff_millis INTEGER NOT NULL DEFAULT 0,
                         lease_expires_at TEXT,
                         started_at TEXT NOT NULL,
                         finished_at TEXT,
@@ -698,6 +792,12 @@ public final class SqliteRunStore implements RunStore {
                     + "ON runs(source, idempotency_key) WHERE idempotency_key IS NOT NULL");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_run_attempts_run "
                     + "ON run_attempts(run_id, sequence)");
+            ensureAttemptColumn(statement, "parent_attempt_id", "TEXT NOT NULL DEFAULT ''");
+            ensureAttemptColumn(statement, "logical_sequence", "INTEGER NOT NULL DEFAULT 1");
+            ensureAttemptColumn(statement, "kind", "TEXT NOT NULL DEFAULT 'INITIAL'");
+            ensureAttemptColumn(statement, "scope", "TEXT NOT NULL DEFAULT ''");
+            ensureAttemptColumn(statement, "backoff_millis", "INTEGER NOT NULL DEFAULT 0");
+            ensureAttemptColumn(statement, "outcome", "TEXT NOT NULL DEFAULT ''");
             try (PreparedStatement version = connection.prepareStatement(
                     "INSERT OR IGNORE INTO run_store_schema(version, applied_at) VALUES (?, ?)")) {
                 version.setInt(1, SCHEMA_VERSION);
@@ -725,10 +825,51 @@ public final class SqliteRunStore implements RunStore {
     private static AttemptRecord readAttempt(ResultSet row) throws SQLException {
         return new AttemptRecord(
                 row.getString("id"), row.getString("run_id"), row.getLong("sequence"),
-                AttemptStatus.from(row.getString("status")), row.getString("worker_id"),
-                row.getString("reason"), instant(row.getString("lease_expires_at")),
+                logicalSequence(row),
+                row.getString("parent_attempt_id"), attemptKind(row.getString("kind")),
+                row.getString("scope"), AttemptStatus.from(row.getString("status")),
+                row.getString("worker_id"), row.getString("reason"),
+                row.getString("outcome"), row.getLong("backoff_millis"),
+                instant(row.getString("lease_expires_at")),
                 instant(row.getString("started_at")), instant(row.getString("finished_at")),
                 instant(row.getString("updated_at")));
+    }
+
+    private static int logicalSequence(ResultSet row) throws SQLException {
+        int value = row.getInt("logical_sequence");
+        if (value > 0) return value;
+        return (int) Math.max(1, Math.min(Integer.MAX_VALUE, row.getLong("sequence")));
+    }
+
+    private void ensureAttemptColumn(Statement statement, String name, String definition)
+            throws SQLException {
+        try {
+            statement.execute("ALTER TABLE run_attempts ADD COLUMN " + name + " " + definition);
+        } catch (SQLException error) {
+            String message = error.getMessage() == null ? "" : error.getMessage();
+            if (!message.toLowerCase(java.util.Locale.ROOT).contains("duplicate column")) {
+                throw error;
+            }
+        }
+    }
+
+    private static AttemptKind attemptKind(String value) {
+        try {
+            return AttemptKind.valueOf(value == null ? "INITIAL" : value);
+        } catch (IllegalArgumentException ignored) {
+            return AttemptKind.INITIAL;
+        }
+    }
+
+    private static long nestedStorageSequence(String attemptId) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(attemptId.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            long value = ByteBuffer.wrap(digest).getLong() & Long.MAX_VALUE;
+            return -Math.max(1L, value);
+        } catch (Exception error) {
+            throw new IllegalStateException("生成 Attempt 存储序号失败", error);
+        }
     }
 
     private static RunStatus legacyRunStatus(String status) {

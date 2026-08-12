@@ -2,6 +2,7 @@ package com.devcli.agent;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import com.devcli.runtime.AttemptKind;
 
 /**
  * 失败步骤"在位重做"的状态与决策，从 {@link AgentOrchestrator} 解耦出来单独承载。
@@ -40,6 +41,10 @@ final class StepRedoTracker {
         return n;
     }
 
+    AttemptKind attemptKind() {
+        return AttemptKind.CORRECTION;
+    }
+
     /** 该步骤是否处于重做中（已重做过至少一次）。 */
     boolean isRedo(String stepId) {
         return redoCount.getOrDefault(stepId, 0) > 0;
@@ -58,5 +63,11 @@ final class StepRedoTracker {
     void reset() {
         redoCount.clear();
         lastFailure.clear();
+    }
+
+    void restore(String stepId, int correctionAttempts, String failureReason) {
+        if (stepId == null || stepId.isBlank() || correctionAttempts <= 0) return;
+        redoCount.put(stepId, Math.min(maxRedoPerStep, correctionAttempts));
+        lastFailure.put(stepId, failureReason == null ? "" : failureReason);
     }
 }

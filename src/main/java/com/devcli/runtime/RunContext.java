@@ -3,6 +3,7 @@ package com.devcli.runtime;
 import com.devcli.budget.PricingCatalog;
 import com.devcli.budget.RunBudget;
 import com.devcli.budget.RunBudgetPolicy;
+import com.devcli.runtime.event.RunEventSink;
 
 import java.nio.file.Path;
 import java.math.BigDecimal;
@@ -24,6 +25,10 @@ public final class RunContext implements AutoCloseable {
     private final Path projectPath;
     private final CancellationToken cancellationToken;
     private final RunBudget runBudget;
+    private volatile RunEventSink eventSink = RunEventSink.NO_OP;
+    private volatile AttemptPersistence attemptPersistence = AttemptPersistence.NO_OP;
+    private volatile RunPersistenceSink persistenceSink = RunPersistenceSink.NO_OP;
+    private volatile String parentAttemptId = "";
     private final RunContext previous;
     private final Deque<AutoCloseable> ownedResources = new ArrayDeque<>();
     private final AtomicBoolean closed = new AtomicBoolean(false);
@@ -58,6 +63,33 @@ public final class RunContext implements AutoCloseable {
 
     public RunBudget runBudget() {
         return runBudget;
+    }
+
+    public RunEventSink eventSink() {
+        return eventSink;
+    }
+
+    public AttemptPersistence attemptPersistence() {
+        return attemptPersistence;
+    }
+
+    public RunPersistenceSink persistenceSink() {
+        return persistenceSink;
+    }
+
+    public String parentAttemptId() {
+        return parentAttemptId;
+    }
+
+    public RunContext configureRuntimeServices(RunEventSink events,
+                                               AttemptPersistence attempts,
+                                               RunPersistenceSink persistence,
+                                               String parentAttemptId) {
+        this.eventSink = events == null ? RunEventSink.NO_OP : events;
+        this.attemptPersistence = attempts == null ? AttemptPersistence.NO_OP : attempts;
+        this.persistenceSink = persistence == null ? RunPersistenceSink.NO_OP : persistence;
+        this.parentAttemptId = parentAttemptId == null ? "" : parentAttemptId;
+        return this;
     }
 
     public RunBudgetState budgetState() {

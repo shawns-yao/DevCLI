@@ -5,6 +5,9 @@ import com.devcli.runtime.store.RunStatus;
 import com.devcli.runtime.store.RunStore;
 import com.devcli.runtime.store.RunSubmission;
 import com.devcli.runtime.store.SubmissionSource;
+import com.devcli.runtime.event.RunEvent;
+import com.devcli.runtime.event.RunEventSink;
+import com.devcli.runtime.store.AttemptStatus;
 
 import java.nio.file.Path;
 import java.time.Duration;
@@ -14,6 +17,7 @@ import java.util.Optional;
 
 /** Run 生命周期协调器：上下文绑定、预算恢复和 CAS 终态只从这里进入。 */
 public final class RunCoordinator {
+    private final RetryPolicy retryPolicy = new RetryPolicy();
     private final RunStore store;
     private final Duration leaseDuration;
 
@@ -43,29 +47,44 @@ public final class RunCoordinator {
     }
 
     public Optional<ClaimedRunContext> claim(String runId, String workerId) {
+        return claim(runId, workerId, RunEventSink.NO_OP);
+    }
+
+    public Optional<ClaimedRunContext> claim(String runId, String workerId, RunEventSink events) {
         RunRecord requested = store.find(runId).orElse(null);
         if (requested == null || requested.terminal() || requested.status() == RunStatus.RUNNING) {
             return Optional.empty();
         }
-        return store.claimNextById(runId, workerId, leaseDuration).map(claimed -> {
-            RunRecord run = claimed.run();
-            Path projectPath = run.projectPath().isBlank()
-                    ? Path.of(System.getProperty("user.dir")) : Path.of(run.projectPath());
-            RunContext context = CancellationContext.startRunContext(
-                    run.id(), projectPath, restoredBudgetState(run));
-            return new ClaimedRunContext(claimed, context);
-        });
+        if (requested.status() == RunStatus.RECOVERY_REQUIRED) {
+            return Optional.empty();
+        }
+        return store.claimNextById(runId, workerId, leaseDuration)
+                .map(claimed -> bind(claimed, events));
+    }
+
+    public Optional<ClaimedRunContext> claimRecovery(
+            String runId, String workerId, RecoveryProof proof, RunEventSink events) {
+        RunRecord requested = store.find(runId).orElse(null);
+        if (requested == null || requested.status() != RunStatus.RECOVERY_REQUIRED) {
+            return Optional.empty();
+        }
+        RecoveryProof normalized = proof == null ? RecoveryProof.unsafe() : proof;
+        RetryPolicy.Decision recovery = retryPolicy.recovery(
+                normalized.patchJournalReconciled(),
+                normalized.checkpointValid() && checkpointRequiredAndSafe(requested),
+                normalized.budgetRestored() && budgetReferenceSafe(requested));
+        RunEventSink eventSink = events == null ? RunEventSink.NO_OP : events;
+        eventSink.emit(new RunEvent.RecoveryReconciled(
+                requested.id(), requested.checkpointRef(), normalized.patchJournalAction(),
+                recovery.retry() ? "ALLOW" : "DENY", recovery.reason()));
+        if (!recovery.retry()) return Optional.empty();
+        return store.claimRecoveryById(runId, workerId, leaseDuration)
+                .map(claimed -> bind(claimed, eventSink));
     }
 
     public Optional<ClaimedRunContext> claimNext(SubmissionSource source, String workerId) {
-        return store.claimNext(source, workerId, leaseDuration).map(claimed -> {
-            RunRecord run = claimed.run();
-            Path projectPath = run.projectPath().isBlank()
-                    ? Path.of(System.getProperty("user.dir")) : Path.of(run.projectPath());
-            RunContext.RunBudgetState budgetState = restoredBudgetState(run);
-            RunContext context = CancellationContext.startRunContext(run.id(), projectPath, budgetState);
-            return new ClaimedRunContext(claimed, context);
-        });
+        return store.claimNext(source, workerId, leaseDuration)
+                .map(claimed -> bind(claimed, RunEventSink.NO_OP));
     }
 
     public boolean complete(ClaimedRunContext claimed, RunStatus status,
@@ -94,12 +113,85 @@ public final class RunCoordinator {
         return store;
     }
 
+    private ClaimedRunContext bind(RunStore.ClaimedRun claimed, RunEventSink events) {
+        RunRecord run = claimed.run();
+        Path projectPath = run.projectPath().isBlank()
+                ? Path.of(System.getProperty("user.dir")) : Path.of(run.projectPath());
+        RunContext context = CancellationContext.startRunContext(
+                run.id(), projectPath, restoredBudgetState(run));
+        RunPersistenceSink persistence = new RunPersistenceSink() {
+            @Override
+            public boolean saveRecoveryReferences(String checkpointRef, String patchJournalRef,
+                                                  String snapshotRef) {
+                RunRecord current = store.find(run.id()).orElse(null);
+                return current != null && store.saveRecoveryReferences(
+                        current.id(), current.version(),
+                        preserveBlank(checkpointRef, current.checkpointRef()),
+                        preserveBlank(patchJournalRef, current.patchJournalRef()),
+                        preserveBlank(snapshotRef, current.snapshotRef()));
+            }
+
+            @Override
+            public boolean clearRecoveryReferences(boolean checkpoint, boolean patchJournal,
+                                                   boolean snapshot) {
+                RunRecord current = store.find(run.id()).orElse(null);
+                return current != null && store.clearRecoveryReferences(
+                        current.id(), current.version(), checkpoint, patchJournal, snapshot);
+            }
+        };
+        AttemptPersistence attempts = new AttemptPersistence() {
+            @Override
+            public void started(AttemptData attempt) {
+                try {
+                    store.startNestedAttempt(attempt);
+                } catch (RuntimeException error) {
+                    if (attempt.kind() == AttemptKind.INITIAL) return;
+                    throw error;
+                }
+            }
+
+            @Override
+            public void finished(String attemptId, AttemptStatus status, String outcome) {
+                store.finishNestedAttempt(attemptId, status, outcome);
+            }
+        };
+        context.configureRuntimeServices(events, attempts, persistence, claimed.attempt().id());
+        return new ClaimedRunContext(claimed, context);
+    }
+
+    private static String preserveBlank(String candidate, String existing) {
+        return candidate == null || candidate.isBlank() ? existing : candidate;
+    }
+
     private static RunContext.RunBudgetState restoredBudgetState(RunRecord run) {
         if (run.budgetStateJson().isBlank()) return null;
         try {
             return com.devcli.runtime.store.SqliteRunStore.decodeBudget(run.budgetStateJson());
         } catch (Exception error) {
             throw new IllegalStateException("恢复 RunBudget 失败: " + error.getMessage(), error);
+        }
+    }
+
+    private static boolean checkpointRequiredAndSafe(RunRecord run) {
+        return !run.checkpointRef().isBlank()
+                && (run.checkpointRef().startsWith("runtime-checkpoint:")
+                || run.checkpointRef().startsWith("agent-checkpoint:"));
+    }
+
+    private static boolean budgetReferenceSafe(RunRecord run) {
+        return run.budgetStateJson().isBlank() || restoredBudgetState(run) != null;
+    }
+
+    public record RecoveryProof(boolean patchJournalReconciled,
+                                boolean checkpointValid,
+                                boolean budgetRestored,
+                                String patchJournalAction) {
+        public RecoveryProof {
+            patchJournalAction = patchJournalAction == null ? "" : patchJournalAction;
+        }
+
+        public static RecoveryProof unsafe() {
+            return new RecoveryProof(false, false, false, "not_reconciled");
         }
     }
 

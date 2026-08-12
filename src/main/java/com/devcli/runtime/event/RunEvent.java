@@ -18,7 +18,8 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
         RunEvent.TurnRejected, RunEvent.CheckpointCreated, RunEvent.CheckpointFailed,
         RunEvent.BudgetConfigured, RunEvent.BudgetUsageUpdated,
         RunEvent.BudgetThresholdReached, RunEvent.BudgetExhausted,
-        RunEvent.LlmRequestCompleted {
+        RunEvent.LlmRequestCompleted, RunEvent.AttemptStarted,
+        RunEvent.RetryScheduled, RunEvent.AttemptFinished, RunEvent.RecoveryReconciled {
 
     String type();
 
@@ -294,6 +295,72 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
 
         @Override
         public String type() { return "llm.request.completed"; }
+    }
+
+    record AttemptStarted(String runId, String attemptId, String parentAttemptId,
+                          String kind, String scope,
+                          String reason, int sequence, long backoffMillis) implements RunEvent {
+        public AttemptStarted {
+            runId = text(runId);
+            attemptId = text(attemptId);
+            parentAttemptId = text(parentAttemptId);
+            kind = text(kind);
+            scope = text(scope);
+            reason = text(reason);
+            sequence = Math.max(1, sequence);
+            backoffMillis = Math.max(0, backoffMillis);
+        }
+
+        @Override
+        public String type() { return "attempt.started"; }
+    }
+
+    record RetryScheduled(String runId, String kind, String scope, String reason,
+                          int nextSequence, long backoffMillis) implements RunEvent {
+        public RetryScheduled {
+            runId = text(runId);
+            kind = text(kind);
+            scope = text(scope);
+            reason = text(reason);
+            nextSequence = Math.max(1, nextSequence);
+            backoffMillis = Math.max(0, backoffMillis);
+        }
+
+        @Override
+        public String type() { return "retry.scheduled"; }
+    }
+
+    record AttemptFinished(String runId, String attemptId, String parentAttemptId,
+                           String kind, String scope,
+                           int sequence, String status, String outcome) implements RunEvent {
+        public AttemptFinished {
+            runId = text(runId);
+            attemptId = text(attemptId);
+            parentAttemptId = text(parentAttemptId);
+            kind = text(kind);
+            scope = text(scope);
+            sequence = Math.max(1, sequence);
+            status = text(status);
+            outcome = text(outcome);
+        }
+
+        @Override
+        public String type() { return "attempt.finished"; }
+    }
+
+    record RecoveryReconciled(String runId, String checkpointRef,
+                              String patchJournalAction, String decision,
+                              String reason) implements RunEvent {
+        public RecoveryReconciled {
+            runId = text(runId);
+            checkpointRef = text(checkpointRef);
+            patchJournalAction = text(patchJournalAction);
+            decision = text(decision);
+            reason = text(reason);
+        }
+
+        @Override
+        public String type() { return "recovery.reconciled"; }
     }
 
     record ToolCallData(String id, String name, String argumentsJson) {

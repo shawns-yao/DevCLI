@@ -98,6 +98,9 @@ public class AgentOrchestrator {
     private boolean requireWorkerToolEvidence;
     private final WorkspaceCommitCoordinator workspaceCommitCoordinator =
             new WorkspaceCommitCoordinator();
+    private com.devcli.runtime.AttemptCoordinator attemptCoordinator() {
+        return com.devcli.runtime.AttemptCoordinator.currentOrLocal("run_team_local");
+    }
 
     private static final class StepUpdateBuffer {
         private final String stepId;
@@ -578,27 +581,39 @@ public class AgentOrchestrator {
         }
         Path projectRoot = Path.of(toolRegistry.getProjectPath());
         AgentCheckpoint.PatchReconcileResult patchReconcile;
+        com.devcli.runtime.AttemptCoordinator.AttemptScope recoveryAttempt =
+                attemptCoordinator().start(com.devcli.runtime.AttemptKind.RECOVERY,
+                        loaded.getOrchestrationId(), "checkpoint_resume", 1, 0);
         try {
             patchReconcile = workspaceCommitCoordinator.reconcile(loaded, projectRoot);
         } catch (Exception e) {
+            recoveryAttempt.fail("patch_reconciliation_persistence_failed");
+            recoveryAttempt.close();
             return "❌ checkpoint [" + loaded.getOrchestrationId()
                     + "] PatchSet 恢复对账保存失败：" + e.getMessage();
         }
         if (!patchReconcile.failures().isEmpty()) {
+            recoveryAttempt.fail("patch_reconciliation_failed");
+            recoveryAttempt.close();
             return "❌ checkpoint [" + loaded.getOrchestrationId()
                     + "] 存在无法自动回滚的 PatchSet 写前日志："
                     + patchReconcile.failures();
         }
+        markCurrentRunPatchJournalReconciled(loaded, patchReconcile);
         checkpoint = loaded;
         AgentCheckpoint.RecoveryState recovery;
         try {
             recovery = restoreAgentTopology(loaded);
         } catch (RuntimeException e) {
             checkpoint = null;
+            recoveryAttempt.fail("agent_topology_invalid");
+            recoveryAttempt.close();
             return "❌ checkpoint [" + loaded.getOrchestrationId()
                     + "] 子代理身份恢复失败：" + e.getMessage();
         }
         if (recovery.planSteps().isEmpty()) {
+            recoveryAttempt.fail("checkpoint_plan_missing");
+            recoveryAttempt.close();
             return "❌ checkpoint [" + loaded.getOrchestrationId()
                     + "] 缺少计划数据（旧格式落盘），无法恢复；请重新发起 /team 任务。";
         }
@@ -623,6 +638,8 @@ public class AgentOrchestrator {
                 .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
         toolRegistry.pruneExpiredLeases();
         if (CancellationContext.isCancelled()) {
+            recoveryAttempt.fail("cancelled");
+            recoveryAttempt.close();
             return "⏹️ 已取消当前多 Agent 任务。";
         }
 
@@ -633,7 +650,27 @@ public class AgentOrchestrator {
                 + "（已完成 " + completedCount + "/" + steps.size() + " 步）"));
         out.println(summarizeSteps(steps) + "\n");
 
+        recoveryAttempt.complete("patch_reconciled_and_checkpoint_restored");
+        recoveryAttempt.close();
         return executeSteps(steps, traceContext);
+    }
+
+    private void markCurrentRunPatchJournalReconciled(
+            AgentCheckpoint loaded, AgentCheckpoint.PatchReconcileResult result) {
+        com.devcli.runtime.RunContext context = CancellationContext.currentRun();
+        if (context == null) return;
+        try {
+            String action = result.actions().isEmpty()
+                    ? "no_pending_patch" : result.actions().toString();
+            context.persistenceSink().saveRecoveryReferences(
+                    "agent-checkpoint:" + loaded.getOrchestrationId(),
+                    "reconciled:" + action, "");
+            context.eventSink().emit(new com.devcli.runtime.event.RunEvent.RecoveryReconciled(
+                    context.runId(), "agent-checkpoint:" + loaded.getOrchestrationId(),
+                    action, "ALLOW", "patch_journal_reconciled"));
+        } catch (Exception error) {
+            log.warn("保存 Patch Journal 对账引用失败: {}", error.getMessage());
+        }
     }
 
     /** 兼容旧调用入口，恢复语义统一委托给结构化协议。 */
@@ -726,6 +763,16 @@ public class AgentOrchestrator {
         out.println(AnsiStyle.heading("⚡ 第二阶段：执行"));
         redoTracker.reset();
         Map<String, Integer> retryCount = new ConcurrentHashMap<>();
+        if (checkpoint != null) {
+            checkpoint.getCorrectionAttempts().forEach((stepId, count) -> {
+                retryCount.put(stepId, Math.min(MAX_RETRIES_PER_STEP, Math.max(0, count)));
+            });
+            checkpoint.getStepRedoAttempts().forEach((stepId, count) -> {
+                String failure = restoredFailedArtifacts.containsKey(stepId)
+                        ? restoredFailedArtifacts.get(stepId).summary() : "";
+                redoTracker.restore(stepId, count, failure);
+            });
+        }
         int singleStepCursor = 0;
         int batchIndex = 0;
 
@@ -1072,6 +1119,12 @@ public class AgentOrchestrator {
                 continue;
             }
             int attempt = redoTracker.markRedo(step.id(), step.result());
+            if (checkpoint != null) {
+                checkpoint.recordStepRedoAttempt(step.id());
+                checkpoint.save();
+            }
+            attemptCoordinator().scheduled(redoTracker.attemptKind(), step.id(),
+                    step.result(), attempt, 0);
             out.println(AnsiStyle.heading("🔁 步骤 [" + step.id() + "] 失败，在原位换思路重做（第 "
                     + attempt + "/" + redoTracker.maxRedoPerStep() + " 次）"));
             steps.set(i, step.withRedoPending());
@@ -1652,6 +1705,13 @@ public class AgentOrchestrator {
         while (!approved && retries < MAX_RETRIES_PER_STEP) {
             retries++;
             retryCount.put(step.id(), retries);
+            if (checkpoint != null) {
+                checkpoint.recordCorrectionAttempt(step.id());
+                checkpoint.save();
+            }
+            com.devcli.runtime.AttemptCoordinator.AttemptScope correctionAttempt =
+                    attemptCoordinator().start(com.devcli.runtime.AttemptKind.CORRECTION,
+                            step.id(), issues, retries, 0);
             out.println("⚠️ 步骤 [" + step.id() + "] 审查未通过，正在重新执行...");
             out.println("   反馈: " + issues + "\n");
 
@@ -1659,6 +1719,8 @@ public class AgentOrchestrator {
             AgentMessage retryResult = executeWorkerWithTransientRetry(step, worker, taskMsg, feedbackContext, out,
                     workerForkContext, "重试 ");
             if (retryResult.type() == AgentMessage.Type.ERROR) {
+                correctionAttempt.fail(retryResult.content());
+                correctionAttempt.close();
                 log.warn("Step {} retry {} failed at LLM layer: {}", step.id(), retries, retryResult.content());
                 issues = "重试时 LLM 调用失败：" + retryResult.content();
                 approved = false;
@@ -1667,6 +1729,8 @@ public class AgentOrchestrator {
             acceptedResult = resolveWorkerResultContent(
                     retryResult.content(), worker.getLastExecutionEvidence());
             if (acceptedResult.isBlank()) {
+                correctionAttempt.fail("empty_result");
+                correctionAttempt.close();
                 approved = false;
                 issues = "执行结果为空";
                 log.info("Step {} retry {} returned empty result without successful tool evidence",
@@ -1684,10 +1748,16 @@ public class AgentOrchestrator {
                             + issues;
                     approved = true;
                 }
+                if (approved) correctionAttempt.complete("reviewer_degraded_after_hard_check");
+                else correctionAttempt.fail(issues);
+                correctionAttempt.close();
                 break;
             }
             approved = retryReview.approved();
             issues = retryReview.issues();
+            if (approved) correctionAttempt.complete("review_approved");
+            else correctionAttempt.fail(issues);
+            correctionAttempt.close();
         }
 
         if (approved) {
@@ -1769,6 +1839,9 @@ public class AgentOrchestrator {
                     && isTransientLlmError(result.content())
                     && transientRetries < MAX_RETRIES_PER_STEP) {
                 transientRetries++;
+                attemptCoordinator().scheduled(
+                        com.devcli.runtime.AttemptKind.INFRASTRUCTURE_RETRY,
+                        step.id(), result.content(), transientRetries + 1, 0);
                 out.println("⚠️ 步骤 [" + step.id() + "] " + label
                         + "LLM 瞬时错误，正在重新调用 Worker (" + transientRetries
                         + "/" + MAX_RETRIES_PER_STEP + ")...");

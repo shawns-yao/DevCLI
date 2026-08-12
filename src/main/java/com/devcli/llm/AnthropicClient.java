@@ -87,7 +87,7 @@ public class AnthropicClient implements LlmClient {
                         return chatOnce(messages, tools, tracking, toolChoice);
                     } catch (IOException error) {
                         LlmException normalized = LlmErrors.normalize(getProviderName(), getModelName(), error);
-                        throw streamed.get() ? normalized.withoutRetry() : normalized;
+                        throw streamed.get() ? normalized.afterResponseStarted() : normalized;
                     }
                 });
     }

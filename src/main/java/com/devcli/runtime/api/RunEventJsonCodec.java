@@ -115,6 +115,37 @@ final class RunEventJsonCodec {
             payload.put("input_tokens", request.inputTokens());
             payload.put("output_tokens", request.outputTokens());
             payload.put("cached_input_tokens", request.cachedInputTokens());
+        } else if (event instanceof RunEvent.AttemptStarted attempt) {
+            payload.put("run_id", attempt.runId());
+            payload.put("attempt_id", attempt.attemptId());
+            payload.put("parent_attempt_id", attempt.parentAttemptId());
+            payload.put("kind", attempt.kind());
+            payload.put("scope", attempt.scope());
+            payload.put("reason", attempt.reason());
+            payload.put("sequence", attempt.sequence());
+            payload.put("backoff_millis", attempt.backoffMillis());
+        } else if (event instanceof RunEvent.RetryScheduled retry) {
+            payload.put("run_id", retry.runId());
+            payload.put("kind", retry.kind());
+            payload.put("scope", retry.scope());
+            payload.put("reason", retry.reason());
+            payload.put("next_sequence", retry.nextSequence());
+            payload.put("backoff_millis", retry.backoffMillis());
+        } else if (event instanceof RunEvent.AttemptFinished attempt) {
+            payload.put("run_id", attempt.runId());
+            payload.put("attempt_id", attempt.attemptId());
+            payload.put("parent_attempt_id", attempt.parentAttemptId());
+            payload.put("kind", attempt.kind());
+            payload.put("scope", attempt.scope());
+            payload.put("sequence", attempt.sequence());
+            payload.put("status", attempt.status());
+            payload.put("outcome", attempt.outcome());
+        } else if (event instanceof RunEvent.RecoveryReconciled recovery) {
+            payload.put("run_id", recovery.runId());
+            payload.put("checkpoint_ref", recovery.checkpointRef());
+            payload.put("patch_journal_action", recovery.patchJournalAction());
+            payload.put("decision", recovery.decision());
+            payload.put("reason", recovery.reason());
         } else {
             throw new IllegalArgumentException("不支持的运行事件: " + event.getClass().getName());
         }

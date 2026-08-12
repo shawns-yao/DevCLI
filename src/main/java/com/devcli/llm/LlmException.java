@@ -9,9 +9,17 @@ public final class LlmException extends IOException {
     private final int statusCode;
     private final boolean retryable;
     private final long retryAfterMillis;
+    private final boolean responseStarted;
 
     public LlmException(LlmErrorCode code, String provider, String model, int statusCode,
                         String message, boolean retryable, long retryAfterMillis, Throwable cause) {
+        this(code, provider, model, statusCode, message, retryable,
+                retryAfterMillis, false, cause);
+    }
+
+    public LlmException(LlmErrorCode code, String provider, String model, int statusCode,
+                        String message, boolean retryable, long retryAfterMillis,
+                        boolean responseStarted, Throwable cause) {
         super(message, cause);
         this.code = code == null ? LlmErrorCode.UNKNOWN : code;
         this.provider = provider == null ? "unknown" : provider;
@@ -19,6 +27,7 @@ public final class LlmException extends IOException {
         this.statusCode = statusCode;
         this.retryable = retryable;
         this.retryAfterMillis = Math.max(0L, retryAfterMillis);
+        this.responseStarted = responseStarted;
     }
 
     public LlmErrorCode code() {
@@ -45,11 +54,15 @@ public final class LlmException extends IOException {
         return retryAfterMillis;
     }
 
-    public LlmException withoutRetry() {
-        if (!retryable) {
+    public LlmException afterResponseStarted() {
+        if (responseStarted) {
             return this;
         }
         return new LlmException(code, provider, model, statusCode, getMessage(),
-                false, retryAfterMillis, getCause());
+                false, retryAfterMillis, true, getCause());
+    }
+
+    public boolean responseStarted() {
+        return responseStarted;
     }
 }

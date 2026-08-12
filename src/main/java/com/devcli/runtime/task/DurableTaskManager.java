@@ -105,6 +105,10 @@ public class DurableTaskManager implements Closeable {
         RunRecord latest = store.find(id).orElse(current);
         boolean canceled = store.cancel(id, latest.version(), "用户取消",
                 task == null ? null : task.context().budgetState());
+        if (!canceled) {
+            RunRecord afterRace = store.find(id).orElse(null);
+            canceled = afterRace != null && afterRace.status() == RunStatus.CANCELED;
+        }
         if (canceled) notifyAll();
         return canceled;
     }

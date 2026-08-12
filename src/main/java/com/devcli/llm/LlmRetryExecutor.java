@@ -1,6 +1,11 @@
 package com.devcli.llm;
 
 import com.devcli.budget.RunBudget;
+import com.devcli.runtime.AttemptCoordinator;
+import com.devcli.runtime.AttemptKind;
+import com.devcli.runtime.CancellationContext;
+import com.devcli.runtime.RetryPolicy;
+import com.devcli.runtime.RunContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -8,6 +13,7 @@ import java.io.IOException;
 
 public final class LlmRetryExecutor {
     private static final Logger log = LoggerFactory.getLogger(LlmRetryExecutor.class);
+    private static final RetryPolicy RETRY_POLICY = new RetryPolicy();
     private LlmRetryExecutor() {
     }
 
@@ -33,7 +39,13 @@ public final class LlmRetryExecutor {
                 ? LlmRetryPolicy.fromSystemProperties() : policy;
         Sleeper effectiveSleeper = sleeper == null ? Thread::sleep : sleeper;
         LlmBudgetContext.Scope scopedBudget = runBudget == null ? LlmBudgetContext.current() : null;
+        RunContext currentRun = CancellationContext.currentRun();
+        String runId = currentRun != null
+                ? currentRun.runId()
+                : (runBudget == null ? "run_llm_local" : runBudget.runId());
+        AttemptCoordinator attempts = AttemptCoordinator.currentOrLocal(runId);
         LlmException last = null;
+        long scheduledBackoff = 0;
         for (int attempt = 1; attempt <= effectivePolicy.maxAttempts(); attempt++) {
             if (SamplingRequestCoordinator.isCurrentCancelled()) {
                 throw cancelled(provider, model, null);
@@ -45,9 +57,15 @@ public final class LlmRetryExecutor {
                 throw new LlmException(LlmErrorCode.BUDGET_EXHAUSTED, provider, model, 0,
                         "Run budget exhausted: " + admission.reason(), false, 0L, last);
             }
-            try {
+            AttemptKind kind = attempt == 1
+                    ? AttemptKind.INITIAL : AttemptKind.INFRASTRUCTURE_RETRY;
+            try (AttemptCoordinator.AttemptScope attemptScope = attempts.start(
+                    kind, phase + ":" + agent,
+                    last == null ? "initial_request" : last.code().name(),
+                    attempt, scheduledBackoff)) {
                 T result = operation.get();
                 if (runBudget != null) runBudget.releaseReservation(admission);
+                attemptScope.complete("success");
                 return result;
             } catch (IOException error) {
                 if (runBudget != null) runBudget.releaseReservation(admission);
@@ -56,10 +74,19 @@ public final class LlmRetryExecutor {
                     throw cancelled(provider, model, error);
                 }
                 last = LlmErrors.normalize(provider, model, error);
-                if (!last.retryable() || attempt >= effectivePolicy.maxAttempts()) {
+                RetryPolicy.Decision decision = RETRY_POLICY.llm(
+                        last.code(), last.responseStarted(), attempt,
+                        effectivePolicy.maxAttempts());
+                if (!last.retryable() && !last.responseStarted()) {
+                    decision = RetryPolicy.Decision.deny("provider_marked_non_retryable");
+                }
+                if (!decision.retry()) {
                     throw last;
                 }
                 long delay = effectivePolicy.delayMillis(attempt, last.retryAfterMillis());
+                scheduledBackoff = delay;
+                attempts.scheduled(AttemptKind.INFRASTRUCTURE_RETRY,
+                        phase + ":" + agent, last.code().name(), attempt + 1, delay);
                 log.warn("retry LLM request: provider={}, model={}, code={}, attempt={}/{}, delayMs={}",
                         provider, model, last.code(), attempt + 1, effectivePolicy.maxAttempts(), delay);
                 try {

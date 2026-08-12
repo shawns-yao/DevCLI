@@ -4,6 +4,7 @@ import com.devcli.budget.RunBudget;
 import com.devcli.budget.RunBudgetPolicy;
 import com.devcli.runtime.CancellationContext;
 import com.devcli.runtime.RunContext;
+import com.devcli.runtime.RunCoordinator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -87,7 +88,8 @@ class SqliteRunStoreTest {
             assertTrue(store.claimNextById(runId, "worker-2", Duration.ofMinutes(1)).isEmpty());
             Thread.sleep(10);
             assertEquals(RunStatus.RECOVERY_REQUIRED, store.reconcileExpiredLeases().getFirst().status());
-            RunStore.ClaimedRun second = store.claimNextById(
+            assertTrue(store.claimNextById(runId, "worker-2", Duration.ofMinutes(1)).isEmpty());
+            RunStore.ClaimedRun second = store.claimRecoveryById(
                     runId, "worker-2", Duration.ofMinutes(1)).orElseThrow();
             assertEquals(first.attempt().sequence() + 1, second.attempt().sequence());
         }
@@ -139,6 +141,38 @@ class SqliteRunStoreTest {
             assertEquals("", cleared.checkpointRef());
             assertEquals("", cleared.patchJournalRef());
             assertEquals("snapshot:commit", cleared.snapshotRef());
+        }
+    }
+
+    @Test
+    void coordinatorRequiresExplicitRecoveryProof(@TempDir Path tempDir) throws Exception {
+        try (SqliteRunStore store = new SqliteRunStore(tempDir.resolve("runtime.db"))) {
+            RunRecord submitted = store.submit(new RunSubmission(
+                    "run_unsafe", SubmissionSource.BACKGROUND, "", tempDir,
+                    "mutate", "", ""));
+            assertTrue(store.saveRecoveryReferences(submitted.id(), submitted.version(),
+                    "agent-checkpoint:orch", "patch-journal:orch", ""));
+            RunRecord withRefs = store.find(submitted.id()).orElseThrow();
+            RunContext.RunBudgetState budget = new RunContext.RunBudgetState(
+                    1, submitted.id(), RunBudgetPolicy.forTier(RunBudgetPolicy.Tier.BALANCED),
+                    new RunBudget.Snapshot(0, 0, 0, 0, 0, 0,
+                            BigDecimal.ZERO, "unknown", 0, 0,
+                            RunBudget.Decision.CONTINUE, ""), Instant.now());
+            assertTrue(store.saveBudgetState(withRefs.id(), withRefs.version(), budget));
+            RunStore.ClaimedRun claimed = store.claimNextById(
+                    submitted.id(), "worker-1", Duration.ofMillis(1)).orElseThrow();
+            Thread.sleep(10);
+            store.reconcileExpiredLeases();
+
+            RunCoordinator coordinator = new RunCoordinator(store, Duration.ofMinutes(1));
+            assertTrue(coordinator.claim(submitted.id(), "worker-2").isEmpty());
+            assertTrue(coordinator.claimRecovery(submitted.id(), "worker-2",
+                    RunCoordinator.RecoveryProof.unsafe(), event -> { }).isEmpty());
+            assertEquals(RunStatus.RECOVERY_REQUIRED,
+                    store.find(submitted.id()).orElseThrow().status());
+            assertTrue(coordinator.claimRecovery(submitted.id(), "worker-2",
+                    new RunCoordinator.RecoveryProof(true, true, true, "rolled_back"),
+                    event -> { }).isPresent());
         }
     }
 }

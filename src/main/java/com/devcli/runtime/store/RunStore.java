@@ -1,5 +1,6 @@
 package com.devcli.runtime.store;
 
+import com.devcli.runtime.AttemptPersistence;
 import com.devcli.runtime.RunContext;
 
 import java.time.Duration;
@@ -17,6 +18,8 @@ public interface RunStore extends AutoCloseable {
     Optional<ClaimedRun> claimNext(SubmissionSource source, String workerId, Duration leaseDuration);
 
     Optional<ClaimedRun> claimNextById(String runId, String workerId, Duration leaseDuration);
+
+    Optional<ClaimedRun> claimRecoveryById(String runId, String workerId, Duration leaseDuration);
 
     boolean renewLease(String runId, long expectedVersion, String attemptId, Duration leaseDuration);
 
@@ -43,6 +46,12 @@ public interface RunStore extends AutoCloseable {
     List<RunRecord> reconcileExpiredLeases();
 
     Optional<AttemptRecord> currentAttempt(String runId);
+
+    List<AttemptRecord> attempts(String runId);
+
+    void startNestedAttempt(AttemptPersistence.AttemptData attempt);
+
+    void finishNestedAttempt(String attemptId, AttemptStatus status, String outcome);
 
     default Optional<String> latestActiveRunId() {
         return Optional.empty();

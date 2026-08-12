@@ -142,6 +142,20 @@ class AgentCheckpointTest {
     }
 
     @Test
+    void correctionAttemptCountPersistsAcrossReload() {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-correction-attempt", "目标");
+        assertEquals(1, checkpoint.recordCorrectionAttempt("step-1"));
+        assertEquals(2, checkpoint.recordCorrectionAttempt("step-1"));
+        assertEquals(1, checkpoint.recordStepRedoAttempt("step-1"));
+        checkpoint.save();
+
+        AgentCheckpoint loaded = AgentCheckpoint.load("orch-correction-attempt");
+        assertNotNull(loaded);
+        assertEquals(2, loaded.correctionAttemptCount("step-1"));
+        assertEquals(1, loaded.getStepRedoAttempts().get("step-1"));
+    }
+
+    @Test
     void reconcilesAppliedPatchJournalAsCompleted(@TempDir Path project) throws Exception {
         Path target = project.resolve("shared.txt");
         Files.writeString(target, "before");
@@ -302,7 +316,7 @@ class AgentCheckpointTest {
 
     @Test
     void loadsCheckpointFromLegacyProtocolVersion() {
-        for (int version : List.of(1, 2, 3)) {
+        for (int version : List.of(1, 2, 3, 4)) {
             String id = "orch-legacy-v" + version;
             AgentCheckpoint checkpoint = new AgentCheckpoint(id, "目标");
             checkpoint.setProtocolVersion(version);

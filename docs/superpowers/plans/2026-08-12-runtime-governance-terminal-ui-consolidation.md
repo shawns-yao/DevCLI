@@ -522,11 +522,13 @@ Agent、Plan、Team 和工具不得直接调用 UI 方法或写 stdout；它们�
 
 **步骤：**
 
-- [ ] 先覆盖 retryable/non-retryable、预算耗尽和副作用禁止重试测试。
-- [ ] 统一 attempt id、原因、退避和最终状态。
-- [ ] 将 Reviewer 修复标记为 correction attempt，不伪装为网络重试。
-- [ ] 恢复前强制执行 Patch Journal 对账。
-- [ ] 完成阶段功能后统一运行 LLM retry、orchestrator、checkpoint、PatchSet 限定测试。
+- [x] 先覆盖 retryable/non-retryable、预算耗尽和副作用禁止重试测试。
+- [x] 统一 attempt id、parent attempt、原因、范围、退避和最终状态，并写入 RunStore。
+- [x] 将 Reviewer 修复标记为 correction attempt；step redo 单独计数，不伪装为网络重试。
+- [x] 普通 Worker 只认领 enqueued；recovery_required 必须通过显式恢复入口，并在认领前提交 Patch Journal、checkpoint 和预算对账证明。
+- [x] 完成阶段功能后统一运行 LLM retry、orchestrator、checkpoint、PatchSet、RunStore、DurableTaskManager 和事件编码限定测试。
+
+阶段结果（2026-08-12）：checkpoint 协议升级为版本 5，版本 1 至 4 保持兼容；RunContext 注入事件、Attempt 与恢复引用窄出口，领域对象不再自行打开默认 runtime.db。全量测试按用户要求推迟到所有功能完成后统一执行。
 
 ### 阶段 4：统一安全策略和 Project Trust
 

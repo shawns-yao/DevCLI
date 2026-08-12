@@ -7,7 +7,6 @@ import com.devcli.plan.ExecutionGraph;
 import com.devcli.workspace.PatchSet;
 import com.devcli.runtime.CancellationContext;
 import com.devcli.runtime.RunContext;
-import com.devcli.runtime.store.SqliteRunStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -48,7 +47,7 @@ public class AgentCheckpoint {
         .enable(SerializationFeature.INDENT_OUTPUT);
     /** 步骤 result 落盘上限：buildStepContext 注入依赖结果最多 800 字符，8KB 足够保真。 */
     public static final int MAX_SUMMARY_LENGTH = 8 * 1024;
-    public static final int CURRENT_PROTOCOL_VERSION = 4;
+    public static final int CURRENT_PROTOCOL_VERSION = 5;
     private static final int MAX_AGENT_SUMMARY_LENGTH = 2 * 1024;
 
     private int protocolVersion = CURRENT_PROTOCOL_VERSION;
@@ -73,6 +72,8 @@ public class AgentCheckpoint {
     private long timestamp;
     private int failedSteps;
     private String lastError;
+    private Map<String, Integer> correctionAttempts;
+    private Map<String, Integer> stepRedoAttempts;
 
     public record StepArtifact(String stepId, List<String> modifiedFiles, String summary,
                                ExecutionArtifact artifact) {
@@ -190,6 +191,8 @@ public class AgentCheckpoint {
         this.agentIdentities = new ArrayList<>();
         this.agentCursors = new HashMap<>();
         this.stepAssignments = new HashMap<>();
+        this.correctionAttempts = new HashMap<>();
+        this.stepRedoAttempts = new HashMap<>();
         this.timestamp = System.currentTimeMillis();
     }
 
@@ -589,7 +592,7 @@ public class AgentCheckpoint {
     /**
      * 保存 Checkpoint 到磁盘（临时文件 + 原子 move，崩溃瞬间不会留下半截 JSON）
      */
-    public void save() {
+    public synchronized void save() {
         try {
             saveOrThrow();
         } catch (Exception e) {
@@ -597,11 +600,11 @@ public class AgentCheckpoint {
         }
     }
 
-    public void saveStrict() throws IOException {
+    public synchronized void saveStrict() throws IOException {
         saveOrThrow();
     }
 
-    private void saveOrThrow() throws IOException {
+    private synchronized void saveOrThrow() throws IOException {
         Path checkpointDir = getCheckpointDir();
         Files.createDirectories(checkpointDir);
 
@@ -622,16 +625,43 @@ public class AgentCheckpoint {
                         ? completedSteps.size() + failedSteps : planSteps.size());
     }
 
+    public synchronized int recordCorrectionAttempt(String stepId) {
+        if (stepId == null || stepId.isBlank()) return 0;
+        int next = correctionAttempts().getOrDefault(stepId, 0) + 1;
+        correctionAttempts().put(stepId, next);
+        timestamp = System.currentTimeMillis();
+        return next;
+    }
+
+    public synchronized int correctionAttemptCount(String stepId) {
+        return correctionAttempts().getOrDefault(stepId, 0);
+    }
+
+    private Map<String, Integer> correctionAttempts() {
+        if (correctionAttempts == null) correctionAttempts = new HashMap<>();
+        return correctionAttempts;
+    }
+
+    public synchronized int recordStepRedoAttempt(String stepId) {
+        if (stepId == null || stepId.isBlank()) return 0;
+        int next = stepRedoAttempts().getOrDefault(stepId, 0) + 1;
+        stepRedoAttempts().put(stepId, next);
+        timestamp = System.currentTimeMillis();
+        return next;
+    }
+
+    private Map<String, Integer> stepRedoAttempts() {
+        if (stepRedoAttempts == null) stepRedoAttempts = new HashMap<>();
+        return stepRedoAttempts;
+    }
+
     private void linkRunRecoveryReferences() {
         RunContext context = CancellationContext.currentRun();
         if (context == null || orchestrationId == null || orchestrationId.isBlank()) return;
-        try (SqliteRunStore store = new SqliteRunStore(SqliteRunStore.defaultDbPath())) {
-            var current = store.find(context.runId()).orElse(null);
-            if (current != null) {
-                store.saveRecoveryReferences(current.id(), current.version(),
-                        "agent-checkpoint:" + orchestrationId,
-                        "patch-journal:" + orchestrationId, current.snapshotRef());
-            }
+        try {
+            context.persistenceSink().saveRecoveryReferences(
+                    "agent-checkpoint:" + orchestrationId,
+                    "patch-journal:" + orchestrationId, "");
         } catch (Exception error) {
             log.warn("关联 RunStore 恢复引用失败: {}", error.getMessage());
         }
@@ -708,11 +738,8 @@ public class AgentCheckpoint {
     private void clearRunRecoveryReferences() {
         RunContext context = CancellationContext.currentRun();
         if (context == null) return;
-        try (SqliteRunStore store = new SqliteRunStore(SqliteRunStore.defaultDbPath())) {
-            var current = store.find(context.runId()).orElse(null);
-            if (current != null) {
-                store.clearRecoveryReferences(current.id(), current.version(), true, true, false);
-            }
+        try {
+            context.persistenceSink().clearRecoveryReferences(true, true, false);
         } catch (Exception error) {
             log.warn("清理 RunStore 恢复引用失败: {}", error.getMessage());
         }
@@ -785,6 +812,8 @@ public class AgentCheckpoint {
         if (agentIdentities == null) agentIdentities = new ArrayList<>();
         if (agentCursors == null) agentCursors = new HashMap<>();
         if (stepAssignments == null) stepAssignments = new HashMap<>();
+        if (correctionAttempts == null) correctionAttempts = new HashMap<>();
+        if (stepRedoAttempts == null) stepRedoAttempts = new HashMap<>();
         validateAgentState();
     }
 
@@ -992,5 +1021,23 @@ public class AgentCheckpoint {
 
     public void setLastError(String lastError) {
         this.lastError = lastError;
+    }
+
+    public Map<String, Integer> getCorrectionAttempts() {
+        return correctionAttempts();
+    }
+
+    public void setCorrectionAttempts(Map<String, Integer> correctionAttempts) {
+        this.correctionAttempts = correctionAttempts == null
+                ? new HashMap<>() : new HashMap<>(correctionAttempts);
+    }
+
+    public Map<String, Integer> getStepRedoAttempts() {
+        return stepRedoAttempts();
+    }
+
+    public void setStepRedoAttempts(Map<String, Integer> stepRedoAttempts) {
+        this.stepRedoAttempts = stepRedoAttempts == null
+                ? new HashMap<>() : new HashMap<>(stepRedoAttempts);
     }
 }

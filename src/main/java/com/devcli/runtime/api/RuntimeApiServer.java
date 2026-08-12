@@ -232,7 +232,7 @@ public class RuntimeApiServer implements AutoCloseable {
     private void runTurn(String threadId, String turnId, String runId, String input) {
         RuntimeEventPublisher events = new RuntimeEventPublisher(store, threadId, turnId);
         RunCoordinator.ClaimedRunContext claimed = runCoordinator
-                .claim(runId, "runtime-api-" + threadId).orElse(null);
+                .claim(runId, "runtime-api-" + threadId, events).orElse(null);
         if (claimed == null) {
             events.emit(new RunEvent.TurnFailed("run_claim_failed"));
             return;

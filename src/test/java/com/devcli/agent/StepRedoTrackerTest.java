@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import com.devcli.runtime.AttemptKind;
 
 class StepRedoTrackerTest {
 
@@ -57,5 +58,18 @@ class StepRedoTrackerTest {
     void zeroMaxRedoNeverAllowsRedo() {
         StepRedoTracker tracker = new StepRedoTracker(0);
         assertFalse(tracker.canRedo("s"));
+    }
+
+    @Test
+    void redoIsClassifiedAsCorrectionAttempt() {
+        assertEquals(AttemptKind.CORRECTION, new StepRedoTracker(1).attemptKind());
+    }
+
+    @Test
+    void restoreKeepsCorrectionLimitAcrossResume() {
+        StepRedoTracker tracker = new StepRedoTracker(1);
+        tracker.restore("s", 1, "failed before restart");
+        assertFalse(tracker.canRedo("s"));
+        assertEquals("failed before restart", tracker.lastFailureReason("s"));
     }
 }
