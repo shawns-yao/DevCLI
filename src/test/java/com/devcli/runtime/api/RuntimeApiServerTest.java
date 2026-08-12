@@ -23,7 +23,7 @@ class RuntimeApiServerTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Test
-    void exposesProjectedRunSnapshot() throws Exception {
+    void exposesProjectedRunSnapshot(@TempDir Path tempDir) throws Exception {
         Path db = tempDir.resolve("runtime-snapshot.db");
         try (RuntimeThreadStore store = new RuntimeThreadStore(db)) {
             String threadId = store.createThread();

@@ -2,7 +2,7 @@
 
 ## 2026-08-12 运行治理、能力收敛与终端界面重构
 
-- 状态：已实现，等待统一验证
+- 状态：已实现并通过统一验证
 - 设计文档：`docs/superpowers/plans/2026-08-12-runtime-governance-terminal-ui-consolidation.md`
 - 目标：删除重复能力，合并 Plan/Team 的公共执行链，使用持久 Session Tree 取代 CLI 进程内分支，保留 Side-Git、PatchSet、Checkpoint 各自不可替代的恢复职责；终端只保留 Inline 与 Plain
 - 成本控制：已新增统一 RunBudget、有限预算档位、并行原子账本和 PricingCatalog；Agent 执行引擎、Planner、压缩和显式重试均接入同一 run，未知模型显示 cost=unknown
@@ -21,8 +21,8 @@
 - 已实现（2026-08-12）：Inline 与 Plain 共用 RunProjection/RunSnapshot；终端划分 stable transcript、live activity、input line、bottom dock 四个所有权区域；Agent、CLI 和工具状态经 RunEventSink 驱动快照，底部 dock 按宽度优先保留模式、阶段、安全域、token、成本和 trace；HITL 与 palette 统一由 InteractionController 读取
 - 已实现（2026-08-12）：删除 Lanterna 包、依赖、启动分支和 renderer 枚举；终端只保留 Inline/Plain；删除 `/plan`、`/team`、`/branch`、`/snapshot`、`/restore`，Side-Git 迁移到 `/workspace status|clean|restore`
 - 未实现：循环收敛与证据门禁、工具契约与执行治理（不在本轮授权范围）
-- 验证计划：功能统一完成前不执行测试；全部功能结束后统一执行安全、quick、phase22、Runtime、Plan/Team 和全量回归；获得用户许可后再启动真实终端验收
-- 剩余风险：尚未执行统一测试；Session Tree 的消息节点来自已完成 turn 事件，不保存未完成推理分叉；真实终端交互仍待最终验收
+- 验证（2026-08-12）：Session Tree / Runtime 分支限定测试 14 项通过；事件、追踪、审计与 Runtime API 限定测试 39 项通过；CLI、Renderer 与 HITL 限定测试 176 项通过；`phase22-smoke` 100 项通过；Plan/Team/Runtime 限定测试 133 项通过；`quick` 1368 项通过、4 项跳过；全量回归 1436 项通过、10 项跳过；`mvn clean package` 构建成功
+- 剩余风险：Session Tree 的消息节点来自已完成 turn 事件，不保存未完成推理分叉；未启动真实终端，PTY 与人工交互验收仍待用户许可
 
 ## 2026-08-11 上下文压缩预算治理优化
 

@@ -6,9 +6,9 @@ import java.util.regex.Pattern;
 /** 命令执行画像；默认全部使用禁网 Docker，宿主机画像必须显式配置。 */
 public enum CommandProfile {
     MAVEN_COMPILE(true, 120, 2, 1024, 256, false,
-            Pattern.compile("(?i)^mvn(?:\\.cmd)?\\s+(?=.*(?:^|\\s)(?:compile|test-compile|package)(?:\\s|$)).+$")),
+            Pattern.compile("(?i)^mvn(?:\\.cmd)?\\s+(?=.*(?:compile|test-compile|package)(?:\\s|$)).+$")),
     MAVEN_TEST(true, 300, 2, 1024, 256, false,
-            Pattern.compile("(?i)^mvn(?:\\.cmd)?\\s+(?=.*(?:^|\\s)test(?:\\s|$)).+$")),
+            Pattern.compile("(?i)^mvn(?:\\.cmd)?\\s+(?=.*test(?:\\s|$)).+$")),
     READ_ONLY_SHELL(true, 60, 1, 512, 128, false,
             Pattern.compile("(?i)^(pwd|ls|dir|type|cat|git\\s+(status|diff|log|show)|rg|grep)\\b.*$")),
     PROJECT_BUILD(true, 300, 2, 1024, 256, false,

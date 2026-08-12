@@ -696,7 +696,7 @@ ToolContract
 - [x] CLI 会话写入统一 Runtime SQLite；`RuntimeThreadStore` 作为会话门面，RunStore 继续只承载运行事实。
 - [x] 实现 `/session tree|fork|use|status`，普通 turn 使用事件，只有新压缩边界写 checkpoint。
 - [x] `/session` 完成持久迁移；旧 `/branch` 已在阶段 9 删除。
-- [ ] 完成阶段功能后统一运行 session、runtime branch、CLI 限定测试。
+- [x] 完成阶段功能后统一运行 session、runtime branch、CLI 限定测试。
 
 ### 阶段 7：统一可观测模型
 
@@ -720,7 +720,7 @@ ToolContract
 - [x] 通过 RunEventEnvelope 为事件补齐 run/turn/step/agent/attempt/trace 上下文。
 - [x] 将预算、沙箱、重试、恢复、checkpoint 与 Side-Git 引用接入统一投影。
 - [x] 增加 Runtime `GET /v1/threads/{id}/snapshot` 查询模型；CLI 查询入口随终端 UI 阶段收敛。
-- [ ] 完成阶段功能后统一运行 event、trace、audit、runtime API 限定测试。
+- [x] 完成阶段功能后统一运行 event、trace、audit、runtime API 限定测试。
 
 ### 阶段 8：终端 UI 重构
 
@@ -748,7 +748,7 @@ ToolContract
 - [x] 工具、retry、recovery、预算和安全状态经统一事件驱动；diff 正文仍保留稳定 transcript 专用渲染。
 - [x] HITL、palette 与 LineReader 输入所有权接入 InteractionController；Session Tree 使用同一 palette 能力面。
 - [x] Renderer 只消费 RunSnapshot；帮助和补全的到期别名在下一阶段删除。
-- [ ] 完成阶段功能后统一运行 renderer、status、completer、HITL、PTY 限定测试。
+- [x] 完成阶段功能后统一运行 renderer、status、completer、HITL 限定测试；PTY 手工验收仍需启动许可。
 
 ### 阶段 9：删除 Lanterna 与旧兼容层
 
@@ -771,7 +771,7 @@ ToolContract
 - [x] 删除独立 ConversationSnapshot、HITL 和 Pane 状态。
 - [x] 删除 Lanterna 依赖及 renderer 枚举。
 - [x] 删除 `/plan`、`/team`、`/branch`、`/snapshot`、`/restore`；Side-Git 迁移为 `/workspace status|clean|restore`。
-- [ ] 所有功能完成后统一运行 quick、phase22、Runtime、Plan/Team 和全量回归。
+- [x] 所有功能完成后统一运行 quick、phase22、Runtime、Plan/Team、全量回归和打包构建。
 - [ ] 获得用户许可后再启动真实终端进行手工验收。
 
 ### 阶段 10：未来 Temporal 适配器（条件触发，不属于当前版本）

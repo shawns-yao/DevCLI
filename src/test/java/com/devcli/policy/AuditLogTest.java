@@ -168,7 +168,7 @@ class AuditLogTest {
     @Test
     void ignoresNullEntry(@TempDir Path tempDir) {
         AuditLog log = new AuditLog(tempDir);
-        log.record(null);
+        log.record((AuditLog.AuditEntry) null);
         assertTrue(log.readRecent(5).isEmpty());
     }
 }

@@ -95,7 +95,7 @@ class InlineActivityDisplayTest {
             display.begin("Thinking");
             display.updateSnapshot(new RunSnapshot(2, RunTelemetry.empty(), "running", "tool",
                     "tool read_file", 0, 0, 0, 0, 1, "", "", "", "", "", "", "",
-                    "", "", "", java.util.List.of(), java.util.Map.of(), java.time.Instant.now()));
+                    "", "", java.util.List.of(), java.util.Map.of(), java.time.Instant.now()));
             terminal.writer().flush();
         }
         assertTrue(terminalSink.toString(StandardCharsets.UTF_8).contains("tool read_file"));

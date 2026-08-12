@@ -117,7 +117,7 @@ class BottomStatusBarTest {
                 .withEnvironment("MCP 12/12", "Skill 20/20");
         RunSnapshot snapshot = new RunSnapshot(2, RunTelemetry.empty(), "running", "worker", "",
                 0, 0, 0, 0, 0, "", "", "", "sandboxed:allowed", "", "", "",
-                "", "", "", java.util.List.of(), java.util.Map.of(), java.time.Instant.now());
+                "", "", java.util.List.of(), java.util.Map.of(), java.time.Instant.now());
         String top = BottomStatusBar.formatStatusLine(info, snapshot, 36);
         assertTrue(top.contains("YOLO"), top);
         assertTrue(top.contains("sandboxed"), top);

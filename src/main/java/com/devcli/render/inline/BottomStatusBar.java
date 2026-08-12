@@ -133,11 +133,11 @@ public final class BottomStatusBar implements AutoCloseable {
     }
 
     static String formatStatusLine(StatusInfo info, int cols) {
-        return formatStatusLine(info, RunSnapshot.empty(), cols);
+        return formatStatusLine(info, null, cols);
     }
 
     static String formatFooterLine(StatusInfo info, int cols) {
-        return formatFooterLine(info, RunSnapshot.empty(), cols);
+        return formatFooterLine(info, null, cols);
     }
 
     private static void appendField(StringBuilder sb, String value) {
@@ -164,7 +164,7 @@ public final class BottomStatusBar implements AutoCloseable {
     }
 
     static List<AttributedString> formatStatusLines(StatusInfo info, int cols) {
-        return formatStatusLines(info, RunSnapshot.empty(), cols);
+        return formatStatusLines(info, null, cols);
     }
 
     static List<AttributedString> formatStatusLines(StatusInfo info, RunSnapshot snapshot, int cols) {
@@ -184,7 +184,7 @@ public final class BottomStatusBar implements AutoCloseable {
         String right = environmentSummary(info);
         String rendered = fitPriority(left, right, cols);
         if (cols < 48 && !security.isBlank() && !rendered.contains(security)) {
-            rendered = fitPriority(joinFields(mode, security), "", cols);
+            rendered = fitPriority(joinFields(compactMode(info.hitlEnabled()), security), "", cols);
         }
         return rendered;
     }
@@ -232,6 +232,10 @@ public final class BottomStatusBar implements AutoCloseable {
     private static String compactId(String value) {
         if (value == null || value.isBlank()) return "";
         return value.length() <= 10 ? value : value.substring(0, 10);
+    }
+
+    private static String compactMode(boolean hitlEnabled) {
+        return hitlEnabled ? "HITL" : "YOLO";
     }
 
     static int inputDockRow(int terminalRows, int dockRows) {

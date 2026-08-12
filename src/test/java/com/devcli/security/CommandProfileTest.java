@@ -11,6 +11,8 @@ class CommandProfileTest {
                 CommandProfile.classify("mvn -q -DskipTests package"));
         assertEquals(CommandProfile.MAVEN_TEST,
                 CommandProfile.classify("mvn -q -Dtest=UnitTest test"));
+        assertEquals(CommandProfile.MAVEN_TEST,
+                CommandProfile.classify("mvn test"));
         assertEquals(CommandProfile.PROJECT_BUILD,
                 CommandProfile.classify("mvn -q dependency:tree"));
     }

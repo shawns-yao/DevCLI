@@ -1,6 +1,8 @@
 package com.devcli.render.state;
 
 import com.devcli.observability.RunTelemetry;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
 
 import java.time.Instant;
 import java.util.List;
@@ -14,7 +16,7 @@ public record RunSnapshot(long version, RunTelemetry context, String state, Stri
                           String securityDomain, String sandboxState, String retryState,
                           String recoveryState, String checkpointRef, String snapshotRef,
                           List<String> transcript, Map<String, Long> metrics,
-                          Instant updatedAt) {
+                          @JsonSerialize(using = ToStringSerializer.class) Instant updatedAt) {
     public RunSnapshot {
         version = Math.max(0, version);
         context = context == null ? RunTelemetry.empty() : context;
@@ -38,7 +40,7 @@ public record RunSnapshot(long version, RunTelemetry context, String state, Stri
     public static RunSnapshot empty() {
         return new RunSnapshot(0, RunTelemetry.empty(), "idle", "idle", "",
                 0, 0, 0, 0, 0, "", "", "", "", "", "", "",
-                "", "", "", List.of(), Map.of(), Instant.now());
+                "", "", List.of(), Map.of(), Instant.now());
     }
 
     public long totalTokens() {
