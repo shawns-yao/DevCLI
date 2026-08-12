@@ -2,6 +2,7 @@ package com.devcli.tool.command;
 
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolOutput;
+import com.devcli.security.CommandProfile;
 
 import java.nio.file.Path;
 
@@ -49,7 +50,13 @@ public interface CommandExecutionService {
     }
 
     record Request(String command, Path projectRoot, long timeoutSeconds,
-                   boolean sandboxRequired) {
+                   boolean sandboxRequired, CommandProfile profile) {
+        public Request(String command, Path projectRoot, long timeoutSeconds,
+                       boolean sandboxRequired) {
+            this(command, projectRoot, timeoutSeconds, sandboxRequired,
+                    sandboxRequired ? CommandProfile.CUSTOM_SANDBOX : CommandProfile.TRUSTED_HOST);
+        }
+
         public Request {
             if (command == null || command.isBlank()) {
                 throw new IllegalArgumentException("command is required");
@@ -61,6 +68,16 @@ public interface CommandExecutionService {
                 throw new IllegalArgumentException("projectRoot is required");
             }
             timeoutSeconds = Math.max(1, timeoutSeconds);
+            profile = profile == null
+                    ? (sandboxRequired ? CommandProfile.CUSTOM_SANDBOX : CommandProfile.TRUSTED_HOST)
+                    : profile;
+            if (profile.sandboxRequired() && !sandboxRequired) {
+                throw new IllegalArgumentException("command profile requires sandbox");
+            }
+            if (!profile.accepts(command)) {
+                throw new IllegalArgumentException("command does not match profile " + profile.name());
+            }
+            timeoutSeconds = Math.min(timeoutSeconds, profile.timeoutSeconds());
         }
     }
 }

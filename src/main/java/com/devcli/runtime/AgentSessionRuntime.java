@@ -6,6 +6,7 @@ import com.devcli.llm.LlmClient;
 import com.devcli.runtime.event.RunEventSink;
 import com.devcli.tool.ToolRegistry;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
@@ -125,7 +126,7 @@ public final class AgentSessionRuntime implements AutoCloseable {
             RunContext context = ownsContext ? CancellationContext.startRunContext(projectPath) : inherited;
             activeContext.set(context);
             try {
-                String output = agent.run(prompt);
+                String output = runTransactional(prompt);
                 RunResult result = new RunResult(output, agent.getConversationHistory(), context.isCancelled());
                 marker.complete(result);
                 return result;
@@ -179,7 +180,7 @@ public final class AgentSessionRuntime implements AutoCloseable {
         }
         activeContext.set(context);
         try {
-            String output = agent.run(prompt);
+            String output = runTransactional(prompt);
             result.complete(new RunResult(output, agent.getConversationHistory(), context.isCancelled()));
         } catch (Throwable error) {
             result.completeExceptionally(error);
@@ -192,6 +193,35 @@ public final class AgentSessionRuntime implements AutoCloseable {
                 CancellationContext.restore(workerPrevious);
             }
         }
+    }
+
+    private String runTransactional(String prompt) {
+        String turnId = activeRunId();
+        try (ReactWorkspaceTransaction transaction =
+                     ReactWorkspaceTransaction.open(agent.getToolRegistry(), turnId)) {
+            Agent isolated = agent.forkWithToolRegistry(transaction.toolRegistry());
+            try {
+                String output = isolated.run(prompt);
+                ReactWorkspaceTransaction.CommitResult commit = transaction.commit();
+                if (!commit.success()) {
+                    throw new IllegalStateException("ReAct 工作区事务提交失败: " + commit.message());
+                }
+                agent.replaceConversationHistory(isolated.getConversationHistory());
+                agent.mergeWorkingMemoryFrom(isolated);
+                return output;
+            } finally {
+                isolated.close();
+            }
+        } catch (IOException error) {
+            throw new IllegalStateException("ReAct 工作区事务失败", error);
+        }
+    }
+
+    private static String activeRunId() {
+        RunContext context = CancellationContext.currentRun();
+        return context == null || context.runId() == null || context.runId().isBlank()
+                ? "turn-" + java.util.UUID.randomUUID()
+                : context.runId();
     }
 
     @Override

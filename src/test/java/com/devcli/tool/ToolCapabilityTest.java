@@ -15,6 +15,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 class ToolCapabilityTest {
 
@@ -136,6 +137,42 @@ class ToolCapabilityTest {
         assertTrue(output.isSuccess(), output.text());
         assertTrue(captured.get().sandboxRequired());
         assertEquals(tempDir.toAbsolutePath().normalize(), captured.get().projectRoot());
+    }
+
+    @Test
+    void fullScopeCommandUsesSandboxByDefault(@TempDir Path tempDir) {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        AtomicReference<CommandExecutionService.Request> captured = new AtomicReference<>();
+        registry.setCommandExecutionService(request -> {
+            captured.set(request);
+            return CommandExecutionService.Result.completed(0, "sandbox");
+        });
+
+        ToolOutput output = registry.executeToolOutput(
+                "execute_command", "{\"command\":\"mvn test\"}");
+
+        assertTrue(output.isSuccess(), output.text());
+        assertTrue(captured.get().sandboxRequired());
+        assertEquals(com.devcli.security.CommandProfile.MAVEN_TEST, captured.get().profile());
+    }
+
+    @Test
+    void hitlCannotTurnDeniedHostCommandIntoAllowedExecution(@TempDir Path tempDir) {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(tempDir.toString());
+        AtomicReference<CommandExecutionService.Request> captured = new AtomicReference<>();
+        registry.setCommandExecutionService(request -> {
+            captured.set(request);
+            return CommandExecutionService.Result.completed(0, "host");
+        });
+
+        ToolOutput output = registry.executeToolOutput(
+                "execute_command",
+                "{\"command\":\"pwd\",\"profile\":\"TRUSTED_HOST\"}");
+
+        assertEquals(ToolErrorCode.CAPABILITY_DENIED, output.errorCode());
+        assertNull(captured.get());
     }
 
     @Test

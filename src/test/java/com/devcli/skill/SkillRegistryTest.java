@@ -54,6 +54,25 @@ class SkillRegistryTest {
     }
 
     @Test
+    void untrustedProjectDoesNotLoadProjectSkills(@TempDir Path tempDir) throws IOException {
+        Path builtin = tempDir.resolve("builtin");
+        Path user = tempDir.resolve("user");
+        Path project = tempDir.resolve("project");
+        writeSkill(builtin, "builtin", "builtin desc", "v0");
+        writeSkill(user, "user", "user desc", "v1");
+        writeSkill(project, "project", "project desc", "v2");
+
+        SkillRegistry registry = new SkillRegistry(
+                builtin, user, project,
+                new SkillStateStore(tempDir.resolve("skills.json")), false);
+        registry.reload();
+
+        assertEquals(List.of("builtin", "user"),
+                registry.allSkills().stream().map(Skill::name).toList());
+        assertNull(registry.findSkill("project"));
+    }
+
+    @Test
     void disabledFiltersOutSkill(@TempDir Path tempDir) throws IOException {
         Path builtin = tempDir.resolve("builtin");
         writeSkill(builtin, "web-access", "desc", "v0");

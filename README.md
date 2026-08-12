@@ -36,7 +36,7 @@ ReAct 主循环、Plan-and-Execute、Multi-Agent 编排、MCP 协议客户端、
 - 四层记忆（对话历史 / 工作记忆 / 长期记忆 / 强约束记忆）与两层上下文压缩（microcompact 落盘引用 + Map-Reduce 与增量九段摘要），含语义守卫、prompt-too-long 重试与失败熔断。
 - MCP（Model Context Protocol）：手写 JSON-RPC 2.0 客户端，支持 stdio 与 Streamable HTTP，动态注册工具与 resources。
 - Skill：jar 内置、用户级与项目级三层加载，`load_skill` 按需展开，allowedTools 白名单约束后续工具调用。
-- 安全模型：HITL（人工审批）、路径围栏、命令快速拒绝与 JSONL 审计链。
+- 安全模型：Project Trust、统一执行安全策略、HITL（人工审批）、路径围栏、默认 Docker 命令沙箱、ReAct 工作区事务与 JSONL 审计链。
 - 隔离工作区与 PatchSet（补丁集）、文件级资源租约、跨步骤过期写入屏障、工具证据出处标记。
 - Prompt 分层组装（jar 内置 / 用户级 / 项目级覆盖），system prompt 只承载会话级稳定内容以保证前缀缓存命中。
 - 多模型运行时切换（Anthropic / OpenAI 兼容 / GLM / DeepSeek / StepFun / Kimi）。
@@ -680,8 +680,11 @@ Hook 在对应生命周期点同步、按配置顺序执行，确保事件顺序
 
 ## Safety
 
-DevCLI 是本地 Agent CLI，不提供容器或虚拟机级沙箱。安全机制包括：
+DevCLI 是本地 Agent CLI。命令执行默认进入受限 Docker，文件读取仍在宿主机项目边界内执行；Docker 不等同完整虚拟机隔离。安全机制包括：
 
+- Project Trust：未知项目在非交互模式下默认不加载项目级 MCP、Hook 和 Skill
+- ExecutionSecurityPolicy：统一映射只读、项目补丁、沙箱命令、外部副作用和拒绝域
+- ReAct 工作区事务：CLI、Runtime API 和后台无头执行先写隔离工作区，再用 PatchSet 冲突预检并原子应用
 - HITL（人工审批）
 - PathGuard（路径围栏）
 - CommandGuard（危险命令快速拒绝）

@@ -12,10 +12,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -273,12 +273,18 @@ class ToolRegistryTest {
     void shouldRunCommandInProjectDirectory(@TempDir Path tempDir) {
         ToolRegistry registry = new ToolRegistry();
         registry.setProjectPath(tempDir.toString());
+        AtomicReference<com.devcli.tool.command.CommandExecutionService.Request> captured =
+                new AtomicReference<>();
+        registry.setCommandExecutionService(request -> {
+            captured.set(request);
+            return com.devcli.tool.command.CommandExecutionService.Result.completed(0, "ok");
+        });
 
         String result = registry.executeTool("execute_command", "{\"command\":\"pwd\"}");
 
-        String normalizedResult = result.replace('/', '\\').toLowerCase(Locale.ROOT);
-        String normalizedPath = tempDir.getFileName().toString().toLowerCase(Locale.ROOT);
-        assertTrue(normalizedResult.contains(normalizedPath), result);
+        assertTrue(result.contains("exit code: 0"), result);
+        assertEquals(tempDir.toAbsolutePath().normalize(), captured.get().projectRoot());
+        assertTrue(captured.get().sandboxRequired());
     }
 
     @Test
@@ -294,6 +300,8 @@ class ToolRegistryTest {
     void shouldTimeoutLongRunningCommandWithoutHanging(@TempDir Path tempDir) {
         ToolRegistry registry = new ToolRegistry(1);
         registry.setProjectPath(tempDir.toString());
+        registry.setCommandExecutionService(request ->
+                com.devcli.tool.command.CommandExecutionService.Result.timedOut("命令执行超时"));
 
         String result = registry.executeTool("execute_command", "{\"command\":\"sleep 2\"}");
 

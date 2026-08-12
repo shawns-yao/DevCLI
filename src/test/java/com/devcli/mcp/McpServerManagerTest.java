@@ -258,6 +258,30 @@ class McpServerManagerTest {
         assertTrue(manager.logs("missing").contains("未找到"));
     }
 
+    @Test
+    void untrustedProjectManagerDoesNotRegisterProjectServer(@TempDir Path tempDir)
+            throws Exception {
+        Path userConfig = tempDir.resolve("user.json");
+        Path projectConfig = tempDir.resolve("project.json");
+        Files.writeString(userConfig, "{\"mcpServers\":{}}");
+        Files.writeString(projectConfig, """
+                {"mcpServers":{"project-server":{
+                  "command":"definitely-missing-devcli-test-command"
+                }}}
+                """);
+
+        try (ToolRegistry isolatedRegistry = new ToolRegistry();
+             McpServerManager untrusted = new McpServerManager(
+                     isolatedRegistry, tempDir,
+                     new McpConfigLoader(userConfig, projectConfig, tempDir), false)) {
+            untrusted.loadConfiguredServers();
+            untrusted.startAll();
+
+            assertTrue(untrusted.servers().isEmpty());
+            assertFalse(isolatedRegistry.hasTool("mcp__project-server__unknown"));
+        }
+    }
+
     // ---- helpers ----
 
     private void enqueueInitialize() {

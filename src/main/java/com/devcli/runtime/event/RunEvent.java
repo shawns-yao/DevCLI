@@ -19,7 +19,8 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
         RunEvent.BudgetConfigured, RunEvent.BudgetUsageUpdated,
         RunEvent.BudgetThresholdReached, RunEvent.BudgetExhausted,
         RunEvent.LlmRequestCompleted, RunEvent.AttemptStarted,
-        RunEvent.RetryScheduled, RunEvent.AttemptFinished, RunEvent.RecoveryReconciled {
+        RunEvent.RetryScheduled, RunEvent.AttemptFinished, RunEvent.RecoveryReconciled,
+        RunEvent.SecurityDecisionMade, RunEvent.SandboxExecution {
 
     String type();
 
@@ -361,6 +362,34 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
 
         @Override
         public String type() { return "recovery.reconciled"; }
+    }
+
+    record SecurityDecisionMade(String runId, String tool, String domain,
+                                String profile, boolean allowed,
+                                boolean approvalRequired, String reason) implements RunEvent {
+        public SecurityDecisionMade {
+            runId = text(runId);
+            tool = text(tool);
+            domain = text(domain);
+            profile = text(profile);
+            reason = text(reason);
+        }
+
+        @Override
+        public String type() { return "security.decision"; }
+    }
+
+    record SandboxExecution(String runId, String commandProfile,
+                            String state, String reason) implements RunEvent {
+        public SandboxExecution {
+            runId = text(runId);
+            commandProfile = text(commandProfile);
+            state = text(state);
+            reason = text(reason);
+        }
+
+        @Override
+        public String type() { return "sandbox.execution"; }
     }
 
     record ToolCallData(String id, String name, String argumentsJson) {

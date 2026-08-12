@@ -33,6 +33,23 @@ class McpConfigLoaderTest {
     }
 
     @Test
+    void untrustedProjectLoadsOnlyUserConfiguration(@TempDir Path tempDir) throws Exception {
+        Path user = tempDir.resolve("user-mcp.json");
+        Path project = tempDir.resolve("project-mcp.json");
+        Files.writeString(user, """
+                {"mcpServers":{"user":{"command":"uvx","args":["safe"]}}}
+                """);
+        Files.writeString(project, """
+                {"mcpServers":{"project":{"command":"npx","args":["project-server"]}}}
+                """);
+
+        McpConfigLoader loader = new McpConfigLoader(user, project, tempDir);
+        Map<String, McpServerConfig> configs = loader.load(false);
+
+        assertEquals(java.util.Set.of("user"), configs.keySet());
+    }
+
+    @Test
     void loadsLocalMcpTrustPolicy(@TempDir Path tempDir) throws Exception {
         Path user = tempDir.resolve("user-mcp.json");
         Files.writeString(user, """

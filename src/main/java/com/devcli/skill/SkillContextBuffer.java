@@ -176,6 +176,23 @@ public final class SkillContextBuffer {
         return copy;
     }
 
+    public void replaceFrom(SkillContextBuffer source) {
+        if (source == null || source == this) return;
+        SkillContextBuffer snapshot = source.copy();
+        synchronized (this) {
+            entries.clear();
+            entries.putAll(snapshot.entries);
+            activeSkillNames.clear();
+            activeSkillNames.addAll(snapshot.activeSkillNames);
+            activeAllowedToolsBySkill.clear();
+            activeAllowedToolsBySkill.putAll(snapshot.activeAllowedToolsBySkill);
+            activeContextBySkill.clear();
+            activeContextBySkill.putAll(snapshot.activeContextBySkill);
+            activeBodyBySkill.clear();
+            activeBodyBySkill.putAll(snapshot.activeBodyBySkill);
+        }
+    }
+
     private static List<String> normalizeAllowedTools(List<String> allowedTools) {
         if (allowedTools == null || allowedTools.isEmpty()) {
             return List.of();

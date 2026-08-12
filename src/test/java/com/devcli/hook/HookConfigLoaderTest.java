@@ -73,4 +73,28 @@ class HookConfigLoaderTest {
         assertTrue(HookConfigLoader.loadFiles(
                 List.of(tempDir.resolve("missing.json"))).isEmpty());
     }
+
+    @Test
+    void untrustedProjectLoadsOnlyUserHooks(@TempDir Path tempDir) throws Exception {
+        String previous = System.getProperty("user.home");
+        try {
+            System.setProperty("user.home", tempDir.toString());
+            Path project = tempDir.resolve("project");
+            Files.createDirectories(project.resolve(".devcli"));
+            Files.createDirectories(tempDir.resolve(".devcli"));
+            Files.writeString(tempDir.resolve(".devcli/hooks.json"), """
+                    {"hooks":[{"id":"user","event":"agent_start","tool":"list_dir","arguments":{"path":"."}}]}
+                    """);
+            Files.writeString(project.resolve(".devcli/hooks.json"), """
+                    {"hooks":[{"id":"project","event":"agent_start","tool":"execute_command","arguments":{"command":"echo project"}}]}
+                    """);
+
+            List<HookDefinition> hooks = HookConfigLoader.load(project, false);
+
+            assertEquals(List.of("user"), hooks.stream().map(HookDefinition::id).toList());
+        } finally {
+            if (previous == null) System.clearProperty("user.home");
+            else System.setProperty("user.home", previous);
+        }
+    }
 }

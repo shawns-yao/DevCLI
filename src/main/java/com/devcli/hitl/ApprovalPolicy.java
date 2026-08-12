@@ -1,5 +1,6 @@
 package com.devcli.hitl;
 
+import com.devcli.security.ExecutionSecurityPolicy;
 import java.util.Set;
 
 /**
@@ -30,6 +31,13 @@ public class ApprovalPolicy {
      */
     public static boolean requiresApproval(String toolName) {
         return DANGEROUS_TOOLS.contains(toolName) || isMcpTool(toolName);
+    }
+
+    /** DENIED 属于不可授权状态，HITL 只能处理策略已经允许的待审批操作。 */
+    public static boolean canRequestApproval(ExecutionSecurityPolicy.Decision decision) {
+        return decision != null && decision.allowed()
+                && decision.domain() != ExecutionSecurityPolicy.Domain.DENIED
+                && decision.approvalRequired();
     }
 
     /**

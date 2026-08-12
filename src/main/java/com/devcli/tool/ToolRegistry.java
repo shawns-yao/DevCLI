@@ -20,11 +20,15 @@ import com.devcli.policy.AuditLog;
 import com.devcli.policy.PathGuard;
 import com.devcli.policy.PolicyException;
 import com.devcli.runtime.CancellationContext;
+import com.devcli.runtime.event.RunEvent;
 import com.devcli.snapshot.SnapshotService;
 import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.tool.command.CommandExecutionService;
 import com.devcli.tool.command.DefaultCommandExecutionService;
+import com.devcli.security.CommandProfile;
+import com.devcli.security.ExecutionSecurityPolicy;
+import com.devcli.security.SecurityProfile;
 import com.devcli.tool.provider.BrowserToolProvider;
 import com.devcli.tool.provider.FileToolProvider;
 import com.devcli.tool.provider.GrepToolProvider;
@@ -76,6 +80,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private final long toolBatchTimeoutSeconds;
     private CommandExecutionService commandExecutionService =
             new DefaultCommandExecutionService();
+    private ExecutionSecurityPolicy securityPolicy =
+            new ExecutionSecurityPolicy(SecurityProfile.fromConfiguration());
     private String projectPath = System.getProperty("user.dir");
     private PathGuard pathGuard = new PathGuard(projectPath);
     private final AuditLog auditLog = new AuditLog();
@@ -237,6 +243,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         fork.skillRegistry = skillRegistry;
         fork.skillContextBuffer = skillContextBuffer == null ? null : skillContextBuffer.copy();
         fork.commandExecutionService = commandExecutionService;
+        fork.securityPolicy = securityPolicy;
         fork.mcpTrustPolicies.putAll(mcpTrustPolicies);
         mcpTools.values().forEach(registered ->
                 fork.registerMcpToolOutput(registered.descriptor(), registered.invoker()));
@@ -278,6 +285,14 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public void setCommandExecutionService(CommandExecutionService commandExecutionService) {
         this.commandExecutionService = Objects.requireNonNull(
                 commandExecutionService, "commandExecutionService");
+    }
+
+    public void setExecutionSecurityPolicy(ExecutionSecurityPolicy securityPolicy) {
+        this.securityPolicy = Objects.requireNonNull(securityPolicy, "securityPolicy");
+    }
+
+    public ExecutionSecurityPolicy executionSecurityPolicy() {
+        return securityPolicy;
     }
 
     public void setMemorySaver(java.util.function.Consumer<String> memorySaver) {
@@ -420,7 +435,9 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     @Override
-    public Path resolveSafePath(String path) { return pathGuard.resolveSafe(path); }
+    public Path resolveSafePath(String path) {
+        return pathGuard.resolveSafe(path);
+    }
     @Override
     public int maxWriteFileBytes() { return MAX_WRITE_FILE_BYTES; }
     @Override
@@ -476,9 +493,44 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
     @Override
     public ToolOutput executeCommandOutput(String command) {
-        boolean sandboxRequired = currentToolAccessScope() == ToolAccessScope.ISOLATED_PROJECT;
-        return commandExecutionService.execute(new CommandExecutionService.Request(
-                command, Path.of(projectPath), commandTimeoutSeconds, sandboxRequired)).toToolOutput();
+        return executeCommandOutput(command, null);
+    }
+
+
+    @Override
+    public ToolOutput executeCommandOutput(String command, String requestedProfile) {
+        CommandProfile profile = CommandProfile.parse(requestedProfile);
+        if (profile == null) profile = CommandProfile.classify(command);
+        if (currentToolAccessScope() == ToolAccessScope.ISOLATED_PROJECT) {
+            profile = CommandProfile.CUSTOM_SANDBOX;
+        }
+        ExecutionSecurityPolicy.Decision decision = securityPolicy.decide(
+                ToolEffect.HOST_PROCESS, currentToolAccessScope(), profile);
+        if (!decision.allowed()) {
+            return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
+                    "策略拒绝: " + decision.reason());
+        }
+        var run = CancellationContext.currentRun();
+        if (run != null && decision.sandboxRequired()) {
+            run.eventSink().emit(new RunEvent.SandboxExecution(
+                    run.runId(), profile.name(), "started", decision.reason()));
+        }
+        try {
+            ToolOutput output = commandExecutionService.execute(new CommandExecutionService.Request(
+                    command, Path.of(projectPath), commandTimeoutSeconds,
+                    decision.sandboxRequired(), profile)).toToolOutput();
+            if (run != null && decision.sandboxRequired()) {
+                run.eventSink().emit(new RunEvent.SandboxExecution(
+                        run.runId(), profile.name(), "finished", output.status().name()));
+            }
+            return output;
+        } catch (RuntimeException error) {
+            if (run != null && decision.sandboxRequired()) {
+                run.eventSink().emit(new RunEvent.SandboxExecution(
+                        run.runId(), profile.name(), "failed", error.getMessage()));
+            }
+            throw error;
+        }
     }
     @Override
     public java.util.function.Consumer<String> memorySaver() { return memorySaver; }
@@ -858,10 +910,21 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         executionPipeline.register(ToolExecutionPipeline.Stage.CAPABILITY, (context, chain) -> {
             Tool tool = tools.get(context.name());
             ToolAccessScope scope = currentToolAccessScope();
-            if (tool != null && !scope.permits(tool.effect())) {
+            ExecutionSecurityPolicy.Decision decision = tool == null
+                    ? null : securityDecision(context.name(), context.argumentsJson());
+            if (tool != null && (decision == null || !decision.allowed())) {
+                if (decision != null) {
+                    emitSecurityDecision(context.name(), decision,
+                            securityProfile(context.name(), context.argumentsJson()));
+                }
                 return ToolOutput.rejected(ToolErrorCode.CAPABILITY_DENIED,
                         "工具能力被当前执行范围拒绝: " + context.name()
                                 + " (scope=" + scope + ", effect=" + tool.effect() + ")");
+            }
+            if (decision != null) {
+                context.putAttribute("security.decision", decision);
+                emitSecurityDecision(context.name(), decision,
+                        securityProfile(context.name(), context.argumentsJson()));
             }
             return chain.proceed(context);
         });
@@ -1269,24 +1332,74 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public enum ToolAccessScope {
         FULL {
             @Override
-            boolean permits(ToolEffect effect) {
+            public boolean permits(ToolEffect effect) {
                 return true;
             }
         },
         READ_ONLY {
             @Override
-            boolean permits(ToolEffect effect) {
+            public boolean permits(ToolEffect effect) {
                 return effect == ToolEffect.READ_ONLY || effect == ToolEffect.LOCAL_CONTEXT;
             }
         },
         ISOLATED_PROJECT {
             @Override
-            boolean permits(ToolEffect effect) {
+            public boolean permits(ToolEffect effect) {
                 return effect != ToolEffect.EXTERNAL_MUTATION;
             }
         };
 
-        abstract boolean permits(ToolEffect effect);
+        public abstract boolean permits(ToolEffect effect);
+    }
+
+    public ExecutionSecurityPolicy.Decision securityDecision(String toolName, String argumentsJson) {
+        Tool tool = tools.get(toolName);
+        CommandProfile commandProfile = null;
+        if (tool != null && tool.effect() == ToolEffect.HOST_PROCESS) {
+            try {
+                JsonNode arguments = parseArguments(argumentsJson);
+                commandProfile = CommandProfile.parse(arguments.path("profile").asText(""));
+                if (commandProfile == null) {
+                    commandProfile = CommandProfile.classify(arguments.path("command").asText(""));
+                }
+                if (currentToolAccessScope() == ToolAccessScope.ISOLATED_PROJECT) {
+                    commandProfile = CommandProfile.CUSTOM_SANDBOX;
+                }
+            } catch (Exception ignored) {
+                commandProfile = CommandProfile.CUSTOM_SANDBOX;
+            }
+        }
+        return tool == null
+                ? new ExecutionSecurityPolicy.Decision(
+                ExecutionSecurityPolicy.Domain.DENIED, false, false, false, "unknown_tool")
+                : securityPolicy.decide(tool.effect(), currentToolAccessScope(), commandProfile);
+    }
+
+    private void emitSecurityDecision(String toolName,
+                                      ExecutionSecurityPolicy.Decision decision,
+                                      String profile) {
+        var run = CancellationContext.currentRun();
+        if (run == null || decision == null) return;
+        run.eventSink().emit(new RunEvent.SecurityDecisionMade(
+                run.runId(), toolName, decision.domain().label(), profile,
+                decision.allowed(), decision.approvalRequired(), decision.reason()));
+    }
+
+    private String securityProfile(String toolName, String argumentsJson) {
+        Tool tool = tools.get(toolName);
+        if (tool == null || tool.effect() != ToolEffect.HOST_PROCESS) return "";
+        try {
+            JsonNode arguments = parseArguments(argumentsJson);
+            CommandProfile profile = CommandProfile.parse(arguments.path("profile").asText(""));
+            if (profile == null) {
+                profile = CommandProfile.classify(arguments.path("command").asText(""));
+            }
+            return currentToolAccessScope() == ToolAccessScope.ISOLATED_PROJECT
+                    ? CommandProfile.CUSTOM_SANDBOX.name()
+                    : profile.name();
+        } catch (Exception ignored) {
+            return CommandProfile.CUSTOM_SANDBOX.name();
+        }
     }
 
     public record Tool(String name, String description, JsonNode parameters,

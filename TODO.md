@@ -2,7 +2,7 @@
 
 ## 2026-08-12 运行治理、能力收敛与终端界面重构
 
-- 状态：实施中；成本预算治理、统一 RunStore、本地持久运行、统一重试与恢复语义已完成
+- 状态：实施中；成本预算治理、统一 RunStore、本地持久运行、统一重试与恢复语义、执行安全策略与 Project Trust 已完成
 - 设计文档：`docs/superpowers/plans/2026-08-12-runtime-governance-terminal-ui-consolidation.md`
 - 目标：删除重复能力，合并 Plan/Team 的公共执行链，使用持久 Session Tree 取代 CLI 进程内分支，保留 Side-Git、PatchSet、Checkpoint 各自不可替代的恢复职责；终端只保留 Inline 与 Plain
 - 成本控制：已新增统一 RunBudget、有限预算档位、并行原子账本和 PricingCatalog；Agent 执行引擎、Planner、压缩和显式重试均接入同一 run，未知模型显示 cost=unknown
@@ -12,9 +12,9 @@
 - UI：重构为 stable transcript、live activity、input line、bottom dock 四区；展示执行模式、上下文占用、Run 预算、金额、安全域、持久化状态和 trace id；新增持久 Session Tree，删除 Lanterna 全屏 TUI
 - Temporal 决策：当前本地版不引入；未来服务端出现跨机器 Worker、长时间审批、定时器和故障转移需求时，可实现 `TemporalWorkflowRuntime` 替换本地调度，禁止与 DurableTaskManager 叠加；Temporal history 只保存控制状态和 Artifact 引用
 - 影响范围：agent、runtime、budget、security、tool、workspace、snapshot、trace、render、tui、cli、配置、测试和文档
-- 未实现：安全策略、Plan/Team 合并、Session Tree、可观测性收敛和 UI 重构
-- 验证计划：各阶段完成后统一运行限定测试，全部功能结束后执行 quick、phase22、Runtime、Plan/Team 和全量回归；获得用户许可后再启动真实终端验收
-- 剩余风险：数据库迁移、ReAct 写入事务化、Plan/Team 公共链抽取和 Lanterna 删除均涉及较大影响范围，必须分阶段提交并保留兼容窗口
+- 未实现：Plan/Team 合并、Session Tree、可观测性收敛和 UI 重构
+- 验证计划：功能统一完成前不执行测试；全部功能结束后统一执行安全、quick、phase22、Runtime、Plan/Team 和全量回归；获得用户许可后再启动真实终端验收
+- 剩余风险：安全阶段尚未执行测试；Plan/Team 公共链抽取、持久 Session Tree 和 Lanterna 删除均涉及较大影响范围，必须分阶段提交并保留兼容窗口
 
 ## 2026-08-11 上下文压缩预算治理优化
 

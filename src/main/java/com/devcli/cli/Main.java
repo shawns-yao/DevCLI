@@ -52,6 +52,7 @@ import com.devcli.snapshot.RestoreResult;
 import com.devcli.snapshot.SnapshotService;
 import com.devcli.snapshot.TurnSnapshot;
 import com.devcli.skill.SkillRegistry;
+import com.devcli.security.ProjectTrustStore;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.util.AnsiStyle;
 import org.jline.terminal.Terminal;
@@ -221,15 +222,35 @@ public class Main {
             return;
         }
         AtomicReference<LlmClient> llmClientRef = new AtomicReference<>(llmClient);
+        Path projectRoot = Path.of(".").toAbsolutePath().normalize();
 
         try (Terminal terminal = buildTerminal()) {
+            ProjectTrustStore projectTrustStore = ProjectTrustStore.defaultStore();
+            boolean interactiveTrustPrompt = terminal.getAttributes() != null
+                    && terminal.input() != null
+                    && System.console() != null;
+            ProjectTrustStore.Trust projectTrust = projectTrustStore.resolve(
+                    projectRoot, interactiveTrustPrompt);
+            if (projectTrust == ProjectTrustStore.Trust.UNKNOWN) {
+                projectTrust = promptProjectTrust(terminal, projectRoot);
+                try {
+                    projectTrustStore.set(projectRoot, projectTrust);
+                } catch (IOException error) {
+                    terminal.writer().println("项目可信状态保存失败: " + error.getMessage());
+                    terminal.writer().flush();
+                }
+            }
+            boolean projectResourcesTrusted = projectTrust == ProjectTrustStore.Trust.TRUSTED;
             TerminalHitlHandler terminalHitlHandler = new TerminalHitlHandler(false);
             SwitchableHitlHandler hitlHandler = new SwitchableHitlHandler(terminalHitlHandler);
             HitlToolRegistry hitlToolRegistry = new HitlToolRegistry(hitlHandler);
             BrowserSession browserSession = new BrowserSession();
             BrowserConnectivityCheck browserConnectivityCheck = new BrowserConnectivityCheck();
             hitlToolRegistry.setBrowserGuard(new BrowserGuard(browserSession, new SensitivePagePolicy()));
-            McpServerManager mcpServerManager = new McpServerManager(hitlToolRegistry, Path.of("."));
+            McpServerManager mcpServerManager = new McpServerManager(
+                    hitlToolRegistry, projectRoot,
+                    new com.devcli.mcp.config.McpConfigLoader(projectRoot),
+                    projectResourcesTrusted);
             ExtensionRegistry extensionRegistry = new ExtensionRegistry();
             mcpServerManager.setExtensionObserver(servers -> extensionRegistry.replaceKind(
                     ExtensionContract.Kind.MCP_SERVER,
@@ -297,13 +318,14 @@ public class Main {
             }
             com.devcli.skill.SkillStateStore skillStateStore = new com.devcli.skill.SkillStateStore(home.resolve(".devcli/skills.json"));
             com.devcli.skill.SkillRegistry skillRegistry = new com.devcli.skill.SkillRegistry(
-                    skillsCacheDir, userSkillsDir, projectSkillsDir, skillStateStore);
+                    skillsCacheDir, userSkillsDir, projectSkillsDir, skillStateStore,
+                    projectResourcesTrusted);
             skillRegistry.reload();
             skillRegistryRef.set(skillRegistry);
             skillRegistry.allSkills().forEach(skill -> extensionRegistry.registerOrReplace(
                     ExtensionRegistry.fromSkill(skill)));
             try {
-                syncHookExtensions(extensionRegistry);
+                syncHookExtensions(extensionRegistry, projectRoot, projectResourcesTrusted);
             } catch (Exception e) {
                 startupNote = appendStartupNote(startupNote, "Hook 目录加载失败: " + e.getMessage());
             }
@@ -716,7 +738,7 @@ public class Main {
                     case SKILL_RELOAD -> {
                         skillRegistry.reload();
                         try {
-                            syncHookExtensions(extensionRegistry);
+                            syncHookExtensions(extensionRegistry, projectRoot, projectResourcesTrusted);
                         } catch (Exception e) {
                             ui.println("⚠️ Hook 目录同步失败: " + e.getMessage());
                         }
@@ -961,12 +983,30 @@ public class Main {
         return followUp.isEmpty() ? null : followUp.get(0);
     }
 
-    private static void syncHookExtensions(ExtensionRegistry extensionRegistry) throws IOException {
+    private static void syncHookExtensions(ExtensionRegistry extensionRegistry,
+                                           Path projectRoot,
+                                           boolean projectResourcesTrusted) throws IOException {
         extensionRegistry.replaceKind(
                 com.devcli.extension.ExtensionContract.Kind.HOOK,
-                HookConfigLoader.load(Path.of(".")).stream()
+                HookConfigLoader.load(projectRoot, projectResourcesTrusted).stream()
                         .map(ExtensionRegistry::fromHook)
                         .toList());
+    }
+
+    private static ProjectTrustStore.Trust promptProjectTrust(Terminal terminal, Path projectRoot) {
+        terminal.writer().println("当前项目包含可执行的 MCP、Hook 或 Skill 资源：" + projectRoot);
+        terminal.writer().print("信任并加载这些项目资源？[y/N] ");
+        terminal.writer().flush();
+        try {
+            String answer = new java.io.BufferedReader(new java.io.InputStreamReader(
+                    terminal.input(), java.nio.charset.StandardCharsets.UTF_8)).readLine();
+            return answer != null && ("y".equalsIgnoreCase(answer.trim())
+                    || "yes".equalsIgnoreCase(answer.trim()))
+                    ? ProjectTrustStore.Trust.TRUSTED
+                    : ProjectTrustStore.Trust.UNTRUSTED;
+        } catch (IOException ignored) {
+            return ProjectTrustStore.Trust.UNTRUSTED;
+        }
     }
 
     private static TurnRunResult runWithCancelSupport(Terminal terminal,

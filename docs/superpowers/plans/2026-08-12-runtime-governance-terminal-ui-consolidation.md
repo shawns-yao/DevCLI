@@ -550,12 +550,14 @@ Agent、Plan、Team 和工具不得直接调用 UI 方法或写 stdout；它们�
 
 **步骤：**
 
-- [ ] 先覆盖未信任项目不启动项目 MCP/Hook 的失败测试。
-- [ ] 将 ToolEffect 映射收口到 ExecutionSecurityPolicy。
-- [ ] ReAct 命令默认路由 Docker，宿主机命令需要显式 profile。
-- [ ] ReAct 写入接入工作区事务与 PatchSet。
-- [ ] 把安全域和沙箱状态发为 RunEvent。
-- [ ] 完成阶段功能后统一运行 policy、HITL、command、MCP、workspace 限定测试。
+- [x] 覆盖未信任项目不启动项目 MCP/Hook/Skill 的测试契约。
+- [x] 将 ToolEffect 映射收口到 ExecutionSecurityPolicy。
+- [x] ReAct 命令默认路由 Docker，宿主机命令需要显式 profile。
+- [x] CLI、Runtime API 和后台无头 ReAct 写入统一接入工作区事务与 PatchSet。
+- [x] 把安全域和沙箱状态发为 RunEvent。
+- [ ] 功能统一完成后统一运行 policy、HITL、command、MCP、workspace 限定测试。
+
+阶段结果（2026-08-12）：Project Trust 控制项目级 MCP、Hook 与 Skill 的加载，非交互未知项目默认不信任；统一安全策略区分 host-readonly、project-patch、sandboxed、external-approved 与 denied，HITL 不能提升被拒权限。ReAct 的所有 `AgentSessionRuntime` 入口使用隔离工作区，成功后通过 PatchSet 原子提交，冲突时不污染主项目；命令默认使用禁网 Docker，只有 `TRUSTED_LOCAL` 安全档位与显式 `TRUSTED_HOST` 命令画像同时满足时才允许宿主机执行。安全事件通过 `security.decision` 与 `sandbox.execution` 进入运行事件流。按照用户要求，本阶段只完成实现、测试契约和编译检查，测试留到所有功能统一完成后执行。
 
 ### 阶段 5：合并 Plan 与 Team 的产品入口
 

@@ -34,6 +34,9 @@ public class HitlToolRegistry extends ToolRegistry {
                                  ToolExecutionPipeline.Chain chain) {
         String name = context.name();
         String argumentsJson = context.argumentsJson();
+        if (!ApprovalPolicy.canRequestApproval(securityDecision(name, argumentsJson))) {
+            return chain.proceed(context);
+        }
         if (!hitlHandler.isEnabled() || !ApprovalPolicy.requiresApproval(name)) {
             return chain.proceed(context);
         }
@@ -91,6 +94,11 @@ public class HitlToolRegistry extends ToolRegistry {
                 return validationError;
             }
             context.replaceArguments(effectiveArguments);
+            if (!ApprovalPolicy.canRequestApproval(
+                    securityDecision(context.name(), effectiveArguments))) {
+                return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
+                        "策略拒绝: 修改后的参数不再属于可审批安全域");
+            }
         }
         return chain.proceed(context);
     }

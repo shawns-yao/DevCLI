@@ -39,11 +39,15 @@ public class McpConfigLoader {
      * 在启动单个 server 时进行，确保单个 server 配置错误（如缺失环境变量）不会阻塞其他 server。
      */
     public Map<String, McpServerConfig> load() throws IOException {
+        return load(true);
+    }
+
+    public Map<String, McpServerConfig> load(boolean includeProjectConfig) throws IOException {
         Map<String, McpServerConfig> merged = new LinkedHashMap<>();
         if (Files.exists(userConfig)) {
             merged.putAll(read(userConfig));
         }
-        if (Files.exists(projectConfig)) {
+        if (includeProjectConfig && Files.exists(projectConfig)) {
             merged.putAll(read(projectConfig));
         }
         return merged;

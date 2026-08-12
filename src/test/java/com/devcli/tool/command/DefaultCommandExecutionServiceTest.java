@@ -60,6 +60,8 @@ class DefaultCommandExecutionServiceTest {
         assertTrue(command.stream().anyMatch(value ->
                 value.startsWith("type=bind,src=") && value.endsWith(",dst=/workspace")),
                 command.toString());
+        assertEquals("256", command.get(command.indexOf("--pids-limit") + 1));
+        assertEquals("1024m", command.get(command.indexOf("--memory") + 1));
     }
 
     @Test

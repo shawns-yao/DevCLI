@@ -44,6 +44,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.function.Supplier;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -164,6 +165,37 @@ public class Agent implements AutoCloseable {
 
     public AgentTurnInbox getTurnInbox() {
         return turnInbox;
+    }
+
+    public Agent forkWithToolRegistry(ToolRegistry registry) {
+        Agent fork = new Agent(llmClient, Objects.requireNonNull(registry, "registry"));
+        fork.seedHistory(getConversationHistory().stream()
+                .filter(message -> !"system".equals(message.role()))
+                .toList());
+        fork.setExternalContextSupplier(externalContextSupplier);
+        fork.setStickyMemorySupplier(stickyMemorySupplier);
+        fork.setSkillRegistry(skillRegistry);
+        fork.setSkillContextBuffer(skillContextBuffer == null ? null : skillContextBuffer.copy());
+        fork.setRenderer(renderer);
+        fork.setRunEventSink(runEventSink);
+        fork.setTurnInbox(turnInbox);
+        fork.setHitlEnabledSupplier(hitlEnabledSupplier);
+        return fork;
+    }
+
+    public void replaceConversationHistory(List<LlmClient.Message> messages) {
+        if (messages == null || messages.isEmpty()) return;
+        conversationHistory.clear();
+        conversationHistory.addAll(messages);
+    }
+
+    public void mergeWorkingMemoryFrom(Agent source) {
+        if (source == null || source == this) return;
+        memoryManager.getWorkingMemory().mergeFrom(
+                source.memoryManager.getWorkingMemory());
+        if (skillContextBuffer != null && source.skillContextBuffer != null) {
+            skillContextBuffer.replaceFrom(source.skillContextBuffer);
+        }
     }
 
     public void abort() {

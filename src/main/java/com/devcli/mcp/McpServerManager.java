@@ -15,6 +15,7 @@ import com.devcli.mcp.transport.StdioTransport;
 import com.devcli.mcp.transport.StreamableHttpTransport;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
+import com.devcli.security.ProjectTrustStore;
 
 import java.io.IOException;
 import java.io.PrintStream;
@@ -47,6 +48,7 @@ public class McpServerManager implements AutoCloseable {
     private final ToolRegistry toolRegistry;
     private final Path projectDir;
     private final McpConfigLoader configLoader;
+    private final boolean projectResourcesTrusted;
     private final Map<String, McpServer> servers = new ConcurrentHashMap<>();
     private final McpResourceCache resourceCache = new McpResourceCache();
     private final List<McpConnectionEvent> connectionEvents = java.util.Collections.synchronizedList(new ArrayList<>());
@@ -61,13 +63,21 @@ public class McpServerManager implements AutoCloseable {
     });
 
     public McpServerManager(ToolRegistry toolRegistry, Path projectDir) {
-        this(toolRegistry, projectDir, new McpConfigLoader(projectDir));
+        this(toolRegistry, projectDir, new McpConfigLoader(projectDir),
+                ProjectTrustStore.defaultStore().resolve(projectDir, false)
+                        == ProjectTrustStore.Trust.TRUSTED);
     }
 
     public McpServerManager(ToolRegistry toolRegistry, Path projectDir, McpConfigLoader configLoader) {
+        this(toolRegistry, projectDir, configLoader, true);
+    }
+
+    public McpServerManager(ToolRegistry toolRegistry, Path projectDir,
+                            McpConfigLoader configLoader, boolean projectResourcesTrusted) {
         this.toolRegistry = toolRegistry;
         this.projectDir = projectDir.toAbsolutePath().normalize();
         this.configLoader = configLoader;
+        this.projectResourcesTrusted = projectResourcesTrusted;
     }
 
     public void setExtensionObserver(Consumer<Collection<McpServer>> observer) {
@@ -76,7 +86,7 @@ public class McpServerManager implements AutoCloseable {
     }
 
     public void loadConfiguredServers() throws IOException {
-        Map<String, McpServerConfig> configs = configLoader.load();
+        Map<String, McpServerConfig> configs = configLoader.load(projectResourcesTrusted);
         servers.clear();
         configs.forEach((name, config) -> servers.put(name, new McpServer(name, config)));
         notifyExtensionObserver();

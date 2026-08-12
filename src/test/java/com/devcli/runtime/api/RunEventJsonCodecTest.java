@@ -112,4 +112,19 @@ class RunEventJsonCodecTest {
         assertEquals(800, retry.path("backoff_millis").asLong());
         assertEquals("ROLLED_BACK", recovery.path("patch_journal_action").asText());
     }
+
+    @Test
+    void encodesSecurityAndSandboxEvents() throws Exception {
+        JsonNode security = MAPPER.readTree(RunEventJsonCodec.encode(
+                new RunEvent.SecurityDecisionMade(
+                        "run_1", "execute_command", "sandboxed", "MAVEN_TEST",
+                        true, true, "maven_test"), "turn_1"));
+        JsonNode sandbox = MAPPER.readTree(RunEventJsonCodec.encode(
+                new RunEvent.SandboxExecution(
+                        "run_1", "MAVEN_TEST", "started", "maven_test"), "turn_1"));
+
+        assertEquals("sandboxed", security.path("domain").asText());
+        assertTrue(security.path("approval_required").asBoolean());
+        assertEquals("started", sandbox.path("state").asText());
+    }
 }

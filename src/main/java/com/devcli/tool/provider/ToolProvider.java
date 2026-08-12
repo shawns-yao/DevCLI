@@ -53,6 +53,10 @@ public interface ToolProvider {
 
         ToolOutput executeCommandOutput(String command);
 
+        default ToolOutput executeCommandOutput(String command, String profile) {
+            return executeCommandOutput(command);
+        }
+
         Consumer<String> memorySaver();
 
         ToolRegistry.MemorySaver memorySaveHandler();

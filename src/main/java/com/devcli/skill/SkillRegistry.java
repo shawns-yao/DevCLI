@@ -28,16 +28,23 @@ public final class SkillRegistry {
     private final Path userSkillsDir;
     private final Path projectSkillsDir;
     private final SkillStateStore stateStore;
+    private final boolean projectSkillsTrusted;
 
     private final Map<String, Skill> skillsByName = new LinkedHashMap<>();
     private final Map<String, Integer> usageCounts = new LinkedHashMap<>();
     private final List<String> warnings = new ArrayList<>();
 
     public SkillRegistry(Path builtinCacheRoot, Path userSkillsDir, Path projectSkillsDir, SkillStateStore stateStore) {
+        this(builtinCacheRoot, userSkillsDir, projectSkillsDir, stateStore, true);
+    }
+
+    public SkillRegistry(Path builtinCacheRoot, Path userSkillsDir, Path projectSkillsDir,
+                         SkillStateStore stateStore, boolean projectSkillsTrusted) {
         this.builtinCacheRoot = builtinCacheRoot;
         this.userSkillsDir = userSkillsDir;
         this.projectSkillsDir = projectSkillsDir;
         this.stateStore = stateStore;
+        this.projectSkillsTrusted = projectSkillsTrusted;
     }
 
     public synchronized void reload() {
@@ -46,7 +53,9 @@ public final class SkillRegistry {
 
         loadDirectory(builtinCacheRoot, Skill.Source.BUILTIN);
         loadDirectory(userSkillsDir, Skill.Source.USER);
-        loadDirectory(projectSkillsDir, Skill.Source.PROJECT);
+        if (projectSkillsTrusted) {
+            loadDirectory(projectSkillsDir, Skill.Source.PROJECT);
+        }
     }
 
     public synchronized List<Skill> allSkills() {

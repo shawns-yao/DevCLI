@@ -295,6 +295,34 @@ public class WorkingMemory {
         return Collections.unmodifiableList(new ArrayList<>(volatileFacts));
     }
 
+    /** 将隔离 ReAct turn 产生的运行态证据合并回长生命周期会话。 */
+    public void mergeFrom(WorkingMemory source) {
+        if (source == null || source == this) return;
+        List<ToolEvidence> toolEvidence = source.getRecentToolResults();
+        List<String> facts = source.getVolatileFacts();
+        Map<String, String> states = source.taskStateSnapshot();
+        synchronized (this) {
+            for (ToolEvidence evidence : toolEvidence) {
+                if (!containsToolEvidence(evidence)) {
+                    recentToolResults.addLast(evidence);
+                }
+            }
+            evictToolResultsIfNeeded();
+            for (String fact : facts) {
+                addVolatileFact(fact);
+            }
+            states.forEach(this::setTaskState);
+        }
+    }
+
+    private boolean containsToolEvidence(ToolEvidence candidate) {
+        return recentToolResults.stream().anyMatch(existing ->
+                existing.toolName.equals(candidate.toolName)
+                        && existing.argsJson.equals(candidate.argsJson)
+                        && existing.result.equals(candidate.result)
+                        && existing.scope.equals(candidate.scope));
+    }
+
     // ─────────────────────────────────────────────────────────
     // 派生视图：注入 system prompt
     // ─────────────────────────────────────────────────────────

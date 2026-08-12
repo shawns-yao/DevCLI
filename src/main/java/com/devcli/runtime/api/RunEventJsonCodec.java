@@ -146,6 +146,19 @@ final class RunEventJsonCodec {
             payload.put("patch_journal_action", recovery.patchJournalAction());
             payload.put("decision", recovery.decision());
             payload.put("reason", recovery.reason());
+        } else if (event instanceof RunEvent.SecurityDecisionMade security) {
+            payload.put("run_id", security.runId());
+            payload.put("tool", security.tool());
+            payload.put("domain", security.domain());
+            payload.put("profile", security.profile());
+            payload.put("allowed", security.allowed());
+            payload.put("approval_required", security.approvalRequired());
+            payload.put("reason", security.reason());
+        } else if (event instanceof RunEvent.SandboxExecution sandbox) {
+            payload.put("run_id", sandbox.runId());
+            payload.put("command_profile", sandbox.commandProfile());
+            payload.put("state", sandbox.state());
+            payload.put("reason", sandbox.reason());
         } else {
             throw new IllegalArgumentException("不支持的运行事件: " + event.getClass().getName());
         }

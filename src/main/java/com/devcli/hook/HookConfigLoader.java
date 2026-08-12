@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.devcli.security.ProjectTrustStore;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -22,6 +23,13 @@ public final class HookConfigLoader {
     }
 
     public static List<HookDefinition> load(Path projectRoot) {
+        boolean trusted = ProjectTrustStore.defaultStore().resolve(
+                projectRoot == null ? Path.of(".") : projectRoot, false)
+                == ProjectTrustStore.Trust.TRUSTED;
+        return load(projectRoot, trusted);
+    }
+
+    public static List<HookDefinition> load(Path projectRoot, boolean includeProjectHooks) {
         String configured = System.getProperty("devcli.hooks.file");
         if (configured == null || configured.isBlank()) {
             configured = System.getenv("DEVCLI_HOOKS_FILE");
@@ -32,9 +40,12 @@ public final class HookConfigLoader {
         Path normalizedProject = projectRoot == null
                 ? Path.of(".").toAbsolutePath().normalize()
                 : projectRoot.toAbsolutePath().normalize();
-        return loadFiles(List.of(
-                Path.of(System.getProperty("user.home"), ".devcli", "hooks.json"),
-                normalizedProject.resolve(".devcli").resolve("hooks.json")));
+        List<Path> files = new ArrayList<>();
+        files.add(Path.of(System.getProperty("user.home"), ".devcli", "hooks.json"));
+        if (includeProjectHooks) {
+            files.add(normalizedProject.resolve(".devcli").resolve("hooks.json"));
+        }
+        return loadFiles(files);
     }
 
     static List<HookDefinition> loadFiles(List<Path> files) {
