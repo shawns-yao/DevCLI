@@ -1,6 +1,10 @@
 package com.devcli.memory;
 
+import com.devcli.budget.RunBudget;
 import com.devcli.llm.LlmClient;
+import com.devcli.llm.LlmBudgetContext;
+import com.devcli.runtime.CancellationContext;
+import com.devcli.runtime.RunContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -1316,7 +1320,22 @@ public class ConversationHistoryCompactor {
                 LlmClient.Message.system(systemPrompt),
                 LlmClient.Message.user(userPrompt)
         );
-        LlmClient.ChatResponse response = llmClient.chat(req, null);
+        RunContext runContext = CancellationContext.currentRun();
+        RunBudget runBudget = runContext == null ? null : runContext.runBudget();
+        LlmClient.ChatResponse response;
+        try (LlmBudgetContext.Scope budgetScope = LlmBudgetContext.open(
+                runBudget, "compaction", "compactor", "attempt",
+                (long) ContextWindowBudget.estimateMessagesTokens(req)
+                        + Math.max(1, llmClient.maxOutputTokens()))) {
+            if (!budgetScope.allowed()) {
+                throw new IOException("Run 预算已用尽: " + budgetScope.denialReason());
+            }
+            response = llmClient.chat(req, null);
+            if (response != null) {
+                budgetScope.recordUsage(llmClient.getProviderName(), llmClient.getModelName(),
+                        response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
+            }
+        }
         return response == null ? null : response.content();
     }
 

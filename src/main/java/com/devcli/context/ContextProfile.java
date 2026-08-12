@@ -19,7 +19,6 @@ import com.devcli.llm.LlmClient;
  */
 public record ContextProfile(
         int maxContextWindow,
-        int agentTokenBudget,
         double compressionTriggerRatio,
         int shortTermMemoryBudget,
         int memoryContextTokens,
@@ -40,7 +39,6 @@ public record ContextProfile(
         int window = Math.max(MIN_WINDOW, llmClient == null ? 128_000 : llmClient.maxContextWindow());
         return new ContextProfile(
                 window,
-                agentBudget(window),
                 DEFAULT_COMPRESSION_TRIGGER_RATIO,
                 shortTermBudget(window),
                 memoryContextTokens(window),
@@ -56,7 +54,6 @@ public record ContextProfile(
         int shortTerm = Math.max(1, shortTermMemoryBudget);
         return new ContextProfile(
                 window,
-                agentBudget(window),
                 DEFAULT_COMPRESSION_TRIGGER_RATIO,
                 shortTerm,
                 memoryContextTokens(window),
@@ -103,11 +100,6 @@ public record ContextProfile(
                 + " | 短期记忆预算: " + shortTermMemoryBudget
                 + " | MCP resource 索引: " + (mcpResourceIndexEnabled ? "on" : "off")
                 + " | prompt cache: " + promptCacheMode;
-    }
-
-    private static int agentBudget(int window) {
-        // Agent 单次 run 的 token 上限（input + output 累计），保 20% 余量给响应突发
-        return Math.max(4_000, (int) Math.floor(window * 0.8));
     }
 
     private static int shortTermBudget(int window) {

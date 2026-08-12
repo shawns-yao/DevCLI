@@ -1,7 +1,11 @@
 package com.devcli.memory;
 
+import com.devcli.budget.RunBudget;
 import com.devcli.llm.LlmClient;
+import com.devcli.llm.LlmBudgetContext;
 import com.devcli.context.ContextProfile;
+import com.devcli.runtime.CancellationContext;
+import com.devcli.runtime.RunContext;
 import com.devcli.tool.ToolSideChannel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -62,7 +66,7 @@ public class MemoryManager implements AutoCloseable {
     /** recurrence 候选计数器的容量上限，防止长会话下无界增长。 */
     private static final int MAX_MEMORY_CANDIDATE_ENTRIES = 512;
     private LlmClient llmClient;
-    private TokenBudget tokenBudget;
+    private ContextWindowBudget contextWindowBudget;
     private ContextProfile contextProfile;
     /** 当前会话显式忽略记忆 flag。用户说"忘记记忆"/"别管记忆"时设为 true。 */
     private volatile boolean memoryIgnored = false;
@@ -91,7 +95,7 @@ public class MemoryManager implements AutoCloseable {
         this.sessionMemory = new SessionMemory();
         this.longTermMemory = longTermMemory != null ? longTermMemory : new LongTermMemory();
         this.retriever = new MemoryRetriever(this.longTermMemory);
-        this.tokenBudget = new TokenBudget(contextProfile.maxContextWindow());
+        this.contextWindowBudget = new ContextWindowBudget(contextProfile.maxContextWindow());
         this.sessionPreSummaryExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "devcli-session-pre-summary");
             t.setDaemon(true);
@@ -106,7 +110,7 @@ public class MemoryManager implements AutoCloseable {
 
     public void applyContextProfile(ContextProfile contextProfile) {
         this.contextProfile = contextProfile;
-        this.tokenBudget = new TokenBudget(contextProfile.maxContextWindow());
+        this.contextWindowBudget = new ContextWindowBudget(contextProfile.maxContextWindow());
     }
 
     // ─────────────────────────────────────────────────────────
@@ -602,7 +606,21 @@ public class MemoryManager implements AutoCloseable {
                                 + renderMessagesForPreSummary(coveredMessages))
                 );
             }
-            LlmClient.ChatResponse response = llmClient.chat(summaryRequest, List.of());
+            RunContext runContext = CancellationContext.currentRun();
+            RunBudget runBudget = runContext == null ? null : runContext.runBudget();
+            LlmClient.ChatResponse response;
+            try (LlmBudgetContext.Scope budgetScope = LlmBudgetContext.open(
+                    runBudget, "pre-summary", "memory", "attempt",
+                    (long) ContextWindowBudget.estimateMessagesTokens(summaryRequest)
+                            + Math.max(1, llmClient.maxOutputTokens()))) {
+                if (!budgetScope.allowed()) {
+                    preSummaryFailureCount.incrementAndGet();
+                    return SessionPreSummaryMaintenanceResult.FAILED;
+                }
+                response = llmClient.chat(summaryRequest, List.of());
+                budgetScope.recordUsage(llmClient.getProviderName(), llmClient.getModelName(),
+                        response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
+            }
             String summary = response.content();
             if (summary == null || summary.isBlank()) {
                 preSummaryFailureCount.incrementAndGet();
@@ -637,8 +655,17 @@ public class MemoryManager implements AutoCloseable {
             int turnToolCalls,
             int largestToolResultChars) {
         List<LlmClient.Message> snapshot = history == null ? List.of() : List.copyOf(history);
+        RunContext callerContext = CancellationContext.currentRun();
         return CompletableFuture.supplyAsync(
-                () -> maintainSessionPreSummaryAfterTurn(snapshot, turnToolCalls, largestToolResultChars),
+                () -> {
+                    RunContext previous = CancellationContext.bind(callerContext);
+                    try {
+                        return maintainSessionPreSummaryAfterTurn(
+                                snapshot, turnToolCalls, largestToolResultChars);
+                    } finally {
+                        CancellationContext.restore(previous);
+                    }
+                },
                 sessionPreSummaryExecutor);
     }
 
@@ -706,11 +733,11 @@ public class MemoryManager implements AutoCloseable {
     // ─────────────────────────────────────────────────────────
 
     public void recordTokenUsage(int inputTokens, int outputTokens) {
-        tokenBudget.recordUsage(inputTokens, outputTokens);
+        // Run 累计用量由 RunBudget 统一记录。保留入口避免破坏旧扩展调用。
     }
 
     public void recordTokenUsage(int inputTokens, int outputTokens, int cachedInputTokens) {
-        tokenBudget.recordUsage(inputTokens, outputTokens, cachedInputTokens);
+        // Run 累计用量由 RunBudget 统一记录。保留入口避免破坏旧扩展调用。
     }
 
     // ─────────────────────────────────────────────────────────
@@ -743,7 +770,8 @@ public class MemoryManager implements AutoCloseable {
                 + ", summaryChars=" + metrics.summaryChars()
                 + ", full/incremental/failed=" + metrics.fullCount() + "/"
                 + metrics.incrementalCount() + "/" + metrics.failureCount() + "\n" +
-                tokenBudget.getUsageReport();
+                "上下文窗口: " + contextWindowBudget.contextWindow()
+                + " | 对话可用: " + contextWindowBudget.availableConversationTokens();
     }
 
     // ─────────────────────────────────────────────────────────
@@ -762,7 +790,13 @@ public class MemoryManager implements AutoCloseable {
 
     public LongTermMemory getLongTermMemory() { return longTermMemory; }
     public MemoryRetriever getRetriever() { return retriever; }
-    public TokenBudget getTokenBudget() { return tokenBudget; }
+    public ContextWindowBudget getContextWindowBudget() { return contextWindowBudget; }
+
+    /** @deprecated 使用 {@link #getContextWindowBudget()}。 */
+    @Deprecated(forRemoval = false)
+    public TokenBudget getTokenBudget() {
+        return new TokenBudget(contextWindowBudget.contextWindow());
+    }
     public ContextProfile getContextProfile() { return contextProfile; }
     public SessionPreSummaryMetrics getSessionPreSummaryMetrics() { return lastPreSummaryMetrics; }
 

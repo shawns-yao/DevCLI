@@ -906,22 +906,30 @@ public class Agent implements AutoCloseable {
     private void pushStatus(AgentBudget budget, long startNanos, String phase) {
         try {
             String model = llmClient == null ? "—" : llmClient.getModelName();
-            long totalTokens = budget == null ? 0L
-                    : (long) (budget.totalInputTokens() + budget.totalOutputTokens());
+            com.devcli.runtime.RunContext runContext = CancellationContext.currentRun();
+            com.devcli.budget.RunBudget.Snapshot runUsage = runContext == null
+                    ? null : runContext.runBudget().snapshot();
+            long totalTokens = runUsage == null
+                    ? (budget == null ? 0L : (long) budget.totalInputTokens() + budget.totalOutputTokens())
+                    : runUsage.totalTokens();
             long contextWindow = llmClient == null ? 0L : llmClient.maxContextWindow();
             boolean hitl = Boolean.TRUE.equals(hitlEnabledSupplier.get());
             long elapsed = (System.nanoTime() - startNanos) / 1_000_000L;
-            String cost = budget == null ? null : TokenUsageFormatter.estimatedCostCny(
-                    llmClient,
-                    budget.totalInputTokens(),
-                    budget.totalOutputTokens(),
-                    budget.totalCachedInputTokens());
+            long inputTokens = runUsage == null
+                    ? (budget == null ? 0L : budget.totalInputTokens()) : runUsage.inputTokens();
+            long outputTokens = runUsage == null
+                    ? (budget == null ? 0L : budget.totalOutputTokens()) : runUsage.outputTokens();
+            long cachedInputTokens = runUsage == null
+                    ? (budget == null ? 0L : budget.totalCachedInputTokens()) : runUsage.cachedInputTokens();
+            String cost = runUsage == null ? TokenUsageFormatter.estimatedCost(
+                    llmClient, (int) inputTokens, (int) outputTokens, (int) cachedInputTokens)
+                    : runUsage.costDisplay();
             renderer().updateStatus(StatusInfo.tokens(
                     model,
                     contextWindow,
-                    budget == null ? 0L : budget.totalInputTokens(),
-                    budget == null ? 0L : budget.totalOutputTokens(),
-                    budget == null ? 0L : budget.totalCachedInputTokens(),
+                    inputTokens,
+                    outputTokens,
+                    cachedInputTokens,
                     cost,
                     hitl,
                     elapsed,

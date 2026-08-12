@@ -1,5 +1,8 @@
 package com.devcli.agent;
 
+import com.devcli.budget.PricingCatalog;
+import com.devcli.budget.RunBudget;
+import com.devcli.budget.RunBudgetPolicy;
 import com.devcli.llm.GLMClient;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.SamplingRequestCoordinator;
@@ -17,6 +20,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AgentExecutionEngineTest {
 
@@ -42,7 +46,10 @@ class AgentExecutionEngineTest {
                 delegate.history.stream().map(LlmClient.Message::role).toList());
         assertEquals(List.of(LlmClient.ToolChoice.REQUIRED, LlmClient.ToolChoice.AUTO), llm.toolChoices);
         assertEquals(List.of(RunEvent.ToolCalls.class, RunEvent.ToolResults.class),
-                delegate.runEvents.stream().map(Object::getClass).toList());
+                delegate.runEvents.stream()
+                        .filter(event -> event instanceof RunEvent.ToolCalls
+                                || event instanceof RunEvent.ToolResults)
+                        .map(Object::getClass).toList());
     }
 
     @Test
@@ -77,6 +84,58 @@ class AgentExecutionEngineTest {
         assertEquals(List.of("system", "assistant", "tool"),
                 delegate.history.stream().map(LlmClient.Message::role).toList());
         assertEquals(List.of(LlmClient.ToolChoice.REQUIRED), llm.toolChoices);
+    }
+
+    @Test
+    void recordsLlmAndToolUsageInTheSharedRunBudget() {
+        LlmClient.ToolCall call = new LlmClient.ToolCall(
+                "call_1", new LlmClient.ToolCall.Function("read_file", "{\"path\":\"a.txt\"}"));
+        ScriptedClient llm = new ScriptedClient(List.of(
+                new LlmClient.ChatResponse("assistant", "", null, List.of(call), 10, 2, 4)
+        ));
+        RunBudget runBudget = RunBudget.create("run_engine", RunBudgetPolicy.builder()
+                .maxLlmCalls(2)
+                .maxToolCalls(2)
+                .maxTotalTokens(10_000)
+                .build(), PricingCatalog.empty());
+        RecordingDelegate delegate = new RecordingDelegate(true);
+
+        String result = new AgentExecutionEngine<String>(
+                llm, new AgentBudget(1_000, 3, 10), null,
+                SamplingRequestCoordinator.shared(), runBudget,
+                "worker", "worker-1", "attempt-1").run(delegate);
+
+        assertEquals("tool-complete", result);
+        assertEquals(1, runBudget.snapshot().llmCalls());
+        assertEquals(1, runBudget.snapshot().toolCalls());
+        assertEquals(10, runBudget.snapshot().inputTokens());
+        assertEquals(2, runBudget.snapshot().outputTokens());
+        assertEquals(4, runBudget.snapshot().cachedInputTokens());
+        assertTrue(delegate.runEvents.stream().anyMatch(RunEvent.BudgetUsageUpdated.class::isInstance));
+    }
+
+    @Test
+    void refusesAnotherModelCallAfterSharedRunBudgetIsExhausted() {
+        ScriptedClient llm = new ScriptedClient(List.of(
+                new LlmClient.ChatResponse("assistant", "first", null, null, 10, 2)
+        ));
+        RunBudget runBudget = RunBudget.create("run_engine", RunBudgetPolicy.builder()
+                .maxLlmCalls(1)
+                .maxTotalTokens(10_000)
+                .build(), PricingCatalog.empty());
+
+        String first = new AgentExecutionEngine<String>(
+                llm, new AgentBudget(1_000, 3, 10), null,
+                SamplingRequestCoordinator.shared(), runBudget,
+                "react", "agent", "attempt-1").run(new RecordingDelegate());
+        String second = new AgentExecutionEngine<String>(
+                llm, new AgentBudget(1_000, 3, 10), null,
+                SamplingRequestCoordinator.shared(), runBudget,
+                "react", "agent", "attempt-2").run(new RecordingDelegate());
+
+        assertEquals("first", first);
+        assertEquals("budget", second);
+        assertEquals(1, runBudget.snapshot().llmCalls());
     }
 
     private static final class RecordingDelegate implements AgentExecutionEngine.Delegate<String> {

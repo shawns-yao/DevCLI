@@ -1,5 +1,8 @@
 package com.devcli.llm;
 
+import com.devcli.budget.PricingCatalog;
+import com.devcli.budget.RunBudget;
+import com.devcli.budget.RunBudgetPolicy;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -25,6 +28,27 @@ class LlmRetryExecutorTest {
 
         assertEquals("ok", result);
         assertEquals(3, calls.get());
+    }
+
+    @Test
+    void retryAttemptsConsumeTheSharedRunCallBudget() {
+        AtomicInteger calls = new AtomicInteger();
+        RunBudget budget = RunBudget.create("run_retry", RunBudgetPolicy.builder()
+                .maxLlmCalls(2)
+                .maxTotalTokens(10_000)
+                .build(), PricingCatalog.empty());
+
+        LlmException error = assertThrows(LlmException.class, () -> LlmRetryExecutor.execute(
+                "openai", "model", new LlmRetryPolicy(3, 1, 4, 0.0),
+                millis -> { }, budget, "react", "agent", () -> {
+                    calls.incrementAndGet();
+                    throw new LlmException(LlmErrorCode.RATE_LIMITED, "openai", "model",
+                            429, "rate limited", true, 0L, null);
+                }));
+
+        assertEquals(LlmErrorCode.BUDGET_EXHAUSTED, error.code());
+        assertEquals(2, calls.get());
+        assertEquals(2, budget.snapshot().llmCalls());
     }
 
     @Test

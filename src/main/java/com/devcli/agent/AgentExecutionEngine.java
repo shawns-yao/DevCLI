@@ -1,8 +1,12 @@
 package com.devcli.agent;
 
+import com.devcli.budget.PricingCatalog;
+import com.devcli.budget.RunBudget;
+import com.devcli.budget.RunBudgetPolicy;
 import com.devcli.hook.HookDispatcher;
 import com.devcli.hook.HookLifecycle;
 import com.devcli.llm.LlmClient;
+import com.devcli.llm.LlmBudgetContext;
 import com.devcli.llm.SamplingRequestCoordinator;
 import com.devcli.runtime.CancellationContext;
 import com.devcli.runtime.RunContext;
@@ -108,22 +112,39 @@ final class AgentExecutionEngine<R> {
     private final AgentBudget budget;
     private final HookLifecycle hookLifecycle;
     private final SamplingRequestCoordinator samplingRequests;
+    private final RunBudget runBudget;
+    private final String budgetPhase;
+    private final String budgetAgent;
+    private final String budgetAttempt;
     private final String engineId = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
 
     AgentExecutionEngine(LlmClient llmClient, AgentBudget budget) {
-        this(llmClient, budget, null, SamplingRequestCoordinator.shared());
+        this(llmClient, budget, null, SamplingRequestCoordinator.shared(), null,
+                "agent", "agent", "attempt-1");
     }
 
     AgentExecutionEngine(LlmClient llmClient, AgentBudget budget, HookLifecycle hookLifecycle) {
-        this(llmClient, budget, hookLifecycle, SamplingRequestCoordinator.shared());
+        this(llmClient, budget, hookLifecycle, SamplingRequestCoordinator.shared(), null,
+                "agent", "agent", "attempt-1");
     }
 
     AgentExecutionEngine(LlmClient llmClient, AgentBudget budget, HookLifecycle hookLifecycle,
                          SamplingRequestCoordinator samplingRequests) {
+        this(llmClient, budget, hookLifecycle, samplingRequests, null,
+                "agent", "agent", "attempt-1");
+    }
+
+    AgentExecutionEngine(LlmClient llmClient, AgentBudget budget, HookLifecycle hookLifecycle,
+                         SamplingRequestCoordinator samplingRequests, RunBudget runBudget,
+                         String budgetPhase, String budgetAgent, String budgetAttempt) {
         this.llmClient = Objects.requireNonNull(llmClient, "llmClient");
         this.budget = Objects.requireNonNull(budget, "budget");
         this.hookLifecycle = hookLifecycle;
         this.samplingRequests = Objects.requireNonNull(samplingRequests, "samplingRequests");
+        this.runBudget = runBudget == null ? resolveRunBudget() : runBudget;
+        this.budgetPhase = text(budgetPhase, "agent");
+        this.budgetAgent = text(budgetAgent, "agent");
+        this.budgetAttempt = text(budgetAttempt, "attempt-1");
     }
 
     R run(Delegate<R> delegate) {
@@ -184,18 +205,34 @@ final class AgentExecutionEngine<R> {
             }
             delegate.beforeIteration(iteration, budget);
 
+            RunBudget.Admission logicalAdmission = null;
             try {
                 RunEventSink eventSink = RunEventSink.composite(
                         delegate.eventSink(),
                         RunEventSink.fromStreamListener(delegate.streamListener()));
                 LlmClient.ChatResponse response;
-                try (SamplingRequestCoordinator.RequestScope ignored =
+                List<LlmClient.Tool> toolDefinitions = delegate.toolDefinitions(iteration);
+                long requestReservation = estimateRequestReservation(delegate.history());
+                try (LlmBudgetContext.Scope budgetScope = LlmBudgetContext.open(
+                        runBudget, budgetPhase, budgetAgent,
+                        budgetAttempt + "-iteration-" + iteration, requestReservation);
+                     SamplingRequestCoordinator.RequestScope ignored =
                              samplingRequests.begin(samplingRequestId(iteration))) {
+                    if (!budgetScope.allowed()) {
+                        eventSink.emit(new RunEvent.BudgetExhausted(
+                                runBudget.runId(), budgetScope.denialReason()));
+                        return delegate.budgetExceeded(
+                                AgentBudget.ExitReason.RUN_BUDGET_EXCEEDED, budget);
+                    }
+                    logicalAdmission = budgetScope.firstAdmission();
                     response = llmClient.chat(
                             delegate.history(),
-                            delegate.toolDefinitions(iteration),
+                            toolDefinitions,
                             new RunEventStreamListener(eventSink),
                             delegate.toolChoice(iteration));
+                    budgetScope.recordUsage(
+                            llmClient.getProviderName(), llmClient.getModelName(),
+                            response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
                 }
                 if (delegate.isCancelled()) {
                     return delegate.cancelled(budget);
@@ -205,6 +242,11 @@ final class AgentExecutionEngine<R> {
                         response.inputTokens(),
                         response.outputTokens(),
                         response.cachedInputTokens());
+                eventSink.emit(new RunEvent.LlmRequestCompleted(
+                        runBudget.runId(), budgetPhase, budgetAgent, budgetAttempt,
+                        llmClient.getProviderName(), llmClient.getModelName(),
+                        response.inputTokens(), response.outputTokens(), response.cachedInputTokens()));
+                eventSink.emit(runBudget.usageEvent(budgetPhase, budgetAgent, budgetAttempt));
                 delegate.afterResponse(response, iteration, budget);
                 response = Objects.requireNonNullElse(
                         delegate.normalizeResponse(response, iteration, budget), response);
@@ -215,6 +257,12 @@ final class AgentExecutionEngine<R> {
                 }
 
                 if (response.hasToolCalls()) {
+                    if (!runBudget.tryRecordToolCalls(response.toolCalls().size())) {
+                        eventSink.emit(new RunEvent.BudgetExhausted(
+                                runBudget.runId(), "tool_call_limit"));
+                        return delegate.budgetExceeded(AgentBudget.ExitReason.RUN_BUDGET_EXCEEDED, budget);
+                    }
+                    eventSink.emit(runBudget.usageEvent(budgetPhase, budgetAgent, budgetAttempt));
                     budget.recordToolCalls(response.toolCalls());
                     delegate.history().add(LlmClient.Message.assistant(
                             response.reasoningContent(),
@@ -273,6 +321,8 @@ final class AgentExecutionEngine<R> {
                 return delegate.completed(response, budget);
             } catch (IOException e) {
                 return delegate.failed(e, budget);
+            } finally {
+                runBudget.releaseReservation(logicalAdmission);
             }
         }
     }
@@ -281,6 +331,24 @@ final class AgentExecutionEngine<R> {
         RunContext runContext = CancellationContext.currentRun();
         String runId = runContext == null ? "local" : runContext.runId();
         return runId + ":engine_" + engineId + ":iteration_" + iteration;
+    }
+
+    private RunBudget resolveRunBudget() {
+        RunContext context = CancellationContext.currentRun();
+        if (context != null) return context.runBudget();
+        return RunBudget.create("run_local_" + engineId,
+                RunBudgetPolicy.fromConfiguration(), PricingCatalog.empty());
+    }
+
+    private long estimateRequestReservation(List<LlmClient.Message> messages) {
+        // Provider usage 已包含工具定义；预留输出上限即可防止并行请求共同穿透 Token 上限。
+        long input = com.devcli.memory.ContextWindowBudget.estimateMessagesTokens(messages);
+        long output = Math.max(1, llmClient.maxOutputTokens());
+        return Math.max(1, input + output);
+    }
+
+    private static String text(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback : value.trim();
     }
 
     private boolean deliverQueuedMessages(Delegate<R> delegate,

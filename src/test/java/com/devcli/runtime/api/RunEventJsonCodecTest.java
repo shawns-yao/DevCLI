@@ -75,4 +75,19 @@ class RunEventJsonCodecTest {
         assertEquals("found issue", custom.path("content").asText());
         assertEquals("warning", custom.path("attributes").path("severity").asText());
     }
+
+    @Test
+    void encodesBudgetUsageAndUnknownCostExplicitly() throws Exception {
+        JsonNode payload = MAPPER.readTree(RunEventJsonCodec.encode(
+                new RunEvent.BudgetUsageUpdated(
+                        "run_1", "worker", "worker-1", "attempt-2",
+                        100, 40, 20, 3, 4, "unknown", "unknown", "CONTINUE"),
+                "turn_1"));
+
+        assertEquals("run_1", payload.path("run_id").asText());
+        assertEquals("worker", payload.path("phase").asText());
+        assertEquals(100, payload.path("input_tokens").asLong());
+        assertEquals(3, payload.path("llm_calls").asLong());
+        assertEquals("unknown", payload.path("estimated_cost").asText());
+    }
 }

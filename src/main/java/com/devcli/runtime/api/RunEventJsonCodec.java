@@ -77,6 +77,44 @@ final class RunEventJsonCodec {
         } else if (event instanceof RunEvent.CheckpointFailed checkpoint) {
             payload.put("covered_through_event_id", checkpoint.coveredThroughEventId());
             payload.put("error", checkpoint.error());
+        } else if (event instanceof RunEvent.BudgetConfigured budget) {
+            payload.put("run_id", budget.runId());
+            payload.put("tier", budget.tier());
+            payload.put("max_total_tokens", budget.maxTotalTokens());
+            payload.put("max_llm_calls", budget.maxLlmCalls());
+            payload.put("max_tool_calls", budget.maxToolCalls());
+            payload.put("max_wall_clock_millis", budget.maxWallClockMillis());
+            payload.put("max_estimated_cost", budget.maxEstimatedCost());
+        } else if (event instanceof RunEvent.BudgetUsageUpdated budget) {
+            payload.put("run_id", budget.runId());
+            payload.put("phase", budget.phase());
+            payload.put("agent", budget.agent());
+            payload.put("attempt", budget.attempt());
+            payload.put("input_tokens", budget.inputTokens());
+            payload.put("output_tokens", budget.outputTokens());
+            payload.put("cached_input_tokens", budget.cachedInputTokens());
+            payload.put("llm_calls", budget.llmCalls());
+            payload.put("tool_calls", budget.toolCalls());
+            payload.put("estimated_cost", budget.estimatedCost());
+            payload.put("currency", budget.currency());
+            payload.put("decision", budget.decision());
+        } else if (event instanceof RunEvent.BudgetThresholdReached budget) {
+            payload.put("run_id", budget.runId());
+            payload.put("threshold", budget.threshold());
+            payload.put("reason", budget.reason());
+        } else if (event instanceof RunEvent.BudgetExhausted budget) {
+            payload.put("run_id", budget.runId());
+            payload.put("reason", budget.reason());
+        } else if (event instanceof RunEvent.LlmRequestCompleted request) {
+            payload.put("run_id", request.runId());
+            payload.put("phase", request.phase());
+            payload.put("agent", request.agent());
+            payload.put("attempt", request.attempt());
+            payload.put("provider", request.provider());
+            payload.put("model", request.model());
+            payload.put("input_tokens", request.inputTokens());
+            payload.put("output_tokens", request.outputTokens());
+            payload.put("cached_input_tokens", request.cachedInputTokens());
         } else {
             throw new IllegalArgumentException("不支持的运行事件: " + event.getClass().getName());
         }

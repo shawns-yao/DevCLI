@@ -1,5 +1,6 @@
 package com.devcli.llm;
 
+import com.devcli.budget.RunBudget;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,17 +23,35 @@ public final class LlmRetryExecutor {
 
     public static <T> T execute(String provider, String model, LlmRetryPolicy policy,
                                 Sleeper sleeper, IoSupplier<T> operation) throws IOException {
+        return execute(provider, model, policy, sleeper, null, "llm", "llm", operation);
+    }
+
+    public static <T> T execute(String provider, String model, LlmRetryPolicy policy,
+                                Sleeper sleeper, RunBudget runBudget,
+                                String phase, String agent, IoSupplier<T> operation) throws IOException {
         LlmRetryPolicy effectivePolicy = policy == null
                 ? LlmRetryPolicy.fromSystemProperties() : policy;
         Sleeper effectiveSleeper = sleeper == null ? Thread::sleep : sleeper;
+        LlmBudgetContext.Scope scopedBudget = runBudget == null ? LlmBudgetContext.current() : null;
         LlmException last = null;
         for (int attempt = 1; attempt <= effectivePolicy.maxAttempts(); attempt++) {
             if (SamplingRequestCoordinator.isCurrentCancelled()) {
                 throw cancelled(provider, model, null);
             }
+            RunBudget.Admission admission = runBudget != null
+                    ? runBudget.tryStartLlmRequest(phase, agent, "attempt-" + attempt)
+                    : (scopedBudget == null ? null : scopedBudget.admissionForAttempt(attempt));
+            if (admission != null && !admission.allowed()) {
+                throw new LlmException(LlmErrorCode.BUDGET_EXHAUSTED, provider, model, 0,
+                        "Run budget exhausted: " + admission.reason(), false, 0L, last);
+            }
             try {
-                return operation.get();
+                T result = operation.get();
+                if (runBudget != null) runBudget.releaseReservation(admission);
+                return result;
             } catch (IOException error) {
+                if (runBudget != null) runBudget.releaseReservation(admission);
+                else if (scopedBudget != null) scopedBudget.failed(admission);
                 if (SamplingRequestCoordinator.isCurrentCancelled()) {
                     throw cancelled(provider, model, error);
                 }

@@ -1,6 +1,12 @@
 package com.devcli.runtime;
 
+import com.devcli.budget.PricingCatalog;
+import com.devcli.budget.RunBudget;
+import com.devcli.budget.RunBudgetPolicy;
+
 import java.nio.file.Path;
+import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.Objects;
@@ -17,6 +23,7 @@ public final class RunContext implements AutoCloseable {
     private final String runId;
     private final Path projectPath;
     private final CancellationToken cancellationToken;
+    private final RunBudget runBudget;
     private final RunContext previous;
     private final Deque<AutoCloseable> ownedResources = new ArrayDeque<>();
     private final AtomicBoolean closed = new AtomicBoolean(false);
@@ -25,6 +32,7 @@ public final class RunContext implements AutoCloseable {
         this.runId = "run_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
         this.projectPath = Objects.requireNonNull(projectPath, "projectPath").toAbsolutePath().normalize();
         this.cancellationToken = new CancellationToken();
+        this.runBudget = RunBudget.create(runId, RunBudgetPolicy.fromConfiguration(), PricingCatalog.empty());
         this.previous = previous;
     }
 
@@ -38,6 +46,39 @@ public final class RunContext implements AutoCloseable {
 
     public CancellationToken cancellationToken() {
         return cancellationToken;
+    }
+
+    public RunBudget runBudget() {
+        return runBudget;
+    }
+
+    public RunBudgetState budgetState() {
+        RunBudget.Snapshot snapshot = runBudget.snapshot();
+        return new RunBudgetState(
+                RunBudgetState.CURRENT_SCHEMA_VERSION,
+                runId,
+                runBudget.policy(),
+                snapshot,
+                Instant.now());
+    }
+
+    /** RunStore 尚未接入前的稳定持久化载荷；恢复时不得清零已消耗预算。 */
+    public record RunBudgetState(int schemaVersion, String runId,
+                                 RunBudgetPolicy policy, RunBudget.Snapshot usage,
+                                 Instant updatedAt) {
+        public static final int CURRENT_SCHEMA_VERSION = 1;
+
+        public RunBudgetState {
+            schemaVersion = Math.max(1, schemaVersion);
+            runId = runId == null ? "" : runId;
+            policy = Objects.requireNonNull(policy, "policy");
+            usage = usage == null
+                    ? new RunBudget.Snapshot(0, 0, 0, 0, 0, 0,
+                    BigDecimal.ZERO, "unknown", 0, 0,
+                    RunBudget.Decision.CONTINUE, "")
+                    : usage;
+            updatedAt = updatedAt == null ? Instant.now() : updatedAt;
+        }
     }
 
     public boolean isCancelled() {

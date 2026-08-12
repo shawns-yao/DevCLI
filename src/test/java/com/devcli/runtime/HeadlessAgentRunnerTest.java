@@ -99,7 +99,11 @@ class HeadlessAgentRunnerTest {
                 client, projectRoot, "hello", List.of(), 100_000, events::add);
 
         assertEquals(List.of(RunEvent.ReasoningDelta.class, RunEvent.MessageDelta.class),
-                events.stream().map(Object::getClass).toList());
+                events.stream()
+                        .filter(event -> event instanceof RunEvent.ReasoningDelta
+                                || event instanceof RunEvent.MessageDelta)
+                        .map(Object::getClass).toList());
+        assertTrue(events.stream().anyMatch(RunEvent.BudgetUsageUpdated.class::isInstance));
     }
 
     @Test

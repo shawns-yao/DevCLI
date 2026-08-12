@@ -4,6 +4,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.LlmTraceLogger;
+import com.devcli.llm.LlmBudgetContext;
+import com.devcli.memory.ContextWindowBudget;
+import com.devcli.budget.RunBudget;
+import com.devcli.runtime.CancellationContext;
+import com.devcli.runtime.RunContext;
 import com.devcli.prompt.PromptAssembler;
 import com.devcli.prompt.PromptContext;
 import com.devcli.prompt.PromptMode;
@@ -54,13 +59,30 @@ public class Planner {
 
         // 调用LLM生成计划
         PlanningStreamRenderer streamRenderer = new PlanningStreamRenderer(out);
-        LlmClient.ChatResponse response = llmClient.chat(messages, null, streamRenderer);
+        RunBudget runBudget = currentRunBudget();
+        LlmClient.ChatResponse response;
+        try (LlmBudgetContext.Scope budgetScope = LlmBudgetContext.open(
+                runBudget, "planner", "planner", "attempt",
+                (long) ContextWindowBudget.estimateMessagesTokens(messages)
+                        + Math.max(1, llmClient.maxOutputTokens()))) {
+            if (!budgetScope.allowed()) {
+                throw new IOException("Run 预算已用尽: " + budgetScope.denialReason());
+            }
+            response = llmClient.chat(messages, null, streamRenderer);
+            budgetScope.recordUsage(llmClient.getProviderName(), llmClient.getModelName(),
+                    response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
+        }
         LlmTraceLogger.logReasoning(log, "planner", llmClient, response.reasoningContent());
         streamRenderer.finish();
         String planJson = response.content();
 
         // 解析JSON计划
         return parsePlan(goal, planJson);
+    }
+
+    private static RunBudget currentRunBudget() {
+        RunContext context = CancellationContext.currentRun();
+        return context == null ? null : context.runBudget();
     }
 
     /**

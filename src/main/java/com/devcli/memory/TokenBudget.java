@@ -5,14 +5,16 @@ import com.devcli.llm.LlmClient;
 import java.util.List;
 
 /**
- * Token 预算管理器 - 确保对话不会超出模型的上下文窗口
+ * @deprecated 使用 {@link ContextWindowBudget} 表达单次请求窗口，Run 累计预算由
+ * {@code com.devcli.budget.RunBudget} 管理。
  *
  * 策略：
  * 1. 设定总 token 预算（系统提示 + 工具定义 + 对话历史 + 回复预留）
  * 2. 每次调用 LLM 前检查预算
  * 3. 超出预算时触发压缩或裁剪
  */
-public class TokenBudget {
+@Deprecated(forRemoval = false)
+public class TokenBudget extends ContextWindowBudget {
     private final int contextWindow;    // 模型上下文窗口大小
     private final int reservedForSystem; // 系统提示预留
     private final int reservedForTools;  // 工具定义预留
@@ -35,6 +37,7 @@ public class TokenBudget {
      * @param reservedForResponse 回复预留 token 数
      */
     public TokenBudget(int contextWindow, int reservedForSystem, int reservedForTools, int reservedForResponse) {
+        super(contextWindow, reservedForSystem, reservedForTools, reservedForResponse);
         this.contextWindow = contextWindow;
         this.reservedForSystem = reservedForSystem;
         this.reservedForTools = reservedForTools;
@@ -49,15 +52,14 @@ public class TokenBudget {
      * 获取对话历史可用的 token 预算
      */
     public int getAvailableForConversation() {
-        return contextWindow - reservedForSystem - reservedForTools - reservedForResponse;
+        return availableConversationTokens();
     }
 
     /**
      * 检查给定的消息列表是否在预算内
      */
     public boolean isWithinBudget(List<LlmClient.Message> messages) {
-        int estimatedTokens = estimateMessagesTokens(messages);
-        return estimatedTokens <= getAvailableForConversation();
+        return fits(messages);
     }
 
     /**

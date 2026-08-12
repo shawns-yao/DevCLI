@@ -12,5 +12,6 @@ public enum LlmErrorCode {
     SERVER_ERROR,
     MALFORMED_RESPONSE,
     CANCELLED,
+    BUDGET_EXHAUSTED,
     UNKNOWN
 }

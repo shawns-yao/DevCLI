@@ -15,7 +15,10 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
         RunEvent.ReasoningDelta, RunEvent.MessageDelta, RunEvent.QueueUpdated, RunEvent.ToolCalls,
         RunEvent.SessionStateChanged, RunEvent.CustomMessage,
         RunEvent.ToolResults, RunEvent.TurnCompleted, RunEvent.TurnFailed,
-        RunEvent.TurnRejected, RunEvent.CheckpointCreated, RunEvent.CheckpointFailed {
+        RunEvent.TurnRejected, RunEvent.CheckpointCreated, RunEvent.CheckpointFailed,
+        RunEvent.BudgetConfigured, RunEvent.BudgetUsageUpdated,
+        RunEvent.BudgetThresholdReached, RunEvent.BudgetExhausted,
+        RunEvent.LlmRequestCompleted {
 
     String type();
 
@@ -222,6 +225,75 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
         public String type() {
             return "thread.checkpoint.failed";
         }
+    }
+
+    record BudgetConfigured(String runId, String tier, long maxTotalTokens,
+                            long maxLlmCalls, long maxToolCalls, long maxWallClockMillis,
+                            String maxEstimatedCost) implements RunEvent {
+        public BudgetConfigured {
+            runId = text(runId);
+            tier = text(tier);
+            maxEstimatedCost = text(maxEstimatedCost);
+        }
+
+        @Override
+        public String type() { return "budget.configured"; }
+    }
+
+    record BudgetUsageUpdated(String runId, String phase, String agent, String attempt,
+                              long inputTokens, long outputTokens, long cachedInputTokens,
+                              long llmCalls, long toolCalls, String estimatedCost,
+                              String currency, String decision) implements RunEvent {
+        public BudgetUsageUpdated {
+            runId = text(runId);
+            phase = text(phase);
+            agent = text(agent);
+            attempt = text(attempt);
+            estimatedCost = text(estimatedCost);
+            currency = text(currency);
+            decision = text(decision);
+        }
+
+        @Override
+        public String type() { return "budget.usage.updated"; }
+    }
+
+    record BudgetThresholdReached(String runId, String threshold, String reason)
+            implements RunEvent {
+        public BudgetThresholdReached {
+            runId = text(runId);
+            threshold = text(threshold);
+            reason = text(reason);
+        }
+
+        @Override
+        public String type() { return "budget.threshold.reached"; }
+    }
+
+    record BudgetExhausted(String runId, String reason) implements RunEvent {
+        public BudgetExhausted {
+            runId = text(runId);
+            reason = text(reason);
+        }
+
+        @Override
+        public String type() { return "budget.exhausted"; }
+    }
+
+    record LlmRequestCompleted(String runId, String phase, String agent, String attempt,
+                               String provider, String model, long inputTokens,
+                               long outputTokens, long cachedInputTokens) implements RunEvent {
+        public LlmRequestCompleted {
+            runId = text(runId);
+            phase = text(phase);
+            agent = text(agent);
+            attempt = text(attempt);
+            provider = text(provider);
+            model = text(model);
+        }
+
+        @Override
+        public String type() { return "llm.request.completed"; }
     }
 
     record ToolCallData(String id, String name, String argumentsJson) {

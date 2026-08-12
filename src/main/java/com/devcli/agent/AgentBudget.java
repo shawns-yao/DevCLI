@@ -16,7 +16,7 @@ import java.util.Locale;
  * 设计目标是把"是否继续下一轮"的主导权交给 LLM 自己——只要它返回 content 不再调用工具，
  * 循环就退出。本类只承担三种"保险阀"职责，避免模型在异常情况下无限重复同一动作：
  *
- * 1. Token 预算：累计 input + output token 超过阈值后强制收尾（**默认无限**，仅显式配置时生效）
+ * 1. 兼容 Token 预算：旧调用方的局部兜底；跨 Agent 累计成本由 RunBudget 管理
  * 2. 停滞检测：连续 N 次工具调用使用完全相同的工具名 + 参数，判定为死循环
  * 3. 硬轮数兜底：累计迭代轮数超过 hardMaxIterations，作为兜底防御
  *
@@ -25,18 +25,16 @@ import java.util.Locale;
  * 配置读取顺序（以 {@link #fromSystemProperties()} 为准）：
  * 1. 系统属性：{@code devcli.react.token.budget} / {@code devcli.react.stagnation.window} /
  *    {@code devcli.react.hard.max.iterations}
- * 2. 默认值：token 预算 = Integer.MAX_VALUE（实质不限）/ 连续 3 次相同工具调用 / 50 轮
+ * 2. 默认值：兼容 token 预算 = Integer.MAX_VALUE / 连续 3 次相同工具调用 / 50 轮
  *
- * 设计取舍：长上下文模型（GLM-5.1 200k / DeepSeek V4 1M）配合套餐用户的"无限 token"诉求，
- * 默认不再以 80% × window 为硬限——让 LLM 自然停在它该停的地方。需要严格成本控制的
- * 场景（CI / 自动化批跑）通过 {@code -Ddevcli.react.token.budget=N} 显式启用。
- * 死循环防护交给 stagnation 检测和 hardMaxIterations 两道兜底。
+ * RunBudget 默认使用有限档位，本类不再承担跨 Planner、Worker、Reviewer 的总量治理。
  */
 public class AgentBudget {
 
     public enum ExitReason {
         WITHIN_BUDGET,
         TOKEN_BUDGET_EXCEEDED,
+        RUN_BUDGET_EXCEEDED,
         STAGNATION_DETECTED,
         REPEATED_TOOL_ERROR,
         HARD_ITERATION_LIMIT
@@ -79,9 +77,7 @@ public class AgentBudget {
     }
 
     public static AgentBudget fromLlmClient(LlmClient llmClient) {
-        // ContextProfile 仍按 80% × window 计算 agentTokenBudget，用于 /context 与 token stats 的"软提示"显示；
-        // 但 AgentBudget 的硬限默认走 Integer.MAX_VALUE，避免长上下文 + 套餐用户被预算墙卡住。
-        // 显式 -Ddevcli.react.token.budget=N 仍可启用硬预算，覆盖默认。
+        // 保留旧系统属性用于单个 Agent 循环兼容；Run 总预算由 RunContext 共享。
         return new AgentBudget(
                 readIntProperty("devcli.react.token.budget", Integer.MAX_VALUE),
                 readIntProperty("devcli.react.stagnation.window", DEFAULT_STAGNATION_WINDOW),
@@ -222,6 +218,7 @@ public class AgentBudget {
             case TOKEN_BUDGET_EXCEEDED -> String.format(Locale.ROOT,
                     "Token 预算已用尽（%d / %d），任务被强制收尾",
                     totalInputTokens + totalOutputTokens, tokenBudget);
+            case RUN_BUDGET_EXCEEDED -> "Run 预算已用尽，任务被强制收尾";
             case STAGNATION_DETECTED -> String.format(Locale.ROOT,
                     "检测到连续 %d 轮重复的工具调用，疑似死循环，已强制收尾",
                     stagnationWindow);

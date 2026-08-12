@@ -1,5 +1,6 @@
 package com.devcli.runtime;
 
+import com.devcli.budget.RunBudget;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -19,6 +20,8 @@ class RunContextTest {
         try (RunContext context = CancellationContext.startRunContext(projectRoot)) {
             assertSame(context, CancellationContext.currentRun());
             assertEquals(projectRoot.toAbsolutePath().normalize(), context.projectPath());
+            assertEquals(context.runId(), context.budgetState().runId());
+            assertTrue(context.budgetState().policy().maxTotalTokens() > 0);
 
             context.cancel();
 
@@ -42,5 +45,21 @@ class RunContextTest {
 
         assertEquals(List.of(2, 1), closed);
         assertEquals(1, firstCloseCount.get());
+    }
+
+    @Test
+    void budgetStateKeepsConsumedUsageForPersistence(@TempDir Path projectRoot) {
+        try (RunContext context = CancellationContext.startRunContext(projectRoot)) {
+            RunBudget.Admission admission = context.runBudget()
+                    .tryStartLlmRequest("react", "agent", "attempt-1");
+            context.runBudget().recordLlmUsage(
+                    admission, "unknown", "model", 12, 3, 2);
+
+            RunContext.RunBudgetState state = context.budgetState();
+
+            assertEquals(12, state.usage().inputTokens());
+            assertEquals(3, state.usage().outputTokens());
+            assertEquals(1, state.usage().llmCalls());
+        }
     }
 }

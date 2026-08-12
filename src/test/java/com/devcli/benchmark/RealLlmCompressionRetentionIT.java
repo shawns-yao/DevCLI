@@ -202,10 +202,9 @@ class RealLlmCompressionRetentionIT {
     // ------------------------------------------------------------------
 
     private static ContextProfile benchmarkContextProfile(int contextWindow, double triggerRatio) {
-        int agentBudget = (int) Math.floor(contextWindow * 0.8);
         int shortTermBudget = (int) Math.floor(contextWindow * 0.45);
         int memoryContextTokens = Math.min(5_000, contextWindow / 200);
-        return new ContextProfile(contextWindow, agentBudget, triggerRatio,
+        return new ContextProfile(contextWindow, triggerRatio,
                 shortTermBudget, memoryContextTokens, true,
                 false, "none", 8_192);
     }

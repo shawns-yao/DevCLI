@@ -1,6 +1,10 @@
 package com.devcli.memory;
 
+import com.devcli.budget.RunBudget;
 import com.devcli.llm.LlmClient;
+import com.devcli.llm.LlmBudgetContext;
+import com.devcli.runtime.CancellationContext;
+import com.devcli.runtime.RunContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -209,7 +213,20 @@ public final class MemoryOrganizer {
             messages.add(LlmClient.Message.user(
                     "上一份输出无法解析：" + clip(error, 200) + "。请严格按 JSON 格式重新输出。"));
         }
-        LlmClient.ChatResponse response = llmClient.chat(messages, List.of());
+        RunContext runContext = CancellationContext.currentRun();
+        RunBudget runBudget = runContext == null ? null : runContext.runBudget();
+        LlmClient.ChatResponse response;
+        try (LlmBudgetContext.Scope budgetScope = LlmBudgetContext.open(
+                runBudget, "memory-organize", "memory-organizer", "attempt",
+                (long) ContextWindowBudget.estimateMessagesTokens(messages)
+                        + Math.max(1, llmClient.maxOutputTokens()))) {
+            if (!budgetScope.allowed()) {
+                throw new IOException("Run 预算已用尽: " + budgetScope.denialReason());
+            }
+            response = llmClient.chat(messages, List.of());
+            budgetScope.recordUsage(llmClient.getProviderName(), llmClient.getModelName(),
+                    response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
+        }
         return response == null || response.content() == null ? "" : response.content().trim();
     }
 
