@@ -144,13 +144,13 @@ class DevCliCompleterTest {
     }
 
     @Test
-    void completesBranchSubCommands() {
+    void completesWorkspaceSubCommands() {
         DevCliCompleter completer = new DevCliCompleter(List::of);
         List<Candidate> candidates = new ArrayList<>();
 
-        completer.complete(null, parsed("/branch cr", "cr"), candidates);
+        completer.complete(null, parsed("/workspace re", "re"), candidates);
 
-        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("create ")));
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("restore ")));
     }
 
     @Test

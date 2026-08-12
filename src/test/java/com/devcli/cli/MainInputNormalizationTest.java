@@ -76,7 +76,8 @@ class MainInputNormalizationTest {
 
         assertTrue(tips.containsKey("/model"));
         assertTrue(tips.get("/model").getMainDesc().get(0).toString().contains("查看当前模型"));
-        assertTrue(tips.containsKey("/plan <任务内容>"));
+        assertTrue(tips.containsKey("/run --review=plan <任务>"));
+        assertTrue(tips.containsKey("/workspace restore <N>"));
     }
 
     @Test

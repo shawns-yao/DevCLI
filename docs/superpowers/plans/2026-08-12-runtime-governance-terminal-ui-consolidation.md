@@ -431,7 +431,7 @@ Agent、Plan、Team 和工具不得直接调用 UI 方法或写 stdout；它们�
 
 ## 3.3 删除 Lanterna
 
-删除范围包括全屏启动、窗口、Pane、独立会话快照、独立 HITL 和相关配置。若 `DEVCLI_RENDERER=lanterna`，在一个兼容版本内提示改用 inline，随后删除该枚举值。Plain 继续作为无 ANSI 降级适配器。
+删除范围包括全屏启动、窗口、Pane、独立会话快照、独立 HITL、Lanterna renderer 枚举与相关配置。Plain 继续作为无 ANSI 降级适配器。
 
 ---
 
@@ -587,7 +587,7 @@ Agent、Plan、Team 和工具不得直接调用 UI 方法或写 stdout；它们�
 - [x] 用契约测试锁定 plan review 与 team review 的差异。
 - [x] 统一产品入口并复用共同执行内核、DAG、workspace、artifact 与 checkpoint 协议；两种差异状态机暂由内部策略适配器承载，避免布尔分支单体类。
 - [x] PLAN_REVIEW 关闭独立 Reviewer；TEAM_REVIEW 启用 Worker/Pre-Review/Reviewer。
-- [x] `/plan`、`/team` 作为 `/run --review=plan|team` 的兼容别名保留一个版本。
+- [x] `/run --review=plan|team` 成为唯一结构化执行入口；旧 `/plan`、`/team` 已在阶段 9 删除。
 - [ ] 完成阶段功能后统一运行 plan、team、graph、artifact、CLI 限定测试。
 
 阶段结果（2026-08-12）：CLI 与旧 TUI 兼容入口都只选择 `ExecutionReviewPolicy` 并进入 `StructuredExecution`；`PlanExecuteAgent` 与 `AgentOrchestrator` 降为内部策略适配器。公共执行内核继续由 `AgentExecutionEngine`、`ExecutionGraph`、`ExecutionArtifact`、`WorkspaceExecutionSession`、`ToolRegistry` 和 `MemoryManager` 提供。按照用户要求，本阶段只完成测试契约和静态差异检查，测试留到全部功能统一完成后执行。
@@ -695,7 +695,7 @@ ToolContract
 - [x] 覆盖跨进程分支、消息节点 fork 可见性和工作区不变测试。
 - [x] CLI 会话写入统一 Runtime SQLite；`RuntimeThreadStore` 作为会话门面，RunStore 继续只承载运行事实。
 - [x] 实现 `/session tree|fork|use|status`，普通 turn 使用事件，只有新压缩边界写 checkpoint。
-- [x] 旧 `/branch` 只做代理并输出迁移提示。
+- [x] `/session` 完成持久迁移；旧 `/branch` 已在阶段 9 删除。
 - [ ] 完成阶段功能后统一运行 session、runtime branch、CLI 限定测试。
 
 ### 阶段 7：统一可观测模型
@@ -767,10 +767,10 @@ ToolContract
 
 **步骤：**
 
-- [ ] 先确认 Lanterna 没有独占业务功能；把必要能力迁到 Inline。
-- [ ] 删除独立 ConversationSnapshot、HITL 和 Pane 状态。
-- [ ] 删除 Lanterna 依赖及 renderer 枚举。
-- [ ] 在兼容周期结束后删除 `/plan`、`/team`、`/branch`、`/snapshot` 等旧别名。
+- [x] 已确认 Lanterna 没有不可替代业务能力；必要能力由 Inline、Session Tree 和统一 HITL 覆盖。
+- [x] 删除独立 ConversationSnapshot、HITL 和 Pane 状态。
+- [x] 删除 Lanterna 依赖及 renderer 枚举。
+- [x] 删除 `/plan`、`/team`、`/branch`、`/snapshot`、`/restore`；Side-Git 迁移为 `/workspace status|clean|restore`。
 - [ ] 所有功能完成后统一运行 quick、phase22、Runtime、Plan/Team 和全量回归。
 - [ ] 获得用户许可后再启动真实终端进行手工验收。
 

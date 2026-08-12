@@ -55,7 +55,7 @@ Terminal
 
 - 用户输入过程中，异步通知可以显示在输入行上方。
 - 普通输出、代码块折叠、tool block 在无 LineReader 绑定时保持原行为。
-- `mvn test -Pphase16-smoke` 通过。
+- `mvn test -Pphase22-smoke` 通过。
 
 ## 22.2 底部状态栏升级
 
@@ -92,7 +92,7 @@ Terminal
 - `/model` 已补 provider：`glm-5.1`、`glm-5v-turbo`、`deepseek`、`step`、`kimi`。
 - `/mcp` 已补 `restart/logs/disable/enable/resources/prompts` 子命令，并从 resource cache 补 server name。
 - `/skill on/off/show` 已补 skill name，candidate description 使用 skill 描述。
-- `/task`、`/browser`、`/snapshot` 已补常用子命令。
+- `/task`、`/browser`、`/workspace` 已补常用子命令。
 - `@` 继续补 MCP resource；本地 `@path` 已补文件/目录路径。
 - `@image:` 后已补本地路径，目录候选保留尾部分隔符。
 - 本地 `@path` 已通过 `LocalPathMentionExpander` 展开为 `<file>` / `<directory>` 上下文块，路径逃逸项目根时保持原文。
@@ -175,7 +175,7 @@ HITL：
 - 输入 highlighter。
 - History 过滤。
 - Plan review / HITL key binding。
-- 扩展 `phase16-smoke` 或新增 `phase22-jline-smoke`。
+- 使用 `phase22-smoke` 统一验证终端交互。
 
 手工 / PTY 测试：
 

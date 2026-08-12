@@ -1,9 +1,8 @@
-# Inline 流式 TUI 改造方案（双形态可切换）
+# Inline 流式 TUI 改造方案（历史设计）
 
-> 本文是给执行 Agent 的方案说明，不是新一期需求。
-> 它修正 `docs/phase-16-tui-productization.md` 里"Lanterna 三栏"的形态选型：
-> 抽出 `Renderer` 接口、两个实现并存——**inline 流式为默认、Lanterna 为可切换形态**。
-> 不延伸到 phase-17（当前按 ROADMAP 为 LSP 诊断注入；图片复制粘贴输入后移到 phase-21）。
+> 本文记录 v16.1 从全屏终端转向 Inline 的历史方案，不代表当前配置。
+> 当前只保留 Inline 与 Plain；Lanterna 包、依赖与兼容入口已删除。
+> 现行设计见 `docs/superpowers/plans/2026-08-12-runtime-governance-terminal-ui-consolidation.md`。
 
 ---
 

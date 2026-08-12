@@ -4,7 +4,7 @@ package com.devcli.hitl;
  * HITL 审批交互接口 - 定义人工审批的交互契约
  *
  * 实现类负责与用户交互，收集用户对危险操作的审批决策。
- * 当前仓库提供基于终端的实现（TerminalHitlHandler）。
+ * 当前交互入口通过 RendererHitlHandler 委托给 Inline 或 Plain Renderer。
  *
  * 设计约定：
  * - 审批是同步阻塞操作，实现类需等待用户输入后才返回

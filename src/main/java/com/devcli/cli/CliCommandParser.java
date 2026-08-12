@@ -13,8 +13,6 @@ final class CliCommandParser {
         HISTORY_CLEAR,
         SWITCH_MODEL,
         RUN_STRUCTURED,
-        SWITCH_PLAN,
-        SWITCH_TEAM,
         SWITCH_HITL,
         MEMORY_STATUS,
         MEMORY_ORGANIZE,
@@ -28,8 +26,7 @@ final class CliCommandParser {
         CONTEXT_STATUS,
         POLICY_STATUS,
         AUDIT_TAIL,
-        SNAPSHOT,
-        RESTORE_SNAPSHOT,
+        WORKSPACE,
         MCP_LIST,
         MCP_RESTART,
         MCP_LOGS,
@@ -45,8 +42,7 @@ final class CliCommandParser {
         SKILL_OFF,
         SKILL_RELOAD,
         CONFIG,
-        SESSION,
-        BRANCH
+        SESSION
     }
 
     record ParsedCommand(CommandType type, String payload) {
@@ -113,22 +109,6 @@ final class CliCommandParser {
 
         if (trimmed.regionMatches(true, 0, "/run ", 0, 5)) {
             return new ParsedCommand(CommandType.RUN_STRUCTURED, trimmed.substring(5).trim());
-        }
-
-        if (trimmed.equalsIgnoreCase("/plan")) {
-            return new ParsedCommand(CommandType.SWITCH_PLAN, null);
-        }
-
-        if (trimmed.regionMatches(true, 0, "/plan ", 0, 6)) {
-            return new ParsedCommand(CommandType.SWITCH_PLAN, trimmed.substring(6).trim());
-        }
-
-        if (trimmed.equalsIgnoreCase("/team")) {
-            return new ParsedCommand(CommandType.SWITCH_TEAM, null);
-        }
-
-        if (trimmed.regionMatches(true, 0, "/team ", 0, 6)) {
-            return new ParsedCommand(CommandType.SWITCH_TEAM, trimmed.substring(6).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/hitl on")) {
@@ -229,20 +209,12 @@ final class CliCommandParser {
             return new ParsedCommand(CommandType.AUDIT_TAIL, trimmed.substring(7).trim());
         }
 
-        if (trimmed.equalsIgnoreCase("/snapshot")) {
-            return new ParsedCommand(CommandType.SNAPSHOT, "list");
+        if (trimmed.equalsIgnoreCase("/workspace")) {
+            return new ParsedCommand(CommandType.WORKSPACE, "status");
         }
 
-        if (trimmed.regionMatches(true, 0, "/snapshot ", 0, 10)) {
-            return new ParsedCommand(CommandType.SNAPSHOT, trimmed.substring(10).trim());
-        }
-
-        if (trimmed.equalsIgnoreCase("/restore")) {
-            return new ParsedCommand(CommandType.RESTORE_SNAPSHOT, null);
-        }
-
-        if (trimmed.regionMatches(true, 0, "/restore ", 0, 9)) {
-            return new ParsedCommand(CommandType.RESTORE_SNAPSHOT, trimmed.substring(9).trim());
+        if (trimmed.regionMatches(true, 0, "/workspace ", 0, 11)) {
+            return new ParsedCommand(CommandType.WORKSPACE, trimmed.substring(11).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/browser")) {
@@ -270,13 +242,6 @@ final class CliCommandParser {
         }
         if (trimmed.regionMatches(true, 0, "/session ", 0, 9)) {
             return new ParsedCommand(CommandType.SESSION, trimmed.substring(9).trim());
-        }
-
-        if (trimmed.equalsIgnoreCase("/branch")) {
-            return new ParsedCommand(CommandType.BRANCH, "status");
-        }
-        if (trimmed.regionMatches(true, 0, "/branch ", 0, 8)) {
-            return new ParsedCommand(CommandType.BRANCH, trimmed.substring(8).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/skill reload")) {

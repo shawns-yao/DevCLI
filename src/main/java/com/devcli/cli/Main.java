@@ -17,9 +17,7 @@ import com.devcli.cli.turn.TurnExecutionGuard;
 import com.devcli.agent.AgentTurnInbox;
 import com.devcli.hitl.HitlHandler;
 import com.devcli.hitl.HitlToolRegistry;
-import com.devcli.hitl.SwitchableHitlHandler;
 import com.devcli.hitl.RendererHitlHandler;
-import com.devcli.hitl.TerminalHitlHandler;
 import com.devcli.hook.HookConfigLoader;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.LlmClientFactory;
@@ -104,11 +102,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * DevCLI v16.1.0 - Terminal-First Agent IDE
  * 支持 ReAct、Plan-and-Execute、Memory、RAG、Multi-Agent、HITL、并行工具调用、多模型切换、MCP、CDP 会话复用
  * 第 15 期新增：Skill 系统（三层加载 + load_skill 工具 + SkillContextBuffer 注入）、内置 web-access skill
- * 第 16 期新增：TUI 界面（Lanterna 3）、文件树浏览、代码高亮、对话历史可视化、配置管理面板
- * 第 16.1 期形态修正：抽出 Renderer 接口 + 三个实现（inline/lanterna/plain），默认形态切换为 inline 流式 TUI（Claude Code 风格）
- *   - inline 流式：prompt 下方 inline 状态区、行内可折叠工具块、行内 git diff、单字符 HITL 提示、命令 palette
- *   - lanterna：保留 phase-16 全屏窗口（向后兼容 DEVCLI_TUI=true）
- *   - plain：纯 println 兜底
+ * 终端界面保留 inline 流式与 plain 纯文本两种形态；inline 统一管理 transcript、activity、输入行和底部 dock。
  * HITL 增强：路径围栏（PathGuard）、命令快速拒绝（CommandGuard）、操作审计链（AuditLog）—— 见 com.devcli.policy
  */
 public class Main {
@@ -248,8 +242,8 @@ public class Main {
                 }
             }
             boolean projectResourcesTrusted = projectTrust == ProjectTrustStore.Trust.TRUSTED;
-            TerminalHitlHandler terminalHitlHandler = new TerminalHitlHandler(false);
-            SwitchableHitlHandler hitlHandler = new SwitchableHitlHandler(terminalHitlHandler);
+            Renderer renderer = RendererFactory.create(RendererFactory.resolveMode(), terminal);
+            RendererHitlHandler hitlHandler = new RendererHitlHandler(renderer, false);
             HitlToolRegistry hitlToolRegistry = new HitlToolRegistry(hitlHandler);
             BrowserSession browserSession = new BrowserSession();
             BrowserConnectivityCheck browserConnectivityCheck = new BrowserConnectivityCheck();
@@ -286,9 +280,6 @@ public class Main {
 
             // JLine-first：启动输出、命令输出、Agent 流式内容都走同一条 Renderer.stream() 通道。
             // inline 首屏要挂到 LineReader 首次初始化回调里，避免在 readLine 接管屏幕前用裸输出抢光标。
-            Renderer renderer = RendererFactory.create(RendererFactory.resolveMode(), terminal);
-            RendererHitlHandler rendererHitl = new RendererHitlHandler(renderer, hitlHandler.isEnabled());
-            hitlHandler.setDelegate(rendererHitl);
             renderer.bindLineReader(lineReader);
             PrintStream ui = renderer.stream();
             renderer.start();
@@ -413,20 +404,6 @@ public class Main {
             ExecutionReviewPolicy pendingReviewPolicy = null;
             AgentTurnInbox turnInbox = reactAgent.getTurnInbox();
             String pendingDraft = "";
-
-            // === TUI / CLI 分支判断 ===
-            // 旧 DEVCLI_TUI=true 路径仍走 Lanterna 全屏 TUI（Day 5 后由 LanternaRenderer 接管）。
-            if (com.devcli.tui.TuiBootstrap.shouldUseTui(terminal)) {
-                try {
-                    com.devcli.tui.TuiBootstrap.launch(config, llmClient, reactAgent, hitlHandler);
-                    return;  // TUI 启动成功，不进入 CLI 循环
-                } catch (Exception e) {
-                    hitlHandler.setDelegate(terminalHitlHandler);
-                    log.warn("TUI startup failed; falling back to CLI", e);
-                    System.err.println("❌ TUI 启动失败，降级到 CLI: " + e.getMessage());
-                    // 降级到 CLI 继续执行
-                }
-            }
 
             reactAgent.setRenderer(renderer);
             reactAgent.setHitlEnabledSupplier(hitlHandler::isEnabled);
@@ -590,22 +567,6 @@ public class Main {
                         }
                         continue;
                     }
-                    case SWITCH_PLAN -> {
-                        if (command.payload() == null || command.payload().isEmpty()) {
-                            pendingReviewPolicy = ExecutionReviewPolicy.PLAN_REVIEW;
-                            ui.println("下一条任务将使用 plan review；/plan 是 /run --review=plan 的兼容别名。\n");
-                            continue;
-                        }
-                        input = command.payload();
-                    }
-                    case SWITCH_TEAM -> {
-                        if (command.payload() == null || command.payload().isEmpty()) {
-                            pendingReviewPolicy = ExecutionReviewPolicy.TEAM_REVIEW;
-                            ui.println("下一条任务将使用 team review；/team 是 /run --review=team 的兼容别名。\n");
-                            continue;
-                        }
-                        input = command.payload();
-                    }
                     case RUN_STRUCTURED -> {
                         StructuredRunCommand structured;
                         try {
@@ -690,12 +651,8 @@ public class Main {
                         printAuditTail(ui, reactAgent, command.payload());
                         continue;
                     }
-                    case SNAPSHOT -> {
-                        printSnapshotCommand(ui, reactAgent.getToolRegistry().getSnapshotService(), command.payload());
-                        continue;
-                    }
-                    case RESTORE_SNAPSHOT -> {
-                        printRestoreCommand(ui, reactAgent.getToolRegistry().getSnapshotService(), command.payload());
+                    case WORKSPACE -> {
+                        printWorkspaceCommand(ui, reactAgent.getToolRegistry().getSnapshotService(), command.payload());
                         continue;
                     }
                     case MCP_LIST -> {
@@ -772,19 +729,6 @@ public class Main {
                     case SESSION -> {
                         try {
                             ui.println(sessionTree.execute(command.payload()).message());
-                        } catch (IllegalArgumentException e) {
-                            ui.println("❌ " + e.getMessage());
-                        }
-                        continue;
-                    }
-                    case BRANCH -> {
-                        try {
-                            String payload = command.payload() == null ? "status" : command.payload().trim();
-                            String migrated = payload.regionMatches(true, 0, "create ", 0, 7)
-                                    ? "fork " + payload.substring(7).trim()
-                                    : payload.equalsIgnoreCase("list") ? "tree" : payload;
-                            ui.println("/branch 已迁移为 /session，本次仍按兼容别名执行。");
-                            ui.println(sessionTree.execute(migrated).message());
                         } catch (IllegalArgumentException e) {
                             ui.println("❌ " + e.getMessage());
                         }
@@ -986,12 +930,6 @@ public class Main {
 
     private static ExecutionReviewPolicy reviewPolicy(CliCommandParser.ParsedCommand command) {
         if (command == null) return null;
-        if (command.type() == CliCommandParser.CommandType.SWITCH_PLAN) {
-            return ExecutionReviewPolicy.PLAN_REVIEW;
-        }
-        if (command.type() == CliCommandParser.CommandType.SWITCH_TEAM) {
-            return ExecutionReviewPolicy.TEAM_REVIEW;
-        }
         if (command.type() != CliCommandParser.CommandType.RUN_STRUCTURED) {
             return null;
         }
@@ -1643,8 +1581,6 @@ public class Main {
                 new SlashCommandHint("/run --review=plan ", "/run --review=plan <任务>", "使用 plan review 结构化执行"),
                 new SlashCommandHint("/run --review=team ", "/run --review=team <任务>", "使用 team review 结构化执行"),
                 new SlashCommandHint("/run --review=team resume", "/run --review=team resume [id]", "恢复 team review checkpoint"),
-                new SlashCommandHint("/plan ", "/plan <任务>", "兼容别名：/run --review=plan"),
-                new SlashCommandHint("/team ", "/team <任务>", "兼容别名：/run --review=team"),
                 new SlashCommandHint("/hitl", "/hitl", "查看 HITL 状态"),
                 new SlashCommandHint("/hitl on", "/hitl on", "启用危险操作人工审批"),
                 new SlashCommandHint("/hitl off", "/hitl off", "关闭 HITL 审批"),
@@ -1669,15 +1605,14 @@ public class Main {
                 new SlashCommandHint("/config", "/config", "打开配置 palette（只读视图 + 切换提示）"),
                 new SlashCommandHint("/audit", "/audit", "查看今日最近 10 条危险工具审计"),
                 new SlashCommandHint("/audit ", "/audit [N]", "查看今日最近 N 条危险工具审计"),
-                new SlashCommandHint("/snapshot", "/snapshot", "查看最近 Side-Git 快照"),
-                new SlashCommandHint("/snapshot status", "/snapshot status", "查看 Side-Git 快照状态"),
-                new SlashCommandHint("/snapshot clean", "/snapshot clean", "清理当前项目 Side-Git 快照"),
+                new SlashCommandHint("/workspace", "/workspace", "查看 Side-Git 工作区状态"),
+                new SlashCommandHint("/workspace status", "/workspace status", "查看 Side-Git 工作区状态"),
+                new SlashCommandHint("/workspace clean", "/workspace clean", "清理当前项目 Side-Git 快照"),
+                new SlashCommandHint("/workspace restore ", "/workspace restore <N>", "恢复到最近第 N 个 turn 前快照"),
                 new SlashCommandHint("/session", "/session", "查看当前持久会话"),
                 new SlashCommandHint("/session tree", "/session tree", "显示持久会话树"),
                 new SlashCommandHint("/session fork ", "/session fork <name>", "从当前上下文创建会话分支"),
                 new SlashCommandHint("/session use ", "/session use <id|name>", "切换到持久会话分支"),
-                new SlashCommandHint("/branch", "/branch", "兼容别名：/session status"),
-                new SlashCommandHint("/restore ", "/restore <N>", "恢复到最近第 N 个 pre-turn 快照"),
                 new SlashCommandHint("/index", "/index", "索引当前代码库"),
                 new SlashCommandHint("/index ", "/index [路径]", "索引指定路径代码库"),
                 new SlashCommandHint("/search ", "/search <查询>", "语义检索代码"),
@@ -1794,7 +1729,7 @@ public class Main {
     private static void handleConfigPalette(Renderer renderer,
                                             DevCliConfig config,
                                             LlmClient llmClient,
-                                            SwitchableHitlHandler hitlHandler,
+                                            HitlHandler hitlHandler,
                                             com.devcli.skill.SkillRegistry skillRegistry) {
         var items = java.util.List.of(
                 "模型: " + (llmClient == null ? "(none)" : llmClient.getModelName() + " / " + llmClient.getProviderName()),
@@ -1813,8 +1748,8 @@ public class Main {
             case 0, 1 -> "💡 默认 Anthropic Messages: /model anthropic；其它: /model openai|glm-5.1|deepseek|step|kimi";
             case 2 -> "💡 切换 HITL: /hitl on / /hitl off";
             case 3 -> "💡 管理 Skill: /skill list / /skill on <name> / /skill off <name>";
-            case 4 -> "💡 切换渲染器（重启后生效）: DEVCLI_RENDERER=inline|lanterna|plain";
-            case 5 -> "💡 当前不在 TUI 内编辑 config.json，建议在编辑器里改完重启";
+            case 4 -> "切换渲染器（重启后生效）: DEVCLI_RENDERER=inline|plain";
+            case 5 -> "配置文件需要在编辑器中修改后重启";
             default -> "(unknown)";
         };
         renderer.stream().println(hint);
@@ -1944,10 +1879,12 @@ public class Main {
         out.println();
     }
 
-    private static void printSnapshotCommand(PrintStream out, SnapshotService snapshotService, String payload) {
-        String normalized = payload == null || payload.isBlank() ? "list" : payload.trim().toLowerCase();
+    private static void printWorkspaceCommand(PrintStream out, SnapshotService snapshotService, String payload) {
+        String raw = payload == null || payload.isBlank() ? "status" : payload.trim();
+        String normalized = raw.toLowerCase(Locale.ROOT);
         if ("status".equals(normalized)) {
             out.println(snapshotService.status());
+            printWorkspaceSnapshots(out, snapshotService);
             out.println();
             return;
         }
@@ -1956,31 +1893,42 @@ public class Main {
             out.println();
             return;
         }
-        if (!"list".equals(normalized)) {
-            out.println("""
-                    ❌ 未知 /snapshot 子命令: %s
-                    可用命令：
-                      /snapshot
-                      /snapshot status
-                      /snapshot clean
-                      /restore <N>
-                    """.formatted(payload).trim());
-            out.println();
+        if (normalized.equals("restore") || normalized.startsWith("restore ")) {
+            String offset = raw.length() <= "restore".length()
+                    ? "" : raw.substring("restore".length()).trim();
+            if (offset.isBlank()) {
+                out.println("请提供恢复序号，例如 /workspace restore 1");
+                out.println();
+                return;
+            }
+            Integer parsedOffset = parseRestoreOffset(offset);
+            if (parsedOffset == null) {
+                out.println("恢复序号必须是 1 到 100 之间的整数");
+                out.println();
+                return;
+            }
+            printRestoreCommand(out, snapshotService, parsedOffset);
             return;
         }
+        out.println("未知 /workspace 子命令: " + raw);
+        out.println("可用命令：/workspace status | /workspace clean | /workspace restore <N>");
+        out.println();
+    }
+
+    private static void printWorkspaceSnapshots(PrintStream out, SnapshotService snapshotService) {
         try {
             List<TurnSnapshot> snapshots = snapshotService.listSnapshots(20);
             if (snapshots.isEmpty()) {
-                out.println("📭 暂无 Side-Git 快照\n");
+                out.println("暂无 Side-Git 快照");
                 return;
             }
-            out.println("📸 最近 " + snapshots.size() + " 条 Side-Git 快照：");
+            out.println("最近 " + snapshots.size() + " 条 Side-Git 快照：");
             int preTurnIndex = 0;
             for (TurnSnapshot snapshot : snapshots) {
                 String restoreHint = "";
                 if ("pre-turn".equals(snapshot.phase().label())) {
                     preTurnIndex++;
-                    restoreHint = "  /restore " + preTurnIndex;
+                    restoreHint = "  /workspace restore " + preTurnIndex;
                 }
                 out.printf("   %s %-11s %-18s %s%s%n",
                         snapshot.shortCommitId(),
@@ -1991,18 +1939,27 @@ public class Main {
             }
             out.println();
         } catch (Exception e) {
-            out.println("❌ 读取快照失败: " + e.getMessage() + "\n");
+            out.println("读取快照失败: " + e.getMessage());
         }
     }
 
-    private static void printRestoreCommand(PrintStream out, SnapshotService snapshotService, String payload) {
-        int offset = parseAuditCount(payload, 1);
+    private static void printRestoreCommand(PrintStream out, SnapshotService snapshotService, int offset) {
         try {
             RestoreResult result = snapshotService.restorePreTurn(offset);
             out.println(result.formatForCli());
             out.println();
         } catch (Exception e) {
-            out.println("❌ 恢复快照失败: " + e.getMessage() + "\n");
+            out.println("恢复快照失败: " + e.getMessage() + "\n");
+        }
+    }
+
+    static Integer parseRestoreOffset(String payload) {
+        if (payload == null || payload.isBlank()) return null;
+        try {
+            int value = Integer.parseInt(payload.trim());
+            return value >= 1 && value <= 100 ? value : null;
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 
@@ -2050,7 +2007,7 @@ public class Main {
     }
 
     private static StatusInfo statusInfo(LlmClient llmClient,
-                                         SwitchableHitlHandler hitlHandler,
+                                         HitlHandler hitlHandler,
                                          String phase,
                                          McpServerManager mcpServerManager,
                                          SkillRegistry skillRegistry) {

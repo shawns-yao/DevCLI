@@ -33,9 +33,9 @@ class RendererFactoryTest {
     }
 
     @Test
-    void propertyValueLanternaResolves() {
+    void removedLanternaValueFallsBackToInline() {
         System.setProperty("devcli.renderer", "lanterna");
-        assertEquals(RendererFactory.Mode.LANTERNA, RendererFactory.resolveMode());
+        assertEquals(RendererFactory.Mode.INLINE, RendererFactory.resolveMode());
     }
 
     @Test
@@ -46,8 +46,8 @@ class RendererFactoryTest {
 
     @Test
     void propertyValueIsCaseInsensitive() {
-        System.setProperty("devcli.renderer", "LANTERNA");
-        assertEquals(RendererFactory.Mode.LANTERNA, RendererFactory.resolveMode());
+        System.setProperty("devcli.renderer", "PLAIN");
+        assertEquals(RendererFactory.Mode.PLAIN, RendererFactory.resolveMode());
     }
 
     @Test
@@ -57,9 +57,9 @@ class RendererFactoryTest {
     }
 
     @Test
-    void tuiAliasResolvesToLanterna() {
+    void removedTuiAliasFallsBackToInline() {
         System.setProperty("devcli.renderer", "tui");
-        assertEquals(RendererFactory.Mode.LANTERNA, RendererFactory.resolveMode());
+        assertEquals(RendererFactory.Mode.INLINE, RendererFactory.resolveMode());
     }
 
     @Test
@@ -70,7 +70,6 @@ class RendererFactoryTest {
 
     @Test
     void createInlineReturnsRendererInstance() {
-        // Day 1 stub still returns PlainRenderer; Day 2 will swap to InlineRenderer.
         Renderer renderer = RendererFactory.create(RendererFactory.Mode.INLINE, null);
         assertInstanceOf(PlainRenderer.class, renderer);
     }

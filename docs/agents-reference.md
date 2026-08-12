@@ -196,11 +196,10 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 最近 2 个 user round 之前的旧 tool_result 会按 toolCallId 成批折叠为 boundary 引用；最近轮次保留原文，避免影响当前任务。
 - WorkingMemory 压缩后恢复区遇到 microcompact 工具引用时，只输出 toolCallId / originalChars / storedPath，并按 storedPath 或 toolCallId 去重。
 
-### TUI (v16.1 Renderer Architecture)
+### Terminal Renderer
 
-- 三个实现：InlineRenderer(默认) / LanternaRenderer / PlainRenderer
-- 环境变量：`DEVCLI_RENDERER=inline|lanterna|plain`
-- `DEVCLI_TUI=true`(旧) → lanterna + deprecation 提示
+- 两个实现：InlineRenderer（默认）/ PlainRenderer
+- 环境变量：`DEVCLI_RENDERER=inline|plain`
 - `DEVCLI_NO_STATUSBAR=true`：禁用底部状态栏
 - `NO_COLOR=1`：禁用 ANSI 颜色
 - 当前开屏 Banner 是无右侧盒线边框的简洁布局，避免 ANSI/CJK 字宽导致竖线错位
@@ -244,7 +243,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - Runtime API 另提供 `POST /v1/threads/{id}/queue/clear` 清空当前分支待处理队列，以及 `POST /v1/threads/{id}/cancel` 取消当前 turn；清空操作写入 `queue.updated(action=cleared)`，取消不伪造 turn 完成事件
 - Runtime 队列快照按 thread/branch 写入 SQLite；会话创建时恢复 Steering / Follow-up，入队和 turn 结束时重写当前分支快照。分支切换只恢复目标分支队列，不复制父分支待处理输入
 - Runtime thread 支持事件树分支：`GET/POST /v1/threads/{id}/branches` 列举或从当前可见事件创建分支，`POST /v1/threads/{id}/branches/{branchId}/activate` 切换活动分支；事件和 checkpoint 都保存 `branch_id`，恢复时按 parent_branch_id / fork_event_id lineage 截取，切换后关闭旧 session 并从目标分支重建
-- CLI 通过持久 Session Tree 复用同一 Runtime SQLite：`/session status|tree|fork|use` 可查看分支和已完成消息节点、从当前末端或指定消息节点 fork、跨进程切换上下文；`/clear` 创建空白持久分支而不删除旧历史。`/branch` 仅作为迁移别名。Session Tree 只恢复对话，不调用 Side-Git，也不复制父分支待处理 Steering / Follow-up 队列
+- CLI 通过持久 Session Tree 复用同一 Runtime SQLite：`/session status|tree|fork|use` 可查看分支和已完成消息节点、从当前末端或指定消息节点 fork、跨进程切换上下文；`/clear` 创建空白持久分支而不删除旧历史。Session Tree 只恢复对话，不调用 Side-Git，也不复制父分支待处理 Steering / Follow-up 队列
 - thread 上下文从 SQLite 恢复最新压缩检查点，并完整追加检查点覆盖事件之后的已完成 turn；没有检查点时恢复全部已完成 turn，不再固定保留最近 20 轮
 - 历史默认达到 32,000 token 时生成持久化检查点，`DEVCLI_RUNTIME_CHECKPOINT_TRIGGER_TOKENS` / `devcli.runtime.checkpoint.trigger.tokens` 可调整，最小 4,000；检查点保存压缩消息、覆盖事件、摘要、token 变化和 `CompactBoundaryMetadata` 运行态快照
 - 检查点候选会移除动态 system prompt、reasoning 和图片正文；同时保存压缩 metadata 与消息树快照（稳定 `id`、`parentId`、role、index），当前默认从压缩边界生成线性 parent 链，为后续分支恢复保留协议字段；旧 SQLite 数据库启动时自动补充 `message_tree_json` 列。保存发生在 `turn.completed` 事件之后，失败只写入 `thread.checkpoint.failed`；最新记录损坏时按时间回退到更早可解析检查点
@@ -330,8 +329,8 @@ Reviewer 前 Java 硬验证；封装 Maven/javac 命令、扫描、超时、输�
 ### MCP Package
 McpServerManager / McpClient / JsonRpcClient / StdioTransport / StreamableHttpTransport / McpSchemaSanitizer / resources/ / mention/ / notifications/
 
-### TUI Package
-TuiBootstrap / LanternaWindow / TuiSessionController / pane/ / hitl/ / history/ / highlight/
+### Render Package
+InlineRenderer / PlainRenderer / RunProjection / RunSnapshot / TranscriptView / ActivityView / StatusDock / InteractionController
 
 ### LLM Clients
 - AnthropicClient：默认 provider，Claude / Anthropic Messages 原生兼容端点
@@ -387,8 +386,7 @@ EMBEDDING_BASE_URL=http://localhost:11434
 # DEVCLI_SNAPSHOT_GC_MIN_INTERVAL_HOURS=24
 # DEVCLI_SNAPSHOT_GC_MAX_SECONDS=30
 # DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS=60
-# DEVCLI_TUI=true
-# NO_TUI=true
+# DEVCLI_RENDERER=inline
 ```
 
 ---

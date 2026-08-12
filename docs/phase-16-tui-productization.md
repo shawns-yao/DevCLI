@@ -1,10 +1,8 @@
 # 第 16 期开发任务：TUI 界面 + 产品化
 
-> ⚠️ **形态修正提示（2026-05-08）**：本文的"Lanterna 三栏全屏"形态选型已被
-> [`docs/inline-tui-pivot.md`](inline-tui-pivot.md) 修正。
-> 默认渲染器切换为 **inline 流式 TUI**（Claude Code 风格）；
-> Lanterna 三栏 TUI 作为可切换形态保留，通过 `DEVCLI_RENDERER=lanterna` 启用。
-> phase-16 实现的 widget 代码（CenterPane / StatusPane / FileTreePane）继续可用，只是默认不再启动。
+> **历史文档**：本文记录第 16 期原始 Lanterna 方案，不代表当前实现。
+> 当前终端已经收敛为 Inline 与 Plain，Lanterna 包、依赖和配置入口已删除。
+> 现行设计见 `docs/superpowers/plans/2026-08-12-runtime-governance-terminal-ui-consolidation.md`。
 
 
 > 这份文档是给执行 Agent 的开发任务说明书，自包含、可直接照着推进。

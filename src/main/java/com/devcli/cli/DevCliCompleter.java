@@ -64,9 +64,8 @@ final class DevCliCompleter implements Completer {
                 || completeSkill(input, candidates)
                 || completeTask(input, candidates)
                 || completeBrowser(input, candidates)
-                || completeSnapshot(input, candidates)
-                || completeSession(input, candidates)
-                || completeBranch(input, candidates)) {
+                || completeWorkspace(input, candidates)
+                || completeSession(input, candidates)) {
             return;
         }
 
@@ -206,27 +205,15 @@ final class DevCliCompleter implements Completer {
         return true;
     }
 
-    private boolean completeSnapshot(String input, List<Candidate> candidates) {
-        if (!input.equalsIgnoreCase("/snapshot") && !input.regionMatches(true, 0, "/snapshot ", 0, 10)) {
+    private boolean completeWorkspace(String input, List<Candidate> candidates) {
+        if (!input.equalsIgnoreCase("/workspace") && !input.regionMatches(true, 0, "/workspace ", 0, 11)) {
             return false;
         }
-        String payload = input.length() <= 10 ? "" : input.substring(10);
-        addMatching(candidates, "快照", payload,
+        String payload = input.length() <= 11 ? "" : input.substring(11);
+        addMatching(candidates, "工作区", payload,
                 option("status", "查看 Side-Git 快照状态"),
-                option("clean", "清理当前项目快照"));
-        return true;
-    }
-
-    private boolean completeBranch(String input, List<Candidate> candidates) {
-        if (!input.equalsIgnoreCase("/branch") && !input.regionMatches(true, 0, "/branch ", 0, 8)) {
-            return false;
-        }
-        String payload = input.length() <= 8 ? "" : input.substring(8);
-        addMatching(candidates, "对话分支", payload,
-                option("status", "查看当前对话分支"),
-                option("list", "列出持久会话分支"),
-                option("create ", "兼容别名：从当前上下文创建持久分支"),
-                option("use ", "切换到已有分支"));
+                option("clean", "清理当前项目快照"),
+                option("restore ", "恢复到最近第 N 个 turn 前快照"));
         return true;
     }
 

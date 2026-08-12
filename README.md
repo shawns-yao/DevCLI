@@ -41,12 +41,12 @@ ReAct 主循环、StructuredExecution 结构化执行、MCP 协议客户端、�
 - Prompt 分层组装（jar 内置 / 用户级 / 项目级覆盖），system prompt 只承载会话级稳定内容以保证前缀缓存命中。
 - 多模型运行时切换（Anthropic / OpenAI 兼容 / GLM / DeepSeek / StepFun / Kimi）。
 - 联网与浏览器：`web_search`、`web_fetch` 正文提取，以及经 Chrome DevTools MCP 的浏览器操作与调试实例登录态复用。
-- 三种终端渲染器：inline 流式（默认）、plain、Lanterna 全屏。
+- 两种终端渲染器：inline 流式（默认）与 plain 纯文本。
 
 **部分实现（MVP）**
 
 - LSP（语言服务器协议）诊断注入：仅实现协议子集，编辑后回灌编译诊断。
-- Git Side-History 快照与回滚：turn 粒度快照与 `/restore`，尚未覆盖全部编辑入口。
+- Git Side-History 快照与回滚：turn 粒度快照与 `/workspace restore`，尚未覆盖全部编辑入口。
 - 后台任务与 Runtime API：SQLite 持久化任务队列与本地 HTTP/SSE 端点，仅监听回环地址。
 - 持久 Session Tree：CLI 与 Runtime API 共用 SQLite 事件和分支模型，可跨进程切换上下文或从已完成消息节点建立分支，不恢复工作区文件。
 - 图片输入：本地路径、file URL 与剪贴板图片。
@@ -65,7 +65,7 @@ ReAct 主循环、StructuredExecution 结构化执行、MCP 协议客户端、�
 DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、代码仓库、记忆、审批、终端交互”串成一个本地开发工作流。产品执行语义分两类：
 
 - `ReAct`：默认模式。模型边思考边选择工具，工具结果会回灌到下一轮推理，适合阅读代码、定位问题、执行命令、做小范围修改。
-- `StructuredExecution`：通过 `/run --review=plan|team` 进入。plan review 使用单执行者 DAG；team review 使用 Planner、Worker、Pre-Review 和 Reviewer。两种策略共用执行引擎、执行图、执行产物、隔离工作区和恢复协议；`/plan` 与 `/team` 暂时作为兼容别名。
+- `StructuredExecution`：通过 `/run --review=plan|team` 进入。plan review 使用单执行者 DAG；team review 使用 Planner、Worker、Pre-Review 和 Reviewer。两种策略共用执行引擎、执行图、执行产物、隔离工作区和恢复协议。
 
 围绕这三条路径，DevCLI 提供以下能力：
 
@@ -77,7 +77,7 @@ DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、�
 - `MCP（Model Context Protocol）`：支持 stdio / streamable HTTP MCP server，动态加载工具和 resources，并把 MCP server 状态、日志、重启能力暴露给 CLI。
 - `HITL（Human-in-the-Loop）`：危险工具和敏感页面操作进入人工审批；审批前先过策略层，策略拒绝的操作不能靠用户批准绕过。
 - `Snapshot（快照）`：通过 Side-Git 在 turn 前后保存快照，支持回滚最近一轮变更，并按 `devcli.snapshot.max` 自动裁剪旧快照，降低 Agent 自动改文件的风险。
-- `Renderer（渲染器）`：默认 inline 模式提供底部状态栏、行内 thinking、工具块和 diff；也保留 plain 和 Lanterna TUI 模式。
+- `Renderer（渲染器）`：默认 inline 模式提供 stable transcript、live activity、底部 dock、工具块和 diff；plain 用于无 ANSI 终端与日志输出。
 - `Runtime API`：本地 HTTP API 暴露 threads / turns / events；同一 thread 的 turn 按提交顺序串行执行，不同 thread 可并行，避免同一会话并发读取过期历史。
 - `RunContext（运行上下文）`：每次交互、后台任务或无头 turn 绑定独立项目路径、取消令牌和资源生命周期；预先创建的线程不会读取其他任务的取消状态，无头 Agent 结束后会关闭本次创建的工具与记忆资源。
 - `AgentExecutionEngine（执行引擎）`：ReAct、Plan task 和 SubAgent 共用同一套取消、预算、LLM 调用、工具消息回灌和异常控制流程；每次模型采样具有稳定请求标识和独立取消边界，重复请求会替换并取消旧请求。
@@ -93,10 +93,10 @@ DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、�
 ```text
 Main
 ├── Agent                  # 默认 ReAct
-├── PlanExecuteAgent       # /plan
+├── PlanExecuteAgent       # PLAN_REVIEW 内部策略
 │   ├── PlanTaskBatchExecutor      # 冲突分波、并行调度、顺序输出归并
 │   └── PlanTaskExecutionResult    # 任务结果与有界摘要
-└── AgentOrchestrator      # /team
+└── AgentOrchestrator      # TEAM_REVIEW 内部策略
     └── MultiAgentBatchExecutor    # Worker 并发协调与批次输出归并
 
 三条路径共享：
@@ -104,7 +104,7 @@ Main
 ├── MemoryManager          # WorkingMemory + LongTermMemory + StickyMemory
 ├── SnapshotService        # turn 前后快照
 ├── PromptAssembler        # 分层 prompt 组装
-├── Renderer               # inline / plain / lanterna
+├── Renderer               # inline / plain
 └── McpServerManager       # MCP server 生命周期
 ```
 
@@ -356,7 +356,6 @@ DEVCLI_RENDERER=inline
 可选值：
 
 - `inline`：默认，底部状态栏、行内工具块、行内 diff。
-- `lanterna`：三栏全屏 TUI。
 - `plain`：纯文本输出。
 
 如果终端不支持底部状态栏：
@@ -410,16 +409,16 @@ Runtime API 默认仅绑定 `127.0.0.1`。HTTP 请求线程和 Agent 执行线�
 * 分析 @image:/absolute/path/screenshot.png 里的报错
 ```
 
-进入 Plan-and-Execute：
+进入 plan review：
 
 ```text
-/plan 重构订单模块，把校验逻辑从 Controller 下沉到 Service，并补充测试
+/run --review=plan 重构订单模块，把校验逻辑从 Controller 下沉到 Service，并补充测试
 ```
 
-进入 Multi-Agent：
+进入 team review：
 
 ```text
-/team 检查认证模块的安全问题，修复高风险项并补充测试
+/run --review=team 检查认证模块的安全问题，修复高风险项并补充测试
 ```
 
 Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 在步骤级隔离工作区实现，`PreReviewVerifier` 在同一隔离目录通过强制 Docker 沙箱执行 Java 编译硬检查；无 Maven 项目通过 javac 参数文件传递源码清单，避免 Windows 命令行长度限制。Reviewer 再读取真实隔离产物做质量审查。验收点会前置注入 Worker，并由 Reviewer 用 `criteria_results` 逐条验证；Planner 给出的 `severity` 会随计划和 checkpoint 固化，critical/high 失败或缺少覆盖强制不通过。三角色注入 role-scoped WorkingMemory：Planner 看任务状态 + 关键事件，Worker 看完整上下文，Reviewer 看任务状态 + 工具证据。Reviewer 必须输出可解析 JSON，并采用 `functional_correctness` / `integration_completeness` / `code_quality` 三层评分，未达阈值强制不通过，非 JSON 文本不再凭关键词放行。Pre-Review 会记录硬检查是否实际执行；Reviewer 遇到可重试模型故障时，普通步骤只有在硬检查实际通过后才允许降级接受，未执行硬检查继续失败关闭。审查通过或满足该降级条件后生成 PatchSet，只有全量冲突预检通过才一次性写回主项目。
@@ -452,9 +451,9 @@ Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个
 |---------|-------------|
 | `/help` | 查看帮助 |
 | `/model` | 查看或切换模型 |
-| `/plan` | 使用 Plan-and-Execute 执行下一条任务 |
-| `/team` | 使用 Multi-Agent 协作执行任务 |
-| `/team resume [id]` | 从 checkpoint 恢复中断的多 Agent 任务 |
+| `/run --review=plan <task>` | 使用 plan review 执行任务 |
+| `/run --review=team <task>` | 使用 team review 执行任务 |
+| `/run --review=team resume [id]` | 从 checkpoint 恢复中断的 team review |
 | `/index` | 为当前仓库建立 RAG 索引 |
 | `/search <query>` | 检索代码库 |
 | `/graph <class>` | 查看代码关系图谱 |
@@ -471,7 +470,9 @@ Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个
 | `/hitl off` | 关闭人工审批 |
 | `/policy` | 查看策略层状态 |
 | `/audit [N]` | 查看最近 N 条审计日志 |
-| `/snapshot` | 查看 Side-Git 快照状态 |
+| `/workspace status` | 查看 Side-Git 工作区状态与快照 |
+| `/workspace clean` | 清理当前项目 Side-Git 快照 |
+| `/workspace restore <N>` | 恢复到最近第 N 个 turn 前快照 |
 | `/browser connect` | 连接可复用 Chrome 会话 |
 | `/clear` | 清空当前对话 |
 | `/exit` | 退出 |
@@ -735,7 +736,7 @@ LLM tool call
 - LLM reasoning 会进入 live thinking 区，正文输出前会收敛为完整引用块。
 - 工具调用以紧凑块展示，文件写入会展示 diff。
 
-Lanterna renderer 保留为全屏三栏 TUI；plain renderer 适合 CI、日志或不支持 ANSI 的终端。
+plain renderer 适合 CI、日志或不支持 ANSI 的终端。
 
 ## Benchmark Evaluation
 

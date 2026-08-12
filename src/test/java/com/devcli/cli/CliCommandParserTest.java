@@ -17,11 +17,10 @@ class CliCommandParserTest {
     }
 
     @Test
-    void parsesPlanSlashCommandWithoutPayload() {
+    void rejectsRemovedPlanAlias() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/plan");
 
-        assertEquals(CliCommandParser.CommandType.SWITCH_PLAN, command.type());
-        assertNull(command.payload());
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, command.type());
     }
 
     @Test
@@ -34,11 +33,10 @@ class CliCommandParserTest {
     }
 
     @Test
-    void parsesPlanSlashCommandWithPayload() {
+    void rejectsRemovedPlanAliasWithPayload() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/plan 创建一个 demo 项目");
 
-        assertEquals(CliCommandParser.CommandType.SWITCH_PLAN, command.type());
-        assertEquals("创建一个 demo 项目", command.payload());
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, command.type());
     }
 
     @Test
@@ -258,30 +256,26 @@ class CliCommandParserTest {
     }
 
     @Test
-    void parsesTeamSlashCommandWithoutPayload() {
+    void rejectsRemovedTeamAlias() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/team");
 
-        assertEquals(CliCommandParser.CommandType.SWITCH_TEAM, command.type());
-        assertNull(command.payload());
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, command.type());
     }
 
     @Test
-    void parsesTeamSlashCommandWithPayload() {
+    void rejectsRemovedTeamAliasWithPayload() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/team 创建并验证一个 Java 项目");
 
-        assertEquals(CliCommandParser.CommandType.SWITCH_TEAM, command.type());
-        assertEquals("创建并验证一个 Java 项目", command.payload());
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, command.type());
     }
 
     @Test
-    void parsesBranchCommands() {
+    void rejectsRemovedBranchAlias() {
         CliCommandParser.ParsedCommand status = CliCommandParser.parse("/branch");
-        assertEquals(CliCommandParser.CommandType.BRANCH, status.type());
-        assertEquals("status", status.payload());
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, status.type());
 
         CliCommandParser.ParsedCommand create = CliCommandParser.parse("/branch create feature-a");
-        assertEquals(CliCommandParser.CommandType.BRANCH, create.type());
-        assertEquals("create feature-a", create.payload());
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, create.type());
     }
 
     @Test
@@ -333,13 +327,24 @@ class CliCommandParserTest {
     }
 
     @Test
-    void parsesSnapshotCommands() {
-        assertEquals(CliCommandParser.CommandType.SNAPSHOT, CliCommandParser.parse("/snapshot").type());
-        assertEquals("list", CliCommandParser.parse("/snapshot").payload());
-        assertEquals(CliCommandParser.CommandType.SNAPSHOT, CliCommandParser.parse("/snapshot status").type());
-        assertEquals("status", CliCommandParser.parse("/snapshot status").payload());
-        assertEquals(CliCommandParser.CommandType.RESTORE_SNAPSHOT, CliCommandParser.parse("/restore 2").type());
-        assertEquals("2", CliCommandParser.parse("/restore 2").payload());
+    void parsesWorkspaceCommandsAndRejectsSnapshotAliases() {
+        assertEquals(CliCommandParser.CommandType.WORKSPACE, CliCommandParser.parse("/workspace").type());
+        assertEquals("status", CliCommandParser.parse("/workspace").payload());
+        assertEquals(CliCommandParser.CommandType.WORKSPACE, CliCommandParser.parse("/workspace clean").type());
+        assertEquals("clean", CliCommandParser.parse("/workspace clean").payload());
+        assertEquals("restore 2", CliCommandParser.parse("/workspace restore 2").payload());
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, CliCommandParser.parse("/snapshot").type());
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, CliCommandParser.parse("/restore 2").type());
+    }
+
+    @Test
+    void validatesWorkspaceRestoreOffset() {
+        assertEquals(1, Main.parseRestoreOffset("1"));
+        assertEquals(100, Main.parseRestoreOffset("100"));
+        assertNull(Main.parseRestoreOffset(""));
+        assertNull(Main.parseRestoreOffset("0"));
+        assertNull(Main.parseRestoreOffset("101"));
+        assertNull(Main.parseRestoreOffset("latest"));
     }
 
     @Test

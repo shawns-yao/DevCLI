@@ -100,7 +100,7 @@ public interface Renderer extends AutoCloseable {
      */
     void appendDiff(String filePath, String before, String after);
 
-    /** 更新底部状态栏 / StatusPane。允许频繁调用，渲染器内部自行节流。 */
+    /** 更新底部状态栏。允许频繁调用，渲染器内部自行节流。 */
     void updateStatus(StatusInfo status);
 
     /** UI 状态只从统一 RunSnapshot 进入；旧 StatusInfo 仅作为环境兼容输入。 */

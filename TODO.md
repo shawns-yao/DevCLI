@@ -2,26 +2,27 @@
 
 ## 2026-08-12 运行治理、能力收敛与终端界面重构
 
-- 状态：实施中；成本预算治理、统一 RunStore、本地持久运行、统一重试与恢复语义、执行安全策略、Project Trust、结构化执行统一入口和持久 Session Tree 已完成
+- 状态：已实现，等待统一验证
 - 设计文档：`docs/superpowers/plans/2026-08-12-runtime-governance-terminal-ui-consolidation.md`
 - 目标：删除重复能力，合并 Plan/Team 的公共执行链，使用持久 Session Tree 取代 CLI 进程内分支，保留 Side-Git、PatchSet、Checkpoint 各自不可替代的恢复职责；终端只保留 Inline 与 Plain
 - 成本控制：已新增统一 RunBudget、有限预算档位、并行原子账本和 PricingCatalog；Agent 执行引擎、Planner、压缩和显式重试均接入同一 run，未知模型显示 cost=unknown
 - 安全性：新增 Project Trust 与统一 ExecutionSecurityPolicy；ReAct 命令默认沙箱执行，项目写入使用工作区事务与 PatchSet；HITL 不得绕过策略拒绝
 - 可靠性：已新增统一 SQLite RunStore、Run/Attempt、版本比较、幂等提交、租约与启动对账；基础设施重试、Reviewer correction、step redo 与 recovery 使用不同 AttemptKind 并持久化 parent、scope、reason、backoff、outcome；流式输出开始后禁止自动重试；普通 Worker 不再认领 recovery_required，恢复必须通过显式入口提交 Patch Journal、checkpoint 与预算对账证明；checkpoint 协议版本 5 分开保存 correction 与 redo 计数；Runtime API turn 和后台任务共用同一运行事实来源，旧 tasks.db 可幂等迁移且遗留 running 不会无条件重试；预算状态和 checkpoint/Patch Journal/Side-Git 引用可随 Run 持久化
 - 可观测性：RunEvent 作为 UI 和 Runtime 状态事实，Trace、Metric、Audit 保持专用存储；统一 run/turn/step/agent/attempt 关联，并增加预算、沙箱、重试、恢复和快照事件
-- UI：重构为 stable transcript、live activity、input line、bottom dock 四区；展示执行模式、上下文占用、Run 预算、金额、安全域、持久化状态和 trace id；新增持久 Session Tree，删除 Lanterna 全屏 TUI
+- UI：已重构为 stable transcript、live activity、input line、bottom dock 四区；展示执行模式、上下文占用、Run 预算、金额、安全域、持久化状态和 trace id；新增持久 Session Tree，并删除 Lanterna 全屏 TUI
 - Temporal 决策：当前本地版不引入；未来服务端出现跨机器 Worker、长时间审批、定时器和故障转移需求时，可实现 `TemporalWorkflowRuntime` 替换本地调度，禁止与 DurableTaskManager 叠加；Temporal history 只保存控制状态和 Artifact 引用
 - 影响范围：agent、runtime、budget、security、tool、workspace、snapshot、trace、render、tui、cli、配置、测试和文档
-- 已实现：产品入口统一为 `StructuredExecution`；`/run --review=plan|team` 选择审查策略，`/plan` 与 `/team` 暂时保留为兼容别名；内部继续复用 `PlanExecuteAgent` 和 `AgentOrchestrator` 两种策略适配器，不虚假合并差异状态机
+- 已实现：产品入口统一为 `StructuredExecution`；`/run --review=plan|team` 选择审查策略；内部继续复用 `PlanExecuteAgent` 和 `AgentOrchestrator` 两种策略适配器，不虚假合并差异状态机
 - 方案修订（2026-08-12）：先补齐观察结果相似性收敛和证据型任务门禁；再统一 ToolContract、参数边界、注册冲突、分类索引、按任务暴露、逐工具限流/超时/并发和外部调用成本；最后实施 Session Tree、可观测性和 UI。复用既有 ToolEffect、ExecutionSecurityPolicy、JSON Schema、ToolOutput、search_tools 与 RunBudget，不建立重复危险标记或第二套预算
 - 实施授权（2026-08-12）：用户已授权持久 Session Tree、统一可观测性、终端 UI 重构、删除 Lanterna 与到期兼容层；循环收敛和工具治理仍只保留设计，不实施代码
 - 明确排除：不为普通问答设置全局 MinIterations；不静默 clamp 越界参数；不把“只暴露 3 至 5 个工具”设为固定规则；不为 JVM 进程内工具虚假承诺独立内存上限；不重复注入隐藏思考原文
 - 已实现（2026-08-12）：CLI 按项目稳定复用 Runtime SQLite 会话；`/session status|tree|fork|use` 支持跨进程分支、消息节点投影与节点 fork；`/clear` 创建空白持久分支；普通 turn 只写事件，只有新压缩边界写 checkpoint；取消和失败 turn 不写 completed 历史；Session Tree 不恢复工作区，Side-Git 职责不变；`RuntimeThreadStore` 是统一数据库上的会话存储门面，未并入 RunStore 接口
 - 已实现（2026-08-12）：RunEvent 使用 schema v2 关联 run/turn/step/agent/attempt/trace；新增 RunTelemetry、TraceSpan、MetricRecorder、RunProjection 与 RunSnapshot；预算、安全、沙箱、重试、恢复、checkpoint 和 Side-Git 引用进入统一投影；Runtime API 提供持久快照查询；Trace、Metric、Audit 继续使用专用职责和存储，写入失败不影响业务终态
 - 已实现（2026-08-12）：Inline 与 Plain 共用 RunProjection/RunSnapshot；终端划分 stable transcript、live activity、input line、bottom dock 四个所有权区域；Agent、CLI 和工具状态经 RunEventSink 驱动快照，底部 dock 按宽度优先保留模式、阶段、安全域、token、成本和 trace；HITL 与 palette 统一由 InteractionController 读取
-- 未实现：循环收敛与证据门禁、工具契约与执行治理、Lanterna 和到期兼容层删除
+- 已实现（2026-08-12）：删除 Lanterna 包、依赖、启动分支和 renderer 枚举；终端只保留 Inline/Plain；删除 `/plan`、`/team`、`/branch`、`/snapshot`、`/restore`，Side-Git 迁移到 `/workspace status|clean|restore`
+- 未实现：循环收敛与证据门禁、工具契约与执行治理（不在本轮授权范围）
 - 验证计划：功能统一完成前不执行测试；全部功能结束后统一执行安全、quick、phase22、Runtime、Plan/Team 和全量回归；获得用户许可后再启动真实终端验收
-- 剩余风险：功能统一完成前尚未执行测试；Session Tree 的消息节点来自已完成 turn 事件，不保存未完成推理分叉；Lanterna 和到期兼容层仍待删除；真实终端交互仍待最终验收
+- 剩余风险：尚未执行统一测试；Session Tree 的消息节点来自已完成 turn 事件，不保存未完成推理分叉；真实终端交互仍待最终验收
 
 ## 2026-08-11 上下文压缩预算治理优化
 

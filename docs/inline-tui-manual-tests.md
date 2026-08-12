@@ -1,6 +1,7 @@
-# Inline TUI v16.1 端到端手测清单
+# Inline TUI v16.1 端到端手测清单（历史）
 
-> 配套 [`docs/inline-tui-pivot.md`](inline-tui-pivot.md) 的 §8 手测清单具体化。
+> 本文保留 v16.1 历史验收记录，其中 Lanterna、旧命令别名和 `phase16-smoke` 用例已经失效。
+> 当前终端验收以 `phase22-smoke`、`/run --review=...`、`/session` 和 `/workspace` 为准。
 > 每条用例自包含——给出启动命令 + 输入提示词 + 预期表现 + 通过判定。
 > 失败现象优先说"看到了什么"而不是"猜原因"。
 
