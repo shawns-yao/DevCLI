@@ -45,6 +45,7 @@ final class CliCommandParser {
         SKILL_OFF,
         SKILL_RELOAD,
         CONFIG,
+        SESSION,
         BRANCH
     }
 
@@ -262,6 +263,13 @@ final class CliCommandParser {
 
         if (trimmed.equalsIgnoreCase("/skill") || trimmed.equalsIgnoreCase("/skill list")) {
             return new ParsedCommand(CommandType.SKILL_LIST, null);
+        }
+
+        if (trimmed.equalsIgnoreCase("/session")) {
+            return new ParsedCommand(CommandType.SESSION, "status");
+        }
+        if (trimmed.regionMatches(true, 0, "/session ", 0, 9)) {
+            return new ParsedCommand(CommandType.SESSION, trimmed.substring(9).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/branch")) {

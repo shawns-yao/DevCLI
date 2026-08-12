@@ -2,7 +2,7 @@
 
 ## 2026-08-12 运行治理、能力收敛与终端界面重构
 
-- 状态：实施中；成本预算治理、统一 RunStore、本地持久运行、统一重试与恢复语义、执行安全策略、Project Trust 与结构化执行统一入口已完成
+- 状态：实施中；成本预算治理、统一 RunStore、本地持久运行、统一重试与恢复语义、执行安全策略、Project Trust、结构化执行统一入口和持久 Session Tree 已完成
 - 设计文档：`docs/superpowers/plans/2026-08-12-runtime-governance-terminal-ui-consolidation.md`
 - 目标：删除重复能力，合并 Plan/Team 的公共执行链，使用持久 Session Tree 取代 CLI 进程内分支，保留 Side-Git、PatchSet、Checkpoint 各自不可替代的恢复职责；终端只保留 Inline 与 Plain
 - 成本控制：已新增统一 RunBudget、有限预算档位、并行原子账本和 PricingCatalog；Agent 执行引擎、Planner、压缩和显式重试均接入同一 run，未知模型显示 cost=unknown
@@ -14,11 +14,12 @@
 - 影响范围：agent、runtime、budget、security、tool、workspace、snapshot、trace、render、tui、cli、配置、测试和文档
 - 已实现：产品入口统一为 `StructuredExecution`；`/run --review=plan|team` 选择审查策略，`/plan` 与 `/team` 暂时保留为兼容别名；内部继续复用 `PlanExecuteAgent` 和 `AgentOrchestrator` 两种策略适配器，不虚假合并差异状态机
 - 方案修订（2026-08-12）：先补齐观察结果相似性收敛和证据型任务门禁；再统一 ToolContract、参数边界、注册冲突、分类索引、按任务暴露、逐工具限流/超时/并发和外部调用成本；最后实施 Session Tree、可观测性和 UI。复用既有 ToolEffect、ExecutionSecurityPolicy、JSON Schema、ToolOutput、search_tools 与 RunBudget，不建立重复危险标记或第二套预算
-- 实施门禁：当前只更新设计文档；循环收敛、工具治理、Session Tree、可观测性和 UI 的代码与测试代码均需用户明确同意后才能开始。结构化执行统一入口已在流程澄清前提交，后续不再沿用先实现后确认的方式
+- 实施授权（2026-08-12）：用户已授权持久 Session Tree、统一可观测性、终端 UI 重构、删除 Lanterna 与到期兼容层；循环收敛和工具治理仍只保留设计，不实施代码
 - 明确排除：不为普通问答设置全局 MinIterations；不静默 clamp 越界参数；不把“只暴露 3 至 5 个工具”设为固定规则；不为 JVM 进程内工具虚假承诺独立内存上限；不重复注入隐藏思考原文
-- 未实现：循环收敛与证据门禁、工具契约与执行治理、Session Tree、可观测性收敛和 UI 重构
+- 已实现（2026-08-12）：CLI 按项目稳定复用 Runtime SQLite 会话；`/session status|tree|fork|use` 支持跨进程分支、消息节点投影与节点 fork；`/clear` 创建空白持久分支；普通 turn 只写事件，只有新压缩边界写 checkpoint；取消和失败 turn 不写 completed 历史；Session Tree 不恢复工作区，Side-Git 职责不变；`RuntimeThreadStore` 是统一数据库上的会话存储门面，未并入 RunStore 接口
+- 未实现：循环收敛与证据门禁、工具契约与执行治理、可观测性收敛、UI 重构和 Lanterna 删除
 - 验证计划：功能统一完成前不执行测试；全部功能结束后统一执行安全、quick、phase22、Runtime、Plan/Team 和全量回归；获得用户许可后再启动真实终端验收
-- 剩余风险：安全阶段尚未执行测试；Plan/Team 公共链抽取、持久 Session Tree 和 Lanterna 删除均涉及较大影响范围，必须分阶段提交并保留兼容窗口
+- 剩余风险：功能统一完成前尚未执行测试；Session Tree 的消息节点来自已完成 turn 事件，不保存未完成推理分叉；可观测性、UI 和 Lanterna 删除仍待实施
 
 ## 2026-08-11 上下文压缩预算治理优化
 
@@ -97,7 +98,7 @@
 - 影响范围：Runtime SQLite schema、事件与 checkpoint 归属、上下文恢复、RuntimeSessionTurnRunner、Runtime API 和测试
 - 已实现：新增 runtime branch 记录，包含 parent_branch_id、fork_event_id、name 和 active 状态；事件与 checkpoint 增加 branch_id；上下文按根到当前分支的 lineage 截取，fork 后主分支和子分支互不污染；提供分支创建、列举和激活接口；切换分支后关闭旧 AgentSessionRuntime，下一轮按目标分支重建；旧 SQLite 表启动时自动补列并把既有数据归入 main
 - 未实现：尚未实现分支重命名、删除和图形化展示；未对正在运行的 turn 允许强制切换分支
-- 验证建议：运行 RuntimeThreadStoreTest、RuntimeApiServerTest、CliCommandParserTest、DevCliCompleterTest、CliConversationBranchManagerTest；真实模型下验证从 fork 前约束继续两条不同任务
+- 验证建议：运行 RuntimeThreadStoreTest、RuntimeApiServerTest、SessionTreeServiceTest、CliCommandParserTest、DevCliCompleterTest；真实模型下验证从消息节点 fork 后继续两条不同任务
 - 风险：分支切换不会复制父分支的待处理队列，避免把旧分支输入带入新分支；大规模分支树和队列仍需分页接口
 
 ## 2026-08-07 CLI 对话分支

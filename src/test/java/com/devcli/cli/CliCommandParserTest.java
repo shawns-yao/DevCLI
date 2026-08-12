@@ -25,6 +25,15 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesSessionCommands() {
+        assertEquals(CliCommandParser.CommandType.SESSION,
+                CliCommandParser.parse("/session").type());
+        assertEquals("status", CliCommandParser.parse("/session").payload());
+        assertEquals("fork alternative",
+                CliCommandParser.parse("/session fork alternative").payload());
+    }
+
+    @Test
     void parsesPlanSlashCommandWithPayload() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/plan 创建一个 demo 项目");
 

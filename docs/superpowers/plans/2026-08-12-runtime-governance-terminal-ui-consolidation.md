@@ -692,10 +692,10 @@ ToolContract
 
 **步骤：**
 
-- [ ] 先覆盖跨进程分支、fork 可见性和工作区不变测试。
-- [ ] CLI 会话也写入 RunStore。
-- [ ] 实现 `/session tree|fork|use|status`。
-- [ ] 旧 `/branch` 只做代理并输出一次迁移提示。
+- [x] 覆盖跨进程分支、消息节点 fork 可见性和工作区不变测试。
+- [x] CLI 会话写入统一 Runtime SQLite；`RuntimeThreadStore` 作为会话门面，RunStore 继续只承载运行事实。
+- [x] 实现 `/session tree|fork|use|status`，普通 turn 使用事件，只有新压缩边界写 checkpoint。
+- [x] 旧 `/branch` 只做代理并输出迁移提示。
 - [ ] 完成阶段功能后统一运行 session、runtime branch、CLI 限定测试。
 
 ### 阶段 7：统一可观测模型

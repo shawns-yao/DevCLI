@@ -65,6 +65,7 @@ final class DevCliCompleter implements Completer {
                 || completeTask(input, candidates)
                 || completeBrowser(input, candidates)
                 || completeSnapshot(input, candidates)
+                || completeSession(input, candidates)
                 || completeBranch(input, candidates)) {
             return;
         }
@@ -223,8 +224,21 @@ final class DevCliCompleter implements Completer {
         String payload = input.length() <= 8 ? "" : input.substring(8);
         addMatching(candidates, "对话分支", payload,
                 option("status", "查看当前对话分支"),
-                option("list", "列出当前进程内的对话分支"),
-                option("create ", "从当前历史创建分支"),
+                option("list", "列出持久会话分支"),
+                option("create ", "兼容别名：从当前上下文创建持久分支"),
+                option("use ", "切换到已有分支"));
+        return true;
+    }
+
+    private boolean completeSession(String input, List<Candidate> candidates) {
+        if (!input.equalsIgnoreCase("/session") && !input.regionMatches(true, 0, "/session ", 0, 9)) {
+            return false;
+        }
+        String payload = input.length() <= 9 ? "" : input.substring(9);
+        addMatching(candidates, "持久会话", payload,
+                option("status", "查看当前会话与分支"),
+                option("tree", "显示持久会话树"),
+                option("fork ", "从当前上下文或消息节点创建分支"),
                 option("use ", "切换到已有分支"));
         return true;
     }

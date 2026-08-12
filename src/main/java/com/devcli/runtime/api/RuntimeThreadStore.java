@@ -36,6 +36,19 @@ public class RuntimeThreadStore implements AutoCloseable {
         }
     }
 
+    public record MessageNodeRecord(String id, String parentId, String branchId,
+                                    String role, String content, String preview, long eventId) {
+        public MessageNodeRecord {
+            id = id == null ? "" : id;
+            parentId = parentId == null ? "" : parentId;
+            branchId = branchId == null ? "" : branchId;
+            role = role == null ? "" : role;
+            content = content == null ? "" : content;
+            preview = preview == null ? "" : preview;
+            eventId = Math.max(0, eventId);
+        }
+    }
+
     public record RuntimeCheckpoint(
             long id,
             String threadId,
@@ -109,15 +122,24 @@ public class RuntimeThreadStore implements AutoCloseable {
 
     public synchronized String createThread() {
         String id = "thread_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        ensureThread(id);
+        return id;
+    }
+
+    /** 创建或打开稳定 thread id，供 CLI 跨进程复用同一 Session Tree。 */
+    public synchronized String ensureThread(String threadId) {
+        String id = requireThreadId(threadId);
         try (PreparedStatement ps = connection.prepareStatement("""
-                INSERT INTO runtime_threads (id, active_branch_id, created_at) VALUES (?, 'main', ?)
+                INSERT OR IGNORE INTO runtime_threads (id, active_branch_id, created_at) VALUES (?, 'main', ?)
                 """)) {
             ps.setString(1, id);
             ps.setString(2, Instant.now().toString());
-            ps.executeUpdate();
-            insertBranch(id, "main", "main", "", 0);
-            RunEvent event = new RunEvent.ThreadCreated(id);
-            appendEvent(id, event.type(), RunEventJsonCodec.encode(event, ""));
+            boolean created = ps.executeUpdate() > 0;
+            ensureRootBranch(id);
+            if (created) {
+                RunEvent event = new RunEvent.ThreadCreated(id);
+                appendEvent(id, event.type(), RunEventJsonCodec.encode(event, ""));
+            }
             return id;
         } catch (SQLException e) {
             throw new IllegalStateException("创建 runtime thread 失败: " + e.getMessage(), e);
@@ -187,6 +209,15 @@ public class RuntimeThreadStore implements AutoCloseable {
         String id = "branch_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
         insertBranch(threadId, id, name == null || name.isBlank() ? id : name.trim(),
                 parentId, fork);
+        return branches(threadId).stream().filter(branch -> branch.id().equals(id)).findFirst().orElseThrow();
+    }
+
+    /** 从空白上下文创建独立根分支；既有分支历史保留但不进入新分支上下文。 */
+    public synchronized BranchRecord createEmptyBranch(String threadId, String name) {
+        ensureRootBranch(threadId);
+        String id = "branch_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        insertBranch(threadId, id, name == null || name.isBlank() ? id : name.trim(),
+                "", 0);
         return branches(threadId).stream().filter(branch -> branch.id().equals(id)).findFirst().orElseThrow();
     }
 
@@ -302,6 +333,19 @@ public class RuntimeThreadStore implements AutoCloseable {
         }
     }
 
+    /** 以 Runtime 事件协议原子顺序写入一个已完成的顶层 turn。 */
+    public synchronized long appendCompletedTurn(String threadId, String input, String output) {
+        String turnId = "turn_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        RunEvent.TurnStarted started = new RunEvent.TurnStarted(input);
+        appendEvent(threadId, started.type(), RunEventJsonCodec.encode(started, turnId));
+        if (output != null && !output.isBlank()) {
+            RunEvent.MessageDelta message = new RunEvent.MessageDelta(output);
+            appendEvent(threadId, message.type(), RunEventJsonCodec.encode(message, turnId));
+        }
+        RunEvent.TurnCompleted completed = new RunEvent.TurnCompleted("completed");
+        return appendEvent(threadId, completed.type(), RunEventJsonCodec.encode(completed, turnId));
+    }
+
     public synchronized List<RuntimeEvent> events(String threadId, long afterId) {
         List<RuntimeEvent> allEvents = new ArrayList<>();
         try (PreparedStatement ps = connection.prepareStatement("""
@@ -335,6 +379,78 @@ public class RuntimeThreadStore implements AutoCloseable {
      */
     public synchronized List<TurnRecord> turnHistory(String threadId) {
         return turnHistoryAfter(threadId, 0);
+    }
+
+    /** 当前可见会话路径中的 user/assistant 消息节点，可作为精确 fork 锚点。 */
+    public synchronized List<MessageNodeRecord> messageNodes(String threadId) {
+        return messageNodes(threadId, Long.MAX_VALUE);
+    }
+
+    private List<MessageNodeRecord> messageNodes(String threadId, long throughEventId) {
+        List<RuntimeEvent> visible = events(threadId, 0);
+        List<MessageNodeRecord> result = new ArrayList<>();
+        Map<String, String> inputs = new HashMap<>();
+        Map<String, Long> inputEventIds = new HashMap<>();
+        Map<String, String> outputs = new HashMap<>();
+        Map<String, String> outputBranches = new HashMap<>();
+        String parentId = "";
+        for (RuntimeEvent event : visible) {
+            if (event.id() > throughEventId) break;
+            try {
+                JsonNode data = MAPPER.readTree(event.data());
+                String turnId = data.path("turn_id").asText("");
+                if (turnId.isBlank()) continue;
+                switch (event.type()) {
+                    case "turn.started" -> {
+                        inputs.put(turnId, data.path("input").asText(""));
+                        inputEventIds.put(turnId, event.id());
+                    }
+                    case "message.delta" -> {
+                        outputs.merge(turnId, data.path("content").asText(""), String::concat);
+                        outputBranches.put(turnId, event.branchId());
+                    }
+                    case "turn.completed" -> {
+                        String input = inputs.remove(turnId);
+                        Long inputEventId = inputEventIds.remove(turnId);
+                        String output = outputs.remove(turnId);
+                        String outputBranch = outputBranches.remove(turnId);
+                        if (input != null && inputEventId != null) {
+                            String id = messageNodeId(turnId, "user");
+                            result.add(new MessageNodeRecord(id, parentId, event.branchId(),
+                                    "user", input, preview(input), inputEventId));
+                            parentId = id;
+                        }
+                        if (output != null) {
+                            String id = messageNodeId(turnId, "assistant");
+                            result.add(new MessageNodeRecord(id, parentId,
+                                    outputBranch == null ? event.branchId() : outputBranch,
+                                    "assistant", output, preview(output), event.id()));
+                            parentId = id;
+                        }
+                    }
+                    default -> { }
+                }
+            } catch (Exception error) {
+                log.warn("解析会话消息节点失败，跳过事件: id={}, type={}", event.id(), event.type());
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    public synchronized MessageNodeRecord messageNode(String threadId, String messageId) {
+        String target = messageId == null ? "" : messageId.trim();
+        return messageNodes(threadId).stream()
+                .filter(node -> node.id().equals(target))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("未找到当前会话路径中的消息节点: " + target));
+    }
+
+    public synchronized MessageNodeRecord forkAnchor(String threadId, String messageId) {
+        MessageNodeRecord node = messageNode(threadId, messageId);
+        if (!"assistant".equals(node.role())) {
+            throw new IllegalArgumentException("只能从已完成的 assistant 消息节点建立分支: " + messageId);
+        }
+        return node;
     }
 
     public synchronized List<TurnRecord> turnHistoryAfter(String threadId, long afterEventId) {
@@ -375,7 +491,7 @@ public class RuntimeThreadStore implements AutoCloseable {
         List<TurnRecord> turns = turnHistoryAfter(threadId, coveredThrough);
         long lastCompletedEventId = turns.isEmpty()
                 ? coveredThrough
-                : turns.getLast().completedEventId();
+                : turns.get(turns.size() - 1).completedEventId();
         return new ContextView(
                 checkpoint.map(RuntimeCheckpoint::messages).orElse(List.of()),
                 turns,
@@ -519,6 +635,75 @@ public class RuntimeThreadStore implements AutoCloseable {
         } catch (SQLException e) {
             throw new IllegalStateException("初始化 runtime root branch 失败: " + e.getMessage(), e);
         }
+    }
+
+    /** 当前活动分支自身最近的 checkpoint，不把父分支 checkpoint 当作本分支新边界。 */
+    public synchronized Optional<RuntimeCheckpoint> latestCheckpointOnActiveBranch(String threadId) {
+        String active = activeBranchId(threadId);
+        try (PreparedStatement ps = connection.prepareStatement("""
+                SELECT id, thread_id, branch_id, covered_through_event_id, messages_json,
+                       summary, metadata_json, created_at, message_tree_json
+                FROM runtime_checkpoints
+                WHERE thread_id = ? AND branch_id = ?
+                ORDER BY covered_through_event_id DESC, id DESC
+                LIMIT 1
+                """)) {
+            ps.setString(1, threadId);
+            ps.setString(2, active);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return Optional.empty();
+                List<LlmClient.Message> messages = MAPPER.readValue(
+                        rs.getString("messages_json"),
+                        new TypeReference<List<LlmClient.Message>>() {});
+                CompactBoundaryMetadata metadata = MAPPER.readValue(
+                        rs.getString("metadata_json"), CompactBoundaryMetadata.class);
+                List<TurnRunner.MessageTreeNode> messageTree = MAPPER.readValue(
+                        rs.getString("message_tree_json"),
+                        new TypeReference<List<TurnRunner.MessageTreeNode>>() {});
+                return Optional.of(new RuntimeCheckpoint(
+                        rs.getLong("id"), rs.getString("thread_id"), active,
+                        rs.getLong("covered_through_event_id"), messages,
+                        rs.getString("summary"), metadata, messageTree,
+                        Instant.parse(rs.getString("created_at"))));
+            }
+        } catch (Exception error) {
+            log.warn("读取活动分支 checkpoint 失败: thread={}, branch={}", threadId, active);
+            return Optional.empty();
+        }
+    }
+
+    /** 在当前可见路径上重建截至指定已完成事件的消息上下文。 */
+    public synchronized List<LlmClient.Message> contextMessagesThrough(String threadId,
+                                                                        long completedEventId) {
+        if (completedEventId <= 0) return List.of();
+        List<LlmClient.Message> result = new ArrayList<>();
+        for (MessageNodeRecord node : messageNodes(threadId, completedEventId)) {
+            if ("user".equals(node.role())) {
+                result.add(LlmClient.Message.user(node.content()));
+            } else if ("assistant".equals(node.role())) {
+                result.add(LlmClient.Message.assistant(node.content()));
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    private static String requireThreadId(String value) {
+        String normalized = value == null ? "" : value.trim();
+        if (!normalized.matches("[A-Za-z0-9._-]{1,96}")) {
+            throw new IllegalArgumentException("threadId 格式无效");
+        }
+        return normalized;
+    }
+
+    private static String messageNodeId(String turnId, String role) {
+        return "msg_" + UUID.nameUUIDFromBytes((turnId + "\u0000" + role)
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                .toString().replace("-", "");
+    }
+
+    private static String preview(String value) {
+        String normalized = value == null ? "" : value.replaceAll("\\s+", " ").trim();
+        return normalized.length() <= 72 ? normalized : normalized.substring(0, 69) + "...";
     }
 
     private void insertBranch(String threadId, String id, String name,

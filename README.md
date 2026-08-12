@@ -48,6 +48,7 @@ ReAct 主循环、StructuredExecution 结构化执行、MCP 协议客户端、�
 - LSP（语言服务器协议）诊断注入：仅实现协议子集，编辑后回灌编译诊断。
 - Git Side-History 快照与回滚：turn 粒度快照与 `/restore`，尚未覆盖全部编辑入口。
 - 后台任务与 Runtime API：SQLite 持久化任务队列与本地 HTTP/SSE 端点，仅监听回环地址。
+- 持久 Session Tree：CLI 与 Runtime API 共用 SQLite 事件和分支模型，可跨进程切换上下文或从已完成消息节点建立分支，不恢复工作区文件。
 - 图片输入：本地路径、file URL 与剪贴板图片。
 - SWE-bench Lite：已产出官方格式 predictions JSONL，官方 harness 尚未跑出有效 resolved 结果。
 

@@ -54,6 +54,7 @@ import com.devcli.snapshot.SnapshotService;
 import com.devcli.snapshot.TurnSnapshot;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.security.ProjectTrustStore;
+import com.devcli.session.SessionTreeService;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.util.AnsiStyle;
 import org.jline.terminal.Terminal;
@@ -173,9 +174,14 @@ public class Main {
         }
     }
 
-    private record TurnRunResult(String response, String draft, boolean executionQuiesced) {
+    private record TurnRunResult(String response, String draft,
+                                 boolean executionQuiesced, boolean persistable) {
         static TurnRunResult completed(String response) {
-            return new TurnRunResult(response, "", true);
+            return new TurnRunResult(response, "", true, true);
+        }
+
+        static TurnRunResult failed(String response) {
+            return new TurnRunResult(response, "", true, false);
         }
     }
 
@@ -339,8 +345,9 @@ public class Main {
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
             AgentSessionRuntime reactSession = AgentSessionRuntime.adoptOwned(
                     reactAgent, Path.of(reactAgent.getToolRegistry().getProjectPath()));
-            CliConversationBranchManager branchManager = new CliConversationBranchManager(reactAgent);
+            SessionTreeService sessionTree = SessionTreeService.open(projectRoot, reactAgent);
             CliSessionArchive sessionArchive = CliSessionArchive.fromEnvironment();
+            shutdown.register(15, "sessionTree", sessionTree::close);
             shutdown.register(20, "reactSession", reactSession::close);
             reactAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
             reactAgent.setSkillRegistry(skillRegistry);
@@ -497,9 +504,9 @@ public class Main {
                         input = command.payload();
                     }
                     case CLEAR -> {
-                        reactAgent.clearHistory();
+                        SessionTreeService.CommandResult cleared = sessionTree.clearToNewBranch();
                         hitlHandler.clearApprovedAll();
-                        ui.println("🗑️ 当前对话历史已清空，长期记忆保持不变\n");
+                        ui.println(cleared.message() + "，长期记忆保持不变\n");
                         continue;
                     }
                     case HISTORY_CLEAR -> {
@@ -762,18 +769,22 @@ public class Main {
                         renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
                         continue;
                     }
+                    case SESSION -> {
+                        try {
+                            ui.println(sessionTree.execute(command.payload()).message());
+                        } catch (IllegalArgumentException e) {
+                            ui.println("❌ " + e.getMessage());
+                        }
+                        continue;
+                    }
                     case BRANCH -> {
                         try {
                             String payload = command.payload() == null ? "status" : command.payload().trim();
-                            if (payload.equalsIgnoreCase("status") || payload.equalsIgnoreCase("list")) {
-                                ui.println(branchManager.status());
-                            } else if (payload.regionMatches(true, 0, "create ", 0, 7)) {
-                                ui.println(branchManager.create(payload.substring(7).trim()));
-                            } else if (payload.regionMatches(true, 0, "use ", 0, 4)) {
-                                ui.println(branchManager.use(payload.substring(4).trim()));
-                            } else {
-                                ui.println("用法: /branch | /branch create <name> | /branch use <name>");
-                            }
+                            String migrated = payload.regionMatches(true, 0, "create ", 0, 7)
+                                    ? "fork " + payload.substring(7).trim()
+                                    : payload.equalsIgnoreCase("list") ? "tree" : payload;
+                            ui.println("/branch 已迁移为 /session，本次仍按兼容别名执行。");
+                            ui.println(sessionTree.execute(migrated).message());
                         } catch (IllegalArgumentException e) {
                             ui.println("❌ " + e.getMessage());
                         }
@@ -913,8 +924,13 @@ public class Main {
                     ui.println(response);
                     ui.println();
                 }
-                sessionArchive.recordTurn(snapshotMode, submittedInput, taskInput, response,
-                        "react".equals(snapshotMode) ? reactAgent.getConversationHistory() : List.of());
+                if (turnResult.persistable()) {
+                    List<LlmClient.Message> sessionMessages = "react".equals(snapshotMode)
+                            ? reactAgent.getConversationHistory() : List.of();
+                    sessionTree.recordCompletedTurn(taskInput, response, sessionMessages);
+                    sessionArchive.recordTurn(snapshotMode, submittedInput, taskInput, response,
+                            sessionMessages);
+                }
                 if (!turnResult.executionQuiesced()) {
                     ui.println("取消后执行线程未在限定时间内退出，为避免上下文并发写入，DevCLI 已停止接收新任务。");
                     break;
@@ -1149,7 +1165,7 @@ public class Main {
                     return cancelledTurn("⏹️ 已请求取消当前任务。", executionGuard);
                 }
             }
-            return new TurnRunResult(future.get(), draft, true);
+            return new TurnRunResult(future.get(), draft, true, true);
         } catch (CancellationException e) {
             return cancelledTurn("⏹️ 已取消当前任务。", executionGuard);
         } catch (InterruptedException e) {
@@ -1159,7 +1175,7 @@ public class Main {
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
             String message = cause == null || cause.getMessage() == null ? "未知错误" : cause.getMessage();
-            return TurnRunResult.completed("❌ 执行失败: " + message);
+            return TurnRunResult.failed("❌ 执行失败: " + message);
         } finally {
             if (terminal != null && original != null) {
                 try {
@@ -1192,7 +1208,7 @@ public class Main {
 
     private static TurnRunResult cancelledTurn(String response, TurnExecutionGuard executionGuard) {
         boolean stopped = executionGuard.awaitStopped(Duration.ofSeconds(CANCEL_QUIESCE_TIMEOUT_SECONDS));
-        return new TurnRunResult(response, "", stopped);
+        return new TurnRunResult(response, "", stopped, false);
     }
 
     private static void wakeActiveTurnReader(Terminal terminal, LineReader lineReader) {
@@ -1639,10 +1655,11 @@ public class Main {
                 new SlashCommandHint("/snapshot", "/snapshot", "查看最近 Side-Git 快照"),
                 new SlashCommandHint("/snapshot status", "/snapshot status", "查看 Side-Git 快照状态"),
                 new SlashCommandHint("/snapshot clean", "/snapshot clean", "清理当前项目 Side-Git 快照"),
-                new SlashCommandHint("/branch", "/branch", "查看当前对话分支"),
-                new SlashCommandHint("/branch status", "/branch status", "查看当前对话分支"),
-                new SlashCommandHint("/branch create ", "/branch create <name>", "从当前历史创建对话分支"),
-                new SlashCommandHint("/branch use ", "/branch use <name>", "切换到已有对话分支"),
+                new SlashCommandHint("/session", "/session", "查看当前持久会话"),
+                new SlashCommandHint("/session tree", "/session tree", "显示持久会话树"),
+                new SlashCommandHint("/session fork ", "/session fork <name>", "从当前上下文创建会话分支"),
+                new SlashCommandHint("/session use ", "/session use <id|name>", "切换到持久会话分支"),
+                new SlashCommandHint("/branch", "/branch", "兼容别名：/session status"),
                 new SlashCommandHint("/restore ", "/restore <N>", "恢复到最近第 N 个 pre-turn 快照"),
                 new SlashCommandHint("/index", "/index", "索引当前代码库"),
                 new SlashCommandHint("/index ", "/index [路径]", "索引指定路径代码库"),
