@@ -2,6 +2,7 @@ package com.devcli.cli;
 
 import com.devcli.agent.Agent;
 import com.devcli.agent.PlanExecuteAgent;
+import com.devcli.agent.StructuredExecution;
 import com.devcli.llm.GLMClient;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.MemoryManager;
@@ -21,14 +22,15 @@ class MainPlanAgentFactoryTest {
         Agent reactAgent = new Agent(llmClient, sharedToolRegistry);
         MemoryManager sharedMemoryManager = reactAgent.getMemoryManager();
 
-        PlanExecuteAgent planAgent = Main.createPlanAgent(
+        StructuredExecution execution = Main.createStructuredExecution(
                 llmClient,
                 reactAgent,
-                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.cancel()
+                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.cancel(),
+                System.out
         );
 
-        assertSame(sharedToolRegistry, readField(planAgent, "toolRegistry"));
-        assertSame(sharedMemoryManager, readField(planAgent, "memoryManager"));
+        assertSame(sharedToolRegistry, readField(execution, "toolRegistry"));
+        assertSame(sharedMemoryManager, readField(execution, "memoryManager"));
     }
 
     private static Object readField(Object target, String fieldName) throws Exception {

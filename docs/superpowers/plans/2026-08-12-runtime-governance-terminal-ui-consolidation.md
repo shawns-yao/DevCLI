@@ -576,11 +576,13 @@ Agent、Plan、Team 和工具不得直接调用 UI 方法或写 stdout；它们�
 
 **步骤：**
 
-- [ ] 先用契约测试锁定 plan review 与 team review 的差异。
-- [ ] 抽取共同计划、DAG、workspace、artifact、checkpoint 流程。
-- [ ] PLAN_REVIEW 关闭独立 Reviewer；TEAM_REVIEW 启用 Worker/Pre-Review/Reviewer。
-- [ ] `/plan`、`/team` 作为 `/run --review=plan|team` 的兼容别名保留一个版本。
+- [x] 用契约测试锁定 plan review 与 team review 的差异。
+- [x] 统一产品入口并复用共同执行内核、DAG、workspace、artifact 与 checkpoint 协议；两种差异状态机暂由内部策略适配器承载，避免布尔分支单体类。
+- [x] PLAN_REVIEW 关闭独立 Reviewer；TEAM_REVIEW 启用 Worker/Pre-Review/Reviewer。
+- [x] `/plan`、`/team` 作为 `/run --review=plan|team` 的兼容别名保留一个版本。
 - [ ] 完成阶段功能后统一运行 plan、team、graph、artifact、CLI 限定测试。
+
+阶段结果（2026-08-12）：CLI 与旧 TUI 兼容入口都只选择 `ExecutionReviewPolicy` 并进入 `StructuredExecution`；`PlanExecuteAgent` 与 `AgentOrchestrator` 降为内部策略适配器。公共执行内核继续由 `AgentExecutionEngine`、`ExecutionGraph`、`ExecutionArtifact`、`WorkspaceExecutionSession`、`ToolRegistry` 和 `MemoryManager` 提供。按照用户要求，本阶段只完成测试契约和静态差异检查，测试留到全部功能统一完成后执行。
 
 ### 阶段 6：持久 Session Tree 替换 CLI 进程内分支
 

@@ -1,8 +1,9 @@
 package com.devcli.tui;
 
 import com.devcli.agent.Agent;
-import com.devcli.agent.AgentOrchestrator;
+import com.devcli.agent.ExecutionReviewPolicy;
 import com.devcli.agent.PlanExecuteAgent;
+import com.devcli.agent.StructuredExecution;
 import com.devcli.config.DevCliConfig;
 import com.devcli.hitl.HitlHandler;
 import com.devcli.llm.LlmClient;
@@ -233,13 +234,8 @@ public final class TuiSessionController implements AutoCloseable {
             SnapshotService snapshots = reactAgent.getToolRegistry().getSnapshotService();
             output = captureStdout(() -> snapshots.runTurn(mode.name().toLowerCase(), input, () -> switch (mode) {
                     case REACT -> reactAgent.run(input);
-                    case PLAN -> new PlanExecuteAgent(
-                            llmClient,
-                            reactAgent.getToolRegistry(),
-                            reactAgent.getMemoryManager(),
-                            (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute()
-                    ).run(input);
-                    case TEAM -> createTeamOrchestrator().run(input);
+                    case PLAN -> structuredExecution().run(ExecutionReviewPolicy.PLAN_REVIEW, input);
+                    case TEAM -> structuredExecution().run(ExecutionReviewPolicy.TEAM_REVIEW, input);
                 }));
         } catch (Exception e) {
             output = "执行失败: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
@@ -254,13 +250,13 @@ public final class TuiSessionController implements AutoCloseable {
         appendAssistant(cleanOutput(output));
     }
 
-    private AgentOrchestrator createTeamOrchestrator() {
-        AgentOrchestrator orchestrator = new AgentOrchestrator(
+    private StructuredExecution structuredExecution() {
+        return new StructuredExecution(
                 llmClient,
                 reactAgent.getToolRegistry(),
-                reactAgent.getMemoryManager()
-        );
-        return orchestrator;
+                reactAgent.getMemoryManager(),
+                (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
+                System.out);
     }
 
     private String formatSnapshots() {

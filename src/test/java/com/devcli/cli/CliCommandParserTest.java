@@ -8,6 +8,15 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 class CliCommandParserTest {
 
     @Test
+    void parsesStructuredRunCommand() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse(
+                "/run --review=team resume orch-1234");
+
+        assertEquals(CliCommandParser.CommandType.RUN_STRUCTURED, command.type());
+        assertEquals("--review=team resume orch-1234", command.payload());
+    }
+
+    @Test
     void parsesPlanSlashCommandWithoutPayload() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/plan");
 

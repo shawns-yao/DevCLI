@@ -62,6 +62,20 @@ class DevCliCompleterTest {
     }
 
     @Test
+    void completesStructuredReviewPoliciesAndTeamResume() {
+        DevCliCompleter completer = new DevCliCompleter(List::of);
+        List<Candidate> policies = new ArrayList<>();
+        List<Candidate> resume = new ArrayList<>();
+
+        completer.complete(null, parsed("/run --review=", "--review="), policies);
+        completer.complete(null, parsed("/run --review=team r", "r"), resume);
+
+        assertTrue(policies.stream().anyMatch(c -> c.value().equals("--review=plan ")));
+        assertTrue(policies.stream().anyMatch(c -> c.value().equals("--review=team ")));
+        assertTrue(resume.stream().anyMatch(c -> c.value().equals("resume ")));
+    }
+
+    @Test
     void completesMcpServerNamesFromResources() {
         DevCliCompleter completer = new DevCliCompleter(() -> List.of(
                 new McpResourceDescriptor("chrome-devtools", "file:///a", "a", "", "", "text/plain", null),

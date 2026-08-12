@@ -12,6 +12,7 @@ final class CliCommandParser {
         CLEAR,
         HISTORY_CLEAR,
         SWITCH_MODEL,
+        RUN_STRUCTURED,
         SWITCH_PLAN,
         SWITCH_TEAM,
         SWITCH_HITL,
@@ -103,6 +104,14 @@ final class CliCommandParser {
 
         if (trimmed.regionMatches(true, 0, "/model ", 0, 7)) {
             return new ParsedCommand(CommandType.SWITCH_MODEL, trimmed.substring(7).trim());
+        }
+
+        if (trimmed.equalsIgnoreCase("/run")) {
+            return new ParsedCommand(CommandType.RUN_STRUCTURED, "");
+        }
+
+        if (trimmed.regionMatches(true, 0, "/run ", 0, 5)) {
+            return new ParsedCommand(CommandType.RUN_STRUCTURED, trimmed.substring(5).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/plan")) {

@@ -1,8 +1,9 @@
 package com.devcli.cli;
 
 import com.devcli.agent.Agent;
-import com.devcli.agent.AgentOrchestrator;
+import com.devcli.agent.ExecutionReviewPolicy;
 import com.devcli.agent.PlanExecuteAgent;
+import com.devcli.agent.StructuredExecution;
 import com.devcli.browser.BrowserAuditMetadata;
 import com.devcli.browser.BrowserConnectivityCheck;
 import com.devcli.browser.BrowserGuard;
@@ -402,8 +403,7 @@ public class Main {
             } else {
                 printStartupScreen(ui, startupScreenInfo);
             }
-            boolean nextTaskUsePlanMode = false;
-            boolean nextTaskUseTeamMode = false;
+            ExecutionReviewPolicy pendingReviewPolicy = null;
             AgentTurnInbox turnInbox = reactAgent.getTurnInbox();
             String pendingDraft = "";
 
@@ -443,7 +443,7 @@ public class Main {
                         promptInput = PromptInput.submitted(queuedPrompt.text());
                     } else {
                         promptInput = readPromptInput(terminal, lineReader, renderer,
-                                nextTaskUsePlanMode || nextTaskUseTeamMode, spaciousPrompt, pendingDraft);
+                                pendingReviewPolicy != null, spaciousPrompt, pendingDraft);
                         pendingDraft = "";
                     }
                 } catch (UserInterruptException e) {
@@ -456,13 +456,9 @@ public class Main {
                 }
 
                 if (promptInput.canceled()) {
-                    if (nextTaskUsePlanMode) {
-                        nextTaskUsePlanMode = false;
-                        ui.println("↩️ 已取消待执行的 Plan-and-Execute，回到默认 ReAct。\n");
-                    }
-                    if (nextTaskUseTeamMode) {
-                        nextTaskUseTeamMode = false;
-                        ui.println("↩️ 已取消待执行的 Multi-Agent，回到默认 ReAct。\n");
+                    if (pendingReviewPolicy != null) {
+                        pendingReviewPolicy = null;
+                        ui.println("已取消待执行的结构化任务，回到默认 ReAct。\n");
                     }
                     continue;
                 }
@@ -589,19 +585,37 @@ public class Main {
                     }
                     case SWITCH_PLAN -> {
                         if (command.payload() == null || command.payload().isEmpty()) {
-                            nextTaskUsePlanMode = true;
-                            ui.println("📋 下一条任务将使用 Plan-and-Execute 模式，输入任务前按 ESC 可取消，执行完成后自动回到默认 ReAct。\n");
+                            pendingReviewPolicy = ExecutionReviewPolicy.PLAN_REVIEW;
+                            ui.println("下一条任务将使用 plan review；/plan 是 /run --review=plan 的兼容别名。\n");
                             continue;
                         }
                         input = command.payload();
                     }
                     case SWITCH_TEAM -> {
                         if (command.payload() == null || command.payload().isEmpty()) {
-                            nextTaskUseTeamMode = true;
-                            ui.println("👥 下一条任务将使用 Multi-Agent 协作模式（规划者 + 执行者 + 检查者），输入任务前按 ESC 可取消，执行完成后自动回到默认 ReAct。\n");
+                            pendingReviewPolicy = ExecutionReviewPolicy.TEAM_REVIEW;
+                            ui.println("下一条任务将使用 team review；/team 是 /run --review=team 的兼容别名。\n");
                             continue;
                         }
                         input = command.payload();
+                    }
+                    case RUN_STRUCTURED -> {
+                        StructuredRunCommand structured;
+                        try {
+                            structured = StructuredRunCommand.parse(command.payload());
+                        } catch (IllegalArgumentException error) {
+                            ui.println(error.getMessage() + "\n");
+                            continue;
+                        }
+                        if (!structured.resume() && structured.task().isBlank()) {
+                            pendingReviewPolicy = structured.policy();
+                            ui.println("下一条任务将使用 " + structured.policy().cliValue()
+                                    + " review，输入任务前按 ESC 可取消。\n");
+                            continue;
+                        }
+                        input = structured.resume()
+                                ? "resume " + structured.checkpointId()
+                                : structured.task();
                     }
                     case SWITCH_MODEL -> {
                         String selection = command.payload();
@@ -854,30 +868,23 @@ public class Main {
                 final String taskInput = input;
                 Callable<String> runTask;
                 String snapshotMode;
-                if (nextTaskUsePlanMode || command.type() == CliCommandParser.CommandType.SWITCH_PLAN) {
-                    snapshotMode = "plan";
+                ExecutionReviewPolicy commandPolicy = reviewPolicy(command);
+                ExecutionReviewPolicy reviewPolicy = commandPolicy == null
+                        ? pendingReviewPolicy : commandPolicy;
+                if (reviewPolicy != null) {
+                    snapshotMode = reviewPolicy.cliValue();
                     LlmClient activeClient = llmClient;
                     runTask = () -> {
-                        PlanExecuteAgent planAgent = createPlanAgent(activeClient, reactAgent, terminal, lineReader, ui);
-                        planAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
-                        planAgent.setStickyMemorySupplier(stickyMemory::renderForPrompt);
-                        planAgent.setSkillRegistry(skillRegistry);
-                        planAgent.setSkillContextBuffer(skillContextBuffer);
-                        return planAgent.run(taskInput);
-                    };
-                } else if (nextTaskUseTeamMode || command.type() == CliCommandParser.CommandType.SWITCH_TEAM) {
-                    snapshotMode = "team";
-                    LlmClient activeClient = llmClient;
-                    runTask = () -> {
-                        AgentOrchestrator orchestrator = createTeamAgent(activeClient, reactAgent, ui);
-                        orchestrator.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
-                        orchestrator.setStickyMemorySupplier(stickyMemory::renderForPrompt);
-                        orchestrator.setSkillSystem(skillRegistry, skillContextBuffer);
-                        String resumeId = parseTeamResumeId(taskInput);
-                        if (resumeId != null) {
-                            return orchestrator.resume(resumeId.isBlank() ? null : resumeId);
-                        }
-                        return orchestrator.run(taskInput);
+                        StructuredExecution structured = createStructuredExecution(
+                                activeClient, reactAgent, terminal, lineReader, ui)
+                                .setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt)
+                                .setStickyMemorySupplier(stickyMemory::renderForPrompt)
+                                .setSkillSystem(skillRegistry, skillContextBuffer);
+                        String resumeId = parseStructuredResumeId(reviewPolicy, taskInput);
+                        return resumeId == null
+                                ? structured.run(reviewPolicy, taskInput)
+                                : structured.resume(reviewPolicy,
+                                resumeId.isBlank() ? null : resumeId);
                     };
                 } else {
                     snapshotMode = "react";
@@ -901,8 +908,7 @@ public class Main {
                 if (!"react".equals(snapshotMode)) {
                     renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
                 }
-                nextTaskUsePlanMode = false;
-                nextTaskUseTeamMode = false;
+                pendingReviewPolicy = null;
                 if (response != null && !response.isBlank()) {
                     ui.println(response);
                     ui.println();
@@ -924,42 +930,24 @@ public class Main {
         }
     }
 
-
-    static PlanExecuteAgent createPlanAgent(LlmClient llmClient, Agent reactAgent,
-                                            PlanExecuteAgent.PlanReviewHandler reviewHandler) {
-        return new PlanExecuteAgent(
+    static StructuredExecution createStructuredExecution(
+            LlmClient llmClient, Agent reactAgent,
+            PlanExecuteAgent.PlanReviewHandler reviewHandler, PrintStream out) {
+        return new StructuredExecution(
                 llmClient,
                 reactAgent.getToolRegistry(),
                 reactAgent.getMemoryManager(),
                 reviewHandler,
-                System.out
-        );
+                out);
     }
 
-    private static PlanExecuteAgent createPlanAgent(LlmClient llmClient, Agent reactAgent,
-                                                    Terminal terminal, LineReader lineReader, PrintStream out) {
-        out.println("📋 使用 Plan-and-Execute 模式\n");
-        return new PlanExecuteAgent(
-                llmClient,
-                reactAgent.getToolRegistry(),
-                reactAgent.getMemoryManager(),
-                createPlanReviewHandler(terminal, lineReader, out),
-                out
-        );
+    private static StructuredExecution createStructuredExecution(
+            LlmClient llmClient, Agent reactAgent,
+            Terminal terminal, LineReader lineReader, PrintStream out) {
+        return createStructuredExecution(llmClient, reactAgent,
+                createPlanReviewHandler(terminal, lineReader, out), out);
     }
 
-    private static AgentOrchestrator createTeamAgent(LlmClient llmClient, Agent reactAgent, PrintStream out) {
-        out.println("👥 使用 Multi-Agent 协作模式\n");
-        AgentOrchestrator orchestrator = new AgentOrchestrator(
-                llmClient, reactAgent.getToolRegistry(), reactAgent.getMemoryManager(), out);
-        return orchestrator;
-    }
-
-    /**
-     * 解析 /team 的 resume 子命令：
-     * "resume" → ""（恢复最近 checkpoint）；"resume orch-xxxx" → "orch-xxxx"；
-     * 其他输入 → null（按普通任务文本走 run）。
-     */
     static String parseTeamResumeId(String taskInput) {
         if (taskInput == null) {
             return null;
@@ -972,6 +960,30 @@ public class Main {
             return trimmed.substring(7).trim();
         }
         return null;
+    }
+
+    static String parseStructuredResumeId(ExecutionReviewPolicy policy, String taskInput) {
+        return policy == ExecutionReviewPolicy.TEAM_REVIEW
+                ? parseTeamResumeId(taskInput)
+                : null;
+    }
+
+    private static ExecutionReviewPolicy reviewPolicy(CliCommandParser.ParsedCommand command) {
+        if (command == null) return null;
+        if (command.type() == CliCommandParser.CommandType.SWITCH_PLAN) {
+            return ExecutionReviewPolicy.PLAN_REVIEW;
+        }
+        if (command.type() == CliCommandParser.CommandType.SWITCH_TEAM) {
+            return ExecutionReviewPolicy.TEAM_REVIEW;
+        }
+        if (command.type() != CliCommandParser.CommandType.RUN_STRUCTURED) {
+            return null;
+        }
+        try {
+            return StructuredRunCommand.parse(command.payload()).policy();
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
     }
 
     private static AgentTurnInbox.Item pollPendingAgentPrompt(AgentTurnInbox inbox) {
@@ -1595,11 +1607,11 @@ public class Main {
                 new SlashCommandHint("/model kimi", "/model kimi", "切换到 Kimi（读取配置模型）"),
                 new SlashCommandHint("/now ", "/now <任务内容>", "中断活动轮次并优先执行；空闲时直接执行"),
                 new SlashCommandHint("/cancel", "/cancel", "取消当前活动轮次"),
-                new SlashCommandHint("/plan", "/plan", "下一条任务使用 Plan-and-Execute 模式"),
-                new SlashCommandHint("/plan ", "/plan <任务内容>", "直接用计划模式执行这条任务"),
-                new SlashCommandHint("/team", "/team", "下一条任务使用 Multi-Agent 协作模式"),
-                new SlashCommandHint("/team ", "/team <任务内容>", "直接用多 Agent 协作执行这条任务"),
-                new SlashCommandHint("/team resume", "/team resume [id]", "从 checkpoint 恢复中断的多 Agent 任务"),
+                new SlashCommandHint("/run --review=plan ", "/run --review=plan <任务>", "使用 plan review 结构化执行"),
+                new SlashCommandHint("/run --review=team ", "/run --review=team <任务>", "使用 team review 结构化执行"),
+                new SlashCommandHint("/run --review=team resume", "/run --review=team resume [id]", "恢复 team review checkpoint"),
+                new SlashCommandHint("/plan ", "/plan <任务>", "兼容别名：/run --review=plan"),
+                new SlashCommandHint("/team ", "/team <任务>", "兼容别名：/run --review=team"),
                 new SlashCommandHint("/hitl", "/hitl", "查看 HITL 状态"),
                 new SlashCommandHint("/hitl on", "/hitl on", "启用危险操作人工审批"),
                 new SlashCommandHint("/hitl off", "/hitl off", "关闭 HITL 审批"),

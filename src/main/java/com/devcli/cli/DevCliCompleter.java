@@ -58,7 +58,8 @@ final class DevCliCompleter implements Completer {
 
     private void completeSlashCommand(ParsedLine line, List<Candidate> candidates) {
         String input = line.line() == null ? "" : line.line();
-        if (completeModel(input, candidates)
+        if (completeStructuredRun(input, candidates)
+                || completeModel(input, candidates)
                 || completeMcp(input, candidates)
                 || completeSkill(input, candidates)
                 || completeTask(input, candidates)
@@ -89,6 +90,25 @@ final class DevCliCompleter implements Completer {
                     true
             ));
         }
+    }
+
+    private boolean completeStructuredRun(String input, List<Candidate> candidates) {
+        if (!input.equalsIgnoreCase("/run") && !input.regionMatches(true, 0, "/run ", 0, 5)) {
+            return false;
+        }
+        String payload = input.length() <= 5 ? "" : input.substring(5);
+        if (!payload.regionMatches(true, 0, "--review=team", 0, 13)) {
+            addMatching(candidates, "结构化执行", payload,
+                    option("--review=plan ", "单执行者 DAG，不启用独立 Reviewer"),
+                    option("--review=team ", "Worker、Pre-Review 与 Reviewer 协作"));
+            return true;
+        }
+        String teamPayload = payload.length() <= 14 ? "" : payload.substring(14);
+        if (teamPayload.isBlank() || "resume".startsWith(teamPayload.trim().toLowerCase())) {
+            addMatching(candidates, "结构化执行", teamPayload.trim(),
+                    option("resume ", "恢复最近或指定的 team review checkpoint"));
+        }
+        return true;
     }
 
     private boolean completeModel(String input, List<Candidate> candidates) {

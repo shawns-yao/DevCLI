@@ -46,13 +46,15 @@ mvn test -DskipTests=false                  # 全量回归
 
 ## 架构概览
 
-三条主执行路径，共享 ToolRegistry / MemoryManager / SnapshotService；ReAct、Plan task、SubAgent 的单轮控制流统一由 `AgentExecutionEngine` 承载，负责取消、预算、LLM 调用、工具消息协议和异常出口，各路径只实现差异钩子：
+产品只暴露 ReAct 与 StructuredExecution 两类执行语义，共享 ToolRegistry / MemoryManager / SnapshotService；ReAct、结构化 task、SubAgent 的单轮控制流统一由 `AgentExecutionEngine` 承载，负责取消、预算、LLM 调用、工具消息协议和异常出口：
 
 | 路径 | 入口 | 触发 |
 |------|------|------|
 | ReAct | `Agent.java` | 默认模式 |
-| Plan-and-Execute | `PlanExecuteAgent.java` | `/plan` |
-| Multi-Agent | `AgentOrchestrator.java` | `/team` |
+| Structured PLAN_REVIEW | `StructuredExecution.java` | `/run --review=plan` |
+| Structured TEAM_REVIEW | `StructuredExecution.java` | `/run --review=team` |
+
+`/plan` 与 `/team` 只作为一个版本的兼容别名。`PlanExecuteAgent` 和 `AgentOrchestrator` 暂时保留为内部策略适配器，分别承载单执行者 DAG 与 Worker/Pre-Review/Reviewer 的差异状态机，禁止调用方直接选择这两个实现。
 
 Multi-Agent 中 Planner 负责拆解 DAG，Worker 负责实现子任务，Reviewer 负责硬检查通过后的质量审查。
 

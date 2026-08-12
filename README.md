@@ -6,7 +6,7 @@
 
 DevCLI 是一个面向 Java 后端开发者的终端 Agent CLI。它可以在命令行中通过自然语言驱动代码阅读、生成、调试、重构、命令执行和仓库检索。
 
-ReAct 主循环、Plan-and-Execute、Multi-Agent 编排、MCP 协议客户端、上下文压缩、RAG 检索与终端渲染全部自行实现，不依赖 Spring AI、LangChain4j 等 Agent 框架。
+ReAct 主循环、StructuredExecution 结构化执行、MCP 协议客户端、上下文压缩、RAG 检索与终端渲染全部自行实现，不依赖 Spring AI、LangChain4j 等 Agent 框架。
 
 ## Project Snapshot
 
@@ -31,7 +31,7 @@ ReAct 主循环、Plan-and-Execute、Multi-Agent 编排、MCP 协议客户端、
 
 **已实现**
 
-- ReAct 主循环、Plan-and-Execute、Multi-Agent（Planner / Worker / Reviewer）三条执行路径，共用取消、预算、DAG 依赖与执行产物协议。
+- ReAct 与 StructuredExecution 两类产品执行语义；结构化执行通过 plan review 或 team review 选择审查强度，共用取消、预算、DAG 依赖与执行产物协议。
 - RAG（检索增强生成）：JavaParser 切分、SQLite 向量存储、关键词召回、代码关系图谱、RRF（倒数排名融合）与 CrossEncoderReranker（交叉编码器重排）。
 - 四层记忆（对话历史 / 工作记忆 / 长期记忆 / 强约束记忆）与两层上下文压缩（microcompact 落盘引用 + Map-Reduce 与增量九段摘要），含语义守卫、prompt-too-long 重试与失败熔断。
 - MCP（Model Context Protocol）：手写 JSON-RPC 2.0 客户端，支持 stdio 与 Streamable HTTP，动态注册工具与 resources。
@@ -61,11 +61,10 @@ ReAct 主循环、Plan-and-Execute、Multi-Agent 编排、MCP 协议客户端、
 
 ## Feature Overview
 
-DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、代码仓库、记忆、审批、终端交互”串成一个本地开发工作流。核心执行路径分三类：
+DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、代码仓库、记忆、审批、终端交互”串成一个本地开发工作流。产品执行语义分两类：
 
 - `ReAct`：默认模式。模型边思考边选择工具，工具结果会回灌到下一轮推理，适合阅读代码、定位问题、执行命令、做小范围修改。
-- `Plan-and-Execute`：通过 `/plan` 进入。Planner 先拆任务和依赖，再按 DAG（有向无环图）执行，适合多步骤改造、跨文件修复、需要先审计划的任务。任务状态与产物统一保存在 `ExecutionArtifact`；FILE_WRITE、COMMAND 和 VERIFICATION 在隔离工作区执行，任务成功后才通过 PatchSet 回写主项目。失败后 replan 是无工具的 Planner 调用，只用结构化产物事实生成后续计划，避免重复规划已落盘成果。
-- `Multi-Agent`：通过 `/team` 进入。Planner 负责拆解和验收标准，Worker 在隔离工作区执行具体子任务，Pre-Review 先做硬验证，Reviewer 读取同一隔离产物做质量审查；只有审查通过且 PatchSet 无冲突时才修改主项目。
+- `StructuredExecution`：通过 `/run --review=plan|team` 进入。plan review 使用单执行者 DAG；team review 使用 Planner、Worker、Pre-Review 和 Reviewer。两种策略共用执行引擎、执行图、执行产物、隔离工作区和恢复协议；`/plan` 与 `/team` 暂时作为兼容别名。
 
 围绕这三条路径，DevCLI 提供以下能力：
 
