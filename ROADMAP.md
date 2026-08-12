@@ -549,9 +549,9 @@
 - OpenAI Assistants API 兼容层设计
 
 **当前 MVP 已落地**：
-- `DurableTaskManager`：SQLite 后台任务队列，默认 `~/.devcli/tasks/tasks.db`
+- `DurableTaskManager`：统一 RunStore 的后台提交器与 Worker，默认复用 `~/.devcli/runtime/runtime.db`
 - `/task`、`/task add`、`/task cancel`、`/task log` CLI 闭环
-- 进程启动时将残留 `running` 任务恢复为 `enqueued`
+- 进程启动时只对 lease 已过期的 `running` Run 进入 `recovery_required`，不无条件重试副作用
 - Worker Pool 默认 2，可用 `DEVCLI_TASK_WORKERS` / `-Ddevcli.task.workers` 覆盖
 - `RuntimeApiServer`：基于 JDK `HttpServer`，仅监听 `127.0.0.1`
 - `RuntimeThreadStore`：SQLite 保存 thread 与 event 时间线

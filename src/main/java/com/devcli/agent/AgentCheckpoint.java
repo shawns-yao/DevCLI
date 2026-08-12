@@ -5,6 +5,9 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.devcli.plan.ExecutionArtifact;
 import com.devcli.plan.ExecutionGraph;
 import com.devcli.workspace.PatchSet;
+import com.devcli.runtime.CancellationContext;
+import com.devcli.runtime.RunContext;
+import com.devcli.runtime.store.SqliteRunStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -612,10 +615,26 @@ public class AgentCheckpoint {
         } catch (IOException atomicUnsupported) {
             Files.move(tempFile, checkpointFile, StandardCopyOption.REPLACE_EXISTING);
         }
+        linkRunRecoveryReferences();
 
         log.info("Checkpoint 已保存: {} (已完成: {}/{} 步)",
                 orchestrationId, completedSteps.size(), planSteps.isEmpty()
                         ? completedSteps.size() + failedSteps : planSteps.size());
+    }
+
+    private void linkRunRecoveryReferences() {
+        RunContext context = CancellationContext.currentRun();
+        if (context == null || orchestrationId == null || orchestrationId.isBlank()) return;
+        try (SqliteRunStore store = new SqliteRunStore(SqliteRunStore.defaultDbPath())) {
+            var current = store.find(context.runId()).orElse(null);
+            if (current != null) {
+                store.saveRecoveryReferences(current.id(), current.version(),
+                        "agent-checkpoint:" + orchestrationId,
+                        "patch-journal:" + orchestrationId, current.snapshotRef());
+            }
+        } catch (Exception error) {
+            log.warn("关联 RunStore 恢复引用失败: {}", error.getMessage());
+        }
     }
 
     /**
@@ -680,8 +699,22 @@ public class AgentCheckpoint {
                 log.info("Checkpoint 已删除: {}", orchestrationId);
             }
             deleteTree(patchJournalRoot());
+            clearRunRecoveryReferences();
         } catch (Exception e) {
             log.warn("删除 Checkpoint 失败: {}", e.getMessage());
+        }
+    }
+
+    private void clearRunRecoveryReferences() {
+        RunContext context = CancellationContext.currentRun();
+        if (context == null) return;
+        try (SqliteRunStore store = new SqliteRunStore(SqliteRunStore.defaultDbPath())) {
+            var current = store.find(context.runId()).orElse(null);
+            if (current != null) {
+                store.clearRecoveryReferences(current.id(), current.version(), true, true, false);
+            }
+        } catch (Exception error) {
+            log.warn("清理 RunStore 恢复引用失败: {}", error.getMessage());
         }
     }
 

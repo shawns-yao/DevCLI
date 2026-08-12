@@ -23,7 +23,7 @@ For the primary entry point, see `/AGENTS.md`.
 | RAG 索引 | `~/.devcli/rag/codebase.db` | `-Ddevcli.rag.dir` |
 | 审计日志 | `~/.devcli/audit/audit-YYYY-MM-DD.jsonl` | `DEVCLI_AUDIT_DIR` / `-Ddevcli.audit.dir` |
 | Side-Git 快照 | `~/.devcli/snapshots/<project_hash>/<worktree_hash>/.git` | `DEVCLI_SNAPSHOT_DIR` / `-Ddevcli.snapshot.dir` |
-| 后台任务 | `~/.devcli/tasks/tasks.db` | — |
+| Runtime 与后台 Run | `~/.devcli/runtime/runtime.db` | `DEVCLI_RUNTIME_DIR` / `-Ddevcli.runtime.dir` |
 
 ### Snapshot Config
 
@@ -236,7 +236,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 ### Async Tasks + Runtime API (Phase 20)
 
-- DurableTaskManager(SQLite) / CLI: /task, /task list, /task add, /task cancel, /task log
+- DurableTaskManager(RunStore 后台适配器) / CLI: /task, /task list, /task add, /task cancel, /task log
 - Runtime API: `serve --http --port 8080`，仅 127.0.0.1，需 API Key
 - 端点：POST /v1/threads / POST /v1/threads/{id}/turns / GET /v1/threads/{id}/events
 - Runtime API 的 turn 通过 `KeyedSerialExecutor` 调度：同 key 的通道创建、入队和空通道删除使用原子 compute，杜绝旧通道与新通道并存；底层调度拒绝会通知全部等待者，单个 turn 异常不会阻塞同通道后续任务

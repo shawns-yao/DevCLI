@@ -498,12 +498,12 @@ Agent、Plan、Team 和工具不得直接调用 UI 方法或写 stdout；它们�
 
 **步骤：**
 
-- [ ] 先建立 schema 迁移测试，保证旧 runtime.db 和 tasks.db 数据可以导入或只读迁移。
-- [ ] 引入 Run 与 Attempt，所有状态变更使用版本比较。
-- [ ] 将后台任务改为 Run 提交来源，删除独立终态写入。
-- [ ] Checkpoint 和 Side-Git 只向 RunStore 写引用与摘要。
-- [ ] 增加启动对账：lease、checkpoint、Patch Journal、Side-Git 引用。
-- [ ] 完成阶段功能后统一运行 runtime、task、checkpoint、snapshot 限定测试。
+- [x] 先建立 schema 迁移测试，保证旧 runtime.db 和 tasks.db 数据可以导入或只读迁移。
+- [x] 引入 Run 与 Attempt，所有状态变更使用版本比较。
+- [x] 将后台任务改为 Run 提交来源，删除独立终态写入。
+- [x] Checkpoint 和 Side-Git 只向 RunStore 写引用与摘要。
+- [x] 增加启动对账：lease、checkpoint、Patch Journal、Side-Git 引用。
+- [x] 完成阶段功能后统一运行 runtime、task、checkpoint、snapshot 限定测试。
 
 ### 阶段 3：统一重试与恢复语义
 

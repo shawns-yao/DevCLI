@@ -3,6 +3,7 @@ package com.devcli.runtime.task;
 public enum TaskStatus {
     ENQUEUED("enqueued"),
     RUNNING("running"),
+    RECOVERY_REQUIRED("recovery_required"),
     COMPLETED("completed"),
     FAILED("failed"),
     CANCELED("canceled");

@@ -1,6 +1,9 @@
 package com.devcli.runtime.api;
 
 import com.devcli.runtime.event.RunEvent;
+import com.devcli.runtime.RunCoordinator;
+import com.devcli.runtime.store.RunStatus;
+import com.devcli.runtime.store.SubmissionSource;
 import com.devcli.agent.AgentTurnInbox;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -34,12 +37,14 @@ public class RuntimeApiServer implements AutoCloseable {
     private final ExecutorService httpExecutor;
     private final ThreadPoolExecutor turnExecutor;
     private final KeyedSerialExecutor serialTurnExecutor;
+    private final RunCoordinator runCoordinator;
 
     public RuntimeApiServer(RuntimeThreadStore store, TurnRunner runner, int port, String apiKey) throws IOException {
         if (apiKey == null || apiKey.isBlank()) {
             throw new IllegalArgumentException("Runtime API 需要配置 DEVCLI_RUNTIME_API_KEY 或 -Ddevcli.runtime.api.key");
         }
         this.store = store;
+        this.runCoordinator = new RunCoordinator(store.runStore());
         this.runner = runner;
         this.apiKey = apiKey;
         this.server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
@@ -147,12 +152,18 @@ public class RuntimeApiServer implements AutoCloseable {
             return;
         }
         String turnId = "turn_" + Long.toHexString(System.nanoTime());
+        String runId = "run_" + turnId.substring("turn_".length());
+        java.nio.file.Path runProjectPath = runner instanceof RuntimeSessionTurnRunner sessionRunner
+                ? sessionRunner.projectPath()
+                : java.nio.file.Path.of(System.getProperty("user.dir"));
+        runCoordinator.ensureSubmitted(runId, SubmissionSource.RUNTIME_API,
+                runProjectPath, input, threadId, threadId + ":" + turnId);
         try {
             serialTurnExecutor.execute(threadId,
-                    () -> runTurn(threadId, turnId, input),
-                    fatal -> new RuntimeEventPublisher(store, threadId, turnId)
-                            .emit(new RunEvent.TurnFailed("fatal_runtime_error")));
+                    () -> runTurn(threadId, turnId, runId, input),
+                    fatal -> failRejectedRun(threadId, turnId, runId, "fatal_runtime_error"));
         } catch (RejectedExecutionException e) {
+            runCoordinator.cancel(runId, "runtime_busy", null);
             new RuntimeEventPublisher(store, threadId, turnId)
                     .emit(new RunEvent.TurnRejected("runtime_busy"));
             writeJson(exchange, 429, "{\"error\":\"runtime_busy\"}");
@@ -218,9 +229,15 @@ public class RuntimeApiServer implements AutoCloseable {
         writeJson(exchange, 202, "{\"cancelled\":" + cancelled + "}");
     }
 
-    private void runTurn(String threadId, String turnId, String input) {
+    private void runTurn(String threadId, String turnId, String runId, String input) {
         RuntimeEventPublisher events = new RuntimeEventPublisher(store, threadId, turnId);
-        try {
+        RunCoordinator.ClaimedRunContext claimed = runCoordinator
+                .claim(runId, "runtime-api-" + threadId).orElse(null);
+        if (claimed == null) {
+            events.emit(new RunEvent.TurnFailed("run_claim_failed"));
+            return;
+        }
+        try (claimed) {
             events.emit(new RunEvent.TurnStarted(input));
             TurnRunner.TurnResult runResult = runner.run(threadId, input, events);
             if (runResult == null) {
@@ -230,16 +247,39 @@ public class RuntimeApiServer implements AutoCloseable {
                 events.emit(new RunEvent.MessageDelta(runResult.output()));
             }
             long completedEventId = events.publish(new RunEvent.TurnCompleted("completed"));
-            persistCheckpoint(events, threadId, completedEventId, runResult.checkpoint());
+            runCoordinator.complete(claimed, RunStatus.COMPLETED, runResult.output(), "");
+            boolean checkpointPersisted = persistCheckpoint(
+                    events, threadId, completedEventId, runResult.checkpoint());
+            if (checkpointPersisted) {
+                store.runStore().linkCheckpointByThread(
+                        threadId, "runtime-checkpoint:" + threadId + ":" + completedEventId);
+            }
         } catch (Exception e) {
-            events.emit(new RunEvent.TurnFailed(e.getMessage()));
+            try {
+                events.emit(new RunEvent.TurnFailed(e.getMessage()));
+            } catch (RuntimeException ignored) {
+                // Server 关闭时持久化连接可能已经释放，不再向已关闭存储追加事件。
+            }
+            try {
+                com.devcli.runtime.store.RunRecord latest = store.runStore().find(runId).orElse(null);
+                if (latest != null && latest.status() == RunStatus.RUNNING) {
+                    runCoordinator.complete(claimed, RunStatus.FAILED, "", e.getMessage());
+                }
+            } catch (RuntimeException ignored) {
+                // 同上，关闭路径不继续访问存储。
+            }
         }
     }
 
-    private void persistCheckpoint(RuntimeEventPublisher events, String threadId,
-                                   long completedEventId,
-                                   TurnRunner.CheckpointCandidate checkpoint) {
-        if (checkpoint == null) return;
+    private void failRejectedRun(String threadId, String turnId, String runId, String reason) {
+        runCoordinator.cancel(runId, reason, null);
+        new RuntimeEventPublisher(store, threadId, turnId).emit(new RunEvent.TurnFailed(reason));
+    }
+
+    private boolean persistCheckpoint(RuntimeEventPublisher events, String threadId,
+                                      long completedEventId,
+                                      TurnRunner.CheckpointCandidate checkpoint) {
+        if (checkpoint == null) return false;
         try {
             store.saveCheckpoint(threadId, completedEventId, checkpoint);
             events.emit(new RunEvent.CheckpointCreated(
@@ -247,8 +287,10 @@ public class RuntimeApiServer implements AutoCloseable {
                     checkpoint.metadata().preTokens(),
                     checkpoint.metadata().postTokens(),
                     checkpoint.metadata().semanticGuardStatus()));
+            return true;
         } catch (Exception e) {
             events.emit(new RunEvent.CheckpointFailed(completedEventId, e.getMessage()));
+            return false;
         }
     }
 
@@ -398,6 +440,11 @@ public class RuntimeApiServer implements AutoCloseable {
     public void close() {
         server.stop(0);
         turnExecutor.shutdownNow();
+        try {
+            turnExecutor.awaitTermination(5, TimeUnit.SECONDS);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+        }
         httpExecutor.shutdownNow();
     }
 }

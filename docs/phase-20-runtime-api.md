@@ -6,8 +6,8 @@
 
 ### 后台任务
 
-- `DurableTaskManager`：SQLite 持久化任务队列
-- 默认数据库：`~/.devcli/tasks/tasks.db`
+- `DurableTaskManager`：统一 RunStore 的后台提交器与 Worker，不再拥有独立任务状态机
+- 默认数据库：`~/.devcli/runtime/runtime.db`；首次启动会从旧 `~/.devcli/tasks/tasks.db` 幂等迁移
 - 生命周期：
   - `enqueued`
   - `running`
@@ -15,7 +15,7 @@
   - `failed`
   - `canceled`
 - Worker Pool：默认 2 个后台 worker，可用 `DEVCLI_TASK_WORKERS` 或 `-Ddevcli.task.workers` 覆盖
-- 进程启动时把上次残留的 `running` 任务恢复为 `enqueued`
+- 进程启动时只对 lease 已过期的 `running` Run 标记 `recovery_required`；新 Worker 认领后创建下一次 Attempt，禁止无条件重试副作用
 - CLI 命令：
   - `/task` 或 `/task list [N]`
   - `/task add <任务内容>`

@@ -29,6 +29,27 @@ public final class BudgetLedger {
         this(policy, pricingCatalog, System.currentTimeMillis());
     }
 
+    public BudgetLedger(RunBudgetPolicy policy, PricingCatalog pricingCatalog,
+                        RunBudget.Snapshot restored) {
+        this(policy, pricingCatalog,
+                System.currentTimeMillis() - Math.max(0,
+                        restored == null ? 0 : restored.elapsedMillis()));
+        if (restored == null) {
+            return;
+        }
+        this.inputTokens = Math.max(0, restored.inputTokens());
+        this.outputTokens = Math.max(0, restored.outputTokens());
+        this.cachedInputTokens = Math.max(0, restored.cachedInputTokens());
+        this.llmCalls = Math.max(0, restored.llmCalls());
+        this.toolCalls = Math.max(0, restored.toolCalls());
+        this.estimatedCost = restored.estimatedCost() == null
+                ? BigDecimal.ZERO : restored.estimatedCost().max(BigDecimal.ZERO);
+        this.currency = restored.currency() == null || restored.currency().isBlank()
+                ? "unknown" : restored.currency();
+        this.unknownPricingCount = Math.max(0, restored.unknownPricingCount());
+        this.exitReason = restored.exitReason() == null ? "" : restored.exitReason();
+    }
+
     BudgetLedger(RunBudgetPolicy policy, PricingCatalog pricingCatalog, long startedAtMillis) {
         this.policy = Objects.requireNonNull(policy, "policy");
         this.pricingCatalog = pricingCatalog == null ? PricingCatalog.empty() : pricingCatalog;

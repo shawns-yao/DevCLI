@@ -7,6 +7,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import com.devcli.runtime.RunContext;
 
 public class SnapshotService implements AutoCloseable {
     private final SideGitManager manager;
@@ -37,6 +38,18 @@ public class SnapshotService implements AutoCloseable {
         }
     }
 
+    public <T> T runTurn(String mode, String input, RunContext runContext,
+                         ThrowingSupplier<T> supplier) throws Exception {
+        String turnId = turnId(mode);
+        String summary = summarize(mode, input);
+        snapshotBeforeTurn(turnId, summary);
+        try {
+            return supplier.get();
+        } finally {
+            snapshotAfterTurnAsync(turnId, summary, runContext);
+        }
+    }
+
     public void snapshotBeforeTurn(String turnId, String summary) {
         if (!manager.config().enabled()) {
             return;
@@ -49,14 +62,26 @@ public class SnapshotService implements AutoCloseable {
     }
 
     public void snapshotAfterTurnAsync(String turnId, String summary) {
+        snapshotAfterTurnAsync(turnId, summary, null);
+    }
+
+    private void snapshotAfterTurnAsync(String turnId, String summary, RunContext runContext) {
         if (!manager.config().enabled()) {
             return;
         }
         lastAsyncTask = executor.submit(() -> {
+            RunContext previous = null;
             try {
+                if (runContext != null) {
+                    previous = com.devcli.runtime.CancellationContext.bind(runContext);
+                }
                 manager.postTurnSnapshot(turnId, summary);
             } catch (Exception e) {
                 System.err.println("⚠️ post-turn 快照失败: " + e.getMessage());
+            } finally {
+                if (runContext != null) {
+                    com.devcli.runtime.CancellationContext.restore(previous);
+                }
             }
         });
     }

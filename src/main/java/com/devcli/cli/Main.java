@@ -42,6 +42,10 @@ import com.devcli.runtime.CancellationContext;
 import com.devcli.runtime.CancellationToken;
 import com.devcli.runtime.AgentSessionRuntime;
 import com.devcli.runtime.RunContext;
+import com.devcli.runtime.RunCoordinator;
+import com.devcli.runtime.store.RunStatus;
+import com.devcli.runtime.store.SqliteRunStore;
+import com.devcli.runtime.store.SubmissionSource;
 import com.devcli.runtime.task.DurableTaskManager;
 import com.devcli.runtime.task.TaskCommandFormatter;
 import com.devcli.snapshot.RestoreResult;
@@ -867,7 +871,9 @@ public class Main {
                         Path.of(reactAgent.getToolRegistry().getProjectPath()),
                         turnInbox,
                         acceptActiveTurnInput,
-                        () -> snapshotService.runTurn(snapshotMode, taskInput, runTask::call));
+                        taskInput,
+                        () -> snapshotService.runTurn(snapshotMode, taskInput,
+                                CancellationContext.currentRun(), runTask::call));
                 String response = turnResult.response();
                 pendingDraft = turnResult.draft();
                 if (!"react".equals(snapshotMode)) {
@@ -971,7 +977,35 @@ public class Main {
                                                       AgentTurnInbox inbox,
                                                       boolean acceptActiveTurnInput,
                                                       Callable<String> task) {
-        RunContext runContext = CancellationContext.startRunContext(projectPath);
+        return runWithCancelSupport(terminal, lineReader, renderer, out, projectPath,
+                inbox, acceptActiveTurnInput, "interactive-turn", task);
+    }
+
+    private static TurnRunResult runWithCancelSupport(Terminal terminal,
+                                                      LineReader lineReader,
+                                                      Renderer renderer,
+                                                      PrintStream out,
+                                                      Path projectPath,
+                                                      AgentTurnInbox inbox,
+                                                      boolean acceptActiveTurnInput,
+                                                      String runPrompt,
+                                                      Callable<String> task) {
+        SqliteRunStore localRunStore;
+        RunCoordinator localRunCoordinator;
+        RunCoordinator.ClaimedRunContext claimedRun;
+        try {
+            localRunStore = new SqliteRunStore(SqliteRunStore.defaultDbPath());
+            localRunCoordinator = new RunCoordinator(localRunStore);
+            String idempotencyKey = "cli:" + java.util.UUID.randomUUID();
+            var submitted = localRunCoordinator.submit(
+                    SubmissionSource.CLI, projectPath,
+                    runPrompt == null || runPrompt.isBlank() ? "interactive-turn" : runPrompt,
+                    "", idempotencyKey);
+            claimedRun = localRunCoordinator.claim(submitted.id(), "cli-interactive").orElseThrow();
+        } catch (Exception error) {
+            throw new IllegalStateException("初始化本地 Run 失败: " + error.getMessage(), error);
+        }
+        RunContext runContext = claimedRun.context();
         CancellationToken token = runContext.cancellationToken();
         ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
             Thread thread = new Thread(r, "devcli-agent-runner");
@@ -1081,7 +1115,25 @@ public class Main {
                 } catch (Exception ignored) {
                 }
             }
-            runContext.close();
+            var latest = localRunStore.find(claimedRun.run().id()).orElse(claimedRun.run());
+            if (latest.status() == RunStatus.RUNNING) {
+                if (runContext.isCancelled()) {
+                    localRunCoordinator.complete(
+                            claimedRun, RunStatus.CANCELED, "", "user_cancelled");
+                } else if (future.isCancelled()) {
+                    localRunCoordinator.complete(
+                            claimedRun, RunStatus.CANCELED, "", "execution_cancelled");
+                } else {
+                    try {
+                        String output = future.isDone() ? future.get() : "";
+                        localRunCoordinator.complete(claimedRun, RunStatus.COMPLETED, output, "");
+                    } catch (Exception error) {
+                        localRunCoordinator.complete(claimedRun, RunStatus.FAILED, "", error.getMessage());
+                    }
+                }
+            }
+            claimedRun.close();
+            localRunStore.close();
             executor.shutdownNow();
         }
     }

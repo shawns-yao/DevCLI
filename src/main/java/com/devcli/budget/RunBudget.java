@@ -28,6 +28,18 @@ public final class RunBudget {
         return new RunBudget(runId, policy, pricingCatalog);
     }
 
+    public static RunBudget restore(String runId, RunBudgetPolicy policy,
+                                    PricingCatalog pricingCatalog, Snapshot snapshot) {
+        return new RunBudget(runId, policy,
+                new BudgetLedger(policy, pricingCatalog, snapshot));
+    }
+
+    private RunBudget(String runId, RunBudgetPolicy policy, BudgetLedger ledger) {
+        this.runId = requireText(runId, "runId");
+        this.policy = Objects.requireNonNull(policy, "policy");
+        this.ledger = Objects.requireNonNull(ledger, "ledger");
+    }
+
     public Admission tryStartLlmRequest(String phase, String agent, String attempt) {
         return tryStartLlmRequest(phase, agent, attempt, 0);
     }

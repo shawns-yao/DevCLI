@@ -35,6 +35,10 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
         this.checkpointTriggerTokens = Math.max(0, checkpointTriggerTokens);
     }
 
+    Path projectPath() {
+        return projectPath;
+    }
+
     @Override
     public TurnResult run(String threadId, String input, RunEventSink eventSink) {
         AgentSessionRuntime session = session(threadId);

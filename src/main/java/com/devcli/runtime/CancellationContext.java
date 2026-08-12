@@ -20,6 +20,13 @@ public final class CancellationContext {
         return context;
     }
 
+    public static RunContext startRunContext(String runId, Path projectPath,
+                                             RunContext.RunBudgetState restoredBudgetState) {
+        RunContext context = new RunContext(runId, projectPath, LOCAL.get(), restoredBudgetState);
+        LOCAL.set(context);
+        return context;
+    }
+
     /**
      * 兼容现有调用方。新代码应持有并关闭 {@link RunContext}。
      */

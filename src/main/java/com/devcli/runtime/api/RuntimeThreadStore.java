@@ -4,6 +4,7 @@ import com.devcli.agent.AgentTurnInbox;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.CompactBoundaryMetadata;
 import com.devcli.runtime.event.RunEvent;
+import com.devcli.runtime.store.SqliteRunStore;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -26,6 +27,7 @@ public class RuntimeThreadStore implements AutoCloseable {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final Connection connection;
+    private final SqliteRunStore runStore;
 
     /** 一次完整 turn 的输入/输出对，供后续 turn 重放历史上下文。 */
     public record TurnRecord(String input, String output, long completedEventId) {
@@ -83,8 +85,10 @@ public class RuntimeThreadStore implements AutoCloseable {
         } catch (Exception e) {
             throw new SQLException("无法创建 Runtime API 数据库目录: " + e.getMessage(), e);
         }
-        this.connection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+        Path normalizedDbPath = dbPath.toAbsolutePath().normalize();
+        this.connection = DriverManager.getConnection("jdbc:sqlite:" + normalizedDbPath);
         initTables();
+        this.runStore = new SqliteRunStore(normalizedDbPath);
     }
 
     public static Path defaultDbPath() {
@@ -95,7 +99,12 @@ public class RuntimeThreadStore implements AutoCloseable {
         if (configured == null || configured.isBlank()) {
             configured = Path.of(System.getProperty("user.home"), ".devcli", "runtime").toString();
         }
-        return Path.of(configured).resolve("runtime.db");
+        return SqliteRunStore.defaultDbPath();
+    }
+
+    /** 兼容门面共享的统一 RunStore，不再为 Runtime API 建立第二套运行状态库。 */
+    public SqliteRunStore runStore() {
+        return runStore;
     }
 
     public synchronized String createThread() {
@@ -613,6 +622,7 @@ public class RuntimeThreadStore implements AutoCloseable {
 
     @Override
     public synchronized void close() {
+        runStore.close();
         try {
             connection.close();
         } catch (SQLException ignored) {

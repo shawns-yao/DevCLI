@@ -29,10 +29,18 @@ public final class RunContext implements AutoCloseable {
     private final AtomicBoolean closed = new AtomicBoolean(false);
 
     RunContext(Path projectPath, RunContext previous) {
-        this.runId = "run_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        this("run_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12),
+                projectPath, previous, null);
+    }
+
+    RunContext(String runId, Path projectPath, RunContext previous,
+               RunBudgetState restoredBudgetState) {
+        this.runId = requireRunId(runId);
         this.projectPath = Objects.requireNonNull(projectPath, "projectPath").toAbsolutePath().normalize();
         this.cancellationToken = new CancellationToken();
-        this.runBudget = RunBudget.create(runId, RunBudgetPolicy.fromConfiguration(), PricingCatalog.empty());
+        this.runBudget = restoredBudgetState == null
+                ? RunBudget.create(this.runId, RunBudgetPolicy.fromConfiguration(), PricingCatalog.empty())
+                : restoreBudget(this.runId, restoredBudgetState);
         this.previous = previous;
     }
 
@@ -62,7 +70,7 @@ public final class RunContext implements AutoCloseable {
                 Instant.now());
     }
 
-    /** RunStore 尚未接入前的稳定持久化载荷；恢复时不得清零已消耗预算。 */
+    /** RunStore 使用的稳定持久化载荷；恢复时不得清零已消耗预算。 */
     public record RunBudgetState(int schemaVersion, String runId,
                                  RunBudgetPolicy policy, RunBudget.Snapshot usage,
                                  Instant updatedAt) {
@@ -79,6 +87,20 @@ public final class RunContext implements AutoCloseable {
                     : usage;
             updatedAt = updatedAt == null ? Instant.now() : updatedAt;
         }
+    }
+
+    private static RunBudget restoreBudget(String runId, RunBudgetState state) {
+        if (!state.runId().isBlank() && !runId.equals(state.runId())) {
+            throw new IllegalArgumentException("预算状态不属于当前 run");
+        }
+        return RunBudget.restore(runId, state.policy(), PricingCatalog.empty(), state.usage());
+    }
+
+    private static String requireRunId(String value) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException("runId is required");
+        }
+        return value.trim();
     }
 
     public boolean isCancelled() {

@@ -96,6 +96,7 @@ public class SideGitManager {
             snapshot = toSnapshot(commit);
         }
         maybeCollectGarbage(pruned);
+        snapshot.linkToCurrentRun();
         return snapshot;
     }
 

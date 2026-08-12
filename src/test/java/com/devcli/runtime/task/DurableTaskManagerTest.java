@@ -34,15 +34,18 @@ class DurableTaskManagerTest {
     }
 
     @Test
-    void recoversRunningTasksAsEnqueued(@TempDir Path tempDir) throws Exception {
+    void doesNotRecoverRunningTaskBeforeLeaseExpires(@TempDir Path tempDir) throws Exception {
         Path db = tempDir.resolve("tasks.db");
         try (DurableTaskManager manager = new DurableTaskManager(db, prompt -> "never", 1)) {
             DurableTask task = manager.enqueue("resume me");
-            markRunning(manager, task.id());
+            var claimed = manager.coordinator().claim(task.id(), "test-worker").orElseThrow();
+            assertEquals(TaskStatus.RUNNING, manager.find(task.id()).orElseThrow().status());
+            claimed.close();
         }
 
         try (DurableTaskManager recovered = new DurableTaskManager(db, prompt -> "ok", 1)) {
-            assertEquals(TaskStatus.ENQUEUED, recovered.find(recovered.list(1).get(0).id()).orElseThrow().status());
+            assertEquals(TaskStatus.RUNNING,
+                    recovered.find(recovered.list(1).get(0).id()).orElseThrow().status());
         }
     }
 
@@ -131,14 +134,4 @@ class DurableTaskManagerTest {
         fail("task did not reach status " + status);
     }
 
-    private static void markRunning(DurableTaskManager manager, String id) throws Exception {
-        var field = DurableTaskManager.class.getDeclaredField("connection");
-        field.setAccessible(true);
-        java.sql.Connection connection = (java.sql.Connection) field.get(manager);
-        try (java.sql.PreparedStatement ps = connection.prepareStatement(
-                "UPDATE runtime_tasks SET status = 'running' WHERE id = ?")) {
-            ps.setString(1, id);
-            ps.executeUpdate();
-        }
-    }
 }
