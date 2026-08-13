@@ -25,12 +25,20 @@ public final class ToolInvocationFingerprint {
 
     public static String of(String toolName, String argumentsJson) {
         String normalizedName = toolName == null ? "" : toolName.trim().toLowerCase(Locale.ROOT);
+        return normalizedName + "|" + canonicalArguments(argumentsJson);
+    }
+
+    /**
+     * 只返回参数的规范化 JSON 文本（deep key-sort + 文本归一化），不拼接工具名。
+     * 供重复调用提醒的参数预览等场景复用，避免两处 canonicalization 语义漂移。
+     */
+    public static String canonicalArguments(String argumentsJson) {
         try {
             JsonNode root = JSON.readTree(argumentsJson == null || argumentsJson.isBlank() ? "{}" : argumentsJson);
-            return normalizedName + "|" + JSON.writeValueAsString(canonicalize(root, ""));
+            return JSON.writeValueAsString(canonicalize(root, ""));
         } catch (Exception ignored) {
             String fallback = argumentsJson == null ? "{}" : argumentsJson.replaceAll("\\s+", " ").trim();
-            return normalizedName + "|" + fallback;
+            return fallback;
         }
     }
 

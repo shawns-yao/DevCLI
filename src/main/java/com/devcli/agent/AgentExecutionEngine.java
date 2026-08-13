@@ -12,7 +12,9 @@ import com.devcli.runtime.event.RunEventStreamListener;
 import com.devcli.tool.ToolRegistry;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -108,6 +110,7 @@ final class AgentExecutionEngine<R> {
     private final AgentBudget budget;
     private final HookLifecycle hookLifecycle;
     private final SamplingRequestCoordinator samplingRequests;
+    private final RepeatToolAdvisor repeatToolAdvisor;
     private final String engineId = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
 
     AgentExecutionEngine(LlmClient llmClient, AgentBudget budget) {
@@ -124,6 +127,7 @@ final class AgentExecutionEngine<R> {
         this.budget = Objects.requireNonNull(budget, "budget");
         this.hookLifecycle = hookLifecycle;
         this.samplingRequests = Objects.requireNonNull(samplingRequests, "samplingRequests");
+        this.repeatToolAdvisor = RepeatToolAdvisor.fromSystemProperties();
     }
 
     R run(Delegate<R> delegate) {
@@ -248,6 +252,7 @@ final class AgentExecutionEngine<R> {
                     }
                     deliverQueuedMessages(delegate, AgentTurnInbox.Channel.STEERING,
                             delegate.drainSteeringMessages());
+                    injectRepeatToolReminders(delegate, eventSink, toolResults);
                     continue;
                 }
 
@@ -281,6 +286,50 @@ final class AgentExecutionEngine<R> {
         RunContext runContext = CancellationContext.currentRun();
         String runId = runContext == null ? "local" : runContext.runId();
         return runId + ":engine_" + engineId + ":iteration_" + iteration;
+    }
+
+    /**
+     * 工具结果返回后观察连续重复调用：达到阈值时注入 advisory 提醒（不阻断、不改写），
+     * 并暂缓停滞检测退出，把自我纠正机会留给提醒；超过最大阈值后停止暂缓，由
+     * {@link AgentBudget} 的停滞检测作为最终兜底。
+     */
+    private void injectRepeatToolReminders(Delegate<R> delegate, RunEventSink eventSink,
+                                           List<ToolRegistry.ToolExecutionResult> toolResults) {
+        if (toolResults == null || toolResults.isEmpty()) {
+            return;
+        }
+        List<RepeatToolAdvisor.Reminder> reminders = new ArrayList<>();
+        for (ToolRegistry.ToolExecutionResult toolResult : toolResults) {
+            RepeatToolAdvisor.Reminder reminder = repeatToolAdvisor.observeAndMaybeRemind(toolResult);
+            if (reminder != null) {
+                reminders.add(reminder);
+            }
+        }
+        if (!reminders.isEmpty()) {
+            String text = joinReminders(reminders);
+            delegate.history().add(LlmClient.Message.user(text));
+            RepeatToolAdvisor.Reminder first = reminders.get(0);
+            eventSink.emit(new RunEvent.CustomMessage(
+                    "repeat_tool_reminder",
+                    text,
+                    Map.of("tool", first.toolName(),
+                            "consecutive", String.valueOf(first.consecutiveCount()),
+                            "gentle", String.valueOf(first.gentle()))));
+        }
+        if (repeatToolAdvisor.suspendsStagnationExit()) {
+            budget.resetStagnation();
+        }
+    }
+
+    private static String joinReminders(List<RepeatToolAdvisor.Reminder> reminders) {
+        StringBuilder sb = new StringBuilder();
+        for (RepeatToolAdvisor.Reminder reminder : reminders) {
+            if (!sb.isEmpty()) {
+                sb.append("\n\n");
+            }
+            sb.append(reminder.text());
+        }
+        return sb.toString();
     }
 
     private boolean deliverQueuedMessages(Delegate<R> delegate,

@@ -172,6 +172,15 @@ public class AgentBudget {
         repeatedToolErrorSignature = "";
     }
 
+    /**
+     * 清除停滞标志但保留签名窗口：advisory 提醒（{@link RepeatToolAdvisor}）已注入时调用，
+     * 给模型一次自我纠正机会；若下一轮仍重复相同调用，{@code recordToolCalls} 会重新置位，
+     * 由调用方在提醒阈值用尽后停止调用本方法，让停滞检测作为最终兜底熔断。
+     */
+    public void resetStagnation() {
+        stagnant = false;
+    }
+
     public ExitReason check() {
         if (stagnant) {
             return ExitReason.STAGNATION_DETECTED;
