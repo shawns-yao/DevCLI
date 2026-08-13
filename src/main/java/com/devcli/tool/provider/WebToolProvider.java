@@ -15,6 +15,8 @@ import java.util.List;
 
 public final class WebToolProvider implements ToolProvider {
     private static final int DEFAULT_FETCH_MAX_CHARS = 8_000;
+    /** 网络工具外层强制超时（秒），与内部 OkHttp callTimeout 对齐，作为卡死兜底。 */
+    private static final long WEB_TOOL_TIMEOUT_SECONDS = 30;
 
     private SearchProvider searchProvider;
     private WebFetcher webFetcher;
@@ -31,7 +33,8 @@ public final class WebToolProvider implements ToolProvider {
                         new ToolParameter("query", "string", "搜索关键词，例如'Java 21 新特性'、'Spring Boot 3.3 release notes'", true),
                         new ToolParameter("top_k", "integer", "返回结果数量（默认5）", false)
                 ),
-                args -> webSearchOutput(args.get("query"), parseInt(args.get("top_k"), 5))
+                args -> webSearchOutput(args.get("query"), parseInt(args.get("top_k"), 5)),
+                WEB_TOOL_TIMEOUT_SECONDS
         ));
 
         context.registerTool(ToolRegistry.Tool.structured(
@@ -42,7 +45,8 @@ public final class WebToolProvider implements ToolProvider {
                         new ToolParameter("url", "string", "完整 URL，需 http 或 https 协议", true),
                         new ToolParameter("max_chars", "integer", "返回 Markdown 最大字符数（默认 8000，超出截断）", false)
                 ),
-                args -> webFetchOutput(args.get("url"), parseInt(args.get("max_chars"), DEFAULT_FETCH_MAX_CHARS))
+                args -> webFetchOutput(args.get("url"), parseInt(args.get("max_chars"), DEFAULT_FETCH_MAX_CHARS)),
+                WEB_TOOL_TIMEOUT_SECONDS
         ));
     }
 

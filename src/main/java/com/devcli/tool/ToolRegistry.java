@@ -1151,37 +1151,53 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                     })
                     .toList();
 
-            List<Future<ToolExecutionResult>> futures =
-                    executor.invokeAll(tasks, toolBatchTimeoutSeconds, TimeUnit.SECONDS);
+            long batchDeadlineNanos = System.nanoTime()
+                    + TimeUnit.SECONDS.toNanos(toolBatchTimeoutSeconds);
+            List<Future<ToolExecutionResult>> futures = tasks.stream()
+                    .map(executor::submit)
+                    .toList();
 
             List<ToolExecutionResult> results = new ArrayList<>();
             for (int i = 0; i < futures.size(); i++) {
                 ToolInvocation invocation = invocations.get(i);
                 Future<ToolExecutionResult> future = futures.get(i);
-                if (future.isCancelled()) {
-                    results.add(ToolExecutionResult.timedOut(invocation, toolBatchTimeoutSeconds));
+                long toolTimeoutSeconds = toolTimeoutSeconds(invocation.name());
+                long deadlineNanos = Math.min(batchDeadlineNanos,
+                        System.nanoTime() + TimeUnit.SECONDS.toNanos(toolTimeoutSeconds));
+                if (future.isDone()) {
+                    try {
+                        results.add(future.get());
+                    } catch (CancellationException e) {
+                        results.add(ToolExecutionResult.timedOut(invocation, toolTimeoutSeconds));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        results.add(ToolExecutionResult.failed(invocation, "工具执行被中断"));
+                    } catch (ExecutionException e) {
+                        results.add(ToolExecutionResult.failed(invocation, causeMessage(e)));
+                    }
                     continue;
                 }
-
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0) {
+                    future.cancel(true);
+                    results.add(ToolExecutionResult.timedOut(invocation, toolTimeoutSeconds));
+                    continue;
+                }
                 try {
-                    results.add(future.get());
+                    results.add(future.get(remainingNanos, TimeUnit.NANOSECONDS));
+                } catch (TimeoutException e) {
+                    future.cancel(true);
+                    results.add(ToolExecutionResult.timedOut(invocation, toolTimeoutSeconds));
+                } catch (CancellationException e) {
+                    results.add(ToolExecutionResult.timedOut(invocation, toolTimeoutSeconds));
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     results.add(ToolExecutionResult.failed(invocation, "工具执行被中断"));
                 } catch (ExecutionException e) {
-                    Throwable cause = e.getCause();
-                    String message = cause == null || cause.getMessage() == null
-                            ? "未知错误"
-                            : cause.getMessage();
-                    results.add(ToolExecutionResult.failed(invocation, message));
+                    results.add(ToolExecutionResult.failed(invocation, causeMessage(e)));
                 }
             }
             return results;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return invocations.stream()
-                    .map(invocation -> ToolExecutionResult.failed(invocation, "工具批次执行被中断"))
-                    .toList();
         } finally {
             executor.shutdownNow();
         }
@@ -1189,6 +1205,20 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     private long elapsedMillis(long startedAtNanos) {
         return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos);
+    }
+
+    private static String causeMessage(ExecutionException e) {
+        Throwable cause = e.getCause();
+        return cause == null || cause.getMessage() == null ? "未知错误" : cause.getMessage();
+    }
+
+    /** 单个工具的执行上限：声明过独立超时用声明值，否则继承批次超时。 */
+    private long toolTimeoutSeconds(String toolName) {
+        Tool tool = toolName == null ? null : tools.get(toolName);
+        if (tool != null && tool.hasOwnTimeout()) {
+            return tool.timeoutSeconds();
+        }
+        return toolBatchTimeoutSeconds;
     }
 
     public boolean hasTool(String name) {
@@ -1290,18 +1320,39 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     public record Tool(String name, String description, JsonNode parameters,
-                       ToolExecutor executor, ToolEffect effect) {
+                       ToolExecutor executor, ToolEffect effect, long timeoutSeconds) {
         public Tool(String name, String description, JsonNode parameters, ToolExecutor executor) {
-            this(name, description, parameters, executor, ToolEffect.builtIn(name));
+            this(name, description, parameters, executor, ToolEffect.builtIn(name), -1);
+        }
+
+        public Tool(String name, String description, JsonNode parameters, ToolExecutor executor,
+                    ToolEffect effect) {
+            this(name, description, parameters, executor, effect, -1);
         }
 
         public static Tool structured(String name, String description, JsonNode parameters,
                                       StructuredToolExecutor executor) {
-            return new Tool(name, description, parameters, executor, ToolEffect.builtIn(name));
+            return new Tool(name, description, parameters, executor, ToolEffect.builtIn(name), -1);
+        }
+
+        /**
+         * 声明独立超时的结构化工具。timeoutSeconds 为单个工具的执行上限（秒），
+         * 批量执行时按该 deadline 强制取消；未声明（-1）继承批次超时。
+         */
+        public static Tool structured(String name, String description, JsonNode parameters,
+                                      StructuredToolExecutor executor, long timeoutSeconds) {
+            return new Tool(name, description, parameters, executor, ToolEffect.builtIn(name),
+                    timeoutSeconds);
         }
 
         public Tool {
             effect = effect == null ? ToolEffect.EXTERNAL_MUTATION : effect;
+            timeoutSeconds = timeoutSeconds <= 0 ? -1 : timeoutSeconds;
+        }
+
+        /** 是否声明了独立超时（&gt; 0 生效，-1 继承批次超时）。 */
+        public boolean hasOwnTimeout() {
+            return timeoutSeconds > 0;
         }
     }
 

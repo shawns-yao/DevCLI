@@ -161,6 +161,20 @@ class ToolResultSizeManagerTest {
     }
 
     @Test
+    void persistFailureFallsBackToInlineTruncation() throws IOException {
+        // 落盘失败必须降级为截断文本，绝不把成功结果变成错误（参考 dsh spill-policy 语义）
+        Path occupied = tempDir.resolve("occupied.txt");
+        Files.writeString(occupied, "occupied");
+        String large = "h".repeat(60_000);
+        String out = ToolResultSizeManager.process(
+                "execute_command", "call_fail_persist", occupied.toString(), false, large);
+
+        assertTrue(out.length() < large.length(), "落盘失败应降级为截断文本");
+        assertTrue(out.startsWith("h".repeat(5_000)), "降级应保留头部");
+        assertTrue(out.contains("已截断"), "降级文本应有截断提示");
+    }
+
+    @Test
     void nullResultReturnsEmptyString() {
         String out = ToolResultSizeManager.process(
                 "execute_command", "call_9", tempDir.toString(), false, null);

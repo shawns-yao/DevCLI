@@ -361,6 +361,39 @@ class ToolRegistryTest {
     }
 
     @Test
+    void shouldHonorPerToolTimeoutDeclaration() {
+        ToolRegistry registry = new ToolRegistry(1, 10) {
+            @Override
+            public String executeTool(String name, String argumentsJson) {
+                if ("slow".equals(name)) {
+                    try {
+                        Thread.sleep(3000);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                return "result-" + name;
+            }
+        };
+        registry.registerTool(new ToolRegistry.Tool(
+                "slow", "slow tool", JsonNodeFactory.instance.objectNode(),
+                args -> "slow", ToolRegistry.ToolEffect.builtIn("slow"), 1));
+        registry.registerTool(new ToolRegistry.Tool(
+                "fast", "fast tool", JsonNodeFactory.instance.objectNode(),
+                args -> "fast"));
+
+        List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
+                new ToolRegistry.ToolInvocation("call_1", "slow", "{}"),
+                new ToolRegistry.ToolInvocation("call_2", "fast", "{}")
+        ));
+
+        assertTrue(results.get(0).timedOut(), "声明 1s 超时的慢工具应在工具级 deadline 被取消");
+        assertTrue(results.get(0).result().contains("工具执行超时"));
+        assertEquals("result-fast", results.get(1).result(),
+                "未声明超时的工具继承批次超时，正常完成");
+    }
+
+    @Test
     void shouldRejectRuntimeWriteConflictBetweenParallelSteps(@TempDir Path tempDir) {
         ToolRegistry registry = new ToolRegistry();
         registry.setProjectPath(tempDir.toString());
