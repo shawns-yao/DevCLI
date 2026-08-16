@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -139,6 +140,38 @@ class AgentCheckpointTest {
         assertFalse(checkpoint.getFailedArtifacts().containsKey("step-1"),
                 "重做成功后同 step 的失败 artifact 应被清理");
         assertEquals("重做成功", checkpoint.getArtifacts().get("step-1").summary());
+    }
+
+    @Test
+    void roundTripsRedoBudgetAndAttemptEvidence() {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-redo-history", "目标");
+        checkpoint.recordRedoAttempt(
+                "step-1", 1, "编译失败：签名不匹配", List.of("src/A.java"));
+        checkpoint.save();
+
+        AgentCheckpoint loaded = AgentCheckpoint.load("orch-redo-history");
+
+        assertEquals(1, loaded.getRedoCounts().get("step-1"));
+        assertEquals(1, loaded.getRedoAttempts().size());
+        AgentCheckpoint.RedoAttemptRecord attempt = loaded.getRedoAttempts().get(0);
+        assertEquals("step-1", attempt.stepId());
+        assertEquals(1, attempt.attempt());
+        assertEquals("编译失败：签名不匹配", attempt.failureReason());
+        assertEquals(List.of("src/A.java"), attempt.modifiedFiles());
+        assertEquals(1, loaded.recoveryState().redoCounts().get("step-1"));
+        assertEquals(1, loaded.recoveryState().redoAttempts().size());
+        assertEquals(Set.of("step-1"), loaded.recoveryState().redoPendingSteps());
+    }
+
+    @Test
+    void clearsRedoPendingMarkerWhenAttemptReachesTerminalState() {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-redo-terminal", "目标");
+        checkpoint.recordRedoAttempt("step-1", 1, "首次失败", List.of("src/A.java"));
+
+        checkpoint.addFailedStep("step-1", List.of("src/A.java"), "重做仍失败");
+
+        assertTrue(checkpoint.getRedoPendingSteps().isEmpty());
+        assertEquals(1, checkpoint.getRedoCounts().get("step-1"));
     }
 
     @Test

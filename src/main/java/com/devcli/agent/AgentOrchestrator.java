@@ -92,6 +92,10 @@ public class AgentOrchestrator {
     private final StepRedoTracker redoTracker = new StepRedoTracker(MAX_REDO_PER_STEP);
     /** resume 时从 checkpoint 载入的失败步骤产物（stepId → 已写文件 + 失败摘要），注入重做上下文；run() 新任务清空。 */
     private Map<String, ExecutionArtifact> restoredFailedArtifacts = new HashMap<>();
+    /** resume 时恢复已经消耗的在位重做额度，避免跨进程恢复重新获得一次重做机会。 */
+    private Map<String, Integer> restoredRedoCounts = Map.of();
+    /** resume 时恢复每个步骤最近一次在位重做失败原因。 */
+    private List<AgentCheckpoint.RedoAttemptRecord> restoredRedoAttempts = List.of();
     private final ThreadLocal<ToolRegistry> activeStepToolRegistry = new ThreadLocal<>();
     private final ThreadLocal<StepUpdateBuffer> activeStepUpdate = new ThreadLocal<>();
     private PreReviewVerifier preReviewVerifier = new PreReviewVerifier();
@@ -492,6 +496,8 @@ public class AgentOrchestrator {
         currentUserTask = userInput == null ? "" : userInput;
         toolRegistry.prefetchToolDefinitionsForInput(currentUserTask);
         restoredFailedArtifacts.clear();
+        restoredRedoCounts = Map.of();
+        restoredRedoAttempts = List.of();
         currentAcceptanceCriteria = List.of();
         // 回收上一轮崩溃残留的超时租约，避免历史租约阻塞本轮写入
         toolRegistry.pruneExpiredLeases();
@@ -621,6 +627,8 @@ public class AgentOrchestrator {
         restoredFailedArtifacts = recovery.artifacts().entrySet().stream()
                 .filter(entry -> entry.getValue().state() == ExecutionGraph.NodeState.FAILED)
                 .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+        restoredRedoCounts = recovery.redoCounts();
+        restoredRedoAttempts = recovery.redoAttempts();
         toolRegistry.pruneExpiredLeases();
         if (CancellationContext.isCancelled()) {
             return "⏹️ 已取消当前多 Agent 任务。";
@@ -647,7 +655,8 @@ public class AgentOrchestrator {
         for (AgentCheckpoint.PlanStep planStep : recovery.planSteps()) {
             List<String> deps = planStep.dependencies() == null ? List.of() : planStep.dependencies();
             ExecutionArtifact artifact = recovery.artifacts().get(planStep.id());
-            if (artifact != null && artifact.successful()) {
+            if (artifact != null && (artifact.successful()
+                    || !recovery.redoPendingSteps().contains(planStep.id()))) {
                 steps.add(new ExecutionStep(
                         planStep.id(), planStep.description(), planStep.type(), deps, artifact));
             } else {
@@ -724,7 +733,13 @@ public class AgentOrchestrator {
      */
     private String executeSteps(List<ExecutionStep> steps, TraceContext traceContext) {
         out.println(AnsiStyle.heading("⚡ 第二阶段：执行"));
-        redoTracker.reset();
+        Map<String, String> restoredRedoFailures = new HashMap<>();
+        for (AgentCheckpoint.RedoAttemptRecord attempt : restoredRedoAttempts) {
+            restoredRedoFailures.put(attempt.stepId(), attempt.failureReason());
+        }
+        redoTracker.restore(restoredRedoCounts, restoredRedoFailures);
+        restoredRedoCounts = Map.of();
+        restoredRedoAttempts = List.of();
         Map<String, Integer> retryCount = new ConcurrentHashMap<>();
         int singleStepCursor = 0;
         int batchIndex = 0;
@@ -1072,6 +1087,11 @@ public class AgentOrchestrator {
                 continue;
             }
             int attempt = redoTracker.markRedo(step.id(), step.result());
+            if (checkpoint != null) {
+                checkpoint.recordRedoAttempt(
+                        step.id(), attempt, step.result(), step.modifiedFiles());
+                saveCheckpointStrict();
+            }
             out.println(AnsiStyle.heading("🔁 步骤 [" + step.id() + "] 失败，在原位换思路重做（第 "
                     + attempt + "/" + redoTracker.maxRedoPerStep() + " 次）"));
             steps.set(i, step.withRedoPending());

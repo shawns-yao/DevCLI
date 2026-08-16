@@ -2,6 +2,8 @@ package com.devcli.agent;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -57,5 +59,15 @@ class StepRedoTrackerTest {
     void zeroMaxRedoNeverAllowsRedo() {
         StepRedoTracker tracker = new StepRedoTracker(0);
         assertFalse(tracker.canRedo("s"));
+    }
+
+    @Test
+    void restoreKeepsRedoBudgetAcrossResume() {
+        StepRedoTracker tracker = new StepRedoTracker(1);
+        tracker.restore(Map.of("s", 1), Map.of("s", "第二次编译失败"));
+
+        assertTrue(tracker.isRedo("s"));
+        assertFalse(tracker.canRedo("s"));
+        assertEquals("第二次编译失败", tracker.lastFailureReason("s"));
     }
 }

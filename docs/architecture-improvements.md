@@ -128,8 +128,22 @@
 
 职责边界：**WorkingMemory 是当前会话副作用证据缓存（会淘汰、不跨进程）；失败步骤的持久化副作用由 checkpoint `failedArtifacts` 负责**。两者互补：同进程靠 WorkingMemory，跨进程 resume 靠 checkpoint。
 
+**补充修复：在位重做额度与失败现场的跨进程持久化**
+
+旧实现只把重做次数保存在进程内的 `StepRedoTracker`。进程退出后恢复同一 checkpoint，计数会被清空，失败步骤可能重新获得一次重做机会。协议版本 5 增加：
+
+- `redoCounts`：保存每个步骤已经消耗的重做次数，恢复后继续沿用原额度
+- `redoAttempts`：保存步骤 ID、重做次数、失败原因、已修改文件和记录时间
+- `redoPendingSteps`：保存已经批准但尚未形成成功或失败终态的重做；成功或再次失败时清除
+- 重做决策落盘成功后才把失败步骤重置为待执行；落盘失败时停止恢复链路，避免内存状态与 checkpoint 分叉
+- 恢复时只有 `redoPendingSteps` 中的失败步骤回到待执行；额度耗尽且已有失败终态的步骤保持失败，不会因恢复额外执行一次
+- 版本 1/2/3/4 缺少新字段时按空集合读取，保持旧 checkpoint 兼容
+
 **边界（诚实声明）**：
-- 在位重做仍可能改到计划外文件（Worker 步骤内越界改文件、"执行中拓扑变化"未解）——彻底根治需 Saga 事务（每步配补偿回滚），对本地 CLI 属过度设计，本次不做
+- 执行中动态增加或删除任务、失败后自动修改整个依赖图仍未实现；当前只允许原步骤保持 id 和依赖不变后重做
+- 外部支付、发送消息等副作用补偿仍未实现；当前隔离任务禁止外部副作用
+- 当前记录的是在位重做决策，不是每次 Agent 与工具尝试的完整事件账本
+- 在位重做仍可能改到计划外文件（Worker 步骤内越界改文件、"执行中拓扑变化"未解）
 - 副作用信息流是 prompt 软注入（让后续 Worker 知情），不是事务性保证
 
 ---
@@ -142,8 +156,8 @@
 | `WorkingMemory.java` | ✅ 已修改 | negativeFact 即时清理失效 RAG 证据 |
 | `AgentCheckpoint.java` | ✅ 已扩展 | 计划层落盘 + 原子写入 + loadLatest |
 | `AgentOrchestrator.java` | ✅ 已修改 | resume() + executeSteps 共享循环 + 在位重做替代 replan + 失败副作用注入 |
-| `AgentCheckpoint.java` | ✅ 已修改 | failedArtifacts 失败步骤产物账本 + addFailedStep |
-| `StepRedoTracker.java` | ✅ 新建 | 在位重做计数+失败反馈决策（与调度解耦） |
+| `AgentCheckpoint.java` | ✅ 已修改 | failedArtifacts、重做次数与重做失败现场的跨进程持久化 |
+| `StepRedoTracker.java` | ✅ 新建 | 在位重做计数、失败反馈决策与 checkpoint 恢复 |
 | `WorkingMemory.java` | ✅ 已修改 | 副作用工具证据优先保留的淘汰策略 |
 | `ToolRegistry.java` | ✅ 已修改 | 按 step 归集修改文件 + prune 委托 |
 | `Main.java` | ✅ 已修改 | /team resume 入口 + runHeadlessTurn 历史重放 + 移除 setReplanEnabled |
@@ -157,10 +171,10 @@
 
 对应测试（均不依赖真实 LLM）：
 
-- `AgentCheckpointTest`：计划+进度落盘往返、result 截断、原子写入、loadLatest
+- `AgentCheckpointTest`：计划+进度落盘往返、result 截断、原子写入、loadLatest、重做额度与失败现场往返
 - `AgentOrchestratorTest`：resume 跳过已完成步骤、遗留 superseded 字段被忽略、
   失败步骤 FAILED 终态下最终集成可执行、失败比例熔断、未找到 checkpoint 列出可用项、旧格式拒绝恢复
-- `StepRedoTrackerTest`：在位重做计数上限、失败反馈存取、reset 清空
+- `StepRedoTrackerTest`：在位重做计数上限、失败反馈存取、reset 清空、恢复后额度不重置
 - `WorkingMemoryEvictionTest`：副作用证据优先保留、全副作用淘汰最旧、纯只读 FIFO
 - `ToolRegistryStepFilesTest`：按 step 归集修改文件、consume 后清空、无租约写入不归集
 - `RuntimeThreadStoreTest`：turnHistory 完整 turn 解析、失败/进行中 turn 跳过、坏数据容错

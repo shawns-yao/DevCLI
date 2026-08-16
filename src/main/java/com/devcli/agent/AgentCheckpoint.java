@@ -45,7 +45,7 @@ public class AgentCheckpoint {
         .enable(SerializationFeature.INDENT_OUTPUT);
     /** 步骤 result 落盘上限：buildStepContext 注入依赖结果最多 800 字符，8KB 足够保真。 */
     public static final int MAX_SUMMARY_LENGTH = 8 * 1024;
-    public static final int CURRENT_PROTOCOL_VERSION = 4;
+    public static final int CURRENT_PROTOCOL_VERSION = 5;
     private static final int MAX_AGENT_SUMMARY_LENGTH = 2 * 1024;
 
     private int protocolVersion = CURRENT_PROTOCOL_VERSION;
@@ -62,6 +62,12 @@ public class AgentCheckpoint {
      * resume 后注入对应步骤上下文，让重做的 Worker 知道上次失败已留下哪些文件，不要假设它们不存在。
      */
     private Map<String, StepArtifact> failedArtifacts;
+    /** 在位重做的累计次数，跨进程恢复后继续沿用，避免恢复重新获得一次重做额度。 */
+    private Map<String, Integer> redoCounts;
+    /** 每次在位重做的失败现场摘要，用于恢复、审计和避免把重做次数与失败产物混为一谈。 */
+    private List<RedoAttemptRecord> redoAttempts;
+    /** 已批准且尚未形成成功或失败终态的重做步骤，用于区分中途崩溃与额度耗尽。 */
+    private Set<String> redoPendingSteps;
     private Map<String, PendingPatchCommit> pendingPatchCommits;
     private List<AgentIdentityRecord> agentIdentities;
     private Map<String, AgentCursorRecord> agentCursors;
@@ -90,6 +96,17 @@ public class AgentCheckpoint {
             return fallbackState == ExecutionGraph.NodeState.COMPLETED
                     ? ExecutionArtifact.completed(stepId, summary, summary, modifiedFiles)
                     : ExecutionArtifact.failed(stepId, summary, summary, modifiedFiles);
+        }
+    }
+
+    public record RedoAttemptRecord(String stepId, int attempt, String failureReason,
+                                    List<String> modifiedFiles, long recordedAt) {
+        public RedoAttemptRecord {
+            stepId = stepId == null ? "" : stepId.trim();
+            attempt = Math.max(1, attempt);
+            failureReason = boundStepSummary(failureReason);
+            modifiedFiles = modifiedFiles == null ? List.of() : List.copyOf(modifiedFiles);
+            recordedAt = recordedAt <= 0 ? System.currentTimeMillis() : recordedAt;
         }
     }
 
@@ -127,7 +144,10 @@ public class AgentCheckpoint {
                                 List<AgentIdentityRecord> agentIdentities,
                                 Map<String, AgentCursorRecord> agentCursors,
                                 Map<String, StepAssignmentRecord> stepAssignments,
-                                long messageSequence) {
+                                long messageSequence,
+                                Map<String, Integer> redoCounts,
+                                List<RedoAttemptRecord> redoAttempts,
+                                Set<String> redoPendingSteps) {
         public RecoveryState {
             planSteps = planSteps == null ? List.of() : List.copyOf(planSteps);
             acceptanceCriteria = acceptanceCriteria == null ? List.of() : List.copyOf(acceptanceCriteria);
@@ -135,6 +155,9 @@ public class AgentCheckpoint {
             agentIdentities = agentIdentities == null ? List.of() : List.copyOf(agentIdentities);
             agentCursors = agentCursors == null ? Map.of() : Map.copyOf(agentCursors);
             stepAssignments = stepAssignments == null ? Map.of() : Map.copyOf(stepAssignments);
+            redoCounts = redoCounts == null ? Map.of() : Map.copyOf(redoCounts);
+            redoAttempts = redoAttempts == null ? List.of() : List.copyOf(redoAttempts);
+            redoPendingSteps = redoPendingSteps == null ? Set.of() : Set.copyOf(redoPendingSteps);
         }
     }
 
@@ -180,6 +203,9 @@ public class AgentCheckpoint {
         this.completedSteps = new ArrayList<>();
         this.artifacts = new HashMap<>();
         this.failedArtifacts = new HashMap<>();
+        this.redoCounts = new HashMap<>();
+        this.redoAttempts = new ArrayList<>();
+        this.redoPendingSteps = new HashSet<>();
         this.pendingPatchCommits = new HashMap<>();
         this.planSteps = new ArrayList<>();
         this.acceptanceCriteria = new ArrayList<>();
@@ -294,6 +320,7 @@ public class AgentCheckpoint {
                 ExecutionArtifact.completed(stepId, bounded, bounded, resources)));
         // 重做成功：清理同 step 的旧失败 artifact，避免成功与失败记录并存导致状态不一致
         failedArtifacts.remove(stepId);
+        redoPendingSteps().remove(stepId);
         timestamp = System.currentTimeMillis();
     }
 
@@ -317,7 +344,23 @@ public class AgentCheckpoint {
         List<String> resources = modifiedFiles == null ? List.of() : List.copyOf(modifiedFiles);
         failedArtifacts.put(stepId, new StepArtifact(stepId, resources, bounded,
                 ExecutionArtifact.failed(stepId, bounded, bounded, resources)));
+        redoPendingSteps().remove(stepId);
         recordFailure(stepId + ": " + bounded);
+    }
+
+    public synchronized void recordRedoAttempt(String stepId, int attempt,
+                                                String failureReason, List<String> modifiedFiles) {
+        if (stepId == null || stepId.isBlank()) {
+            return;
+        }
+        String normalizedStepId = stepId.trim();
+        int normalizedAttempt = Math.max(1, attempt);
+        redoCounts().merge(normalizedStepId, normalizedAttempt, Math::max);
+        redoAttempts().add(new RedoAttemptRecord(
+                normalizedStepId, normalizedAttempt, failureReason, modifiedFiles,
+                System.currentTimeMillis()));
+        redoPendingSteps().add(normalizedStepId);
+        timestamp = System.currentTimeMillis();
     }
 
     public synchronized void preparePatchCommit(String stepId, Path projectRoot,
@@ -576,7 +619,10 @@ public class AgentCheckpoint {
                 agentIdentities,
                 agentCursors,
                 stepAssignments,
-                messageSequence);
+                messageSequence,
+                redoCounts(),
+                redoAttempts(),
+                redoPendingSteps());
     }
 
     // ─────────────────────────────────────────────────────────
@@ -746,6 +792,9 @@ public class AgentCheckpoint {
         if (supersededSteps == null) supersededSteps = new ArrayList<>();
         if (artifacts == null) artifacts = new HashMap<>();
         if (failedArtifacts == null) failedArtifacts = new HashMap<>();
+        if (redoCounts == null) redoCounts = new HashMap<>();
+        if (redoAttempts == null) redoAttempts = new ArrayList<>();
+        if (redoPendingSteps == null) redoPendingSteps = new HashSet<>();
         if (pendingPatchCommits == null) pendingPatchCommits = new HashMap<>();
         if (planSteps == null) planSteps = new ArrayList<>();
         if (acceptanceCriteria == null) acceptanceCriteria = new ArrayList<>();
@@ -897,6 +946,30 @@ public class AgentCheckpoint {
         this.failedArtifacts = failedArtifacts == null ? new HashMap<>() : failedArtifacts;
     }
 
+    public Map<String, Integer> getRedoCounts() {
+        return Map.copyOf(redoCounts());
+    }
+
+    public void setRedoCounts(Map<String, Integer> redoCounts) {
+        this.redoCounts = redoCounts == null ? new HashMap<>() : new HashMap<>(redoCounts);
+    }
+
+    public List<RedoAttemptRecord> getRedoAttempts() {
+        return List.copyOf(redoAttempts());
+    }
+
+    public void setRedoAttempts(List<RedoAttemptRecord> redoAttempts) {
+        this.redoAttempts = redoAttempts == null ? new ArrayList<>() : new ArrayList<>(redoAttempts);
+    }
+
+    public Set<String> getRedoPendingSteps() {
+        return Set.copyOf(redoPendingSteps());
+    }
+
+    public void setRedoPendingSteps(Set<String> redoPendingSteps) {
+        this.redoPendingSteps = redoPendingSteps == null ? new HashSet<>() : new HashSet<>(redoPendingSteps);
+    }
+
     public Map<String, PendingPatchCommit> getPendingPatchCommits() {
         return pendingPatchCommits();
     }
@@ -959,5 +1032,33 @@ public class AgentCheckpoint {
 
     public void setLastError(String lastError) {
         this.lastError = lastError;
+    }
+
+    private Map<String, Integer> redoCounts() {
+        if (redoCounts == null) {
+            redoCounts = new HashMap<>();
+        }
+        return redoCounts;
+    }
+
+    private List<RedoAttemptRecord> redoAttempts() {
+        if (redoAttempts == null) {
+            redoAttempts = new ArrayList<>();
+        }
+        return redoAttempts;
+    }
+
+    private Set<String> redoPendingSteps() {
+        if (redoPendingSteps == null) {
+            redoPendingSteps = new HashSet<>();
+        }
+        return redoPendingSteps;
+    }
+
+    private static String boundStepSummary(String summary) {
+        String normalized = summary == null ? "" : summary;
+        return normalized.length() <= MAX_SUMMARY_LENGTH
+                ? normalized
+                : normalized.substring(0, MAX_SUMMARY_LENGTH) + "...(截断)";
     }
 }

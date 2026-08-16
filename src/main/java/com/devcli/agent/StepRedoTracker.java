@@ -59,4 +59,26 @@ final class StepRedoTracker {
         redoCount.clear();
         lastFailure.clear();
     }
+
+    /**
+     * 从 checkpoint 恢复已经消耗的重做额度和最近失败原因。
+     * 旧 checkpoint 没有这些字段时传入空集合，保持原有首次运行语义。
+     */
+    void restore(Map<String, Integer> counts, Map<String, String> failures) {
+        reset();
+        if (counts != null) {
+            counts.forEach((stepId, count) -> {
+                if (stepId != null && !stepId.isBlank() && count != null && count > 0) {
+                    redoCount.put(stepId, count);
+                }
+            });
+        }
+        if (failures != null) {
+            failures.forEach((stepId, reason) -> {
+                if (stepId != null && !stepId.isBlank()) {
+                    lastFailure.put(stepId, reason == null ? "" : reason);
+                }
+            });
+        }
+    }
 }
