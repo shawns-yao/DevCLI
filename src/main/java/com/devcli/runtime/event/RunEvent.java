@@ -12,7 +12,8 @@ import java.util.Map;
  * Agent、Renderer 与 Runtime API 共享的强类型运行事件。
  */
 public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnStarted,
-        RunEvent.ReasoningDelta, RunEvent.MessageDelta, RunEvent.QueueUpdated, RunEvent.ToolCalls,
+        RunEvent.ReasoningDelta, RunEvent.MessageDelta, RunEvent.ExecutionStateChanged,
+        RunEvent.QueueUpdated, RunEvent.ToolCalls,
         RunEvent.SessionStateChanged, RunEvent.CustomMessage,
         RunEvent.ToolResults, RunEvent.TurnCompleted, RunEvent.TurnFailed,
         RunEvent.TurnRejected, RunEvent.CheckpointCreated, RunEvent.CheckpointFailed {
@@ -60,6 +61,31 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
         @Override
         public String type() {
             return "message.delta";
+        }
+    }
+
+    enum ExecutionState {
+        THINKING,
+        TOOL_EXECUTING,
+        TOOL_RESULTS_PAIRED,
+        COMPLETED,
+        CANCELLED,
+        BUDGET_EXCEEDED,
+        ITERATION_LIMIT_REACHED,
+        FAILED
+    }
+
+    record ExecutionStateChanged(int iteration, ExecutionState state, String reason)
+            implements RunEvent {
+        public ExecutionStateChanged {
+            iteration = Math.max(0, iteration);
+            state = state == null ? ExecutionState.FAILED : state;
+            reason = text(reason);
+        }
+
+        @Override
+        public String type() {
+            return "execution.state";
         }
     }
 

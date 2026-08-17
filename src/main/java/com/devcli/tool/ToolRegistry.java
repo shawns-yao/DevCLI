@@ -1221,6 +1221,13 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         return toolBatchTimeoutSeconds;
     }
 
+    public ToolCancellationCapability toolCancellationCapability(String toolName) {
+        Tool tool = toolName == null ? null : tools.get(toolName);
+        return tool == null
+                ? ToolCancellationCapability.INTERRUPT_ONLY
+                : tool.cancellationCapability();
+    }
+
     public boolean hasTool(String name) {
         return tools.containsKey(name);
     }
@@ -1319,20 +1326,35 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         abstract boolean permits(ToolEffect effect);
     }
 
+    public enum ToolCancellationCapability {
+        COOPERATIVE,
+        INTERRUPT_ONLY
+    }
+
     public record Tool(String name, String description, JsonNode parameters,
-                       ToolExecutor executor, ToolEffect effect, long timeoutSeconds) {
+                       ToolExecutor executor, ToolEffect effect, long timeoutSeconds,
+                       ToolCancellationCapability cancellationCapability) {
         public Tool(String name, String description, JsonNode parameters, ToolExecutor executor) {
-            this(name, description, parameters, executor, ToolEffect.builtIn(name), -1);
+            this(name, description, parameters, executor, ToolEffect.builtIn(name), -1,
+                    ToolCancellationCapability.INTERRUPT_ONLY);
         }
 
         public Tool(String name, String description, JsonNode parameters, ToolExecutor executor,
                     ToolEffect effect) {
-            this(name, description, parameters, executor, effect, -1);
+            this(name, description, parameters, executor, effect, -1,
+                    ToolCancellationCapability.INTERRUPT_ONLY);
+        }
+
+        public Tool(String name, String description, JsonNode parameters, ToolExecutor executor,
+                    ToolEffect effect, long timeoutSeconds) {
+            this(name, description, parameters, executor, effect, timeoutSeconds,
+                    ToolCancellationCapability.INTERRUPT_ONLY);
         }
 
         public static Tool structured(String name, String description, JsonNode parameters,
                                       StructuredToolExecutor executor) {
-            return new Tool(name, description, parameters, executor, ToolEffect.builtIn(name), -1);
+            return new Tool(name, description, parameters, executor, ToolEffect.builtIn(name), -1,
+                    ToolCancellationCapability.INTERRUPT_ONLY);
         }
 
         /**
@@ -1342,12 +1364,15 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         public static Tool structured(String name, String description, JsonNode parameters,
                                       StructuredToolExecutor executor, long timeoutSeconds) {
             return new Tool(name, description, parameters, executor, ToolEffect.builtIn(name),
-                    timeoutSeconds);
+                    timeoutSeconds, ToolCancellationCapability.INTERRUPT_ONLY);
         }
 
         public Tool {
             effect = effect == null ? ToolEffect.EXTERNAL_MUTATION : effect;
             timeoutSeconds = timeoutSeconds <= 0 ? -1 : timeoutSeconds;
+            cancellationCapability = cancellationCapability == null
+                    ? ToolCancellationCapability.INTERRUPT_ONLY
+                    : cancellationCapability;
         }
 
         /** 是否声明了独立超时（&gt; 0 生效，-1 继承批次超时）。 */

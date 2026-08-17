@@ -27,6 +27,10 @@ final class RunEventJsonCodec {
             payload.put("content", reasoning.content());
         } else if (event instanceof RunEvent.MessageDelta message) {
             payload.put("content", message.content());
+        } else if (event instanceof RunEvent.ExecutionStateChanged state) {
+            payload.put("iteration", state.iteration());
+            payload.put("state", state.state().name());
+            payload.put("reason", state.reason());
         } else if (event instanceof RunEvent.QueueUpdated queue) {
             payload.put("channel", queue.channel());
             payload.put("steering_pending", queue.steeringPending());
