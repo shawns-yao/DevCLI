@@ -6,5 +6,6 @@ public enum ToolStatus {
     ERROR,
     REJECTED,
     CANCELLED,
-    TIMEOUT
+    TIMEOUT,
+    TERMINATION_UNCONFIRMED
 }

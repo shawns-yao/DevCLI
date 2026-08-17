@@ -10,6 +10,8 @@ import java.nio.file.Path;
  */
 public final class CancellationContext {
     private static final InheritableThreadLocal<RunContext> LOCAL = new InheritableThreadLocal<>();
+    private static final InheritableThreadLocal<CancellationToken> TOKEN_OVERRIDE =
+            new InheritableThreadLocal<>();
 
     private CancellationContext() {
     }
@@ -32,6 +34,10 @@ public final class CancellationContext {
     }
 
     public static CancellationToken current() {
+        CancellationToken override = TOKEN_OVERRIDE.get();
+        if (override != null) {
+            return override;
+        }
         RunContext context = currentRun();
         return context == null ? null : context.cancellationToken();
     }
@@ -42,6 +48,48 @@ public final class CancellationContext {
         }
         CancellationToken token = current();
         return token != null && token.isCancelled();
+    }
+
+    public static void throwIfCancelled() {
+        CancellationToken token = current();
+        if (token != null) {
+            token.throwIfCancelled();
+        } else if (Thread.currentThread().isInterrupted()) {
+            throw new java.util.concurrent.CancellationException("线程已中断");
+        }
+    }
+
+    /** 在当前线程及其新建子线程中临时使用工具调用自己的子令牌。 */
+    public static TokenBinding bindToken(CancellationToken token) {
+        CancellationToken previous = TOKEN_OVERRIDE.get();
+        if (token == null) {
+            TOKEN_OVERRIDE.remove();
+        } else {
+            TOKEN_OVERRIDE.set(token);
+        }
+        return new TokenBinding(previous);
+    }
+
+    public static final class TokenBinding implements AutoCloseable {
+        private final CancellationToken previous;
+        private boolean closed;
+
+        private TokenBinding(CancellationToken previous) {
+            this.previous = previous;
+        }
+
+        @Override
+        public void close() {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            if (previous == null) {
+                TOKEN_OVERRIDE.remove();
+            } else {
+                TOKEN_OVERRIDE.set(previous);
+            }
+        }
     }
 
     public static void clear(CancellationToken token) {
@@ -61,6 +109,7 @@ public final class CancellationContext {
         } else {
             LOCAL.set(previous);
         }
+        TOKEN_OVERRIDE.remove();
     }
 
     /**

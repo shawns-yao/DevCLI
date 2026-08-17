@@ -81,6 +81,12 @@ public record ToolOutput(
                 text, List.of(), List.of(), List.of());
     }
 
+    public static ToolOutput terminationUnconfirmed(String text) {
+        return new ToolOutput(ToolStatus.TERMINATION_UNCONFIRMED,
+                ToolErrorCode.TERMINATION_UNCONFIRMED, true,
+                text, List.of(), List.of(), List.of());
+    }
+
     public ToolOutput withModifiedResources(List<String> resources) {
         return new ToolOutput(status, errorCode, retryable, text, imageParts, resources, sideChannels);
     }

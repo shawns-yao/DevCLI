@@ -24,6 +24,7 @@ final class ToolErrorClassifier {
             case MCP_ERROR -> "mcp";
             case CANCELLED -> "cancelled";
             case TIMEOUT -> "timeout";
+            case TERMINATION_UNCONFIRMED -> "termination-unconfirmed";
         };
     }
 

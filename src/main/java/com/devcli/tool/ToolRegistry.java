@@ -20,6 +20,8 @@ import com.devcli.policy.AuditLog;
 import com.devcli.policy.PathGuard;
 import com.devcli.policy.PolicyException;
 import com.devcli.runtime.CancellationContext;
+import com.devcli.runtime.CancellationReason;
+import com.devcli.runtime.CancellationToken;
 import com.devcli.snapshot.SnapshotService;
 import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillRegistry;
@@ -46,7 +48,9 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
 /**
@@ -57,6 +61,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private static final int DEFAULT_COMMAND_TIMEOUT_SECONDS = 60;
     private static final int DEFAULT_TOOL_BATCH_TIMEOUT_SECONDS = 90;
     private static final int MAX_PARALLEL_TOOLS = 4;
+    private static final long COOPERATIVE_CANCEL_GRACE_MILLIS = 250;
+    private static final long TERMINATION_CONFIRM_TIMEOUT_MILLIS = 1_000;
     // write_file 单次写入字节数上限。LLM 想塞超大内容时通常是误生成（重复粘贴 / hallucinate 大段日志），
     // 5MB 对常规代码生成 / 文档撰写完全够用，超过即拒，避免磁盘灌满与误覆盖。
     private static final int MAX_WRITE_FILE_BYTES = 5 * 1024 * 1024;
@@ -1108,98 +1114,327 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         if (invocations == null || invocations.isEmpty()) {
             return List.of();
         }
-        if (CancellationContext.isCancelled()) {
-            return invocations.stream()
-                    .map(invocation -> ToolExecutionResult.cancelled(invocation, "用户取消了此次工具调用"))
-                    .toList();
-        }
-        if (invocations.size() == 1) {
-            ToolInvocation invocation = invocations.get(0);
-            long startedAt = System.nanoTime();
-            ToolOutput output = executeToolOutput(invocation);
-            return List.of(ToolExecutionResult.completed(
-                    invocation, output, elapsedMillis(startedAt)));
-        }
-
         int parallelism = Math.min(invocations.size(), MAX_PARALLEL_TOOLS);
         SkillContextBuffer activeSkillBuffer = activeSkillContextBuffer();
         ToolAccessScope activeAccessScope = currentToolAccessScope();
         String activeResourceLeaseStep = resourceLeaseStep.get();
+        CancellationToken parentToken = CancellationContext.current();
+        if (parentToken == null) {
+            parentToken = new CancellationToken();
+        }
+        CancellationToken executionParent = parentToken;
         ExecutorService executor = Executors.newFixedThreadPool(parallelism, r -> {
             Thread thread = new Thread(r, "devcli-tool-executor");
             thread.setDaemon(true);
             return thread;
         });
+        ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(
+                Math.min(Math.max(1, invocations.size()), MAX_PARALLEL_TOOLS), r -> {
+                    Thread thread = new Thread(r, "devcli-tool-cancellation");
+                    thread.setDaemon(true);
+                    return thread;
+                });
+        long batchDeadlineNanos = System.nanoTime()
+                + TimeUnit.SECONDS.toNanos(toolBatchTimeoutSeconds);
+        List<ToolInvocationControl> controls = invocations.stream()
+                .map(invocation -> new ToolInvocationControl(
+                        invocation,
+                        executionParent.child(),
+                        toolCancellationCapability(invocation.name()),
+                        toolTimeoutSeconds(invocation.name())))
+                .toList();
 
         try {
-            List<Callable<ToolExecutionResult>> tasks = invocations.stream()
-                    .<Callable<ToolExecutionResult>>map(invocation -> () -> {
-                        if (CancellationContext.isCancelled()) {
-                            return ToolExecutionResult.cancelled(invocation, "用户取消了此次工具调用");
-                        }
-                        long startedAt = System.nanoTime();
-                        java.util.concurrent.atomic.AtomicReference<ToolOutput> output =
-                                new java.util.concurrent.atomic.AtomicReference<>(ToolOutput.text(""));
-                        runWithToolAccess(activeAccessScope, () ->
-                                runWithResourceLease(activeResourceLeaseStep, () -> {
-                                    runWithSkillContextBuffer(activeSkillBuffer,
-                                            () -> output.set(executeToolOutput(invocation)));
-                                    return null;
-                                }));
-                        return ToolExecutionResult.completed(
-                                invocation, output.get(), elapsedMillis(startedAt));
-                    })
-                    .toList();
+            for (ToolInvocationControl control : controls) {
+                Future<?> future = executor.submit(() -> runToolInvocation(
+                        control, batchDeadlineNanos, scheduler, activeAccessScope,
+                        activeResourceLeaseStep, activeSkillBuffer));
+                control.attachFuture(future);
+            }
 
-            long batchDeadlineNanos = System.nanoTime()
-                    + TimeUnit.SECONDS.toNanos(toolBatchTimeoutSeconds);
-            List<Future<ToolExecutionResult>> futures = tasks.stream()
-                    .map(executor::submit)
-                    .toList();
-
-            List<ToolExecutionResult> results = new ArrayList<>();
-            for (int i = 0; i < futures.size(); i++) {
-                ToolInvocation invocation = invocations.get(i);
-                Future<ToolExecutionResult> future = futures.get(i);
-                long toolTimeoutSeconds = toolTimeoutSeconds(invocation.name());
-                long deadlineNanos = Math.min(batchDeadlineNanos,
-                        System.nanoTime() + TimeUnit.SECONDS.toNanos(toolTimeoutSeconds));
-                if (future.isDone()) {
-                    try {
-                        results.add(future.get());
-                    } catch (CancellationException e) {
-                        results.add(ToolExecutionResult.timedOut(invocation, toolTimeoutSeconds));
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        results.add(ToolExecutionResult.failed(invocation, "工具执行被中断"));
-                    } catch (ExecutionException e) {
-                        results.add(ToolExecutionResult.failed(invocation, causeMessage(e)));
-                    }
-                    continue;
-                }
-                long remainingNanos = deadlineNanos - System.nanoTime();
-                if (remainingNanos <= 0) {
-                    future.cancel(true);
-                    results.add(ToolExecutionResult.timedOut(invocation, toolTimeoutSeconds));
-                    continue;
-                }
+            List<ToolExecutionResult> results = new ArrayList<>(controls.size());
+            boolean interrupted = false;
+            for (ToolInvocationControl control : controls) {
                 try {
-                    results.add(future.get(remainingNanos, TimeUnit.NANOSECONDS));
-                } catch (TimeoutException e) {
-                    future.cancel(true);
-                    results.add(ToolExecutionResult.timedOut(invocation, toolTimeoutSeconds));
-                } catch (CancellationException e) {
-                    results.add(ToolExecutionResult.timedOut(invocation, toolTimeoutSeconds));
+                    results.add(control.completion().get());
                 } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    results.add(ToolExecutionResult.failed(invocation, "工具执行被中断"));
+                    interrupted = true;
+                    control.cancel(CancellationReason.CALLER_INTERRUPTED, scheduler);
+                    break;
                 } catch (ExecutionException e) {
-                    results.add(ToolExecutionResult.failed(invocation, causeMessage(e)));
+                    results.add(ToolExecutionResult.failed(control.invocation(), causeMessage(e)));
                 }
+            }
+            if (interrupted) {
+                Thread.interrupted();
+                controls.forEach(control -> control.cancel(
+                        CancellationReason.CALLER_INTERRUPTED, scheduler));
+                results = new ArrayList<>(controls.size());
+                for (ToolInvocationControl control : controls) {
+                    results.add(control.awaitedResult());
+                }
+                Thread.currentThread().interrupt();
             }
             return results;
         } finally {
+            controls.forEach(ToolInvocationControl::close);
+            scheduler.shutdownNow();
             executor.shutdownNow();
+        }
+    }
+
+    private void runToolInvocation(ToolInvocationControl control, long batchDeadlineNanos,
+                                   ScheduledExecutorService scheduler,
+                                   ToolAccessScope activeAccessScope,
+                                   String activeResourceLeaseStep,
+                                   SkillContextBuffer activeSkillBuffer) {
+        if (!control.tryStart()) {
+            return;
+        }
+        long startedAt = System.nanoTime();
+        control.bindWorker(Thread.currentThread());
+        long toolDeadlineNanos = Math.min(batchDeadlineNanos,
+                startedAt + TimeUnit.SECONDS.toNanos(control.timeoutSeconds()));
+        long remainingNanos = toolDeadlineNanos - startedAt;
+        try (CancellationContext.TokenBinding ignored = CancellationContext.bindToken(control.token())) {
+            if (remainingNanos <= 0) {
+                control.cancel(CancellationReason.BATCH_TIMEOUT, scheduler);
+                return;
+            }
+            CancellationReason timeoutReason = batchDeadlineNanos <= startedAt
+                    + TimeUnit.SECONDS.toNanos(control.timeoutSeconds())
+                    ? CancellationReason.BATCH_TIMEOUT
+                    : CancellationReason.TOOL_TIMEOUT;
+            control.scheduleTimeout(scheduler, remainingNanos, timeoutReason);
+            if (control.token().isCancelled()) {
+                control.complete(control.cancelResult(elapsedMillis(startedAt)));
+                return;
+            }
+            java.util.concurrent.atomic.AtomicReference<ToolOutput> output =
+                    new java.util.concurrent.atomic.AtomicReference<>(ToolOutput.text(""));
+            runWithToolAccess(activeAccessScope, () ->
+                    runWithResourceLease(activeResourceLeaseStep, () -> {
+                        runWithSkillContextBuffer(activeSkillBuffer,
+                                () -> output.set(executeToolOutput(control.invocation())));
+                        return null;
+                    }));
+            control.complete(control.resultFromOutput(output.get(), elapsedMillis(startedAt)));
+        } catch (CancellationException e) {
+            control.complete(control.cancelResult(elapsedMillis(startedAt)));
+        } catch (Exception e) {
+            control.complete(control.token().isCancelled()
+                    ? control.cancelResult(elapsedMillis(startedAt))
+                    : ToolExecutionResult.failed(control.invocation(), e.getMessage()));
+        } finally {
+            control.finish();
+            Thread.interrupted();
+        }
+    }
+
+    private enum ToolControlState {
+        NEW,
+        RUNNING,
+        FINISHED
+    }
+
+    private static final class ToolInvocationControl {
+        private final ToolInvocation invocation;
+        private final CancellationToken token;
+        private final ToolCancellationCapability capability;
+        private final long timeoutSeconds;
+        private final CompletableFuture<ToolExecutionResult> completion = new CompletableFuture<>();
+        private final AtomicReference<ToolControlState> state =
+                new AtomicReference<>(ToolControlState.NEW);
+        private final AtomicReference<Thread> worker = new AtomicReference<>();
+        private final AtomicBoolean cancelRequested = new AtomicBoolean(false);
+        private final CancellationToken.Registration tokenRegistration;
+        private volatile Future<?> future;
+        private volatile ScheduledFuture<?> timeoutFuture;
+        private volatile ScheduledExecutorService scheduler;
+        private volatile CancellationReason cancellationReason = CancellationReason.NONE;
+
+        private ToolInvocationControl(ToolInvocation invocation, CancellationToken token,
+                                       ToolCancellationCapability capability,
+                                       long timeoutSeconds) {
+            this.invocation = invocation;
+            this.token = token;
+            this.capability = capability == null
+                    ? ToolCancellationCapability.INTERRUPT_ONLY : capability;
+            this.timeoutSeconds = Math.max(1, timeoutSeconds);
+            this.tokenRegistration = token.onCancel(() -> onTokenCancelled(token.reason()));
+        }
+
+        private ToolInvocation invocation() {
+            return invocation;
+        }
+
+        private CancellationToken token() {
+            return token;
+        }
+
+        private long timeoutSeconds() {
+            return timeoutSeconds;
+        }
+
+        private CompletableFuture<ToolExecutionResult> completion() {
+            return completion;
+        }
+
+        private boolean tryStart() {
+            return state.compareAndSet(ToolControlState.NEW, ToolControlState.RUNNING);
+        }
+
+        private void bindWorker(Thread thread) {
+            worker.set(thread);
+            if (token.isCancelled()) {
+                onTokenCancelled(token.reason());
+            }
+        }
+
+        private void attachFuture(Future<?> future) {
+            this.future = future;
+            if (state.get() == ToolControlState.FINISHED) {
+                future.cancel(false);
+            }
+        }
+
+        private void scheduleTimeout(ScheduledExecutorService scheduler, long delayNanos,
+                                     CancellationReason reason) {
+            this.scheduler = scheduler;
+            timeoutFuture = scheduler.schedule(() -> cancel(reason, scheduler),
+                    Math.max(0, delayNanos), TimeUnit.NANOSECONDS);
+        }
+
+        private void cancel(CancellationReason reason, ScheduledExecutorService scheduler) {
+            this.scheduler = scheduler;
+            cancellationReason = reason == null || reason == CancellationReason.NONE
+                    ? CancellationReason.USER_REQUEST : reason;
+            token.cancel(cancellationReason);
+            onTokenCancelled(cancellationReason);
+        }
+
+        private void onTokenCancelled(CancellationReason reason) {
+            cancellationReason = reason == null || reason == CancellationReason.NONE
+                    ? CancellationReason.USER_REQUEST : reason;
+            if (!cancelRequested.compareAndSet(false, true)) {
+                return;
+            }
+            if (state.compareAndSet(ToolControlState.NEW, ToolControlState.FINISHED)) {
+                Future<?> queued = future;
+                if (queued != null) {
+                    queued.cancel(false);
+                }
+                completion.complete(cancelResult(0));
+                return;
+            }
+            if (state.get() != ToolControlState.RUNNING) {
+                return;
+            }
+            if (capability == ToolCancellationCapability.INTERRUPT_ONLY) {
+                interruptWorker();
+            } else {
+                scheduleEscalation(COOPERATIVE_CANCEL_GRACE_MILLIS);
+            }
+            scheduleTerminationConfirmation();
+        }
+
+        private void scheduleEscalation(long delayMillis) {
+            ScheduledExecutorService activeScheduler = scheduler;
+            if (activeScheduler == null) {
+                interruptWorker();
+                return;
+            }
+            activeScheduler.schedule(this::interruptWorker, delayMillis, TimeUnit.MILLISECONDS);
+        }
+
+        private void scheduleTerminationConfirmation() {
+            ScheduledExecutorService activeScheduler = scheduler;
+            if (activeScheduler == null) {
+                return;
+            }
+            activeScheduler.schedule(() -> {
+                if (state.get() == ToolControlState.RUNNING && !completion.isDone()) {
+                    completion.complete(ToolExecutionResult.terminationUnconfirmed(
+                            invocation, cancellationReason));
+                }
+            }, TERMINATION_CONFIRM_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+        }
+
+        private void interruptWorker() {
+            Thread activeWorker = worker.get();
+            if (activeWorker != null && activeWorker != Thread.currentThread()) {
+                activeWorker.interrupt();
+            }
+        }
+
+        private ToolExecutionResult resultFromOutput(ToolOutput output, long elapsedMillis) {
+            if (token.isCancelled()) {
+                return cancelResult(elapsedMillis);
+            }
+            return ToolExecutionResult.completed(invocation, output, elapsedMillis);
+        }
+
+        private ToolExecutionResult cancelResult(long elapsedMillis) {
+            CancellationReason reason = effectiveCancellationReason();
+            return switch (reason) {
+                case TOOL_TIMEOUT, BATCH_TIMEOUT ->
+                        ToolExecutionResult.timedOut(invocation, timeoutSeconds, reason,
+                                elapsedMillis);
+                default -> ToolExecutionResult.cancelled(invocation,
+                        reason == CancellationReason.PARENT_CANCELLED
+                                ? "上游任务取消了此次工具调用"
+                                : "用户取消了此次工具调用",
+                        elapsedMillis);
+            };
+        }
+
+        private CancellationReason effectiveCancellationReason() {
+            if (cancellationReason != CancellationReason.NONE) {
+                return cancellationReason;
+            }
+            CancellationReason tokenReason = token.reason();
+            return tokenReason == CancellationReason.NONE
+                    ? CancellationReason.THREAD_INTERRUPTED : tokenReason;
+        }
+
+        private void complete(ToolExecutionResult result) {
+            completion.complete(result);
+        }
+
+        private void finish() {
+            if (state.compareAndSet(ToolControlState.RUNNING, ToolControlState.FINISHED)) {
+                if (timeoutFuture != null) {
+                    timeoutFuture.cancel(false);
+                }
+                worker.set(null);
+                if (!completion.isDone()) {
+                    completion.complete(cancelResult(0));
+                }
+                tokenRegistration.close();
+                token.close();
+            }
+        }
+
+        private ToolExecutionResult awaitedResult() {
+            try {
+                return completion.get(TERMINATION_CONFIRM_TIMEOUT_MILLIS + 250,
+                        TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return ToolExecutionResult.terminationUnconfirmed(
+                        invocation, effectiveCancellationReason());
+            } catch (ExecutionException | TimeoutException e) {
+                return ToolExecutionResult.terminationUnconfirmed(
+                        invocation, effectiveCancellationReason());
+            }
+        }
+
+        private void close() {
+            if (timeoutFuture != null) {
+                timeoutFuture.cancel(false);
+            }
+            tokenRegistration.close();
+            token.close();
         }
     }
 
@@ -1447,12 +1682,17 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         }
 
         public static ToolExecutionResult cancelled(ToolInvocation invocation, String message) {
+            return cancelled(invocation, message, 0);
+        }
+
+        public static ToolExecutionResult cancelled(ToolInvocation invocation, String message,
+                                                    long elapsedMillis) {
             return new ToolExecutionResult(
                     invocation.id(),
                     invocation.name(),
                     invocation.argumentsJson(),
                     message,
-                    0,
+                    elapsedMillis,
                     ToolStatus.CANCELLED,
                     ToolErrorCode.CANCELLED,
                     false,
@@ -1460,17 +1700,38 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         }
 
         private static ToolExecutionResult timedOut(ToolInvocation invocation, long timeoutSeconds) {
+            return timedOut(invocation, timeoutSeconds, CancellationReason.TOOL_TIMEOUT,
+                    timeoutSeconds * 1000);
+        }
+
+        private static ToolExecutionResult timedOut(ToolInvocation invocation, long timeoutSeconds,
+                                                    CancellationReason reason,
+                                                    long elapsedMillis) {
             return new ToolExecutionResult(
                     invocation.id(),
                     invocation.name(),
                     invocation.argumentsJson(),
-                    "工具执行超时（" + timeoutSeconds + "秒），已取消",
-                    timeoutSeconds * 1000,
+                    "工具执行超时（" + timeoutSeconds + "秒），原因=" + reason,
+                    elapsedMillis,
                     ToolStatus.TIMEOUT,
                     ToolErrorCode.TIMEOUT,
                     true,
                     List.of()
             );
+        }
+
+        private static ToolExecutionResult terminationUnconfirmed(ToolInvocation invocation,
+                                                                   CancellationReason reason) {
+            return new ToolExecutionResult(
+                    invocation.id(),
+                    invocation.name(),
+                    invocation.argumentsJson(),
+                    "工具已请求取消，但在确认窗口内未能确认执行线程停止，原因=" + reason,
+                    0,
+                    ToolStatus.TERMINATION_UNCONFIRMED,
+                    ToolErrorCode.TERMINATION_UNCONFIRMED,
+                    true,
+                    List.of());
         }
 
         public boolean timedOut() {
