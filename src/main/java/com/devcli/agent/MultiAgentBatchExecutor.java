@@ -8,19 +8,15 @@ import com.devcli.trace.TraceRecorder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
@@ -104,19 +100,18 @@ final class MultiAgentBatchExecutor {
             ));
             out.println("⚡ 批次 #" + batchIndex + "：" + wave.size()
                     + " 个独立步骤并行执行（最多 " + workers.size() + " 个并发 Worker）\n");
-            executeWave(wave);
+            executeWave(batchIndex, wave, traceContext);
         }
     }
 
-    private void executeWave(List<AgentOrchestrator.ExecutionStep> wave) {
-        int parallelism = Math.min(wave.size(), workers.size());
-        ExecutorService executor = Executors.newFixedThreadPool(parallelism, task -> {
-            Thread thread = new Thread(task, "devcli-multi-agent");
-            thread.setDaemon(true);
-            return thread;
-        });
-        Map<String, ByteArrayOutputStream> buffers = new LinkedHashMap<>();
-        Map<String, PrintStream> streams = new LinkedHashMap<>();
+    private void executeWave(int batchIndex, List<AgentOrchestrator.ExecutionStep> wave,
+                             TraceContext traceContext) {
+        long waveStarted = System.nanoTime();
+        AtomicInteger activeExecutions = new AtomicInteger();
+        AtomicInteger peakConcurrency = new AtomicInteger();
+        AtomicLong firstExecutionStarted = new AtomicLong(Long.MAX_VALUE);
+        AtomicLong lastExecutionFinished = new AtomicLong();
+        LongAdder aggregateExecutionNanos = new LongAdder();
         Map<String, SubAgent> assignments = new LinkedHashMap<>();
         Map<String, ReentrantLock> workerLocks = new HashMap<>();
         workers.forEach(worker -> workerLocks.put(worker.getName(), new ReentrantLock(true)));
@@ -127,89 +122,100 @@ final class MultiAgentBatchExecutor {
             AgentOrchestrator.ExecutionStep step = wave.get(index);
             assignments.put(step.id(), hooks.workerResolver().apply(step.id(), index));
         }
+        Map<String, String> contexts = new LinkedHashMap<>();
+        for (AgentOrchestrator.ExecutionStep step : wave) {
+            contexts.put(step.id(), hooks.contextBuilder().apply(step));
+        }
 
         SubAgent reviewerForkTemplate = new SubAgent(
                 reviewer.getName(), AgentRole.REVIEWER, llmClient, toolRegistry);
         hooks.subAgentConfigurer().accept(reviewerForkTemplate);
         hooks.recoveryConfigurer().accept(reviewerForkTemplate);
         SubAgent.ForkContext reviewerForkContext = reviewerForkTemplate.createForkContext();
-        List<Future<?>> futures = new ArrayList<>();
-
-        try {
-            for (AgentOrchestrator.ExecutionStep step : wave) {
-                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-                PrintStream stepOut = new PrintStream(buffer, true, StandardCharsets.UTF_8);
-                buffers.put(step.id(), buffer);
-                streams.put(step.id(), stepOut);
-                String context = hooks.contextBuilder().apply(step);
-
-                futures.add(executor.submit(() -> {
+        OrchestrationWaveExecutor.execute(
+                OrchestrationProfile.TEAM,
+                out,
+                wave,
+                workers.size(),
+                step -> { },
+                (step, stepOut) -> {
                     SubAgent worker = assignments.get(step.id());
                     ReentrantLock workerLock = workerLocks.get(worker.getName());
+                    long executionStarted = 0L;
+                    boolean executionMeasured = false;
                     SubAgent localReviewer = new SubAgent(
                             reviewer.getName(), AgentRole.REVIEWER, llmClient, toolRegistry);
                     hooks.subAgentConfigurer().accept(localReviewer);
                     hooks.recoveryConfigurer().accept(localReviewer);
                     try {
                         workerLock.lockInterruptibly();
+                        executionStarted = System.nanoTime();
+                        executionMeasured = true;
+                        firstExecutionStarted.accumulateAndGet(executionStarted, Math::min);
+                        int active = activeExecutions.incrementAndGet();
+                        peakConcurrency.accumulateAndGet(active, Math::max);
                         SubAgent.ForkContext workerForkContext = workerContexts.get(worker);
+                        String context = contexts.get(step.id());
                         toolRegistry.runWithResourceLease(step.id(), () -> {
                             hooks.stepRunner().run(step, worker, localReviewer, context, stepOut,
                                     workerForkContext, reviewerForkContext);
                             return null;
                         });
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        hooks.failureHandler().accept(step, "并行执行被中断");
-                        stepOut.println("❌ 步骤 [" + step.id() + "] 被中断\n");
-                    } catch (RuntimeException e) {
-                        String message = e.getMessage() == null
-                                ? e.getClass().getSimpleName()
-                                : e.getMessage();
-                        log.error("Parallel step {} failed unexpectedly", step.id(), e);
-                        hooks.failureHandler().accept(step, "并行执行异常: " + message);
-                        stepOut.println("❌ 步骤 [" + step.id() + "] 并行执行异常：" + message + "\n");
                     } finally {
+                        if (executionMeasured) {
+                            long executionFinished = System.nanoTime();
+                            aggregateExecutionNanos.add(executionFinished - executionStarted);
+                            lastExecutionFinished.accumulateAndGet(executionFinished, Math::max);
+                            activeExecutions.decrementAndGet();
+                        }
                         worker.clearHistory();
                         if (workerLock.isHeldByCurrentThread()) {
                             workerLock.unlock();
                         }
                         toolRegistry.releaseResourceLeases(step.id());
-                        stepOut.flush();
                     }
                     return null;
-                }));
-            }
-
-            awaitCompletion(futures);
-        } finally {
-            executor.shutdownNow();
-            flushOutput(wave, buffers);
-            streams.values().forEach(PrintStream::close);
-        }
+                },
+                (step, error, stepOut) -> {
+                    if (error instanceof InterruptedException) {
+                        hooks.failureHandler().accept(step, "并行执行被中断");
+                        stepOut.println("❌ 步骤 [" + step.id() + "] 被中断\n");
+                        return null;
+                    }
+                    String message = error.getMessage() == null
+                            ? error.getClass().getSimpleName()
+                            : error.getMessage();
+                    log.error("Parallel step {} failed unexpectedly", step.id(), error);
+                    hooks.failureHandler().accept(step, "并行执行异常: " + message);
+                    stepOut.println("❌ 步骤 [" + step.id() + "] 并行执行异常：" + message + "\n");
+                    return null;
+                });
+        long firstStarted = firstExecutionStarted.get();
+        long lastFinished = lastExecutionFinished.get();
+        long executionWallNanos = firstStarted == Long.MAX_VALUE || lastFinished < firstStarted
+                ? System.nanoTime() - waveStarted
+                : lastFinished - firstStarted;
+        recordWaveMetrics(batchIndex, wave.size(), peakConcurrency.get(),
+                executionWallNanos, aggregateExecutionNanos.sum(), traceContext);
     }
 
-    private static void awaitCompletion(List<Future<?>> futures) {
-        for (Future<?> future : futures) {
-            try {
-                future.get();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                log.warn("Batch wait interrupted");
-            } catch (ExecutionException e) {
-                log.error("Parallel step task failed", e.getCause());
-            }
-        }
+    private void recordWaveMetrics(int batchIndex, int stepCount, int peakConcurrency,
+                                   long wallNanos, long aggregateExecutionNanos,
+                                   TraceContext traceContext) {
+        long wallMillis = Math.max(0L, wallNanos / 1_000_000L);
+        long aggregateMillis = Math.max(0L, aggregateExecutionNanos / 1_000_000L);
+        double parallelismFactor = wallNanos <= 0L
+                ? 0.0
+                : (double) aggregateExecutionNanos / (double) wallNanos;
+        traceRecorder.record(traceContext, "batch.wave.completed", Map.of(
+                "batchIndex", batchIndex,
+                "stepCount", stepCount,
+                "workerCount", workers.size(),
+                "peakConcurrency", peakConcurrency,
+                "wallMillis", wallMillis,
+                "aggregateStepMillis", aggregateMillis,
+                "parallelismFactor", parallelismFactor
+        ));
     }
 
-    private void flushOutput(List<AgentOrchestrator.ExecutionStep> wave,
-                             Map<String, ByteArrayOutputStream> buffers) {
-        for (AgentOrchestrator.ExecutionStep step : wave) {
-            ByteArrayOutputStream buffer = buffers.get(step.id());
-            if (buffer != null && buffer.size() > 0) {
-                out.print(buffer.toString(StandardCharsets.UTF_8));
-                out.flush();
-            }
-        }
-    }
 }

@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -37,6 +38,7 @@ class MultiAgentBatchExecutorTest {
                 AtomicInteger peak = new AtomicInteger();
                 CountDownLatch bothStarted = new CountDownLatch(2);
                 CountDownLatch secondPrinted = new CountDownLatch(1);
+                RecordingTraceRecorder traceRecorder = new RecordingTraceRecorder();
 
                 MultiAgentBatchExecutor executor = new MultiAgentBatchExecutor(
                         new PrintStream(output, true, StandardCharsets.UTF_8),
@@ -44,7 +46,7 @@ class MultiAgentBatchExecutorTest {
                         reviewer,
                         llmClient,
                         registry,
-                        new TraceRecorder(),
+                        traceRecorder,
                         new MultiAgentBatchExecutor.Hooks(
                                 (stepId, index) -> workers.get(index % workers.size()),
                                 agent -> { },
@@ -56,6 +58,7 @@ class MultiAgentBatchExecutorTest {
                                     peak.accumulateAndGet(current, Math::max);
                                     bothStarted.countDown();
                                     await(bothStarted);
+                                    LockSupport.parkNanos(Duration.ofMillis(40).toNanos());
                                     if (step.id().equals("first")) {
                                         await(secondPrinted);
                                         stepOut.println("first-output");
@@ -75,6 +78,11 @@ class MultiAgentBatchExecutorTest {
                 String rendered = output.toString(StandardCharsets.UTF_8);
                 assertEquals(2, peak.get());
                 assertTrue(rendered.indexOf("first-output") < rendered.indexOf("second-output"));
+                Map<String, ?> metrics = traceRecorder.fieldsFor("batch.wave.completed");
+                assertEquals(2, metrics.get("peakConcurrency"));
+                assertEquals(2, metrics.get("stepCount"));
+                assertTrue(((Number) metrics.get("parallelismFactor")).doubleValue() > 1.2,
+                        "parallelism factor should prove overlapping execution: " + metrics);
             }
         });
     }
@@ -195,5 +203,25 @@ class MultiAgentBatchExecutorTest {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("等待并行步骤时中断", e);
         }
+    }
+
+    private static final class RecordingTraceRecorder extends TraceRecorder {
+        private final List<TraceEvent> events = new CopyOnWriteArrayList<>();
+
+        @Override
+        public void record(TraceContext context, String event, Map<String, ?> fields) {
+            events.add(new TraceEvent(event, Map.copyOf(fields)));
+        }
+
+        private Map<String, ?> fieldsFor(String eventName) {
+            return events.stream()
+                    .filter(event -> event.name().equals(eventName))
+                    .map(TraceEvent::fields)
+                    .findFirst()
+                    .orElseThrow();
+        }
+    }
+
+    private record TraceEvent(String name, Map<String, ?> fields) {
     }
 }

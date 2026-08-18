@@ -19,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -26,17 +27,15 @@ import static org.junit.jupiter.api.Assertions.*;
 class SubAgentTest {
 
     @Test
-    void reviewerIterationLimitShouldBeBoundedAndConfigurable() {
+    void reviewerIterationLimitShouldRejectInvalidExplicitValues() {
         String previous = System.getProperty("devcli.team.reviewer.max.iterations");
         try {
             System.setProperty("devcli.team.reviewer.max.iterations", "5");
             assertEquals(5, SubAgent.resolveReviewerMaxIterations());
             System.setProperty("devcli.team.reviewer.max.iterations", "99");
-            assertEquals(SubAgent.MAX_REVIEWER_MAX_ITERATIONS,
-                    SubAgent.resolveReviewerMaxIterations());
+            assertThrows(IllegalArgumentException.class, SubAgent::resolveReviewerMaxIterations);
             System.setProperty("devcli.team.reviewer.max.iterations", "invalid");
-            assertEquals(SubAgent.DEFAULT_REVIEWER_MAX_ITERATIONS,
-                    SubAgent.resolveReviewerMaxIterations());
+            assertThrows(IllegalArgumentException.class, SubAgent::resolveReviewerMaxIterations);
         } finally {
             if (previous == null) {
                 System.clearProperty("devcli.team.reviewer.max.iterations");
@@ -117,6 +116,46 @@ class SubAgentTest {
         assertTrue(systemPrompt.contains("先调用第一个具体工具"), systemPrompt);
         assertTrue(systemPrompt.contains("write_file"), systemPrompt);
         assertTrue(systemPrompt.contains("不能以空 content 结束"), systemPrompt);
+    }
+
+    @Test
+    void planReviewShouldUseIsolatedNoToolPrompt() {
+        MultiCallStreamClient llm = new MultiCallStreamClient(List.of(
+                new CallScript(listener -> { },
+                        new LlmClient.ChatResponse("assistant", "{\"approved\":true}", null, 8, 3))
+        ));
+        SubAgent reviewer = new SubAgent("reviewer", AgentRole.REVIEWER, llm, new ToolRegistry());
+
+        reviewer.executePlanReview(AgentMessage.task("orchestrator", "评审候选计划"),
+                new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+
+        List<LlmClient.Message> messages = llm.messagesByCall.get(0);
+        assertTrue(messages.get(0).content().contains("Team Plan Reviewer"));
+        assertTrue(llm.toolsByCall.get(0) == null || llm.toolsByCall.get(0).isEmpty());
+    }
+
+    @Test
+    void forkContextKeepsWaveSnapshotWhenSharedMemoryChangesMidExecution() {
+        MultiCallStreamClient llm = new MultiCallStreamClient(List.of(
+                new CallScript(listener -> { },
+                        new LlmClient.ChatResponse("assistant", "完成", null, 8, 3))
+        ));
+        SubAgent worker = new SubAgent("worker", AgentRole.WORKER, llm, new ToolRegistry());
+        AtomicReference<String> workingMemory = new AtomicReference<>("wave-snapshot-before");
+        worker.setWorkingMemorySupplier(workingMemory::get);
+
+        SubAgent.ForkContext forkContext = worker.createForkContext();
+        workingMemory.set("wave-snapshot-after");
+        worker.executeForked(AgentMessage.task("orchestrator", "执行独立步骤"), forkContext,
+                new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+
+        String userMessage = llm.messagesByCall.get(0).stream()
+                .filter(message -> "user".equals(message.role()))
+                .reduce((first, second) -> second)
+                .orElseThrow()
+                .content();
+        assertTrue(userMessage.contains("wave-snapshot-before"), userMessage);
+        assertFalse(userMessage.contains("wave-snapshot-after"), userMessage);
     }
 
     @Test
@@ -376,6 +415,7 @@ class SubAgentTest {
     private static final class MultiCallStreamClient extends GLMClient {
         private final java.util.Iterator<CallScript> iter;
         private final List<List<Message>> messagesByCall = new java.util.ArrayList<>();
+        private final List<List<Tool>> toolsByCall = new java.util.ArrayList<>();
 
         private MultiCallStreamClient(List<CallScript> scripts) {
             super("test-key");
@@ -393,6 +433,7 @@ class SubAgentTest {
                 throw new IOException("脚本已耗尽，未预设第 N 次调用");
             }
             messagesByCall.add(List.copyOf(messages));
+            toolsByCall.add(tools == null ? null : List.copyOf(tools));
             CallScript next = iter.next();
             next.streamScript().accept(listener);
             return next.response();

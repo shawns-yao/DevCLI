@@ -1,15 +1,14 @@
 package com.devcli.agent;
 
+import com.devcli.config.ConfigResolver;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.hook.HookLifecycle;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.LlmTraceLogger;
 import com.devcli.lsp.LspDiagnosticReport;
-import com.devcli.memory.CompactBoundaryRuntimeState;
 import com.devcli.memory.ConversationHistoryCompactor;
 import com.devcli.memory.MemoryManager;
-import com.devcli.memory.PostCompactRestoreContext;
 import com.devcli.memory.TokenBudget;
 import com.devcli.context.ContextProfile;
 import com.devcli.plan.*;
@@ -18,7 +17,6 @@ import com.devcli.prompt.PromptContext;
 import com.devcli.prompt.PromptMode;
 import com.devcli.runtime.CancellationContext;
 import com.devcli.skill.SkillContextBuffer;
-import com.devcli.skill.SkillIndexFormatter;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.util.AnsiStyle;
 import com.devcli.tool.ToolRegistry;
@@ -26,7 +24,6 @@ import com.devcli.tool.ToolRegistry.ToolExecutionResult;
 import com.devcli.tool.ToolRegistry.ToolInvocation;
 import com.devcli.trace.TraceContext;
 import com.devcli.trace.TraceRecorder;
-import com.devcli.util.TerminalMarkdownRenderer;
 import com.devcli.image.ImageReferenceParser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -141,17 +138,13 @@ public class PlanExecuteAgent {
         this.reviewHandler = reviewHandler == null ? (goal, plan) -> PlanReviewDecision.execute() : reviewHandler;
         this.memoryManager = memoryManager != null ? memoryManager : new MemoryManager(llmClient);
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
-        this.historyCompactor.setSessionMemory(this.memoryManager.getSessionMemory());
-        this.historyCompactor.setPostCompactContextSupplier(this::buildPostCompactRestoreSection);
-        this.historyCompactor.setCompactBoundaryRuntimeStateSupplier(this::buildCompactBoundaryRuntimeState);
-        this.historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(this.toolRegistry.getProjectPath()));
-        this.toolRegistry.setContextProfile(this.memoryManager.getContextProfile());
-        this.toolRegistry.setMemorySaver(this.memoryManager::storeFact);
-        this.toolRegistry.setMemorySaveHandler(fact -> {
-            MemoryManager.StoreResult result = this.memoryManager.storeFactWithPolicy(fact, true);
-            return new ToolRegistry.MemorySaveResult(result.stored(), result.message());
-        });
-        this.toolRegistry.setMemoryListHandler(this.memoryManager::listLongTermMemory);
+        AgentRuntimeSupport.configureCompactor(
+                historyCompactor,
+                this.memoryManager,
+                this.toolRegistry,
+                this::buildPostCompactRestoreSection,
+                this::buildCompactBoundaryRuntimeState);
+        AgentRuntimeSupport.bindMemory(this.toolRegistry, this.memoryManager);
     }
 
     private static PrintStream deferredSystemOut() {
@@ -210,61 +203,22 @@ public class PlanExecuteAgent {
     }
 
     private String buildSkillIndex(String activationText) {
-        if (skillRegistry == null) return "";
-        try {
-            return SkillIndexFormatter.format(skillRegistry.enabledSkillsForText(
-                    activationText,
-                    toolRegistry.getProjectPath()));
-        } catch (Exception e) {
-            log.warn("Failed to build skill index", e);
-            return "";
-        }
+        return AgentRuntimeSupport.buildSkillIndex(
+                skillRegistry, activationText, toolRegistry, log);
     }
 
     private String prependSkillBodies(String content) {
-        if (skillContextBuffer == null || skillContextBuffer.isEmpty()) {
-            return content;
-        }
-        String drained = skillContextBuffer.drain();
-        if (drained.isEmpty()) return content;
-        return drained + "\n" + content;
+        return AgentRuntimeSupport.prependSkillBodies(skillContextBuffer, content);
     }
 
     private String buildPostCompactRestoreSection() {
-        List<PostCompactRestoreContext.Section> sections = new ArrayList<>();
-        String workingMemory = memoryManager.buildPostCompactRestoreSection();
-        if (workingMemory != null && !workingMemory.isBlank()) {
-            sections.add(new PostCompactRestoreContext.Section("工作记忆恢复", workingMemory.trim()));
-        }
-        String mcpTools = buildMcpPostCompactRestoreSection();
-        if (!mcpTools.isBlank()) {
-            sections.add(new PostCompactRestoreContext.Section("MCP 工具状态", mcpTools));
-        }
-        if (skillContextBuffer != null) {
-            String skills = skillContextBuffer.renderPostCompactRestoreSection();
-            if (!skills.isBlank()) {
-                sections.add(new PostCompactRestoreContext.Section("已调用 Skill 恢复", skills));
-            }
-        }
-        return PostCompactRestoreContext.render(sections.toArray(PostCompactRestoreContext.Section[]::new));
+        return AgentRuntimeSupport.buildPostCompactRestoreSection(
+                memoryManager.buildPostCompactRestoreSection(), toolRegistry, skillContextBuffer);
     }
 
-    private String buildMcpPostCompactRestoreSection() {
-        String snapshot = toolRegistry.mcpToolSnapshot();
-        if (snapshot == null || snapshot.isBlank() || "none".equalsIgnoreCase(snapshot.trim())) {
-            return "";
-        }
-        return "- snapshot: " + snapshot.trim();
-    }
-
-    private CompactBoundaryRuntimeState buildCompactBoundaryRuntimeState() {
-        return new CompactBoundaryRuntimeState(
-                skillContextBuffer == null ? List.of() : skillContextBuffer.activeSkillNames(),
-                CompactBoundaryRuntimeState.mergeRagEpochSnapshots(
-                        memoryManager.currentRagEpochSnapshot(),
-                        toolRegistry.currentRagIndexEpochSnapshot()),
-                toolRegistry.mcpToolSnapshot(),
-                false);
+    private com.devcli.memory.CompactBoundaryRuntimeState buildCompactBoundaryRuntimeState() {
+        return AgentRuntimeSupport.buildCompactBoundaryRuntimeState(
+                memoryManager, toolRegistry, skillContextBuffer, false);
     }
 
     /**
@@ -326,28 +280,24 @@ public class PlanExecuteAgent {
     private static final int MAX_REPLAN_ATTEMPTS = 2;
 
     private PlanRunOutcome reviewAndExecutePlan(ExecutionPlan plan, StreamState streamState) throws IOException {
-        // Phase 1: 用户审阅循环（可补充重规划）
-        while (true) {
-            PlanReviewDecision decision = reviewHandler.review(plan.getGoal(), plan);
-            if (decision == null || decision.action() == PlanReviewAction.EXECUTE) {
-                break;
-            }
-
-            if (decision.action() == PlanReviewAction.CANCEL) {
-                return PlanRunOutcome.canceled("⏹️ 已取消本次计划执行。");
-            }
-
-            String feedback = decision.feedback() == null ? "" : decision.feedback().trim();
-            if (feedback.isEmpty()) {
-                break;
-            }
-
-            out.println("📝 已收到补充要求，正在重新规划...\n");
-            plan = planner.createPlan(plan.getGoal() + "\n补充要求：" + feedback);
-        }
-
-        // Phase 2: 执行 + 有界 replan（非递归），最多 MAX_REPLAN_ATTEMPTS 次重新规划
+        // 每一版图都必须经过同一审阅入口；默认无头 handler 仍可自动批准。
         for (int replanAttempt = 0; ; replanAttempt++) {
+            while (true) {
+                PlanReviewDecision decision = reviewHandler.review(plan.getGoal(), plan);
+                if (decision == null || decision.action() == PlanReviewAction.EXECUTE) {
+                    break;
+                }
+                if (decision.action() == PlanReviewAction.CANCEL) {
+                    return PlanRunOutcome.canceled("⏹️ 已取消本次计划执行。");
+                }
+                String feedback = decision.feedback() == null ? "" : decision.feedback().trim();
+                if (feedback.isEmpty()) {
+                    break;
+                }
+                out.println("📝 已收到补充要求，正在生成计划修订...\n");
+                plan = planner.reviseForFeedback(plan, feedback);
+            }
+
             String result = executePlan(plan, streamState);
             if (replanAttempt >= MAX_REPLAN_ATTEMPTS || !plan.hasFailed() || result.contains("⏹️")) {
                 return PlanRunOutcome.executed(result);
@@ -500,11 +450,10 @@ public class PlanExecuteAgent {
     }
 
     private boolean requiresIsolatedWorkspace(Task task) {
-        String configured = System.getProperty("devcli.workspace.isolation.enabled");
-        if (configured == null || configured.isBlank()) {
-            configured = System.getenv("DEVCLI_WORKSPACE_ISOLATION_ENABLED");
-        }
-        if (configured != null && !configured.isBlank() && !Boolean.parseBoolean(configured)) {
+        if (!ConfigResolver.booleanValue(
+                "devcli.workspace.isolation.enabled",
+                "DEVCLI_WORKSPACE_ISOLATION_ENABLED",
+                true)) {
             return false;
         }
         return task.getType() == Task.TaskType.FILE_WRITE
@@ -568,6 +517,11 @@ public class PlanExecuteAgent {
                     @Override
                     public List<LlmClient.Tool> toolDefinitions(int iteration) {
                         return activeTaskToolRegistry().getToolDefinitions();
+                    }
+
+                    @Override
+                    public com.devcli.tool.ToolPresentation toolPresentation(String toolName) {
+                        return activeTaskToolRegistry().toolPresentation(toolName);
                     }
 
                     @Override
@@ -760,7 +714,7 @@ public class PlanExecuteAgent {
         if (report == null || report.isEmpty()) {
             return;
         }
-        messages.add(LlmClient.Message.user(report.promptText()));
+        messages.add(LlmClient.Message.internalUser(report.promptText()));
         out.println(report.displayText());
         log.info("Injected LSP diagnostics into plan task conversation");
     }
@@ -807,7 +761,7 @@ public class PlanExecuteAgent {
             List<LlmClient.ContentPart> parts = new ArrayList<>();
             parts.add(LlmClient.ContentPart.text("工具 " + result.name() + " 返回了图片内容，请结合上面的工具文本结果分析。"));
             parts.addAll(result.imageParts());
-            messages.add(LlmClient.Message.user(parts));
+            messages.add(LlmClient.Message.user(parts, LlmClient.MessageSource.TOOL));
         }
     }
 
@@ -917,90 +871,24 @@ public class PlanExecuteAgent {
     }
 
     private static final class TaskStreamRenderer implements LlmClient.StreamListener {
-        private final String taskId;
-        private final StreamState streamState;
-        private final PrintStream out;
-        private final StringBuilder pendingReasoning = new StringBuilder();
-        private final StringBuilder lateReasoning = new StringBuilder();
-        private TerminalMarkdownRenderer reasoningRenderer;
-        private TerminalMarkdownRenderer contentRenderer;
-        private boolean reasoningStarted;
-        private boolean contentStarted;
-        private boolean streamedOutput;
+        private final AgentStreamPresenter delegate;
 
         private TaskStreamRenderer(String taskId, StreamState streamState, PrintStream out) {
-            this.taskId = taskId;
-            this.streamState = streamState;
-            this.out = out;
+            this.delegate = AgentStreamPresenter.task(taskId, out, streamState::markStreamed);
         }
 
         @Override
         public synchronized void onReasoningDelta(String delta) {
-            if (delta == null || delta.isEmpty()) {
-                return;
-            }
-            if (contentStarted) {
-                lateReasoning.append(delta);
-                return;
-            }
-            if (!reasoningStarted) {
-                pendingReasoning.append(delta);
-                if (pendingReasoning.toString().isBlank()) {
-                    return;
-                }
-                out.println(AnsiStyle.heading("🧠 任务思考 [" + taskId + "]"));
-                reasoningRenderer = new TerminalMarkdownRenderer(out);
-                reasoningRenderer.append(pendingReasoning.toString());
-                pendingReasoning.setLength(0);
-                reasoningStarted = true;
-                streamedOutput = true;
-                streamState.markStreamed();
-            } else {
-                reasoningRenderer.append(delta);
-            }
-            out.flush();
+            delegate.onReasoningDelta(delta);
         }
 
         @Override
         public synchronized void onContentDelta(String delta) {
-            if (delta == null || delta.isEmpty()) {
-                return;
-            }
-            if (!contentStarted) {
-                if (reasoningStarted && reasoningRenderer != null) {
-                    reasoningRenderer.finish();
-                    out.println();
-                } else if (pendingReasoning.length() > 0 && !pendingReasoning.toString().isBlank()) {
-                    out.println(AnsiStyle.heading("🧠 任务思考 [" + taskId + "]"));
-                    TerminalMarkdownRenderer r = new TerminalMarkdownRenderer(out);
-                    r.append(pendingReasoning.toString());
-                    r.finish();
-                    out.println();
-                    pendingReasoning.setLength(0);
-                    reasoningStarted = true;
-                }
-                // content 可能只是 tool-call 前的叙述，也可能是最终回答，用"输出"避免误导。
-                out.println(AnsiStyle.section("🤖 任务输出 [" + taskId + "]"));
-                contentRenderer = new TerminalMarkdownRenderer(out);
-                contentStarted = true;
-                streamedOutput = true;
-                streamState.markStreamed();
-            }
-            contentRenderer.append(delta);
-            out.flush();
+            delegate.onContentDelta(delta);
         }
 
         private synchronized void finish() {
-            if (streamedOutput) {
-                if (reasoningRenderer != null) {
-                    reasoningRenderer.finish();
-                }
-                if (contentRenderer != null) {
-                    contentRenderer.finish();
-                }
-                flushLateReasoning();
-                out.println("\n");
-            }
+            delegate.finish();
         }
 
         /**
@@ -1008,39 +896,11 @@ public class PlanExecuteAgent {
          * 让下一轮迭代能重新打印 🧠 / 🤖 标题，避免标题和内容被 HITL / 工具执行中断而错位。
          */
         private synchronized void resetBetweenIterations() {
-            if (reasoningRenderer != null) {
-                reasoningRenderer.finish();
-                reasoningRenderer = null;
-            }
-            if (contentRenderer != null) {
-                contentRenderer.finish();
-                contentRenderer = null;
-            }
-            flushLateReasoning();
-            pendingReasoning.setLength(0);
-            reasoningStarted = false;
-            contentStarted = false;
-            if (streamedOutput) {
-                out.println();
-            }
+            delegate.resetBetweenIterations();
         }
 
         private synchronized boolean hasStreamedOutput() {
-            return streamedOutput;
-        }
-
-        private void flushLateReasoning() {
-            String late = lateReasoning.toString().trim();
-            if (late.isEmpty()) {
-                lateReasoning.setLength(0);
-                return;
-            }
-            out.println();
-            out.println(AnsiStyle.heading("🧠 补充思考 [" + taskId + "]"));
-            TerminalMarkdownRenderer renderer = new TerminalMarkdownRenderer(out);
-            renderer.append(late);
-            renderer.finish();
-            lateReasoning.setLength(0);
+            return delegate.hasStreamedOutput();
         }
     }
 

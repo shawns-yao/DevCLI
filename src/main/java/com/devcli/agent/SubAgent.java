@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.config.ConfigResolver;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -10,21 +11,18 @@ import com.devcli.llm.LlmTraceLogger;
 import com.devcli.lsp.LspDiagnosticReport;
 import com.devcli.memory.CompactBoundaryRuntimeState;
 import com.devcli.memory.ConversationHistoryCompactor;
-import com.devcli.memory.PostCompactRestoreContext;
 import com.devcli.memory.TokenBudget;
 import com.devcli.context.ContextProfile;
 import com.devcli.prompt.PromptAssembler;
 import com.devcli.prompt.PromptContext;
 import com.devcli.prompt.PromptMode;
 import com.devcli.skill.SkillContextBuffer;
-import com.devcli.skill.SkillIndexFormatter;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.tool.ToolStatus;
 import com.devcli.tool.ToolRegistry.ToolExecutionResult;
 import com.devcli.tool.ToolRegistry.ToolInvocation;
 import com.devcli.util.AnsiStyle;
-import com.devcli.util.TerminalMarkdownRenderer;
 import com.devcli.image.ImageReferenceParser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -212,7 +210,11 @@ public class SubAgent {
      * 以 append-only 方式进入任务消息，避免 fork 共享前缀逐任务失配。
      */
     private String getSystemPrompt() {
-        return promptAssembler.assemble(promptMode(), PromptContext.builder()
+        return getSystemPrompt(promptMode());
+    }
+
+    private String getSystemPrompt(PromptMode mode) {
+        return promptAssembler.assemble(mode, PromptContext.builder()
                 .externalContext(buildExternalContext())
                 .stickyMemory(buildStickyMemory())
                 .build());
@@ -256,22 +258,8 @@ public class SubAgent {
     }
 
     private String buildPostCompactRestoreSection() {
-        List<PostCompactRestoreContext.Section> sections = new ArrayList<>();
-        String workingMemory = buildPostCompactRestoreMemory();
-        if (!workingMemory.isBlank()) {
-            sections.add(new PostCompactRestoreContext.Section("工作记忆恢复", workingMemory));
-        }
-        String mcpTools = buildMcpPostCompactRestoreSection();
-        if (!mcpTools.isBlank()) {
-            sections.add(new PostCompactRestoreContext.Section("MCP 工具状态", mcpTools));
-        }
-        if (skillContextBuffer != null) {
-            String skills = skillContextBuffer.renderPostCompactRestoreSection();
-            if (!skills.isBlank()) {
-                sections.add(new PostCompactRestoreContext.Section("已调用 Skill 恢复", skills));
-            }
-        }
-        return PostCompactRestoreContext.render(sections.toArray(PostCompactRestoreContext.Section[]::new));
+        return AgentRuntimeSupport.buildPostCompactRestoreSection(
+                buildPostCompactRestoreMemory(), toolRegistry, skillContextBuffer);
     }
 
     private String buildPostCompactRestoreMemory() {
@@ -282,14 +270,6 @@ public class SubAgent {
             log.warn("Failed to render post-compact restore memory in SubAgent {}", name, e);
             return "";
         }
-    }
-
-    private String buildMcpPostCompactRestoreSection() {
-        String snapshot = toolRegistry.mcpToolSnapshot();
-        if (snapshot == null || snapshot.isBlank() || "none".equalsIgnoreCase(snapshot.trim())) {
-            return "";
-        }
-        return "- snapshot: " + snapshot.trim();
     }
 
     private CompactBoundaryRuntimeState buildCompactBoundaryRuntimeState() {
@@ -363,15 +343,8 @@ public class SubAgent {
     }
 
     private String buildSkillIndex() {
-        if (skillRegistry == null) return "";
-        try {
-            return SkillIndexFormatter.format(skillRegistry.enabledSkillsForText(
-                    currentSkillActivationText,
-                    toolRegistry.getProjectPath()));
-        } catch (Exception e) {
-            log.warn("[{}] failed to build skill index", name, e);
-            return "";
-        }
+        return AgentRuntimeSupport.buildSkillIndex(
+                skillRegistry, currentSkillActivationText, toolRegistry, log);
     }
 
     private String prependSkillBodies(String content) {
@@ -379,16 +352,8 @@ public class SubAgent {
     }
 
     private String prependSkillBodies(String content, boolean consumeBuffer) {
-        if (skillContextBuffer == null || skillContextBuffer.isEmpty()) {
-            return content;
-        }
-        String skillBodies = consumeBuffer ? skillContextBuffer.drain() : skillContextBuffer.snapshot();
-        return prependSkillBodies(content, skillBodies);
-    }
-
-    private static String prependSkillBodies(String content, String skillBodies) {
-        if (skillBodies == null || skillBodies.isEmpty()) return content;
-        return skillBodies + "\n" + content;
+        return AgentRuntimeSupport.prependSkillBodies(
+                skillContextBuffer, content, consumeBuffer);
     }
 
     private static String prependTurnContext(String content, String turnContext) {
@@ -456,7 +421,7 @@ public class SubAgent {
         pruneHistoricalImagePayloads();
         refreshSystemPrompt();
         return executeWithHistory(task, out, conversationHistory, null, toolChoice,
-                completionToolName);
+                completionToolName, true);
     }
 
     public AgentMessage executeForked(AgentMessage task, ForkContext forkContext, PrintStream out) {
@@ -476,19 +441,31 @@ public class SubAgent {
         ForkContext context = forkContext == null ? createForkContext() : forkContext;
         List<LlmClient.Message> forkedHistory = new ArrayList<>(context.sharedPrefix());
         return executeWithHistory(task, out, forkedHistory, context, toolChoice,
-                completionToolName);
+                completionToolName, true);
+    }
+
+    /** 使用独立、无工具上下文评审候选计划，不污染执行产物 Reviewer 的历史。 */
+    AgentMessage executePlanReview(AgentMessage task, PrintStream out) {
+        executionEvidence.set(new ExecutionEvidenceAccumulator());
+        currentSkillActivationText = "";
+        List<LlmClient.Message> reviewHistory = new ArrayList<>();
+        reviewHistory.add(LlmClient.Message.system(getSystemPrompt(PromptMode.TEAM_PLAN_REVIEWER)));
+        return executeWithHistory(task, out, reviewHistory, null, LlmClient.ToolChoice.AUTO,
+                "", false);
     }
 
     private AgentMessage executeWithHistory(AgentMessage task, PrintStream out,
                                             List<LlmClient.Message> history,
                                             ForkContext forkContext,
                                             LlmClient.ToolChoice initialToolChoice,
-                                            String completionToolName) {
+                                            String completionToolName,
+                                            boolean toolsEnabled) {
         // 当轮快照：非 fork 路径实时渲染，fork 路径用冻结快照（同批 Worker 一致且无并发读竞争）
         String turnContext = forkContext == null ? buildTurnContext() : forkContext.turnContextSnapshot();
         String taskContent = prependTurnContext(forkContext == null
                 ? prependSkillBodies(task.content(), true)
-                : prependSkillBodies(task.content(), forkContext.skillBodySnapshot()), turnContext);
+                : AgentRuntimeSupport.prependSkillBodies(
+                        forkContext.skillBodySnapshot(), task.content()), turnContext);
 
         // 将任务注入对话
         history.add(ImageReferenceParser.userMessage(
@@ -508,7 +485,12 @@ public class SubAgent {
 
                     @Override
                     public List<LlmClient.Tool> toolDefinitions(int iteration) {
-                        return toolDefinitionsFor(forkContext);
+                        return toolsEnabled ? toolDefinitionsFor(forkContext) : null;
+                    }
+
+                    @Override
+                    public com.devcli.tool.ToolPresentation toolPresentation(String toolName) {
+                        return toolRegistry.toolPresentation(toolName);
                     }
 
                     @Override
@@ -663,18 +645,12 @@ public class SubAgent {
     }
 
     static int resolveReviewerMaxIterations() {
-        String raw = System.getProperty("devcli.team.reviewer.max.iterations");
-        if (raw == null || raw.isBlank()) {
-            raw = System.getenv("DEVCLI_TEAM_REVIEWER_MAX_ITERATIONS");
-        }
-        try {
-            int parsed = raw == null || raw.isBlank()
-                    ? DEFAULT_REVIEWER_MAX_ITERATIONS
-                    : Integer.parseInt(raw.trim());
-            return Math.max(1, Math.min(MAX_REVIEWER_MAX_ITERATIONS, parsed));
-        } catch (NumberFormatException ignored) {
-            return DEFAULT_REVIEWER_MAX_ITERATIONS;
-        }
+        return ConfigResolver.intValue(
+                "devcli.team.reviewer.max.iterations",
+                "DEVCLI_TEAM_REVIEWER_MAX_ITERATIONS",
+                DEFAULT_REVIEWER_MAX_ITERATIONS,
+                1,
+                MAX_REVIEWER_MAX_ITERATIONS);
     }
 
     static LlmClient.ChatResponse adaptRequiredToolEnvelope(
@@ -888,7 +864,7 @@ public class SubAgent {
         if (report == null || report.isEmpty()) {
             return;
         }
-        history.add(LlmClient.Message.user(report.promptText()));
+        history.add(LlmClient.Message.internalUser(report.promptText()));
         if (out != null) {
             out.println(report.displayText());
         }
@@ -947,7 +923,7 @@ public class SubAgent {
             List<LlmClient.ContentPart> parts = new ArrayList<>();
             parts.add(LlmClient.ContentPart.text("工具 " + result.name() + " 返回了图片内容，请结合上面的工具文本结果分析。"));
             parts.addAll(result.imageParts());
-            history.add(LlmClient.Message.user(parts));
+            history.add(LlmClient.Message.user(parts, LlmClient.MessageSource.TOOL));
         }
     }
 
@@ -1092,92 +1068,20 @@ public class SubAgent {
      * 在 finish() 时以"🧠 补充思考"独立展示，避免混入结果区。
      */
     private static final class SubAgentStreamRenderer implements LlmClient.StreamListener {
-        private final String agentName;
-        private final AgentRole role;
-        private final PrintStream out;
-        private final StringBuilder pendingReasoning = new StringBuilder();
-        private final StringBuilder lateReasoning = new StringBuilder();
-        private TerminalMarkdownRenderer reasoningRenderer;
-        private TerminalMarkdownRenderer contentRenderer;
-        private boolean reasoningStarted;
-        private boolean contentStarted;
-        private boolean streamedOutput;
+        private final AgentStreamPresenter delegate;
 
         private SubAgentStreamRenderer(String agentName, AgentRole role, PrintStream out) {
-            this.agentName = agentName;
-            this.role = role;
-            this.out = out;
+            this.delegate = AgentStreamPresenter.subAgent(agentName, role, out);
         }
 
         @Override
         public void onReasoningDelta(String delta) {
-            if (delta == null || delta.isEmpty()) {
-                return;
-            }
-            if (contentStarted) {
-                lateReasoning.append(delta);
-                return;
-            }
-            if (!reasoningStarted) {
-                pendingReasoning.append(delta);
-                if (pendingReasoning.toString().isBlank()) {
-                    return;
-                }
-                out.println(AnsiStyle.heading("🧠 " + reasoningLabel() + " [" + agentName + "]"));
-                reasoningRenderer = new TerminalMarkdownRenderer(out);
-                reasoningRenderer.append(pendingReasoning.toString());
-                pendingReasoning.setLength(0);
-                reasoningStarted = true;
-                streamedOutput = true;
-            } else {
-                reasoningRenderer.append(delta);
-            }
-            out.flush();
+            delegate.onReasoningDelta(delta);
         }
 
         @Override
         public void onContentDelta(String delta) {
-            if (delta == null || delta.isEmpty()) {
-                return;
-            }
-            if (!contentStarted) {
-                if (reasoningStarted && reasoningRenderer != null) {
-                    reasoningRenderer.finish();
-                    out.println();
-                } else if (pendingReasoning.length() > 0 && !pendingReasoning.toString().isBlank()) {
-                    // 实质 reasoning 尚未流出就被 content 打断：先补打思考过程再切到结果
-                    out.println(AnsiStyle.heading("🧠 " + reasoningLabel() + " [" + agentName + "]"));
-                    TerminalMarkdownRenderer r = new TerminalMarkdownRenderer(out);
-                    r.append(pendingReasoning.toString());
-                    r.finish();
-                    out.println();
-                    pendingReasoning.setLength(0);
-                    reasoningStarted = true;
-                }
-                out.println(AnsiStyle.section("🤖 " + contentLabel() + " [" + agentName + "]"));
-                contentRenderer = new TerminalMarkdownRenderer(out);
-                contentStarted = true;
-                streamedOutput = true;
-            }
-            contentRenderer.append(delta);
-            out.flush();
-        }
-
-        private String reasoningLabel() {
-            return switch (role) {
-                case PLANNER -> "规划思考";
-                case WORKER -> "执行思考";
-                case REVIEWER -> "审查思考";
-            };
-        }
-
-        private String contentLabel() {
-            // WORKER/REVIEWER 可能在 tool_calls 前先 narrate，用"输出"避免"结果"暗示已经完成。
-            return switch (role) {
-                case PLANNER -> "规划结果";
-                case WORKER -> "执行输出";
-                case REVIEWER -> "审查输出";
-            };
+            delegate.onContentDelta(delta);
         }
 
         /**
@@ -1185,52 +1089,11 @@ public class SubAgent {
          * 让下一轮迭代的 reasoning/content 能重新打印各自的标题。
          */
         private void resetBetweenIterations() {
-            if (reasoningRenderer != null) {
-                reasoningRenderer.finish();
-                reasoningRenderer = null;
-            }
-            if (contentRenderer != null) {
-                contentRenderer.finish();
-                contentRenderer = null;
-            }
-            String late = lateReasoning.toString().trim();
-            if (!late.isEmpty()) {
-                out.println();
-                out.println(AnsiStyle.heading("🧠 补充思考 [" + agentName + "]"));
-                TerminalMarkdownRenderer r = new TerminalMarkdownRenderer(out);
-                r.append(late);
-                r.finish();
-                lateReasoning.setLength(0);
-                streamedOutput = true;
-            }
-            pendingReasoning.setLength(0);
-            reasoningStarted = false;
-            contentStarted = false;
-            if (streamedOutput) {
-                out.println();
-            }
+            delegate.resetBetweenIterations();
         }
 
         private void finish() {
-            if (reasoningRenderer != null) {
-                reasoningRenderer.finish();
-            }
-            if (contentRenderer != null) {
-                contentRenderer.finish();
-            }
-            String late = lateReasoning.toString().trim();
-            if (!late.isEmpty()) {
-                out.println();
-                out.println(AnsiStyle.heading("🧠 补充思考 [" + agentName + "]"));
-                TerminalMarkdownRenderer r = new TerminalMarkdownRenderer(out);
-                r.append(late);
-                r.finish();
-                lateReasoning.setLength(0);
-                streamedOutput = true;
-            }
-            if (streamedOutput) {
-                out.println("\n");
-            }
+            delegate.finish();
         }
     }
 }

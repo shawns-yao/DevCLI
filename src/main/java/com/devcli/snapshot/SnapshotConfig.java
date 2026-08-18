@@ -1,10 +1,11 @@
 package com.devcli.snapshot;
 
+import com.devcli.config.ConfigResolver;
+
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 
 public record SnapshotConfig(
@@ -40,21 +41,28 @@ public record SnapshotConfig(
     );
 
     public static SnapshotConfig fromEnvironment() {
-        boolean enabled = readBoolean("devcli.snapshot.enabled", "DEVCLI_SNAPSHOT_ENABLED", true);
-        Path root = Path.of(readString("devcli.snapshot.dir", "DEVCLI_SNAPSHOT_DIR",
+        boolean enabled = ConfigResolver.booleanValue(
+                "devcli.snapshot.enabled", "DEVCLI_SNAPSHOT_ENABLED", true);
+        Path root = Path.of(ConfigResolver.stringValue(
+                "devcli.snapshot.dir", "DEVCLI_SNAPSHOT_DIR",
                 Path.of(System.getProperty("user.home"), ".devcli", "snapshots").toString()));
-        int max = readInt("devcli.snapshot.max", "DEVCLI_SNAPSHOT_MAX", 50);
-        List<String> excludes = mergeExcludes(readString("devcli.snapshot.excludes", "DEVCLI_SNAPSHOT_EXCLUDES", ""));
-        boolean gcEnabled = readBoolean("devcli.snapshot.gc.enabled", "DEVCLI_SNAPSHOT_GC_ENABLED", true);
-        int gcThreshold = readInt("devcli.snapshot.gc.pruned.threshold",
-                "DEVCLI_SNAPSHOT_GC_PRUNED_THRESHOLD", 100);
-        int gcIntervalHours = readInt("devcli.snapshot.gc.min.interval.hours",
-                "DEVCLI_SNAPSHOT_GC_MIN_INTERVAL_HOURS", 24);
-        int gcMaxSeconds = readInt("devcli.snapshot.gc.max.seconds",
-                "DEVCLI_SNAPSHOT_GC_MAX_SECONDS", 30);
-        return new SnapshotConfig(enabled, root, Math.max(1, max), excludes,
-                gcEnabled, Math.max(1, gcThreshold), Math.max(1, gcIntervalHours),
-                Math.max(1, gcMaxSeconds));
+        int max = ConfigResolver.intValue(
+                "devcli.snapshot.max", "DEVCLI_SNAPSHOT_MAX", 50, 1, Integer.MAX_VALUE);
+        List<String> excludes = mergeExcludes(ConfigResolver.stringValue(
+                "devcli.snapshot.excludes", "DEVCLI_SNAPSHOT_EXCLUDES", ""));
+        boolean gcEnabled = ConfigResolver.booleanValue(
+                "devcli.snapshot.gc.enabled", "DEVCLI_SNAPSHOT_GC_ENABLED", true);
+        int gcThreshold = ConfigResolver.intValue(
+                "devcli.snapshot.gc.pruned.threshold",
+                "DEVCLI_SNAPSHOT_GC_PRUNED_THRESHOLD", 100, 1, Integer.MAX_VALUE);
+        int gcIntervalHours = ConfigResolver.intValue(
+                "devcli.snapshot.gc.min.interval.hours",
+                "DEVCLI_SNAPSHOT_GC_MIN_INTERVAL_HOURS", 24, 1, Integer.MAX_VALUE);
+        int gcMaxSeconds = ConfigResolver.intValue(
+                "devcli.snapshot.gc.max.seconds",
+                "DEVCLI_SNAPSHOT_GC_MAX_SECONDS", 30, 1, Integer.MAX_VALUE);
+        return new SnapshotConfig(enabled, root, max, excludes,
+                gcEnabled, gcThreshold, gcIntervalHours, gcMaxSeconds);
     }
 
     public SnapshotConfig(boolean enabled, Path snapshotsRoot, int maxSnapshots,
@@ -66,43 +74,6 @@ public record SnapshotConfig(
     public SnapshotConfig withEnabled(boolean enabled) {
         return new SnapshotConfig(enabled, snapshotsRoot, maxSnapshots, excludes,
                 gcEnabled, gcPrunedThreshold, gcMinIntervalHours, gcMaxSeconds);
-    }
-
-    private static boolean readBoolean(String property, String env, boolean fallback) {
-        String value = readNullable(property, env);
-        if (value == null || value.isBlank()) {
-            return fallback;
-        }
-        return switch (value.trim().toLowerCase(Locale.ROOT)) {
-            case "1", "true", "yes", "on" -> true;
-            case "0", "false", "no", "off" -> false;
-            default -> fallback;
-        };
-    }
-
-    private static int readInt(String property, String env, int fallback) {
-        String value = readNullable(property, env);
-        if (value == null || value.isBlank()) {
-            return fallback;
-        }
-        try {
-            return Integer.parseInt(value.trim());
-        } catch (NumberFormatException ignored) {
-            return fallback;
-        }
-    }
-
-    private static String readString(String property, String env, String fallback) {
-        String value = readNullable(property, env);
-        return value == null || value.isBlank() ? fallback : value.trim();
-    }
-
-    private static String readNullable(String property, String env) {
-        String value = System.getProperty(property);
-        if (value != null) {
-            return value;
-        }
-        return System.getenv(env);
     }
 
     private static List<String> mergeExcludes(String configured) {

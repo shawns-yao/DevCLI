@@ -45,7 +45,9 @@ class AgentCheckpointTest {
                 new AgentCheckpoint.PlanStep("step-1", "拆分校验逻辑", "code", List.of()),
                 new AgentCheckpoint.PlanStep("step-2", "补充单元测试", "test", List.of("step-1"))));
         checkpoint.setAcceptanceCriteria(List.of(
-                new AgentCheckpoint.CriterionRecord("ac-1", "critical", "编译通过", "mvn compile", "critical")));
+                new AgentCheckpoint.CriterionRecord(
+                        "ac-1", "critical", "编译通过", "mvn compile", "critical",
+                        "TOOL", "execute_command", List.of("step-2", "FINAL"))));
         checkpoint.addCompletedStep("step-1", List.of("src/Order.java"), "校验逻辑已下沉");
         checkpoint.setSupersededSteps(List.of("step-x"));
         checkpoint.save();
@@ -57,6 +59,9 @@ class AgentCheckpointTest {
         assertEquals(2, loaded.getPlanSteps().size());
         assertEquals(List.of("step-1"), loaded.getPlanSteps().get(1).dependencies());
         assertEquals(1, loaded.getAcceptanceCriteria().size());
+        assertEquals("TOOL", loaded.getAcceptanceCriteria().get(0).verificationMethod());
+        assertEquals("execute_command", loaded.getAcceptanceCriteria().get(0).verifier());
+        assertEquals(List.of("step-2", "FINAL"), loaded.getAcceptanceCriteria().get(0).appliesTo());
         assertTrue(loaded.isStepCompleted("step-1"));
         assertFalse(loaded.isStepCompleted("step-2"));
         assertTrue(loaded.isStepSuperseded("step-x"));

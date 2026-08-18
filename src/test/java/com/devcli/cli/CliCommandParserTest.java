@@ -1,5 +1,6 @@
 package com.devcli.cli;
 
+import com.devcli.agent.OrchestrationProfile;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -11,7 +12,8 @@ class CliCommandParserTest {
     void parsesPlanSlashCommandWithoutPayload() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/plan");
 
-        assertEquals(CliCommandParser.CommandType.SWITCH_PLAN, command.type());
+        assertEquals(CliCommandParser.CommandType.ORCHESTRATE, command.type());
+        assertEquals(OrchestrationProfile.TEAM, command.orchestrationProfile());
         assertNull(command.payload());
     }
 
@@ -19,8 +21,36 @@ class CliCommandParserTest {
     void parsesPlanSlashCommandWithPayload() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/plan 创建一个 demo 项目");
 
-        assertEquals(CliCommandParser.CommandType.SWITCH_PLAN, command.type());
+        assertEquals(CliCommandParser.CommandType.ORCHESTRATE, command.type());
+        assertEquals(OrchestrationProfile.TEAM, command.orchestrationProfile());
         assertEquals("创建一个 demo 项目", command.payload());
+    }
+
+    @Test
+    void normalizesLegacyTeamFlagToUnifiedPlanPipeline() {
+        CliCommandParser.ParsedCommand next = CliCommandParser.parse("/plan --team");
+        CliCommandParser.ParsedCommand direct = CliCommandParser.parse(
+                "/plan --team 创建并验证一个 Java 项目");
+        CliCommandParser.ParsedCommand resume = CliCommandParser.parse(
+                "/plan --team resume orch-123");
+
+        assertEquals(CliCommandParser.CommandType.ORCHESTRATE, next.type());
+        assertEquals(OrchestrationProfile.TEAM, next.orchestrationProfile());
+        assertNull(next.payload());
+        assertEquals(CliCommandParser.CommandType.ORCHESTRATE, direct.type());
+        assertEquals(OrchestrationProfile.TEAM, direct.orchestrationProfile());
+        assertEquals("创建并验证一个 Java 项目", direct.payload());
+        assertEquals(OrchestrationProfile.TEAM, resume.orchestrationProfile());
+        assertEquals("resume orch-123", resume.payload());
+    }
+
+    @Test
+    void keepsTeamLikeTaskTextInUnifiedPlanPipeline() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse(
+                "/plan --teamwork 作为普通任务文本");
+
+        assertEquals(OrchestrationProfile.TEAM, command.orchestrationProfile());
+        assertEquals("--teamwork 作为普通任务文本", command.payload());
     }
 
     @Test
@@ -240,18 +270,20 @@ class CliCommandParserTest {
     }
 
     @Test
-    void parsesTeamSlashCommandWithoutPayload() {
+    void normalizesLegacyTeamSlashCommandWithoutPayload() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/team");
 
-        assertEquals(CliCommandParser.CommandType.SWITCH_TEAM, command.type());
+        assertEquals(CliCommandParser.CommandType.ORCHESTRATE, command.type());
+        assertEquals(OrchestrationProfile.TEAM, command.orchestrationProfile());
         assertNull(command.payload());
     }
 
     @Test
-    void parsesTeamSlashCommandWithPayload() {
+    void normalizesLegacyTeamSlashCommandWithPayload() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/team 创建并验证一个 Java 项目");
 
-        assertEquals(CliCommandParser.CommandType.SWITCH_TEAM, command.type());
+        assertEquals(CliCommandParser.CommandType.ORCHESTRATE, command.type());
+        assertEquals(OrchestrationProfile.TEAM, command.orchestrationProfile());
         assertEquals("创建并验证一个 Java 项目", command.payload());
     }
 
@@ -264,6 +296,17 @@ class CliCommandParserTest {
         CliCommandParser.ParsedCommand create = CliCommandParser.parse("/branch create feature-a");
         assertEquals(CliCommandParser.CommandType.BRANCH, create.type());
         assertEquals("create feature-a", create.payload());
+    }
+
+    @Test
+    void parsesSessionCommands() {
+        CliCommandParser.ParsedCommand status = CliCommandParser.parse("/session");
+        assertEquals(CliCommandParser.CommandType.SESSION, status.type());
+        assertEquals("status", status.payload());
+
+        CliCommandParser.ParsedCommand fork = CliCommandParser.parse("/session fork feature-a");
+        assertEquals(CliCommandParser.CommandType.SESSION, fork.type());
+        assertEquals("fork feature-a", fork.payload());
     }
 
     @Test

@@ -8,6 +8,9 @@ import java.util.*;
 public class ExecutionPlan {
     private final String id;
     private final String goal;                    // 计划目标
+    private final int revision;
+    private final String parentPlanId;
+    private final String revisionReason;
     private final Map<String, Task> tasks;        // 所有任务
     private final List<String> executionOrder;    // 执行顺序（拓扑排序后）
     private PlanStatus status;
@@ -24,8 +27,16 @@ public class ExecutionPlan {
     }
 
     public ExecutionPlan(String id, String goal) {
+        this(id, goal, 0, "", "");
+    }
+
+    public ExecutionPlan(String id, String goal, int revision,
+                         String parentPlanId, String revisionReason) {
         this.id = id;
         this.goal = goal;
+        this.revision = Math.max(0, revision);
+        this.parentPlanId = parentPlanId == null ? "" : parentPlanId;
+        this.revisionReason = revisionReason == null ? "" : revisionReason;
         this.tasks = new LinkedHashMap<>();  // 保持插入顺序
         this.executionOrder = new ArrayList<>();
         this.status = PlanStatus.CREATED;
@@ -34,6 +45,9 @@ public class ExecutionPlan {
     // Getters
     public String getId() { return id; }
     public String getGoal() { return goal; }
+    public int getRevision() { return revision; }
+    public String getParentPlanId() { return parentPlanId; }
+    public String getRevisionReason() { return revisionReason; }
     public PlanStatus getStatus() { return status; }
     public String getSummary() { return summary; }
     public long getStartTime() { return startTime; }
@@ -83,12 +97,7 @@ public class ExecutionPlan {
      * 获取可执行的任务（依赖都已完成）
      */
     public List<Task> getExecutableTasks() {
-        return ExecutionGraph.ready(
-                new ArrayList<>(tasks.values()),
-                Task::getId,
-                Task::getDependencies,
-                task -> graphState(task.getStatus()),
-                task -> false);
+        return ExecutionGraph.ready(new ArrayList<>(tasks.values()), task -> false);
     }
 
     /**
@@ -97,23 +106,12 @@ public class ExecutionPlan {
     public boolean computeExecutionOrder() {
         executionOrder.clear();
         List<Task> nodes = new ArrayList<>(tasks.values());
-        ExecutionGraph.ValidationResult validation = ExecutionGraph.validate(
-                nodes, Task::getId, Task::getDependencies);
+        ExecutionGraph.ValidationResult validation = ExecutionGraph.validate(nodes);
         if (!validation.valid()) {
             return false;
         }
-        executionOrder.addAll(ExecutionGraph.topologicalOrder(
-                nodes, Task::getId, Task::getDependencies));
+        executionOrder.addAll(ExecutionGraph.topologicalOrder(nodes));
         return true;
-    }
-
-    private static ExecutionGraph.NodeState graphState(Task.TaskStatus status) {
-        return switch (status) {
-            case PENDING -> ExecutionGraph.NodeState.PENDING;
-            case RUNNING -> ExecutionGraph.NodeState.RUNNING;
-            case COMPLETED -> ExecutionGraph.NodeState.COMPLETED;
-            case FAILED -> ExecutionGraph.NodeState.FAILED;
-        };
     }
 
     /**
@@ -228,6 +226,13 @@ public class ExecutionPlan {
         StringBuilder sb = new StringBuilder();
         sb.append("📋 计划摘要\n");
         sb.append("   - 目标: ").append(compactGoal(goal, 48)).append('\n');
+        if (revision > 0) {
+            sb.append("   - 修订: r").append(revision);
+            if (!parentPlanId.isBlank()) {
+                sb.append(" | parent: ").append(parentPlanId);
+            }
+            sb.append('\n');
+        }
         sb.append("   - 任务数: ").append(tasks.size())
                 .append(" | 并行批次: ").append(batches.size())
                 .append(" | 当前可执行: ").append(readyTasks.size())

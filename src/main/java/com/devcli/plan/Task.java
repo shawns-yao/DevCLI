@@ -7,7 +7,7 @@ import java.util.Map;
 /**
  * 任务节点 - 表示一个可执行的任务单元。
  */
-public class Task {
+public class Task implements ExecutionNode {
     private final String id;
     private final String description;
     private final TaskType type;
@@ -60,6 +60,18 @@ public class Task {
     public long getStartTime() { return artifact.startedAt(); }
     public long getEndTime() { return artifact.finishedAt(); }
     public ExecutionArtifact getArtifact() { return artifact; }
+
+    @Override
+    public String id() { return id; }
+
+    @Override
+    public String description() { return description; }
+
+    @Override
+    public List<String> dependencies() { return List.copyOf(dependencies); }
+
+    @Override
+    public ExecutionArtifact artifact() { return artifact; }
 
     public void setStatus(TaskStatus status) {
         this.artifact = artifact.withState(graphState(status));

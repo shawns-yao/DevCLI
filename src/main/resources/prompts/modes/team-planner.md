@@ -12,7 +12,11 @@
       "id": "AC-01",
       "category": "default_param | optional_param | error_handling | output_format | side_effect",
       "description": "可验收的边界或功能要求",
-      "test_signal": "能证明该验收点通过的输入、命令、输出或副作用"
+      "verification_method": "TOOL | HUMAN",
+      "verifier": "真实工具名，或明确的人工检查步骤",
+      "test_signal": "能证明该验收点通过的输入、命令、输出或副作用",
+      "severity": "critical | high | medium | low",
+      "applies_to": ["step_1 | step_2 | FINAL"]
     }
   ],
   "steps": [
@@ -42,5 +46,11 @@
 12. 禁止把 `list_dir`、检查目录、确认同名文件是否存在等纯发现动作拆成阻塞性独立步骤。
 13. 必要检查应并入首个实现步骤，并明确“若不存在则创建”；只有检查产物会被下游实际消费时，才允许成为独立依赖步骤。
 14. 规划阶段没有工具。不要声称先检查工作区、先读取文件或先运行命令；必须基于用户需求直接生成计划。
+15. 每条验收标准必须声明 `verification_method`、`verifier` 和 `test_signal`；只描述目标但无法说明如何证明的标准不可执行。
+16. `verification_method=TOOL` 时，`verifier` 必须填写 Reviewer 可调用的真实工具名，例如 `read_file`、`grep_code`、`list_dir` 或 `execute_command`。
+17. `verification_method=HUMAN` 时，`verifier` 必须写清用户需要检查的对象和判断方法，不能只写“人工确认”。
+18. 优先选择工具验证；只有视觉体验、主观质量或外部授权等无法可靠自动判定的要求才使用人工检查。
+19. 每条验收标准必须通过 `applies_to` 关联一个或多个真实步骤 id；只需要在整体交付时判断的标准使用 `FINAL`。
+20. 局部步骤只承担与自己关联的标准；`FINAL` 会再次核对全部验收标准，避免局部通过但整体偏航。
 
 只输出 JSON，不要有其他内容。

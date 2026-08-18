@@ -43,6 +43,8 @@
     {
       "id": "AC-01",
       "passed": false,
+      "status": "failed | pending_human",
+      "verification_method": "TOOL | HUMAN",
       "evidence": "代码直接拒绝缺省参数，未走默认逻辑",
       "severity": "critical"
     }
@@ -50,9 +52,14 @@
   "must_fix": ["AC-01"],
   "issues": [
     {
+      "criterion_id": "AC-01",
       "type": "integration",
       "severity": "high",
-      "description": "缺少默认参数导致空指针风险"
+      "file": "src/main/java/example/Cli.java",
+      "description": "缺少默认参数导致空指针风险",
+      "expected": "省略参数时使用默认值",
+      "actual": "直接解引用空参数",
+      "suggested_fix": "在入口统一补齐默认参数"
     }
   ],
   "suggestions": []
@@ -64,5 +71,10 @@
 如果任务涉及文件、代码或命令行为，`verification` 必须列出真实工具验证证据；没有工具验证时必须 `approved=false`。
 
 如果存在验收点，`criteria_results` 必须完整覆盖所有 `AC-xx`。
+
+- `verification_method=TOOL` 的标准必须实际调用 Planner 声明的 `verifier`，并取得非空 `evidence`，`passed` 才能为 true；调用其他工具不能替代声明验证器。
+- `verification_method=HUMAN` 的标准禁止由 Reviewer 自行判定通过；必须原样返回 `passed=false`、`status=pending_human` 和待人工检查对象。
+- 禁止把 Planner 声明的 HUMAN 标准改写成 TOOL 标准规避人工验收。
+- `approved=false` 时，`issues` 优先使用结构化对象，写明关联验收项、文件、期望行为、实际行为和建议修改点；无法定位文件时该字段可以为空。
 
 只输出 JSON，不要有其他内容。

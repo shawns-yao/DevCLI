@@ -54,6 +54,11 @@ final class StepRedoTracker {
         return maxRedoPerStep;
     }
 
+    /** 返回当前 run 已消耗的重做次数快照，供失败升级与 checkpoint 汇总使用。 */
+    Map<String, Integer> snapshotCounts() {
+        return Map.copyOf(redoCount);
+    }
+
     /** 每个 run/resume 开始时清空，避免跨任务串档。 */
     void reset() {
         redoCount.clear();

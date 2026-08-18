@@ -1,13 +1,16 @@
 package com.devcli.agent;
 
+import com.devcli.config.ConfigResolver;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.MemoryManager;
 import com.devcli.plan.ExecutionArtifact;
 import com.devcli.plan.ExecutionGraph;
+import com.devcli.plan.ExecutionNode;
 import com.devcli.runtime.CancellationContext;
 import com.devcli.tool.ToolRegistry;
+import com.devcli.tool.ToolStatus;
 import com.devcli.trace.TraceContext;
 import com.devcli.trace.TraceRecorder;
 import com.devcli.util.AnsiStyle;
@@ -53,10 +56,8 @@ public class AgentOrchestrator {
     /** Worker 默认数量；可经 -Ddevcli.team.workers / DEVCLI_TEAM_WORKERS 覆盖。 */
     static final int DEFAULT_WORKER_COUNT = 2;
     /** Worker 数量保护上限：过多并发 Worker 会放大 LLM 限流与终端输出竞争。 */
-    static final int MAX_WORKER_COUNT = 8;
+    static final int MAX_WORKER_COUNT = OrchestrationProfile.TEAM.maxParallelism();
     private static final int SUBAGENT_CONTEXT_SCHEMA_VERSION = 1;
-    private static final double MIN_REVIEW_SCORE = 0.6;
-    private static final double REQUIRED_FUNCTIONAL_SCORE = 1.0;
     private static final double FINAL_INTEGRATION_FAILURE_RATIO_LIMIT = 0.5;
     private static final int MAX_PLANNER_STEPS = 5;
     /**
@@ -64,14 +65,7 @@ public class AgentOrchestrator {
      * 恢复始终长在原 DAG 上、通过依赖关系看到已完成成果，从机制上消除"平行计划 vs 已落盘成果"冲突。
      */
     private static final int MAX_REDO_PER_STEP = 1;
-    /**
-     * Reviewer 输出 JSON 解析失败时的否定语义识别。
-     * 覆盖"未通过/不通过/未全部通过/没有通过/未能通过"等变体，
-     * 避免"测试未全部通过"因含"通过"二字被误判为批准。
-     */
-    private static final java.util.regex.Pattern NEGATIVE_REVIEW_PATTERN =
-            java.util.regex.Pattern.compile("[未没不][^。\\n]{0,6}通过");
-
+    private static final int MAX_PLAN_REVIEW_REVISIONS = 3;
     private final LlmClient llmClient;
     private final SubAgent planner;
     private List<SubAgent> workers;
@@ -86,6 +80,7 @@ public class AgentOrchestrator {
     private com.devcli.skill.SkillContextBuffer skillContextBuffer;
     private final TraceRecorder traceRecorder = new TraceRecorder();
     private List<AcceptanceCriterion> currentAcceptanceCriteria = List.of();
+    private Set<String> currentPlanStepIds = Set.of();
     /** 当前 run 的进度 checkpoint：步骤完成/失败即落盘，全部成功后删除。崩溃后可凭文件做事后排查。 */
     private AgentCheckpoint checkpoint;
     /** 失败步骤在位重做的状态与决策（计数 + 上次失败原因），与调度循环解耦，见 {@link StepRedoTracker}。 */
@@ -99,6 +94,11 @@ public class AgentOrchestrator {
     private final ThreadLocal<ToolRegistry> activeStepToolRegistry = new ThreadLocal<>();
     private final ThreadLocal<StepUpdateBuffer> activeStepUpdate = new ThreadLocal<>();
     private PreReviewVerifier preReviewVerifier = new PreReviewVerifier();
+    private TeamPlanReviewHandler planReviewHandler = request -> request.requiresHumanReview()
+            ? TeamPlanReviewDecision.cancel("计划包含人工验收标准，需要人工确认后才能执行")
+            : TeamPlanReviewDecision.execute();
+    private boolean planSemanticReviewEnabled = ConfigResolver.booleanValue(
+            "devcli.team.plan.review.enabled", "DEVCLI_TEAM_PLAN_REVIEW_ENABLED", true);
     private boolean requireWorkerToolEvidence;
     private final WorkspaceCommitCoordinator workspaceCommitCoordinator =
             new WorkspaceCommitCoordinator();
@@ -114,10 +114,31 @@ public class AgentOrchestrator {
 
     // 执行步骤的数据结构（package-private 供测试访问）
     record ExecutionStep(String id, String description, String type,
-                         List<String> dependencies, ExecutionArtifact artifact) {
+                         List<String> dependencies, ExecutionArtifact artifact)
+            implements ExecutionNode {
         ExecutionStep {
             dependencies = dependencies == null ? List.of() : List.copyOf(dependencies);
             artifact = artifact == null ? ExecutionArtifact.pending(id) : artifact;
+        }
+
+        @Override
+        public String id() {
+            return id;
+        }
+
+        @Override
+        public String description() {
+            return description;
+        }
+
+        @Override
+        public List<String> dependencies() {
+            return dependencies;
+        }
+
+        @Override
+        public ExecutionArtifact artifact() {
+            return artifact;
         }
 
         ExecutionStep(String id, String description, String type, List<String> dependencies,
@@ -200,25 +221,63 @@ public class AgentOrchestrator {
         }
     }
 
-    record AcceptanceCriterion(String id, String category, String description, String testSignal, String severity) {
-        boolean isValid() {
-            return !id.isBlank() && !description.isBlank();
+    public interface TeamPlanReviewHandler {
+        TeamPlanReviewDecision review(TeamPlanReviewRequest request);
+    }
+
+    public enum TeamPlanReviewAction {
+        EXECUTE,
+        SUPPLEMENT,
+        CANCEL
+    }
+
+    public record AcceptanceCriterionView(
+            String id,
+            String description,
+            String verificationMethod,
+            String verifier,
+            String testSignal,
+            String severity,
+            List<String> appliesTo
+    ) {
+        public AcceptanceCriterionView {
+            appliesTo = appliesTo == null ? List.of() : List.copyOf(appliesTo);
+        }
+    }
+
+    public record TeamPlanReviewRequest(
+            String goal,
+            String planSummary,
+            List<AcceptanceCriterionView> criteria,
+            boolean requiresHumanReview,
+            boolean semanticReviewExecuted,
+            String semanticReviewSummary
+    ) {
+        public TeamPlanReviewRequest {
+            criteria = criteria == null ? List.of() : List.copyOf(criteria);
+            semanticReviewSummary = semanticReviewSummary == null ? "" : semanticReviewSummary.trim();
         }
 
-        String formatForPrompt() {
-            StringBuilder sb = new StringBuilder();
-            sb.append("- ").append(id);
-            if (!category.isBlank()) {
-                sb.append(" [").append(category).append("]");
-            }
-            if (!severity.isBlank()) {
-                sb.append(" severity=").append(severity);
-            }
-            sb.append(": ").append(description);
-            if (!testSignal.isBlank()) {
-                sb.append("；test_signal: ").append(testSignal);
-            }
-            return sb.toString();
+        public TeamPlanReviewRequest(String goal, String planSummary,
+                                     List<AcceptanceCriterionView> criteria,
+                                     boolean requiresHumanReview) {
+            this(goal, planSummary, criteria, requiresHumanReview, false, "");
+        }
+    }
+
+    public record TeamPlanReviewDecision(TeamPlanReviewAction action, String feedback) {
+        public static TeamPlanReviewDecision execute() {
+            return new TeamPlanReviewDecision(TeamPlanReviewAction.EXECUTE, "");
+        }
+
+        public static TeamPlanReviewDecision supplement(String feedback) {
+            return new TeamPlanReviewDecision(TeamPlanReviewAction.SUPPLEMENT,
+                    feedback == null ? "" : feedback.trim());
+        }
+
+        public static TeamPlanReviewDecision cancel(String reason) {
+            return new TeamPlanReviewDecision(TeamPlanReviewAction.CANCEL,
+                    reason == null ? "" : reason.trim());
         }
     }
 
@@ -240,13 +299,7 @@ public class AgentOrchestrator {
         this.out = out == null ? System.out : out;
         this.toolRegistry = toolRegistry;
         this.memoryManager = memoryManager;
-        this.toolRegistry.setContextProfile(this.memoryManager.getContextProfile());
-        this.toolRegistry.setMemorySaver(this.memoryManager::storeFact);
-        this.toolRegistry.setMemorySaveHandler(fact -> {
-            MemoryManager.StoreResult result = this.memoryManager.storeFactWithPolicy(fact, true);
-            return new ToolRegistry.MemorySaveResult(result.stored(), result.message());
-        });
-        this.toolRegistry.setMemoryListHandler(this.memoryManager::listLongTermMemory);
+        AgentRuntimeSupport.bindMemory(this.toolRegistry, this.memoryManager);
         this.planner = new SubAgent("planner", AgentRole.PLANNER, llmClient, toolRegistry);
         this.workers = buildWorkers(resolveWorkerCount(), llmClient, toolRegistry);
         this.reviewer = new SubAgent("reviewer", AgentRole.REVIEWER, llmClient, toolRegistry);
@@ -257,27 +310,12 @@ public class AgentOrchestrator {
 
     /**
      * 解析 Worker 数量：系统属性 {@code devcli.team.workers} 优先，其次环境变量
-     * {@code DEVCLI_TEAM_WORKERS}，缺省 {@link #DEFAULT_WORKER_COUNT}，并夹在 [1, {@link #MAX_WORKER_COUNT}]。
+     * {@code DEVCLI_TEAM_WORKERS}，缺省 {@link #DEFAULT_WORKER_COUNT}；显式非法值直接拒绝。
      */
     static int resolveWorkerCount() {
-        String raw = System.getProperty("devcli.team.workers");
-        if (raw == null || raw.isBlank()) {
-            raw = System.getenv("DEVCLI_TEAM_WORKERS");
-        }
-        if (raw == null || raw.isBlank()) {
-            return DEFAULT_WORKER_COUNT;
-        }
-        try {
-            int n = Integer.parseInt(raw.trim());
-            int clamped = Math.max(1, Math.min(MAX_WORKER_COUNT, n));
-            if (clamped != n) {
-                log.warn("devcli.team.workers={} 超出范围 [1,{}]，已夹取为 {}", n, MAX_WORKER_COUNT, clamped);
-            }
-            return clamped;
-        } catch (NumberFormatException e) {
-            log.warn("非法 devcli.team.workers={}，使用默认 {}", raw, DEFAULT_WORKER_COUNT);
-            return DEFAULT_WORKER_COUNT;
-        }
+        return ConfigResolver.intValue(
+                "devcli.team.workers", "DEVCLI_TEAM_WORKERS",
+                DEFAULT_WORKER_COUNT, 1, MAX_WORKER_COUNT);
     }
 
     private static List<SubAgent> buildWorkers(int count, LlmClient llmClient, ToolRegistry toolRegistry) {
@@ -384,6 +422,16 @@ public class AgentOrchestrator {
         reviewer.setExternalContextSupplier(this.externalContextSupplier);
     }
 
+    public void setPlanReviewHandler(TeamPlanReviewHandler planReviewHandler) {
+        if (planReviewHandler != null) {
+            this.planReviewHandler = planReviewHandler;
+        }
+    }
+
+    void setPlanSemanticReviewEnabled(boolean enabled) {
+        this.planSemanticReviewEnabled = enabled;
+    }
+
     /**
      * 注入 Sticky Memory（PR-B）：把 supplier 同时下发到 planner / workers / reviewer，
      * 让团队三角色都看到统一的稳定事实层。
@@ -434,9 +482,12 @@ public class AgentOrchestrator {
         agent.setSkillContextBuffer(skillContextBuffer == null ? null : skillContextBuffer.copy());
     }
 
-    private record PlanGenerationResult(AgentMessage message, List<ExecutionStep> steps) {
+    private record PlanGenerationResult(AgentMessage message, List<ExecutionStep> steps,
+                                        TeamPlanReviewProtocol.Evaluation semanticReview) {
         private PlanGenerationResult {
             steps = steps == null ? new ArrayList<>() : new ArrayList<>(steps);
+            semanticReview = semanticReview == null
+                    ? TeamPlanReviewProtocol.Evaluation.skipped() : semanticReview;
         }
     }
 
@@ -444,34 +495,86 @@ public class AgentOrchestrator {
         AgentMessage result = executePlanner(AgentMessage.task("orchestrator",
                 "请为以下任务制定执行计划：\n" + Objects.toString(userInput, "")));
         if (result.type() == AgentMessage.Type.ERROR) {
-            return new PlanGenerationResult(result, List.of());
+            return new PlanGenerationResult(result, List.of(), TeamPlanReviewProtocol.Evaluation.skipped());
         }
-
-        List<ExecutionStep> steps = parsePlan(result.content());
-        String planIssue = TeamPlannerProtocol.validate(
-                steps, userInput, ExecutionStep::id, ExecutionStep::description, ExecutionStep::dependencies);
         int maxRepairAttempts = TeamPlannerProtocol.resolveRepairAttempts();
-        for (int attempt = 1; planIssue != null && attempt <= maxRepairAttempts; attempt++) {
+        for (int repairAttempt = 0; ; repairAttempt++) {
+            List<ExecutionStep> steps = parsePlan(result.content());
+            String planIssue = validateGeneratedPlan(steps, userInput);
+            TeamPlanReviewProtocol.Evaluation semanticReview = TeamPlanReviewProtocol.Evaluation.skipped();
+            if (planIssue == null) {
+                semanticReview = reviewGeneratedPlan(userInput, steps);
+                if (!semanticReview.protocolValid()) {
+                    return new PlanGenerationResult(
+                            AgentMessage.error("plan-reviewer", AgentRole.REVIEWER,
+                                    "计划语义评审失败：" + semanticReview.issues()),
+                            List.of(), semanticReview);
+                }
+                if (semanticReview.approved()) {
+                    return new PlanGenerationResult(result, steps, semanticReview);
+                }
+                planIssue = "计划语义评审未通过：" + semanticReview.issues();
+            }
+            if (repairAttempt >= maxRepairAttempts) {
+                log.warn("Planner output remained invalid after repair attempts: {}", planIssue);
+                return new PlanGenerationResult(result, List.of(), semanticReview);
+            }
             if (CancellationContext.isCancelled()) {
                 break;
             }
-            out.println("⚠️ 规划输出未通过协议或结构校验，正在请求修复 (" + attempt
+            int attempt = repairAttempt + 1;
+            out.println("⚠️ 规划候选未通过校验或语义评审，正在请求修复 (" + attempt
                     + "/" + maxRepairAttempts + ")...\n");
             result = executePlanner(AgentMessage.task("orchestrator",
                     TeamPlannerProtocol.buildRepairPrompt(
                             userInput, result.content(), planIssue, attempt)));
             if (result.type() == AgentMessage.Type.ERROR) {
-                return new PlanGenerationResult(result, List.of());
+                return new PlanGenerationResult(result, List.of(), semanticReview);
             }
-            steps = parsePlan(result.content());
-            planIssue = TeamPlannerProtocol.validate(
-                    steps, userInput, ExecutionStep::id, ExecutionStep::description, ExecutionStep::dependencies);
         }
-        if (planIssue != null) {
-            log.warn("Planner output remained invalid after repair attempts: {}", planIssue);
-            return new PlanGenerationResult(result, List.of());
+        return new PlanGenerationResult(result, List.of(), TeamPlanReviewProtocol.Evaluation.skipped());
+    }
+
+    private TeamPlanReviewProtocol.Evaluation reviewGeneratedPlan(
+            String userInput, List<ExecutionStep> steps) {
+        if (!planSemanticReviewEnabled) {
+            return TeamPlanReviewProtocol.Evaluation.skipped();
         }
-        return new PlanGenerationResult(result, steps);
+        StringBuilder prompt = new StringBuilder("计划语义评审\n原始用户目标：\n")
+                .append(Objects.toString(userInput, ""))
+                .append("\n\n候选执行计划：\n")
+                .append(summarizeSteps(steps))
+                .append("\n\n候选验收标准：\n");
+        for (AcceptanceCriterion criterion : currentAcceptanceCriteria) {
+            prompt.append("- ").append(criterion.id()).append(": ")
+                    .append(criterion.description())
+                    .append(" | method=").append(criterion.verificationMethod())
+                    .append(" | verifier=").append(criterion.verifier())
+                    .append(" | signal=").append(criterion.testSignal())
+                    .append(" | applies_to=").append(criterion.appliesTo()).append('\n');
+        }
+        AgentMessage review = reviewer.executePlanReview(
+                AgentMessage.task("orchestrator", prompt.toString()), out);
+        if (review.type() == AgentMessage.Type.ERROR) {
+            return new TeamPlanReviewProtocol.Evaluation(
+                    false, false, "", review.content());
+        }
+        return TeamPlanReviewProtocol.evaluate(
+                review.content(),
+                currentAcceptanceCriteria.stream().map(AcceptanceCriterion::id).toList(),
+                currentPlanStepIds);
+    }
+
+    private String validateGeneratedPlan(List<ExecutionStep> steps, String userInput) {
+        String graphIssue = TeamPlannerProtocol.validate(
+                steps, userInput, ExecutionStep::id, ExecutionStep::description, ExecutionStep::dependencies);
+        if (graphIssue != null) {
+            return graphIssue;
+        }
+        AcceptanceCriteriaPreflight.Report criteriaReport = acceptanceCriteriaPreflight();
+        return criteriaReport.executable()
+                ? null
+                : "验收标准不可执行：" + criteriaReport.describeIssues();
     }
 
     private AgentMessage executePlanner(AgentMessage message) {
@@ -483,11 +586,11 @@ public class AgentOrchestrator {
     }
 
     /**
-     * 运行多 Agent 协作任务
+     * 运行统一 Plan 任务；串行或并行由 DAG 就绪节点决定。
      */
     public String run(String userInput) {
         log.info("Multi-Agent run started: inputLength={}", userInput == null ? 0 : userInput.length());
-        TraceContext traceContext = TraceContext.root("team");
+        TraceContext traceContext = TraceContext.root("plan");
         traceRecorder.record(traceContext, "run.start", Map.of(
                 "inputChars", userInput == null ? 0 : userInput.length(),
                 "workers", workers.size()
@@ -499,10 +602,11 @@ public class AgentOrchestrator {
         restoredRedoCounts = Map.of();
         restoredRedoAttempts = List.of();
         currentAcceptanceCriteria = List.of();
+        currentPlanStepIds = Set.of();
         // 回收上一轮崩溃残留的超时租约，避免历史租约阻塞本轮写入
         toolRegistry.pruneExpiredLeases();
         if (CancellationContext.isCancelled()) {
-            return "⏹️ 已取消当前多 Agent 任务。";
+            return "⏹️ 已取消当前 Plan 任务。";
         }
         String finalResultForSummary = "";
         try {
@@ -513,7 +617,7 @@ public class AgentOrchestrator {
             PlanGenerationResult planGeneration = requestValidatedPlan(userInput);
             AgentMessage planResult = planGeneration.message();
             if (CancellationContext.isCancelled()) {
-                finalResultForSummary = "⏹️ 已取消当前多 Agent 任务。";
+                finalResultForSummary = "⏹️ 已取消当前 Plan 任务。";
                 return finalResultForSummary;
             }
 
@@ -528,6 +632,37 @@ public class AgentOrchestrator {
                 finalResultForSummary = "❌ 规划失败：无法解析执行计划\n原始输出:\n"
                         + Objects.toString(planResult.content(), "");
                 return finalResultForSummary;
+            }
+
+            int reviewRevision = 0;
+            while (true) {
+                AcceptanceCriteriaPreflight.Report preflight = acceptanceCriteriaPreflight();
+                TeamPlanReviewDecision decision = planReviewHandler.review(
+                        buildTeamPlanReviewRequest(currentUserTask, steps, preflight,
+                                planGeneration.semanticReview()));
+                if (decision == null || decision.action() == TeamPlanReviewAction.EXECUTE) {
+                    break;
+                }
+                if (decision.action() == TeamPlanReviewAction.CANCEL) {
+                    String reason = decision.feedback().isBlank()
+                            ? "已取消本次 Plan 执行"
+                            : decision.feedback();
+                    finalResultForSummary = "⏹️ " + reason;
+                    return finalResultForSummary;
+                }
+                if (decision.feedback().isBlank() || reviewRevision >= MAX_PLAN_REVIEW_REVISIONS) {
+                    finalResultForSummary = "❌ 执行前评审未形成可执行决策";
+                    return finalResultForSummary;
+                }
+                reviewRevision++;
+                currentUserTask = currentUserTask + "\n执行前评审补充要求：" + decision.feedback();
+                planGeneration = requestValidatedPlan(currentUserTask);
+                planResult = planGeneration.message();
+                steps = planGeneration.steps();
+                if (planResult.type() == AgentMessage.Type.ERROR || steps.isEmpty()) {
+                    finalResultForSummary = "❌ 规划失败：执行前评审修订未生成可执行计划";
+                    return finalResultForSummary;
+                }
             }
             steps = appendFinalIntegrationStep(steps);
             checkpoint = new AgentCheckpoint(
@@ -551,6 +686,34 @@ public class AgentOrchestrator {
         }
     }
 
+    private TeamPlanReviewRequest buildTeamPlanReviewRequest(
+            String goal, List<ExecutionStep> steps, AcceptanceCriteriaPreflight.Report preflight) {
+        return buildTeamPlanReviewRequest(
+                goal, steps, preflight, TeamPlanReviewProtocol.Evaluation.skipped());
+    }
+
+    private TeamPlanReviewRequest buildTeamPlanReviewRequest(
+            String goal, List<ExecutionStep> steps, AcceptanceCriteriaPreflight.Report preflight,
+            TeamPlanReviewProtocol.Evaluation semanticReview) {
+        List<AcceptanceCriterionView> criteria = currentAcceptanceCriteria.stream()
+                .map(criterion -> new AcceptanceCriterionView(
+                        criterion.id(),
+                        criterion.description(),
+                        criterion.verificationMethod() == null ? "" : criterion.verificationMethod().name(),
+                        criterion.verifier(),
+                        criterion.testSignal(),
+                        criterion.severity(),
+                        criterion.appliesTo()))
+                .toList();
+        return new TeamPlanReviewRequest(
+                goal,
+                summarizeSteps(steps),
+                criteria,
+                preflight.requiresHumanReview(),
+                planSemanticReviewEnabled,
+                semanticReview.summary());
+    }
+
     private void scheduleSessionPreSummaryMaintenance(String userInput, String result) {
         List<LlmClient.Message> turnHistory = new ArrayList<>();
         turnHistory.add(LlmClient.Message.system("TEAM_TURN"));
@@ -562,7 +725,7 @@ public class AgentOrchestrator {
     }
 
     /**
-     * 从磁盘 checkpoint 恢复执行（/team resume 入口）。
+     * 从磁盘 checkpoint 恢复执行（/plan resume 入口）。
      *
      * <p>恢复范围：计划（步骤/依赖/验收点）与进度（已完成步骤带回完整 result 与产物文件，
      * 其余——包括上次失败的、被阻塞的——重置为 PENDING 重新执行）。
@@ -595,6 +758,7 @@ public class AgentOrchestrator {
                     + "] 存在无法自动回滚的 PatchSet 写前日志："
                     + patchReconcile.failures();
         }
+        int loadedProtocolVersion = loaded.getProtocolVersion();
         checkpoint = loaded;
         AgentCheckpoint.RecoveryState recovery;
         try {
@@ -606,7 +770,7 @@ public class AgentOrchestrator {
         }
         if (recovery.planSteps().isEmpty()) {
             return "❌ checkpoint [" + loaded.getOrchestrationId()
-                    + "] 缺少计划数据（旧格式落盘），无法恢复；请重新发起 /team 任务。";
+                    + "] 缺少计划数据（旧格式落盘），无法恢复；请重新发起 /plan 任务。";
         }
         long completedCount = recovery.artifacts().values().stream()
                 .filter(ExecutionArtifact::successful)
@@ -614,7 +778,7 @@ public class AgentOrchestrator {
         log.info("Multi-Agent resume started: checkpoint={}, protocol={}, completed={}/{}",
                 loaded.getOrchestrationId(), recovery.protocolVersion(),
                 completedCount, recovery.planSteps().size());
-        TraceContext traceContext = TraceContext.root("team-resume");
+        TraceContext traceContext = TraceContext.root("plan-resume");
         traceRecorder.record(traceContext, "resume.start", Map.of(
                 "checkpoint", loaded.getOrchestrationId(),
                 "completedSteps", completedCount,
@@ -623,7 +787,8 @@ public class AgentOrchestrator {
 
         currentUserTask = recovery.goal() == null ? "" : recovery.goal();
         memoryManager.addUserMessage(currentUserTask);
-        currentAcceptanceCriteria = fromCriterionRecords(recovery.acceptanceCriteria());
+        currentAcceptanceCriteria = fromCriterionRecords(
+                recovery.acceptanceCriteria(), loadedProtocolVersion < 6);
         restoredFailedArtifacts = recovery.artifacts().entrySet().stream()
                 .filter(entry -> entry.getValue().state() == ExecutionGraph.NodeState.FAILED)
                 .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
@@ -631,10 +796,47 @@ public class AgentOrchestrator {
         restoredRedoAttempts = recovery.redoAttempts();
         toolRegistry.pruneExpiredLeases();
         if (CancellationContext.isCancelled()) {
-            return "⏹️ 已取消当前多 Agent 任务。";
+            return "⏹️ 已取消当前 Plan 任务。";
         }
 
         List<ExecutionStep> steps = rebuildStepsFromCheckpoint(recovery);
+        currentPlanStepIds = steps.stream()
+                .filter(step -> !isFinalIntegrationStep(step))
+                .map(ExecutionStep::id)
+                .collect(Collectors.toUnmodifiableSet());
+        boolean hasPendingSteps = steps.stream().anyMatch(step -> step.status() == StepStatus.PENDING);
+        if (hasPendingSteps) {
+            AcceptanceCriteriaPreflight.Report preflight = acceptanceCriteriaPreflight();
+            if (!preflight.executable()) {
+                return "❌ checkpoint [" + loaded.getOrchestrationId()
+                        + "] 缺少可执行的验收标准，不能继续恢复：" + preflight.describeIssues()
+                        + "。请重新发起 /plan 任务。";
+            }
+            TeamPlanReviewProtocol.Evaluation semanticReview = reviewGeneratedPlan(
+                    currentUserTask, steps.stream()
+                            .filter(step -> !isFinalIntegrationStep(step))
+                            .toList());
+            if (!semanticReview.protocolValid() || !semanticReview.approved()) {
+                return "❌ checkpoint [" + loaded.getOrchestrationId()
+                        + "] 计划语义评审未通过，不能继续恢复："
+                        + semanticReview.issues() + "。请重新发起 /plan 任务。";
+            }
+            if (loadedProtocolVersion < 6) {
+                TeamPlanReviewDecision decision = planReviewHandler.review(
+                        buildTeamPlanReviewRequest(currentUserTask, steps, preflight));
+                if (decision == null || decision.action() == TeamPlanReviewAction.EXECUTE) {
+                    // 旧协议验收字段已安全迁移并由调用方确认，继续恢复。
+                } else if (decision.action() == TeamPlanReviewAction.CANCEL) {
+                    String reason = decision.feedback().isBlank()
+                            ? "已取消旧 checkpoint 的恢复执行"
+                            : decision.feedback();
+                    return "⏹️ " + reason;
+                } else {
+                    return "⏹️ 旧 checkpoint 的计划不能原位补充；请根据反馈重新发起 /plan 任务："
+                            + decision.feedback();
+                }
+            }
+        }
         restoreCheckpointArtifactsIntoWorkingMemory(recovery);
 
         out.println(AnsiStyle.heading("🔁 恢复执行 checkpoint [" + loaded.getOrchestrationId() + "]"
@@ -693,7 +895,7 @@ public class AgentOrchestrator {
                         .append(" 步，").append(info.timestamp()).append("）：")
                         .append(abbreviate(info.goal(), 80)).append("\n");
             }
-            sb.append("使用 /team resume <id> 恢复指定任务。");
+            sb.append("使用 /plan resume <id> 恢复指定任务。");
         }
         return sb.toString();
     }
@@ -708,21 +910,41 @@ public class AgentOrchestrator {
     private List<AgentCheckpoint.CriterionRecord> toCriterionRecords(List<AcceptanceCriterion> criteria) {
         return criteria.stream()
                 .map(c -> new AgentCheckpoint.CriterionRecord(
-                        c.id(), c.category(), c.description(), c.testSignal(), c.severity()))
+                        c.id(), c.category(), c.description(), c.testSignal(), c.severity(),
+                        c.verificationMethod() == null ? "" : c.verificationMethod().name(),
+                        c.verifier(), c.appliesTo()))
                 .toList();
     }
 
-    private List<AcceptanceCriterion> fromCriterionRecords(List<AgentCheckpoint.CriterionRecord> records) {
+    private List<AcceptanceCriterion> fromCriterionRecords(
+            List<AgentCheckpoint.CriterionRecord> records, boolean migrateLegacyCriteria) {
         if (records == null) {
             return List.of();
         }
         return records.stream()
-                .map(r -> new AcceptanceCriterion(
-                        r.id() == null ? "" : r.id(),
-                        r.category() == null ? "" : r.category(),
-                        r.description() == null ? "" : r.description(),
-                        r.testSignal() == null ? "" : r.testSignal(),
-                        r.severity() == null || r.severity().isBlank() ? "high" : r.severity()))
+                .map(r -> {
+                    AcceptanceCriterion.VerificationMethod method =
+                            AcceptanceCriterion.VerificationMethod.parse(r.verificationMethod());
+                    String verifier = r.verifier() == null ? "" : r.verifier();
+                    if (migrateLegacyCriteria && method == null) {
+                        method = AcceptanceCriterion.VerificationMethod.HUMAN;
+                        verifier = "人工核对旧验收标准："
+                                + (r.description() == null ? "" : r.description());
+                    }
+                    List<String> appliesTo = r.appliesTo();
+                    if (appliesTo == null || appliesTo.isEmpty()) {
+                        appliesTo = List.of("FINAL");
+                    }
+                    return new AcceptanceCriterion(
+                            r.id() == null ? "" : r.id(),
+                            r.category() == null ? "" : r.category(),
+                            r.description() == null ? "" : r.description(),
+                            r.testSignal() == null ? "" : r.testSignal(),
+                            r.severity() == null || r.severity().isBlank() ? "high" : r.severity(),
+                            method,
+                            verifier,
+                            appliesTo);
+                })
                 .filter(AcceptanceCriterion::isValid)
                 .toList();
     }
@@ -746,7 +968,7 @@ public class AgentOrchestrator {
 
         while (true) {
             if (CancellationContext.isCancelled()) {
-                return "⏹️ 已取消当前多 Agent 任务。";
+                return "⏹️ 已取消当前 Plan 任务。";
             }
             List<ExecutionStep> executable = getExecutableSteps(steps);
             // 失败步骤的在位重做：当正常步骤全部走完（只剩最终集成或无可执行步骤）且存在失败步骤时，
@@ -791,8 +1013,8 @@ public class AgentOrchestrator {
         }
 
         // 6. 汇总结果
-        String finalResult = buildFinalResult(steps);
-        memoryManager.addAssistantMessage("[多Agent结果] " + finalResult);
+        String finalResult = buildFinalResult(steps, retryCount);
+        memoryManager.addAssistantMessage("[Plan结果] " + finalResult);
 
         if (checkpoint != null) {
             boolean allCompleted = steps.stream().allMatch(step ->
@@ -832,11 +1054,11 @@ public class AgentOrchestrator {
             if (root == null) {
                 log.warn("Planner output does not contain a complete plan JSON object");
                 currentAcceptanceCriteria = List.of();
+                currentPlanStepIds = Set.of();
                 return List.of();
             }
-            currentAcceptanceCriteria = parseAcceptanceCriteria(firstPresent(root,
-                    "acceptance_criteria", "acceptanceCriteria", "acceptancecriteria"));
-            log.debug("Parsed acceptance criteria: {} items", currentAcceptanceCriteria.size());
+            JsonNode criteriaNode = firstPresent(root,
+                    "acceptance_criteria", "acceptanceCriteria", "acceptancecriteria");
 
             JsonNode stepsNode = root.path("steps");
             if (!stepsNode.isArray() || stepsNode.isEmpty()) {
@@ -845,6 +1067,8 @@ public class AgentOrchestrator {
 
             if (!stepsNode.isArray() || stepsNode.isEmpty()) {
                 log.warn("Plan JSON has no 'steps' or 'tasks' array");
+                currentAcceptanceCriteria = List.of();
+                currentPlanStepIds = Set.of();
                 return List.of();
             }
 
@@ -888,12 +1112,17 @@ public class AgentOrchestrator {
                 }
             }
 
+            currentAcceptanceCriteria = parseAcceptanceCriteria(criteriaNode, idMapping);
+            log.debug("Parsed acceptance criteria: {} items", currentAcceptanceCriteria.size());
+
             List<ExecutionStep> normalizedSteps = coarsenPlanIfNeeded(steps);
-            ExecutionGraph.ValidationResult validation = ExecutionGraph.validate(
-                    normalizedSteps, ExecutionStep::id, ExecutionStep::dependencies);
+            currentPlanStepIds = normalizedSteps.stream().map(ExecutionStep::id)
+                    .collect(Collectors.toUnmodifiableSet());
+            ExecutionGraph.ValidationResult validation = ExecutionGraph.validate(normalizedSteps);
             if (!validation.valid()) {
                 log.warn("Plan graph validation failed: {}", validation.errors());
                 currentAcceptanceCriteria = List.of();
+                currentPlanStepIds = Set.of();
                 return List.of();
             }
             log.debug("Final validated plan: {} steps", normalizedSteps.size());
@@ -901,11 +1130,17 @@ public class AgentOrchestrator {
         } catch (Exception e) {
             log.error("Failed to parse plan JSON", e);
             currentAcceptanceCriteria = List.of();
+            currentPlanStepIds = Set.of();
             return List.of();
         }
     }
 
     List<AcceptanceCriterion> parseAcceptanceCriteria(JsonNode criteriaNode) {
+        return parseAcceptanceCriteria(criteriaNode, Map.of());
+    }
+
+    private List<AcceptanceCriterion> parseAcceptanceCriteria(
+            JsonNode criteriaNode, Map<String, String> idMapping) {
         if (criteriaNode == null || !criteriaNode.isArray() || criteriaNode.isEmpty()) {
             return List.of();
         }
@@ -920,13 +1155,45 @@ public class AgentOrchestrator {
             String description = node.path("description").asText("");
             String testSignal = firstPresent(node, "test_signal", "testSignal", "testsignal").asText("");
             String severity = node.path("severity").asText("high");
-            AcceptanceCriterion criterion = new AcceptanceCriterion(id, category, description, testSignal, severity);
+            String verificationMethod = firstPresent(node,
+                    "verification_method", "verificationMethod", "verificationmethod").asText("");
+            String verifier = firstPresent(node,
+                    "verifier", "verification_tool", "verificationTool").asText("");
+            List<String> appliesTo = new ArrayList<>();
+            JsonNode appliesToNode = firstPresent(node,
+                    "applies_to", "appliesTo", "appliesto");
+            if (appliesToNode.isArray()) {
+                for (JsonNode targetNode : appliesToNode) {
+                    String target = targetNode.asText("").trim();
+                    appliesTo.add("FINAL".equalsIgnoreCase(target)
+                            ? "FINAL"
+                            : idMapping.getOrDefault(target, target));
+                }
+            }
+            AcceptanceCriterion criterion = new AcceptanceCriterion(
+                    id, category, description, testSignal, severity,
+                    AcceptanceCriterion.VerificationMethod.parse(verificationMethod), verifier,
+                    appliesTo);
             if (criterion.isValid()) {
                 criteria.add(criterion);
                 index++;
             }
         }
         return List.copyOf(criteria);
+    }
+
+    AcceptanceCriteriaPreflight.Report acceptanceCriteriaPreflight() {
+        return AcceptanceCriteriaPreflight.validate(
+                currentAcceptanceCriteria, this::isAllowedAcceptanceVerifier, currentPlanStepIds);
+    }
+
+    private boolean isAllowedAcceptanceVerifier(String toolName) {
+        if (!toolRegistry.hasTool(toolName)) {
+            return false;
+        }
+        ToolRegistry.ToolEffect effect = toolRegistry.toolEffect(toolName);
+        return effect == ToolRegistry.ToolEffect.READ_ONLY
+                || effect == ToolRegistry.ToolEffect.HOST_PROCESS;
     }
 
     private JsonNode firstPresent(JsonNode node, String... fieldNames) {
@@ -996,21 +1263,7 @@ public class AgentOrchestrator {
      * 获取当前可执行的步骤（依赖已全部完成）
      */
     List<ExecutionStep> getExecutableSteps(List<ExecutionStep> steps) {
-        return ExecutionGraph.ready(
-                steps,
-                ExecutionStep::id,
-                ExecutionStep::dependencies,
-                step -> graphState(step.status()),
-                this::isFinalIntegrationStep);
-    }
-
-    private static ExecutionGraph.NodeState graphState(StepStatus status) {
-        return switch (status) {
-            case PENDING -> ExecutionGraph.NodeState.PENDING;
-            case RUNNING -> ExecutionGraph.NodeState.RUNNING;
-            case COMPLETED -> ExecutionGraph.NodeState.COMPLETED;
-            case FAILED -> ExecutionGraph.NodeState.FAILED;
-        };
+        return ExecutionGraph.ready(steps, this::isFinalIntegrationStep);
     }
 
     boolean shouldFuseFinalIntegration(List<ExecutionStep> steps) {
@@ -1106,217 +1359,32 @@ public class AgentOrchestrator {
      * 解析失败时采取保守策略：默认判为"不通过"，避免在审查者异常输出时让问题结果直接放行。
      */
     boolean parseReviewApproval(String reviewContent) {
-        if (reviewContent == null || reviewContent.isEmpty()) {
-            log.warn("Reviewer returned empty content, defaulting to rejected");
-            return false;
-        }
-        try {
-            String cleaned = reviewContent.replaceAll("```json\\s*", "")
-                    .replaceAll("```\\s*", "")
-                    .trim();
-            JsonNode root = mapper.readTree(cleaned);
-            JsonNode approvedNode = root.path("approved");
-            if (approvedNode.isMissingNode() || approvedNode.isNull()) {
-                log.warn("Reviewer JSON missing 'approved' field, defaulting to rejected");
-                return false;
-            }
-            boolean approved = approvedNode.asBoolean(false);
-            if (!approved) {
-                return false;
-            }
-            if (hasFailedBlockingCriteria(root.path("criteria_results"))) {
-                log.warn("Reviewer approved despite failed blocking acceptance criteria, defaulting to rejected");
-                return false;
-            }
-            if (hasMissingAcceptanceCriteriaCoverage(root.path("criteria_results"))) {
-                log.warn("Reviewer JSON missing acceptance criteria coverage, defaulting to rejected");
-                return false;
-            }
-            JsonNode scoresNode = root.path("scores");
-            if (scoresNode.isMissingNode() || scoresNode.isNull() || !scoresNode.isObject()) {
-                log.warn("Reviewer JSON missing structured scores, defaulting to rejected");
-                return false;
-            }
-            double functional = scoresNode.path("functional_correctness").asDouble(-1.0);
-            double integration = scoresNode.path("integration_completeness").asDouble(-1.0);
-            double quality = scoresNode.path("code_quality").asDouble(-1.0);
-            if (functional < REQUIRED_FUNCTIONAL_SCORE) {
-                log.warn("Reviewer functional_correctness score {} below required {}", functional, REQUIRED_FUNCTIONAL_SCORE);
-                return false;
-            }
-            if (integration < MIN_REVIEW_SCORE || quality < MIN_REVIEW_SCORE) {
-                log.warn("Reviewer scores below threshold: integration={}, quality={}, threshold={}",
-                        integration, quality, MIN_REVIEW_SCORE);
-                return false;
-            }
-            return true;
-        } catch (Exception e) {
-            log.warn("Reviewer output is not valid JSON, defaulting to rejected");
-            return false;
-        }
-    }
-
-    private boolean hasFailedBlockingCriteria(JsonNode criteriaResultsNode) {
-        if (criteriaResultsNode == null || !criteriaResultsNode.isArray()) {
-            return false;
-        }
-        for (JsonNode result : criteriaResultsNode) {
-            boolean passed = result.path("passed").asBoolean(false);
-            String id = result.path("id").asText("");
-            String severity = result.path("severity").asText("").toLowerCase(Locale.ROOT);
-            if (!passed && (isBlockingSeverity(severity) || isBlockingSeverity(plannedSeverityFor(id)))) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private String plannedSeverityFor(String criterionId) {
-        if (criterionId == null || criterionId.isBlank()
-                || currentAcceptanceCriteria == null || currentAcceptanceCriteria.isEmpty()) {
-            return "";
-        }
-        for (AcceptanceCriterion criterion : currentAcceptanceCriteria) {
-            if (criterion.id().equals(criterionId)) {
-                return criterion.severity();
-            }
-        }
-        return "";
-    }
-
-    private static boolean isBlockingSeverity(String severity) {
-        if (severity == null) {
-            return false;
-        }
-        String normalized = severity.trim().toLowerCase(Locale.ROOT);
-        return normalized.equals("critical") || normalized.equals("high");
-    }
-
-    private boolean hasMissingAcceptanceCriteriaCoverage(JsonNode criteriaResultsNode) {
-        if (currentAcceptanceCriteria == null || currentAcceptanceCriteria.isEmpty()) {
-            return false;
-        }
-        if (criteriaResultsNode == null || !criteriaResultsNode.isArray() || criteriaResultsNode.isEmpty()) {
-            return true;
-        }
-        Set<String> coveredIds = new HashSet<>();
-        for (JsonNode result : criteriaResultsNode) {
-            String id = result.path("id").asText("");
-            if (!id.isBlank()) {
-                coveredIds.add(id);
-            }
-        }
-        for (AcceptanceCriterion criterion : currentAcceptanceCriteria) {
-            if (!coveredIds.contains(criterion.id())) {
-                return true;
-            }
-        }
-        return false;
+        return TeamReviewerProtocol.evaluate(reviewContent, reviewerCriteria()).approved();
     }
 
     /**
      * 解析检查者反馈的问题
      */
     String parseReviewIssues(String reviewContent) {
-        if (reviewContent == null || reviewContent.isEmpty()) {
-            return "";
-        }
-        try {
-            String cleaned = reviewContent.replaceAll("```json\\s*", "")
-                    .replaceAll("```\\s*", "")
-                    .trim();
-            JsonNode root = mapper.readTree(cleaned);
-            String criteriaIssues = formatFailedCriteriaResults(root.path("criteria_results"));
-
-            JsonNode issuesNode = root.path("issues");
-            if (issuesNode.isArray() && !issuesNode.isEmpty()) {
-                StringBuilder sb = new StringBuilder();
-                for (JsonNode issue : issuesNode) {
-                    sb.append("- ").append(formatReviewIssue(issue)).append("\n");
-                }
-                if (!criteriaIssues.isBlank()) {
-                    sb.append(criteriaIssues).append("\n");
-                }
-                return sb.toString().trim();
-            }
-
-            JsonNode suggestionsNode = root.path("suggestions");
-            if (suggestionsNode.isArray() && !suggestionsNode.isEmpty()) {
-                StringBuilder sb = new StringBuilder();
-                for (JsonNode suggestion : suggestionsNode) {
-                    sb.append("- ").append(formatReviewIssue(suggestion)).append("\n");
-                }
-                if (!criteriaIssues.isBlank()) {
-                    sb.append(criteriaIssues).append("\n");
-                }
-                return sb.toString().trim();
-            }
-
-            if (!criteriaIssues.isBlank()) {
-                return criteriaIssues;
-            }
-
-            // 返回 summary 作为备选
-            String summary = root.path("summary").asText();
-            if (!summary.isEmpty()) {
-                return summary;
-            }
-        } catch (Exception ignored) {
-        }
-        return "审查未通过，请改进执行结果";
+        return TeamReviewerProtocol.evaluate(reviewContent, reviewerCriteria()).issues();
     }
 
-    private String formatFailedCriteriaResults(JsonNode criteriaResultsNode) {
-        if (criteriaResultsNode == null || !criteriaResultsNode.isArray() || criteriaResultsNode.isEmpty()) {
-            return "";
-        }
-        StringBuilder sb = new StringBuilder();
-        for (JsonNode result : criteriaResultsNode) {
-            if (result.path("passed").asBoolean(false)) {
-                continue;
-            }
-            String id = result.path("id").asText("");
-            String severity = result.path("severity").asText("");
-            String evidence = result.path("evidence").asText("");
-            sb.append("- 验收失败");
-            if (!id.isBlank()) {
-                sb.append(" ").append(id);
-            }
-            if (!severity.isBlank()) {
-                sb.append(" severity=").append(severity);
-            }
-            if (!evidence.isBlank()) {
-                sb.append(": ").append(evidence);
-            }
-            sb.append("\n");
-        }
-        return sb.toString().trim();
+    private List<TeamReviewerProtocol.Criterion> reviewerCriteria() {
+        return reviewerCriteria(null);
     }
 
-    private String formatReviewIssue(JsonNode issue) {
-        if (issue == null || issue.isNull()) {
-            return "";
-        }
-        if (!issue.isObject()) {
-            return issue.asText();
-        }
-        List<String> parts = new ArrayList<>();
-        String type = issue.path("type").asText("");
-        String severity = issue.path("severity").asText("");
-        String description = issue.path("description").asText("");
-        if (!type.isBlank()) {
-            parts.add("type=" + type);
-        }
-        if (!severity.isBlank()) {
-            parts.add("severity=" + severity);
-        }
-        if (!description.isBlank()) {
-            parts.add(description);
-        }
-        if (parts.isEmpty()) {
-            return issue.toString();
-        }
-        return String.join(", ", parts);
+    private List<TeamReviewerProtocol.Criterion> reviewerCriteria(ExecutionStep step) {
+        List<AcceptanceCriterion> criteria = step == null
+                ? currentAcceptanceCriteria
+                : acceptanceCriteriaForStep(step);
+        return criteria.stream()
+                .map(criterion -> new TeamReviewerProtocol.Criterion(
+                        criterion.id(), criterion.severity(),
+                        criterion.verificationMethod() == null
+                                ? ""
+                                : criterion.verificationMethod().name(),
+                        criterion.verifier()))
+                .toList();
     }
 
     /**
@@ -1598,11 +1666,10 @@ public class AgentOrchestrator {
     }
 
     private boolean requiresIsolatedWorkspace(ExecutionStep step) {
-        String configured = System.getProperty("devcli.workspace.isolation.enabled");
-        if (configured == null || configured.isBlank()) {
-            configured = System.getenv("DEVCLI_WORKSPACE_ISOLATION_ENABLED");
-        }
-        if (configured != null && !configured.isBlank() && !Boolean.parseBoolean(configured)) {
+        if (!ConfigResolver.booleanValue(
+                "devcli.workspace.isolation.enabled",
+                "DEVCLI_WORKSPACE_ISOLATION_ENABLED",
+                true)) {
             return false;
         }
         return requiresConcreteVerification(step);
@@ -1900,7 +1967,9 @@ public class AgentOrchestrator {
         reviewer.setStructuredToolResultConsumer(result -> {
             memoryManager.addToolResult(result.name(), result.argumentsJson(), result.result(),
                     result.sideChannels());
-            reviewToolCalls.add(result.name());
+            if (result.status() == ToolStatus.SUCCESS) {
+                reviewToolCalls.add(result.name());
+            }
         });
         AgentMessage reviewResult = reviewerForkContext == null
                 ? reviewer.review(reviewTask, workerResult, out)
@@ -1924,14 +1993,30 @@ public class AgentOrchestrator {
                         false, preReview.hardCheckExecuted());
             }
         }
-
-        return new ReviewDecision(parseReviewApproval(reviewResult.content()),
-                parseReviewIssues(reviewResult.content()), false,
+        List<String> effectiveVerificationTools = new ArrayList<>(reviewToolCalls);
+        if (preReview.hardCheckExecuted()) {
+            effectiveVerificationTools.add("execute_command");
+        }
+        TeamReviewerProtocol.Evaluation evaluation = TeamReviewerProtocol.evaluate(
+                reviewResult.content(), reviewerCriteria(step), effectiveVerificationTools);
+        return new ReviewDecision(evaluation.approved(),
+                evaluation.issues(), false,
                 preReview.hardCheckExecuted());
     }
 
     record ReviewDecision(boolean approved, String issues, boolean reviewerError,
                           boolean hardCheckExecuted) {
+    }
+
+    List<String> missingDeclaredVerifierTools(List<String> reviewToolCalls) {
+        Set<String> used = reviewToolCalls == null ? Set.of() : new HashSet<>(reviewToolCalls);
+        return currentAcceptanceCriteria.stream()
+                .filter(criterion -> criterion.verificationMethod()
+                        == AcceptanceCriterion.VerificationMethod.TOOL)
+                .map(AcceptanceCriterion::verifier)
+                .filter(verifier -> !used.contains(verifier))
+                .distinct()
+                .toList();
     }
 
     PreReviewResult runPreReviewHook(ExecutionStep step) {
@@ -2015,7 +2100,8 @@ public class AgentOrchestrator {
         if (currentUserTask != null && !currentUserTask.isBlank()) {
             context.append("原始用户任务：\n").append(currentUserTask).append("\n\n");
         }
-        appendAcceptanceCriteriaSection(context, "本步骤必须满足以下验收点");
+        appendAcceptanceCriteriaSection(
+                context, "本步骤必须满足以下验收点", acceptanceCriteriaForStep(currentStep));
         context.append("当前步骤：").append(currentStep.description()).append("\n\n");
         if (redoTracker.isRedo(currentStep.id())) {
             context.append("⚠️ 本步骤上次执行失败，现在原位重做——请换一种思路实现，不要重复已失败的做法。\n");
@@ -2205,7 +2291,9 @@ public class AgentOrchestrator {
         if (currentUserTask != null && !currentUserTask.isBlank()) {
             task.append("原始用户任务：\n").append(currentUserTask).append("\n\n");
         }
-        appendAcceptanceCriteriaSection(task, "逐条验证以下验收点，每条必须单独检查并输出证据");
+        appendAcceptanceCriteriaSection(
+                task, "逐条验证以下验收点，每条必须单独检查并输出证据",
+                acceptanceCriteriaForStep(step));
         task.append("当前步骤：").append(step.description());
         if (requiresConcreteVerification(step)) {
             task.append("\n\n审查要求：")
@@ -2218,15 +2306,28 @@ public class AgentOrchestrator {
         return task.toString();
     }
 
-    private void appendAcceptanceCriteriaSection(StringBuilder sb, String title) {
-        if (currentAcceptanceCriteria == null || currentAcceptanceCriteria.isEmpty()) {
+    private void appendAcceptanceCriteriaSection(
+            StringBuilder sb, String title, List<AcceptanceCriterion> criteria) {
+        if (criteria == null || criteria.isEmpty()) {
             return;
         }
         sb.append("⚠️ [关键上下文，不可压缩或省略] ").append(title).append("：\n");
-        for (AcceptanceCriterion criterion : currentAcceptanceCriteria) {
+        for (AcceptanceCriterion criterion : criteria) {
             sb.append(criterion.formatForPrompt()).append("\n");
         }
         sb.append("\n");
+    }
+
+    List<AcceptanceCriterion> acceptanceCriteriaForStep(ExecutionStep step) {
+        if (step == null) {
+            return List.of();
+        }
+        if (isFinalIntegrationStep(step)) {
+            return List.copyOf(currentAcceptanceCriteria);
+        }
+        return currentAcceptanceCriteria.stream()
+                .filter(criterion -> criterion.appliesTo().contains(step.id()))
+                .toList();
     }
 
     private boolean requiresConcreteVerification(ExecutionStep step) {
@@ -2263,18 +2364,19 @@ public class AgentOrchestrator {
      * 注意：Worker/Reviewer 的完整输出在执行阶段已经通过流式渲染打印给用户，
      * 此处只返回"步骤状态 + 简短预览"作为总结，避免同一段内容被打印 2-3 次。
      */
-    private String buildFinalResult(List<ExecutionStep> steps) {
+    private String buildFinalResult(List<ExecutionStep> steps,
+                                    Map<String, Integer> retryCount) {
         StringBuilder result = new StringBuilder();
         boolean allCompleted = steps.stream().allMatch(step ->
                 step.status() == StepStatus.COMPLETED);
         boolean hasFailedSteps = steps.stream().anyMatch(step -> step.status() == StepStatus.FAILED);
 
         if (allCompleted) {
-            result.append("✅ 多 Agent 协作任务完成！\n\n");
+            result.append("✅ Plan 任务完成！\n\n");
         } else if (hasFailedSteps) {
-            result.append("⚠️ 多 Agent 协作任务未完全完成，存在失败步骤。\n\n");
+            result.append("⚠️ Plan 任务未完全完成，存在失败步骤。\n\n");
         } else {
-            result.append("⚠️ 多 Agent 协作任务部分完成，仍有未执行步骤。\n\n");
+            result.append("⚠️ Plan 任务部分完成，仍有未执行步骤。\n\n");
         }
         result.append("📋 执行总结：\n");
 
@@ -2297,6 +2399,76 @@ public class AgentOrchestrator {
             }
         }
 
+        String pendingHuman = pendingHumanAcceptanceSummary();
+        if (!pendingHuman.isBlank()) {
+            result.append("\n").append(pendingHuman).append("\n");
+        }
+
+        String escalation = formatFailureEscalation(
+                steps,
+                retryCount,
+                redoTracker.snapshotCounts(),
+                checkpoint == null ? "" : checkpoint.getOrchestrationId());
+        if (!escalation.isBlank()) {
+            result.append("\n").append(escalation).append("\n");
+        }
+
         return result.toString();
+    }
+
+    static String formatFailureEscalation(List<ExecutionStep> steps,
+                                          Map<String, Integer> reviewerRetries,
+                                          Map<String, Integer> redoCounts,
+                                          String orchestrationId) {
+        List<ExecutionStep> failedSteps = steps == null ? List.of() : steps.stream()
+                .filter(step -> step.status() == StepStatus.FAILED)
+                .toList();
+        if (failedSteps.isEmpty()) {
+            return "";
+        }
+
+        Map<String, Integer> retries = reviewerRetries == null ? Map.of() : reviewerRetries;
+        Map<String, Integer> redos = redoCounts == null ? Map.of() : redoCounts;
+        StringBuilder summary = new StringBuilder("🚨 自动恢复链路已结束，需要人工介入：\n");
+        for (ExecutionStep step : failedSteps) {
+            summary.append("- ").append(step.id())
+                    .append("：Reviewer 重试 ")
+                    .append(retries.getOrDefault(step.id(), 0)).append('/')
+                    .append(MAX_RETRIES_PER_STEP)
+                    .append("，原位重做 ")
+                    .append(redos.getOrDefault(step.id(), 0)).append('/')
+                    .append(MAX_REDO_PER_STEP);
+            if (step.result() != null && !step.result().isBlank()) {
+                String reason = step.result().length() > 200
+                        ? step.result().substring(0, 200) + "..."
+                        : step.result();
+                summary.append("；最后失败原因：").append(reason);
+            }
+            summary.append('\n');
+        }
+        if (orchestrationId != null && !orchestrationId.isBlank()) {
+            summary.append("- checkpoint：").append(orchestrationId).append('\n');
+        }
+        summary.append("- 后续处理：补充或修正验收约束后重新规划；也可以人工修复后重新发起 Plan。");
+        return summary.toString();
+    }
+
+    String pendingHumanAcceptanceSummary() {
+        List<AcceptanceCriterion> pending = currentAcceptanceCriteria.stream()
+                .filter(criterion -> criterion.verificationMethod()
+                        == AcceptanceCriterion.VerificationMethod.HUMAN)
+                .toList();
+        if (pending.isEmpty()) {
+            return "";
+        }
+        StringBuilder summary = new StringBuilder("⚠️ 待人工验收：\n");
+        for (AcceptanceCriterion criterion : pending) {
+            summary.append("- ").append(criterion.id())
+                    .append(": ").append(criterion.description())
+                    .append("；检查方式：").append(criterion.verifier())
+                    .append("；通过证据：").append(criterion.testSignal())
+                    .append('\n');
+        }
+        return summary.toString().trim();
     }
 }

@@ -31,6 +31,24 @@ public final class ExecutionGraph {
     private ExecutionGraph() {
     }
 
+    public static <T extends ExecutionNode> List<T> ready(
+            List<T> nodes, Predicate<T> finalStep) {
+        return ready(
+                nodes,
+                ExecutionNode::id,
+                ExecutionNode::dependencies,
+                node -> node.artifact().state(),
+                finalStep);
+    }
+
+    public static ValidationResult validate(List<? extends ExecutionNode> nodes) {
+        return validate(nodes, ExecutionNode::id, ExecutionNode::dependencies);
+    }
+
+    public static List<String> topologicalOrder(List<? extends ExecutionNode> nodes) {
+        return topologicalOrder(nodes, ExecutionNode::id, ExecutionNode::dependencies);
+    }
+
     public static <T> List<T> ready(List<T> nodes,
                                     Function<T, String> id,
                                     Function<T, List<String>> dependencies,

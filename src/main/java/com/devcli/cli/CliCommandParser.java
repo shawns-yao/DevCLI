@@ -1,5 +1,7 @@
 package com.devcli.cli;
 
+import com.devcli.agent.OrchestrationProfile;
+
 final class CliCommandParser {
 
     enum CommandType {
@@ -12,8 +14,7 @@ final class CliCommandParser {
         CLEAR,
         HISTORY_CLEAR,
         SWITCH_MODEL,
-        SWITCH_PLAN,
-        SWITCH_TEAM,
+        ORCHESTRATE,
         SWITCH_HITL,
         MEMORY_STATUS,
         MEMORY_ORGANIZE,
@@ -44,12 +45,21 @@ final class CliCommandParser {
         SKILL_OFF,
         SKILL_RELOAD,
         CONFIG,
+        SESSION,
         BRANCH
     }
 
-    record ParsedCommand(CommandType type, String payload) {
+    record ParsedCommand(CommandType type, String payload, OrchestrationProfile orchestrationProfile) {
+        ParsedCommand(CommandType type, String payload) {
+            this(type, payload, null);
+        }
+
         static ParsedCommand none() {
             return new ParsedCommand(CommandType.NONE, null);
+        }
+
+        static ParsedCommand orchestrate(OrchestrationProfile profile, String payload) {
+            return new ParsedCommand(CommandType.ORCHESTRATE, payload, profile);
         }
     }
 
@@ -106,19 +116,28 @@ final class CliCommandParser {
         }
 
         if (trimmed.equalsIgnoreCase("/plan")) {
-            return new ParsedCommand(CommandType.SWITCH_PLAN, null);
+            return ParsedCommand.orchestrate(OrchestrationProfile.TEAM, null);
         }
 
         if (trimmed.regionMatches(true, 0, "/plan ", 0, 6)) {
-            return new ParsedCommand(CommandType.SWITCH_PLAN, trimmed.substring(6).trim());
+            String planInput = trimmed.substring(6).trim();
+            if (planInput.equalsIgnoreCase("--team")) {
+                return ParsedCommand.orchestrate(OrchestrationProfile.TEAM, null);
+            }
+            if (planInput.regionMatches(true, 0, "--team ", 0, 7)) {
+                return ParsedCommand.orchestrate(
+                        OrchestrationProfile.TEAM, planInput.substring(7).trim());
+            }
+            return ParsedCommand.orchestrate(OrchestrationProfile.TEAM, planInput);
         }
 
         if (trimmed.equalsIgnoreCase("/team")) {
-            return new ParsedCommand(CommandType.SWITCH_TEAM, null);
+            return ParsedCommand.orchestrate(OrchestrationProfile.TEAM, null);
         }
 
         if (trimmed.regionMatches(true, 0, "/team ", 0, 6)) {
-            return new ParsedCommand(CommandType.SWITCH_TEAM, trimmed.substring(6).trim());
+            return ParsedCommand.orchestrate(
+                    OrchestrationProfile.TEAM, trimmed.substring(6).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/hitl on")) {
@@ -253,6 +272,13 @@ final class CliCommandParser {
 
         if (trimmed.equalsIgnoreCase("/skill") || trimmed.equalsIgnoreCase("/skill list")) {
             return new ParsedCommand(CommandType.SKILL_LIST, null);
+        }
+
+        if (trimmed.equalsIgnoreCase("/session")) {
+            return new ParsedCommand(CommandType.SESSION, "status");
+        }
+        if (trimmed.regionMatches(true, 0, "/session ", 0, 9)) {
+            return new ParsedCommand(CommandType.SESSION, trimmed.substring(9).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/branch")) {

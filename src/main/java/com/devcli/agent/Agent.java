@@ -6,11 +6,9 @@ import com.devcli.llm.LlmTraceLogger;
 import com.devcli.context.ContextProfile;
 import com.devcli.context.TokenUsageFormatter;
 import com.devcli.lsp.LspDiagnosticReport;
-import com.devcli.memory.CompactBoundaryRuntimeState;
 import com.devcli.memory.ConversationHistoryCompactor;
 import com.devcli.memory.ExplicitMemoryHints;
 import com.devcli.memory.MemoryManager;
-import com.devcli.memory.PostCompactRestoreContext;
 import com.devcli.memory.TokenBudget;
 import com.devcli.prompt.PromptAssembler;
 import com.devcli.prompt.PromptContext;
@@ -22,7 +20,6 @@ import com.devcli.runtime.CancellationContext;
 import com.devcli.runtime.event.RunEvent;
 import com.devcli.runtime.event.RunEventSink;
 import com.devcli.skill.SkillContextBuffer;
-import com.devcli.skill.SkillIndexFormatter;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.util.AnsiStyle;
 import com.devcli.tool.ToolRegistry;
@@ -30,7 +27,6 @@ import com.devcli.tool.ToolRegistry.ToolExecutionResult;
 import com.devcli.tool.ToolRegistry.ToolInvocation;
 import com.devcli.trace.TraceContext;
 import com.devcli.trace.TraceRecorder;
-import com.devcli.util.TerminalMarkdownRenderer;
 import com.devcli.image.ImageReferenceParser;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -87,17 +83,13 @@ public class Agent implements AutoCloseable {
         this.conversationHistory = new ArrayList<>();
         this.memoryManager = new MemoryManager(llmClient);
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
-        this.historyCompactor.setSessionMemory(memoryManager.getSessionMemory());
-        this.historyCompactor.setPostCompactContextSupplier(this::buildPostCompactRestoreSection);
-        this.historyCompactor.setCompactBoundaryRuntimeStateSupplier(this::buildCompactBoundaryRuntimeState);
-        this.historyCompactor.setMicrocompactOutputRoot(Path.of(this.toolRegistry.getProjectPath()));
-        this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
-        this.toolRegistry.setMemorySaver(memoryManager::storeFact);
-        this.toolRegistry.setMemorySaveHandler(fact -> {
-            MemoryManager.StoreResult result = memoryManager.storeFactWithPolicy(fact, true);
-            return new ToolRegistry.MemorySaveResult(result.stored(), result.message());
-        });
-        this.toolRegistry.setMemoryListHandler(memoryManager::listLongTermMemory);
+        AgentRuntimeSupport.configureCompactor(
+                historyCompactor,
+                memoryManager,
+                this.toolRegistry,
+                this::buildPostCompactRestoreSection,
+                this::buildCompactBoundaryRuntimeState);
+        AgentRuntimeSupport.bindMemory(this.toolRegistry, memoryManager);
         conversationHistory.add(LlmClient.Message.system(buildSystemPrompt()));
     }
 
@@ -270,6 +262,11 @@ public class Agent implements AutoCloseable {
                         logRequestContext("react iteration=" + iteration, definitions);
                         streamRenderer.beginThinking();
                         return definitions;
+                    }
+
+                    @Override
+                    public com.devcli.tool.ToolPresentation toolPresentation(String toolName) {
+                        return toolRegistry.toolPresentation(toolName);
                     }
 
                     @Override
@@ -593,67 +590,32 @@ public class Agent implements AutoCloseable {
         if (report == null || report.isEmpty()) {
             return;
         }
-        conversationHistory.add(LlmClient.Message.user(report.promptText()));
+        conversationHistory.add(LlmClient.Message.internalUser(report.promptText()));
         renderer().stream().println(report.displayText());
         log.info("Injected LSP diagnostics into ReAct conversation");
     }
 
     private String buildSkillIndex() {
-        if (skillRegistry == null) return "";
-        try {
-            return SkillIndexFormatter.format(skillRegistry.enabledSkillsForText(
-                    currentSkillActivationText,
-                    toolRegistry.getProjectPath()));
-        } catch (Exception e) {
-            log.warn("Failed to build skill index", e);
-            return "";
-        }
+        return AgentRuntimeSupport.buildSkillIndex(
+                skillRegistry, currentSkillActivationText, toolRegistry, log);
     }
 
     private String prependSkillBodies(String userInput) {
         if (skillContextBuffer == null || skillContextBuffer.isEmpty()) {
             return userInput;
         }
-        String drained = skillContextBuffer.drain();
-        if (drained.isEmpty()) return userInput;
-        return drained + "\n用户输入：\n" + userInput;
+        return AgentRuntimeSupport.prependSkillBodies(
+                skillContextBuffer, "用户输入：\n" + userInput);
     }
 
     private String buildPostCompactRestoreSection() {
-        List<PostCompactRestoreContext.Section> sections = new ArrayList<>();
-        String workingMemory = memoryManager.buildPostCompactRestoreSection();
-        if (workingMemory != null && !workingMemory.isBlank()) {
-            sections.add(new PostCompactRestoreContext.Section("工作记忆恢复", workingMemory.trim()));
-        }
-        String mcpTools = buildMcpPostCompactRestoreSection();
-        if (!mcpTools.isBlank()) {
-            sections.add(new PostCompactRestoreContext.Section("MCP 工具状态", mcpTools));
-        }
-        if (skillContextBuffer != null) {
-            String skills = skillContextBuffer.renderPostCompactRestoreSection();
-            if (!skills.isBlank()) {
-                sections.add(new PostCompactRestoreContext.Section("已调用 Skill 恢复", skills));
-            }
-        }
-        return PostCompactRestoreContext.render(sections.toArray(PostCompactRestoreContext.Section[]::new));
+        return AgentRuntimeSupport.buildPostCompactRestoreSection(
+                memoryManager.buildPostCompactRestoreSection(), toolRegistry, skillContextBuffer);
     }
 
-    private String buildMcpPostCompactRestoreSection() {
-        String snapshot = toolRegistry.mcpToolSnapshot();
-        if (snapshot == null || snapshot.isBlank() || "none".equalsIgnoreCase(snapshot.trim())) {
-            return "";
-        }
-        return "- snapshot: " + snapshot.trim();
-    }
-
-    private CompactBoundaryRuntimeState buildCompactBoundaryRuntimeState() {
-        return new CompactBoundaryRuntimeState(
-                skillContextBuffer == null ? List.of() : skillContextBuffer.activeSkillNames(),
-                CompactBoundaryRuntimeState.mergeRagEpochSnapshots(
-                        memoryManager.currentRagEpochSnapshot(),
-                        toolRegistry.currentRagIndexEpochSnapshot()),
-                toolRegistry.mcpToolSnapshot(),
-                false);
+    private com.devcli.memory.CompactBoundaryRuntimeState buildCompactBoundaryRuntimeState() {
+        return AgentRuntimeSupport.buildCompactBoundaryRuntimeState(
+                memoryManager, toolRegistry, skillContextBuffer, false);
     }
 
     private void maintainSessionPreSummaryAfterTurn(int turnToolCalls, int largestToolResultChars) {
@@ -968,52 +930,20 @@ public class Agent implements AutoCloseable {
         if (result == null || result.name() == null) {
             return;
         }
-        String summary = switch (result.name()) {
-            case "web_search" -> webSearchSummary(result);
-            case "web_fetch" -> webFetchSummary(result);
-            default -> "";
-        };
-        if (!summary.isBlank()) {
-            renderer().stream().println(AnsiStyle.subtle("  → " + summary));
+        if (!"web_search".equals(result.name()) && !"web_fetch".equals(result.name())) {
+            return;
         }
-    }
-
-    private String webSearchSummary(ToolExecutionResult result) {
-        String text = result.result() == null ? "" : result.result();
-        if (text.startsWith("搜索失败") || text.startsWith("⚠️") || text.contains("未找到相关结果")) {
-            return compactOneLine(text, 120);
-        }
-        long count = text.lines().filter(line -> line.matches("^\\d+\\.\\s+.*")).count();
-        String query = extractJsonArg(result.argumentsJson(), "query");
-        String label = query.isBlank() ? "搜索结果" : "搜索 \"" + query + "\"";
-        return count > 0
-                ? label + " 返回 " + count + " 条结果"
-                : label + " 已返回结果";
-    }
-
-    private String webFetchSummary(ToolExecutionResult result) {
-        String text = result.result() == null ? "" : result.result();
-        String url = extractJsonArg(result.argumentsJson(), "url");
-        String target = url.isBlank() ? "页面" : compactOneLine(url.replaceFirst("^https?://", ""), 80);
-        if (text.startsWith("抓取失败") || text.startsWith("❌")) {
-            return "抓取 " + target + " 失败: " + compactOneLine(text, 100);
-        }
-        String title = text.lines()
-                .filter(line -> line.startsWith("📄 标题:"))
-                .map(line -> line.substring("📄 标题:".length()).trim())
-                .findFirst()
-                .orElse("");
-        String length = text.lines()
-                .filter(line -> line.startsWith("📏 正文"))
-                .findFirst()
-                .orElse("");
-        if (!title.isBlank() && !length.isBlank()) {
-            return "抓取 " + target + " 完成: " + title + " · " + length.replace("📏 ", "");
-        }
-        if (!title.isBlank()) {
-            return "抓取 " + target + " 完成: " + title;
-        }
-        return "抓取 " + target + " 完成";
+        String title = result.presentation().title().isBlank()
+                ? result.name()
+                : result.presentation().title();
+        String target = extractJsonArg(
+                result.argumentsJson(), result.presentation().primaryArgument());
+        String terminal = result.status() == com.devcli.tool.ToolStatus.SUCCESS
+                ? "已完成"
+                : "状态 " + result.status().name();
+        renderer().stream().println(AnsiStyle.subtle("  → " + title
+                + (target.isBlank() ? "" : " · " + target)
+                + " · " + terminal));
     }
 
     private String extractJsonArg(String json, String key) {
@@ -1027,21 +957,6 @@ public class Agent implements AutoCloseable {
         }
     }
 
-    private String compactOneLine(String text, int maxLength) {
-        if (text == null || text.isBlank()) {
-            return "";
-        }
-        String value = text.replace("\r\n", "\n")
-                .replace('\r', '\n')
-                .lines()
-                .map(String::trim)
-                .filter(line -> !line.isEmpty())
-                .findFirst()
-                .orElse("")
-                .replaceAll("\\s+", " ");
-        return value.length() > maxLength ? value.substring(0, Math.max(0, maxLength - 3)) + "..." : value;
-    }
-
     private void appendImageToolMessages(List<ToolExecutionResult> toolResults) {
         if (toolResults == null || toolResults.isEmpty()) {
             return;
@@ -1053,7 +968,7 @@ public class Agent implements AutoCloseable {
             List<LlmClient.ContentPart> parts = new ArrayList<>();
             parts.add(LlmClient.ContentPart.text("工具 " + result.name() + " 返回了图片内容，请结合上面的工具文本结果分析。"));
             parts.addAll(result.imageParts());
-            conversationHistory.add(LlmClient.Message.user(parts));
+            conversationHistory.add(LlmClient.Message.user(parts, LlmClient.MessageSource.TOOL));
         }
     }
 
@@ -1095,271 +1010,53 @@ public class Agent implements AutoCloseable {
      *    缓冲到 lateReasoning，最终在 finish() 用"🧠 补充思考"标题独立展示，不会污染回复区
      */
     private static final class StreamRenderer implements LlmClient.StreamListener, RunEventSink {
-        private final Renderer renderer;
-        private final PrintStream boundOut;  // null 表示延迟读取 System.out（保持旧测试兼容）
-        private final StringBuilder pendingReasoning = new StringBuilder();
-        private final StringBuilder visibleReasoning = new StringBuilder();
-        private final StringBuilder lateReasoning = new StringBuilder();
-        private TerminalMarkdownRenderer reasoningRenderer;
-        private TerminalMarkdownRenderer contentRenderer;
-        private boolean reasoningHeadingPrinted;
-        private boolean reasoningStarted;
-        private boolean contentStarted;
-        private boolean thinkingQuotePrinted;
-        private boolean streamedOutput;
+        private final AgentStreamPresenter delegate;
 
         StreamRenderer() {
-            this.renderer = null;
-            this.boundOut = null;
+            this.delegate = AgentStreamPresenter.react();
         }
 
         StreamRenderer(PrintStream out) {
-            this.renderer = null;
-            this.boundOut = out;
+            this.delegate = AgentStreamPresenter.react(out);
         }
 
         StreamRenderer(Renderer renderer) {
-            this.renderer = renderer;
-            this.boundOut = renderer == null ? null : renderer.stream();
-        }
-
-        private PrintStream out() {
-            return boundOut != null ? boundOut : System.out;
-        }
-
-        private boolean hasThinkingPanel() {
-            return renderer != null && renderer.supportsThinkingPanel();
+            this.delegate = AgentStreamPresenter.react(renderer);
         }
 
         private void beginThinking() {
-            if (hasThinkingPanel()) {
-                renderer.beginThinking("Thinking");
-            }
+            delegate.beginThinking();
         }
 
         private void clearThinkingPanel() {
-            if (hasThinkingPanel()) {
-                renderer.endThinking();
-                pendingReasoning.setLength(0);
-            }
+            delegate.clearThinkingPanel();
         }
 
         @Override
         public void emit(RunEvent event) {
-            if (event instanceof RunEvent.ReasoningDelta reasoning) {
-                onReasoningDelta(reasoning.content());
-            } else if (event instanceof RunEvent.MessageDelta message) {
-                onContentDelta(message.content());
-            } else if (event instanceof RunEvent.ToolCalls toolCalls && renderer != null) {
-                renderer.appendToolCalls(toolCalls.toLlmToolCalls());
-            }
+            delegate.emit(event);
         }
 
         @Override
         public void onReasoningDelta(String delta) {
-            if (delta == null || delta.isEmpty()) {
-                return;
-            }
-            if (contentStarted) {
-                // content 已开始，无法回头；缓冲到"补充思考"
-                lateReasoning.append(delta);
-                return;
-            }
-            visibleReasoning.append(delta);
-            if (hasThinkingPanel()) {
-                pendingReasoning.append(delta);
-                if (pendingReasoning.toString().isBlank()) {
-                    return;
-                }
-                renderer.appendThinking(pendingReasoning.toString());
-                pendingReasoning.setLength(0);
-                reasoningStarted = true;
-                return;
-            }
-            if (!reasoningStarted) {
-                pendingReasoning.append(delta);
-                if (pendingReasoning.toString().isBlank()) {
-                    return;  // 还没攒出实质内容，等
-                }
-                if (!containsLineBreak(pendingReasoning)) {
-                    return;  // 避免先打印一个空标题，等有完整行或迭代切换时再 flush
-                }
-                printReasoningHeadingIfNeeded();
-                reasoningRenderer = new TerminalMarkdownRenderer(out());
-                reasoningRenderer.append(pendingReasoning.toString());
-                pendingReasoning.setLength(0);
-                reasoningStarted = true;
-                streamedOutput = true;
-            } else {
-                if (hasThinkingPanel()) {
-                    renderer.appendThinking(delta);
-                } else {
-                    reasoningRenderer.append(delta);
-                }
-            }
-            out().flush();
+            delegate.onReasoningDelta(delta);
         }
 
         @Override
         public void onContentDelta(String delta) {
-            if (delta == null || delta.isEmpty()) {
-                return;
-            }
-            if (!contentStarted) {
-                if (hasThinkingPanel()) {
-                    finishThinkingPanelAndPrintQuote();
-                } else if (reasoningStarted && reasoningRenderer != null) {
-                    reasoningRenderer.finish();
-                    out().println();
-                } else if (pendingReasoning.length() > 0 && !pendingReasoning.toString().isBlank()) {
-                    printReasoningHeadingIfNeeded();
-                    TerminalMarkdownRenderer r = new TerminalMarkdownRenderer(out());
-                    r.append(pendingReasoning.toString());
-                    r.finish();
-                    out().println();
-                    pendingReasoning.setLength(0);
-                    reasoningStarted = true;
-                }
-                out().print(AnsiStyle.answerMarker() + " ");
-                contentRenderer = new TerminalMarkdownRenderer(out());
-                contentStarted = true;
-                streamedOutput = true;
-            }
-            contentRenderer.append(delta);
-            out().flush();
+            delegate.onContentDelta(delta);
         }
 
         private boolean hasStreamedOutput() {
-            return streamedOutput;
+            return delegate.hasStreamedOutput();
         }
 
         private void resetBetweenIterations() {
-            if (hasThinkingPanel()) {
-                finishThinkingPanelAndPrintQuote();
-            }
-            if (reasoningRenderer != null) {
-                reasoningRenderer.finish();
-                reasoningRenderer = null;
-            } else if (!hasThinkingPanel()) {
-                flushPendingReasoning();
-            }
-            if (contentRenderer != null) {
-                contentRenderer.finish();
-                contentRenderer = null;
-            }
-            String late = lateReasoning.toString().trim();
-            if (!late.isEmpty()) {
-                out().println();
-                out().println(AnsiStyle.heading("🧠 补充思考"));
-                TerminalMarkdownRenderer r = new TerminalMarkdownRenderer(out());
-                r.append(late);
-                r.finish();
-                lateReasoning.setLength(0);
-                streamedOutput = true;
-            }
-            pendingReasoning.setLength(0);
-            visibleReasoning.setLength(0);
-            reasoningStarted = false;
-            contentStarted = false;
-            thinkingQuotePrinted = false;
-            // 同一次 ReAct 运行内"🧠 思考过程"标题只打印一次：工具迭代之间不重置
-            // reasoningHeadingPrinted，使工具调用后的后续推理继续归到同一思考块下。
-            if (streamedOutput) {
-                out().println();
-            }
+            delegate.resetBetweenIterations();
         }
 
         private void finish() {
-            if (hasThinkingPanel()) {
-                finishThinkingPanelAndPrintQuote();
-            }
-            if (reasoningRenderer != null) {
-                reasoningRenderer.finish();
-            } else if (!hasThinkingPanel()) {
-                flushPendingReasoning();
-            }
-            if (contentRenderer != null) {
-                contentRenderer.finish();
-            }
-            String late = lateReasoning.toString().trim();
-            if (!late.isEmpty()) {
-                out().println();
-                out().println(AnsiStyle.heading("🧠 补充思考"));
-                TerminalMarkdownRenderer r = new TerminalMarkdownRenderer(out());
-                r.append(late);
-                r.finish();
-                lateReasoning.setLength(0);
-                streamedOutput = true;
-            }
-            if (streamedOutput) {
-                out().println();
-            }
-        }
-
-        private boolean containsLineBreak(CharSequence content) {
-            for (int i = 0; i < content.length(); i++) {
-                char ch = content.charAt(i);
-                if (ch == '\n' || ch == '\r') {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        private void flushPendingReasoning() {
-            String pending = pendingReasoning.toString();
-            if (pending.isBlank()) {
-                pendingReasoning.setLength(0);
-                return;
-            }
-            printReasoningHeadingIfNeeded();
-            TerminalMarkdownRenderer renderer = new TerminalMarkdownRenderer(out());
-            renderer.append(pending);
-            renderer.finish();
-            pendingReasoning.setLength(0);
-            streamedOutput = true;
-        }
-
-        private void finishThinkingPanelAndPrintQuote() {
-            if (!hasThinkingPanel()) {
-                return;
-            }
-            if (pendingReasoning.length() > 0 && !pendingReasoning.toString().isBlank()) {
-                renderer.appendThinking(pendingReasoning.toString());
-            }
-            renderer.endThinking();
-            pendingReasoning.setLength(0);
-            printThinkingQuoteIfNeeded();
-        }
-
-        private void printThinkingQuoteIfNeeded() {
-            if (thinkingQuotePrinted) {
-                return;
-            }
-            String reasoning = visibleReasoning.toString()
-                    .replace("\r\n", "\n")
-                    .replace('\r', '\n')
-                    .trim();
-            if (reasoning.isEmpty()) {
-                return;
-            }
-            out().println(AnsiStyle.thinking("Thinking..."));
-            for (String line : reasoning.split("\\R+")) {
-                String normalized = line.replaceAll("\\s+", " ").trim();
-                if (!normalized.isEmpty()) {
-                    out().println(AnsiStyle.subtle("│ " + normalized));
-                }
-            }
-            out().println();
-            thinkingQuotePrinted = true;
-            streamedOutput = true;
-        }
-
-        private void printReasoningHeadingIfNeeded() {
-            if (!reasoningHeadingPrinted) {
-                out().println(AnsiStyle.heading("🧠 思考过程"));
-                reasoningHeadingPrinted = true;
-            }
+            delegate.finish();
         }
     }
 }

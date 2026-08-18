@@ -27,12 +27,14 @@ import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -44,11 +46,13 @@ class AgentOrchestratorTest {
         // run() 会写 orchestration checkpoint；测试重定向到临时目录，避免污染用户主目录
         System.setProperty("devcli.checkpoint.dir",
                 Files.createTempDirectory("devcli-test-checkpoints").toString());
+        System.setProperty("devcli.team.plan.review.enabled", "false");
     }
 
     @AfterAll
     static void clearCheckpointDirProperty() {
         System.clearProperty("devcli.checkpoint.dir");
+        System.clearProperty("devcli.team.plan.review.enabled");
     }
 
     @Test
@@ -75,15 +79,15 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    void resolveWorkerCountClampsAndRejectsGarbage() {
+    void resolveWorkerCountRejectsOutOfRangeAndGarbage() {
         String prev = System.getProperty("devcli.team.workers");
         try {
             System.setProperty("devcli.team.workers", "999");
-            assertEquals(AgentOrchestrator.MAX_WORKER_COUNT, AgentOrchestrator.resolveWorkerCount());
+            assertThrows(IllegalArgumentException.class, AgentOrchestrator::resolveWorkerCount);
             System.setProperty("devcli.team.workers", "0");
-            assertEquals(1, AgentOrchestrator.resolveWorkerCount());
+            assertThrows(IllegalArgumentException.class, AgentOrchestrator::resolveWorkerCount);
             System.setProperty("devcli.team.workers", "abc");
-            assertEquals(AgentOrchestrator.DEFAULT_WORKER_COUNT, AgentOrchestrator.resolveWorkerCount());
+            assertThrows(IllegalArgumentException.class, AgentOrchestrator::resolveWorkerCount);
         } finally {
             if (prev == null) System.clearProperty("devcli.team.workers");
             else System.setProperty("devcli.team.workers", prev);
@@ -91,17 +95,15 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    void resolvePlannerRepairAttemptsReadsAndClampsSystemProperty() {
+    void resolvePlannerRepairAttemptsRejectsInvalidExplicitValues() {
         String previous = System.getProperty("devcli.team.planner.repair.max.attempts");
         try {
             System.setProperty("devcli.team.planner.repair.max.attempts", "1");
             assertEquals(1, TeamPlannerProtocol.resolveRepairAttempts());
             System.setProperty("devcli.team.planner.repair.max.attempts", "99");
-            assertEquals(TeamPlannerProtocol.MAX_REPAIR_ATTEMPTS,
-                    TeamPlannerProtocol.resolveRepairAttempts());
+            assertThrows(IllegalArgumentException.class, TeamPlannerProtocol::resolveRepairAttempts);
             System.setProperty("devcli.team.planner.repair.max.attempts", "invalid");
-            assertEquals(TeamPlannerProtocol.DEFAULT_REPAIR_ATTEMPTS,
-                    TeamPlannerProtocol.resolveRepairAttempts());
+            assertThrows(IllegalArgumentException.class, TeamPlannerProtocol::resolveRepairAttempts);
         } finally {
             if (previous == null) {
                 System.clearProperty("devcli.team.planner.repair.max.attempts");
@@ -296,6 +298,405 @@ class AgentOrchestratorTest {
 
         assertEquals(1, steps.size());
         assertEquals("实现核心功能", steps.get(0).description());
+    }
+
+    @Test
+    void shouldRejectAcceptanceCriteriaWithoutVerificationContract() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+
+        orchestrator.parsePlan("""
+                {
+                  "acceptance_criteria": [
+                    {
+                      "id": "AC-01",
+                      "description": "默认模型可以完成请求",
+                      "test_signal": "请求成功"
+                    }
+                  ],
+                  "steps": [
+                    {"id":"s1","description":"实现功能","type":"ANALYSIS","dependencies":[]}
+                  ]
+                }
+                """);
+
+        AcceptanceCriteriaPreflight.Report report = orchestrator.acceptanceCriteriaPreflight();
+
+        assertFalse(report.executable());
+        assertTrue(report.describeIssues().contains("verification_method"));
+    }
+
+    @Test
+    void shouldParseExecutableToolAcceptanceCriterion() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+
+        orchestrator.parsePlan("""
+                {
+                  "acceptance_criteria": [
+                    {
+                      "id": "AC-01",
+                      "description": "默认模型可以完成请求",
+                      "verification_method": "TOOL",
+                      "verifier": "execute_command",
+                      "test_signal": "命令退出码为 0",
+                      "applies_to": ["FINAL"]
+                    }
+                  ],
+                  "steps": [
+                    {"id":"s1","description":"实现功能","type":"ANALYSIS","dependencies":[]}
+                  ]
+                }
+                """);
+
+        AcceptanceCriteriaPreflight.Report report = orchestrator.acceptanceCriteriaPreflight();
+
+        assertTrue(report.executable(), report.describeIssues());
+        assertFalse(report.requiresHumanReview());
+    }
+
+    @Test
+    void shouldRejectMutationToolAsAcceptanceVerifier() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        orchestrator.parsePlan("""
+                {
+                  "acceptance_criteria": [
+                    {
+                      "id":"AC-01",
+                      "description":"文件内容正确",
+                      "verification_method":"TOOL",
+                      "verifier":"write_file",
+                      "test_signal":"文件存在",
+                      "applies_to":["FINAL"]
+                    }
+                  ],
+                  "steps":[
+                    {"id":"s1","description":"实现功能","type":"ANALYSIS","dependencies":[]}
+                  ]
+                }
+                """);
+
+        AcceptanceCriteriaPreflight.Report report = orchestrator.acceptanceCriteriaPreflight();
+
+        assertFalse(report.executable());
+        assertTrue(report.describeIssues().contains("write_file"));
+    }
+
+    @Test
+    void shouldKeepHumanCriteriaVisibleAsDeliveryObligations() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        orchestrator.parsePlan(humanReviewPlanJson());
+
+        String summary = orchestrator.pendingHumanAcceptanceSummary();
+
+        assertTrue(summary.contains("待人工验收"), summary);
+        assertTrue(summary.contains("AC-01"), summary);
+        assertTrue(summary.contains("用户检查最终终端展示"), summary);
+    }
+
+    @Test
+    void shouldRequireReviewerToUseDeclaredToolVerifier() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        orchestrator.parsePlan("""
+                {
+                  "acceptance_criteria": [
+                    {
+                      "id":"AC-01",
+                      "description":"项目可以编译",
+                      "verification_method":"TOOL",
+                      "verifier":"execute_command",
+                      "test_signal":"命令退出码为 0",
+                      "applies_to":["FINAL"]
+                    }
+                  ],
+                  "steps":[
+                    {"id":"s1","description":"实现功能","type":"ANALYSIS","dependencies":[]}
+                  ]
+                }
+                """);
+
+        assertTrue(orchestrator.missingDeclaredVerifierTools(List.of("read_file"))
+                .contains("execute_command"));
+        assertTrue(orchestrator.missingDeclaredVerifierTools(List.of("execute_command")).isEmpty());
+    }
+
+    @Test
+    void shouldNormalizeCriterionTargetsAndInjectOnlyRelevantStepCriteria() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        List<AgentOrchestrator.ExecutionStep> steps = orchestrator.parsePlan("""
+                {
+                  "acceptance_criteria": [
+                    {
+                      "id":"AC-IMPL",
+                      "description":"实现结果存在",
+                      "verification_method":"TOOL",
+                      "verifier":"list_dir",
+                      "test_signal":"目录中存在实现产物",
+                      "applies_to":["impl"]
+                    },
+                    {
+                      "id":"AC-VERIFY",
+                      "description":"验证结果通过",
+                      "verification_method":"TOOL",
+                      "verifier":"execute_command",
+                      "test_signal":"命令退出码为 0",
+                      "applies_to":["verify"]
+                    }
+                  ],
+                  "steps":[
+                    {"id":"impl","description":"实现功能","type":"ANALYSIS","dependencies":[]},
+                    {"id":"verify","description":"验证功能","type":"VERIFICATION","dependencies":["impl"]}
+                  ]
+                }
+                """);
+
+        assertEquals(List.of("AC-IMPL"), orchestrator.acceptanceCriteriaForStep(steps.get(0)).stream()
+                .map(AcceptanceCriterion::id).toList());
+        assertEquals(List.of("AC-VERIFY"), orchestrator.acceptanceCriteriaForStep(steps.get(1)).stream()
+                .map(AcceptanceCriterion::id).toList());
+
+        AgentOrchestrator.ExecutionStep finalStep = orchestrator.appendFinalIntegrationStep(steps).get(2);
+        assertEquals(List.of("AC-IMPL", "AC-VERIFY"),
+                orchestrator.acceptanceCriteriaForStep(finalStep).stream()
+                        .map(AcceptanceCriterion::id).toList());
+    }
+
+    @Test
+    void shouldEscalateWithRetryEvidenceWhenAllAutomaticRecoveryIsExhausted() {
+        AgentOrchestrator.ExecutionStep failed = AgentOrchestrator.ExecutionStep
+                .pending("step_1", "实现支付补偿", "ANALYSIS", List.of())
+                .withFailed("AC-03 未满足：退款状态错误");
+
+        String escalation = AgentOrchestrator.formatFailureEscalation(
+                List.of(failed), Map.of("step_1", 2), Map.of("step_1", 1), "orch-pay");
+
+        assertTrue(escalation.contains("需要人工介入"), escalation);
+        assertTrue(escalation.contains("step_1"), escalation);
+        assertTrue(escalation.contains("Reviewer 重试 2/2"), escalation);
+        assertTrue(escalation.contains("原位重做 1/1"), escalation);
+        assertTrue(escalation.contains("orch-pay"), escalation);
+        assertTrue(escalation.contains("重新规划"), escalation);
+    }
+
+    @Test
+    void shouldBlockExecutionWhenAcceptanceCriteriaRemainUnverifiable(@TempDir Path tempDir) {
+        String previous = System.getProperty("devcli.team.planner.repair.max.attempts");
+        System.setProperty("devcli.team.planner.repair.max.attempts", "0");
+        AtomicInteger workerCalls = new AtomicInteger();
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                return response("""
+                        {
+                          "acceptance_criteria": [
+                            {
+                              "id": "AC-01",
+                              "description": "结果满足用户目标",
+                              "test_signal": "结果正确"
+                            }
+                          ],
+                          "steps": [
+                            {"id":"s1","description":"完成任务","type":"ANALYSIS","dependencies":[]}
+                          ]
+                        }
+                        """);
+            }
+            workerCalls.incrementAndGet();
+            return response("worker result");
+        };
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    new DispatchingStubGLMClient(dispatcher), isolatedToolRegistry(tempDir), mm);
+
+            String result = orchestrator.run("完成一个需要验收的任务");
+
+            assertTrue(result.contains("规划失败"), result);
+            assertEquals(0, workerCalls.get());
+        } finally {
+            if (previous == null) {
+                System.clearProperty("devcli.team.planner.repair.max.attempts");
+            } else {
+                System.setProperty("devcli.team.planner.repair.max.attempts", previous);
+            }
+        }
+    }
+
+    @Test
+    void shouldRequireExplicitReviewBeforeExecutingHumanCriteria(@TempDir Path tempDir) {
+        AtomicInteger workerCalls = new AtomicInteger();
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                return response("""
+                        {
+                          "acceptance_criteria": [
+                            {
+                              "id": "AC-01",
+                              "description": "终端信息层级清晰",
+                              "verification_method": "HUMAN",
+                              "verifier": "用户检查最终终端展示的信息层级",
+                              "test_signal": "用户确认不存在歧义",
+                              "applies_to": ["FINAL"]
+                            }
+                          ],
+                          "steps": [
+                            {"id":"s1","description":"完成终端展示","type":"ANALYSIS","dependencies":[]}
+                          ]
+                        }
+                        """);
+            }
+            workerCalls.incrementAndGet();
+            return response("worker result");
+        };
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    new DispatchingStubGLMClient(dispatcher), isolatedToolRegistry(tempDir), mm);
+
+            String result = orchestrator.run("调整终端展示");
+
+            assertTrue(result.contains("需要人工确认"), result);
+            assertEquals(0, workerCalls.get());
+        }
+    }
+
+    @Test
+    void shouldExecuteHumanCriteriaAfterExplicitPlanApproval(@TempDir Path tempDir) {
+        AtomicInteger workerCalls = new AtomicInteger();
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                return response(humanReviewPlanJson());
+            }
+            workerCalls.incrementAndGet();
+            return response("worker result");
+        };
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    new DispatchingStubGLMClient(dispatcher), isolatedToolRegistry(tempDir), mm);
+            orchestrator.setPlanReviewHandler(request -> AgentOrchestrator.TeamPlanReviewDecision.execute());
+
+            orchestrator.run("调整终端展示");
+
+            assertTrue(workerCalls.get() > 0);
+        }
+    }
+
+    @Test
+    void shouldReplanFromPreExecutionReviewFeedback(@TempDir Path tempDir) {
+        AtomicInteger plannerCalls = new AtomicInteger();
+        AtomicInteger reviewCalls = new AtomicInteger();
+        AtomicInteger workerCalls = new AtomicInteger();
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                plannerCalls.incrementAndGet();
+                return response(humanReviewPlanJson());
+            }
+            workerCalls.incrementAndGet();
+            return response("worker result");
+        };
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    new DispatchingStubGLMClient(dispatcher), isolatedToolRegistry(tempDir), mm);
+            orchestrator.setPlanReviewHandler(request -> reviewCalls.getAndIncrement() == 0
+                    ? AgentOrchestrator.TeamPlanReviewDecision.supplement("补充键盘操作验收")
+                    : AgentOrchestrator.TeamPlanReviewDecision.cancel("测试结束"));
+
+            String result = orchestrator.run("调整终端展示");
+
+            assertEquals(2, plannerCalls.get());
+            assertEquals(0, workerCalls.get());
+            assertTrue(result.contains("测试结束"), result);
+        }
+    }
+
+    @Test
+    void shouldRepairPlanRejectedBySemanticReviewerBeforeHumanApproval(@TempDir Path tempDir) {
+        AtomicInteger plannerCalls = new AtomicInteger();
+        AtomicInteger semanticReviewCalls = new AtomicInteger();
+        AtomicReference<AgentOrchestrator.TeamPlanReviewRequest> approvalRequest = new AtomicReference<>();
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划") || body.contains("上次规划输出无法解析")) {
+                plannerCalls.incrementAndGet();
+                return response("""
+                        {"summary":"交付计划","acceptance_criteria":[{
+                          "id":"AC-01","description":"功能成果可观察","verification_method":"TOOL",
+                          "verifier":"list_dir","test_signal":"工具返回成功","severity":"high","applies_to":["s1"]
+                        }],"steps":[
+                          {"id":"s1","description":"实现完整功能","type":"ANALYSIS","dependencies":[]}
+                        ]}
+                        """);
+            }
+            if (body.contains("计划语义评审")) {
+                int review = semanticReviewCalls.incrementAndGet();
+                return response(review == 1 ? """
+                        {"approved":false,"summary":"遗漏原始目标","requirement_coverage":[
+                          {"requirement":"交付功能","status":"missing","step_ids":["step_1"],"criterion_ids":["AC-01"]}
+                        ],"criteria_reviews":[
+                          {"id":"AC-01","clear":true,"verifiable":true,"scope_valid":true,"evidence":"list_dir 可验证"}
+                        ],"issues":[
+                          {"type":"missing_requirement","severity":"high","requirement":"交付功能","description":"计划未覆盖完整目标","suggested_fix":"补齐实现范围"}
+                        ]}
+                        """ : """
+                        {"approved":true,"summary":"原始目标、节点和验收标准已闭环","requirement_coverage":[
+                          {"requirement":"交付功能","status":"covered","step_ids":["step_1"],"criterion_ids":["AC-01"]}
+                        ],"criteria_reviews":[
+                          {"id":"AC-01","clear":true,"verifiable":true,"scope_valid":true,"evidence":"list_dir 返回成功即可判定"}
+                        ],"issues":[]}
+                        """);
+            }
+            return response("unexpected worker call");
+        };
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    new DispatchingStubGLMClient(dispatcher), isolatedToolRegistry(tempDir), mm);
+            orchestrator.setPlanSemanticReviewEnabled(true);
+            orchestrator.setPlanReviewHandler(request -> {
+                approvalRequest.set(request);
+                return AgentOrchestrator.TeamPlanReviewDecision.cancel("测试结束");
+            });
+
+            String result = orchestrator.run("交付完整功能");
+
+            assertEquals(2, plannerCalls.get());
+            assertEquals(2, semanticReviewCalls.get());
+            assertTrue(result.contains("测试结束"), result);
+            assertNotNull(approvalRequest.get());
+            assertTrue(approvalRequest.get().semanticReviewExecuted());
+            assertTrue(approvalRequest.get().semanticReviewSummary().contains("闭环"));
+        }
+    }
+
+    @Test
+    void shouldFailClosedWhenPlanReviewerReturnsMalformedProtocol(@TempDir Path tempDir) {
+        AtomicInteger workerCalls = new AtomicInteger();
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("计划语义评审")) {
+                return response("not-json");
+            }
+            if (body.contains("请为以下任务制定执行计划")) {
+                return response("""
+                        {"acceptance_criteria":[{
+                          "id":"AC-01","description":"功能成果可观察","verification_method":"TOOL",
+                          "verifier":"list_dir","test_signal":"工具返回成功","severity":"high","applies_to":["s1"]
+                        }],"steps":[
+                          {"id":"s1","description":"实现功能","type":"ANALYSIS","dependencies":[]}
+                        ]}
+                        """);
+            }
+            workerCalls.incrementAndGet();
+            return response("unexpected worker call");
+        };
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    new DispatchingStubGLMClient(dispatcher), isolatedToolRegistry(tempDir), mm);
+            orchestrator.setPlanSemanticReviewEnabled(true);
+
+            String result = orchestrator.run("实现功能");
+
+            assertTrue(result.contains("计划语义评审失败"), result);
+            assertEquals(0, workerCalls.get());
+        }
     }
 
     @Test
@@ -878,7 +1279,10 @@ class AgentOrchestratorTest {
                               "id": "AC-01",
                               "category": "default_param",
                               "description": "log clean shard 不带 --before 时合法，默认删除早于2026-01-01的文件",
-                              "test_signal": "args = ['log','clean','shard'] 无异常"
+                              "verification_method": "TOOL",
+                              "verifier": "list_dir",
+                              "test_signal": "args = ['log','clean','shard'] 无异常",
+                              "applies_to": ["s1"]
                             }
                           ],
                           "steps": [
@@ -1049,7 +1453,10 @@ class AgentOrchestratorTest {
                       "id": "AC-01",
                       "category": "default_param",
                       "description": "缺省参数必须走默认逻辑",
-                      "test_signal": "省略参数仍成功"
+                      "test_signal": "省略参数仍成功",
+                      "verification_method": "TOOL",
+                      "verifier": "execute_command",
+                      "applies_to": ["FINAL"]
                     }
                   ],
                   "steps": [
@@ -1058,7 +1465,19 @@ class AgentOrchestratorTest {
                 }
                 """);
 
-        assertFalse(orchestrator.parseReviewApproval(approvedReviewJson()));
+        assertFalse(orchestrator.parseReviewApproval("""
+                {
+                  "approved": true,
+                  "summary": "通过",
+                  "scores": {
+                    "functional_correctness": 1.0,
+                    "integration_completeness": 1.0,
+                    "code_quality": 1.0
+                  },
+                  "criteria_results": [],
+                  "issues": []
+                }
+                """));
     }
 
     @Test
@@ -1193,7 +1612,7 @@ class AgentOrchestratorTest {
 
             String finalResult = orchestrator.run("验证最终集成 reviewer 瞬时失败降级");
 
-            assertTrue(finalResult.contains("多 Agent 协作任务完成"), finalResult);
+            assertTrue(finalResult.contains("Plan 任务完成"), finalResult);
             assertTrue(finalResult.contains("Pre-Review"), finalResult);
         }
     }
@@ -1644,7 +2063,7 @@ class AgentOrchestratorTest {
             Path resultFile = tempDir.resolve("src/main/java/Result.java");
             assertTrue(Files.isRegularFile(resultFile), result);
             assertEquals("public class Result {}", Files.readString(resultFile));
-            assertTrue(result.contains("多 Agent 协作任务完成"), result);
+            assertTrue(result.contains("Plan 任务完成"), result);
         }
     }
 
@@ -1900,7 +2319,56 @@ class AgentOrchestratorTest {
     }
 
     private static LlmClient.ChatResponse response(String content) {
-        return new LlmClient.ChatResponse("assistant", content, null, 100, 20);
+        return new LlmClient.ChatResponse(
+                "assistant", withDefaultAcceptanceCriterion(content), null, 100, 20);
+    }
+
+    private static String withDefaultAcceptanceCriterion(String content) {
+        if (content == null
+                || !content.contains("\"steps\"")
+                || content.contains("\"acceptance_criteria\"")) {
+            return content;
+        }
+        int objectStart = content.indexOf('{');
+        if (objectStart < 0) {
+            return content;
+        }
+        String criterion = """
+
+                  "acceptance_criteria": [
+                    {
+                      "id":"AC-01",
+                      "description":"测试夹具要求任务结果可观察",
+                      "verification_method":"TOOL",
+                      "verifier":"list_dir",
+                      "test_signal":"工具返回成功",
+                      "applies_to":["FINAL"]
+                    }
+                  ],
+                """;
+        return content.substring(0, objectStart + 1)
+                + criterion
+                + content.substring(objectStart + 1);
+    }
+
+    private static String humanReviewPlanJson() {
+        return """
+                {
+                  "acceptance_criteria": [
+                    {
+                      "id": "AC-01",
+                      "description": "终端信息层级清晰",
+                      "verification_method": "HUMAN",
+                      "verifier": "用户检查最终终端展示的信息层级",
+                      "test_signal": "用户确认不存在歧义",
+                      "applies_to": ["FINAL"]
+                    }
+                  ],
+                  "steps": [
+                    {"id":"s1","description":"完成终端展示","type":"ANALYSIS","dependencies":[]}
+                  ]
+                }
+                """;
     }
 
     private static String approvedReviewJson() {
@@ -1913,6 +2381,14 @@ class AgentOrchestratorTest {
                     "integration_completeness": 1.0,
                     "code_quality": 1.0
                   },
+                  "criteria_results": [
+                    {
+                      "id":"AC-01",
+                      "passed":true,
+                      "verification_method":"TOOL",
+                      "evidence":"测试夹具验证通过"
+                    }
+                  ],
                   "issues": []
                 }
                 """;
@@ -2057,6 +2533,44 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    void rebuildKeepsExhaustedRedoFailureTerminal(@TempDir File memoryDir) throws Exception {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-redo-exhausted", "目标");
+        checkpoint.setPlanSteps(List.of(
+                new AgentCheckpoint.PlanStep("step-1", "改实现", "code", List.of())));
+        checkpoint.addFailedStep("step-1", List.of("src/main/java/App.java"), "首次失败");
+        checkpoint.recordRedoAttempt("step-1", 1, "首次失败", List.of("src/main/java/App.java"));
+        checkpoint.addFailedStep("step-1", List.of("src/main/java/App.java"), "重做仍失败");
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(memoryDir)) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    new GLMClient("test-key"), new ToolRegistry(), mm);
+
+            List<AgentOrchestrator.ExecutionStep> steps = invokeRebuildStepsFromCheckpoint(orchestrator, checkpoint);
+
+            assertEquals(AgentOrchestrator.StepStatus.FAILED, steps.get(0).status());
+            assertEquals("重做仍失败", steps.get(0).result());
+        }
+    }
+
+    @Test
+    void rebuildResumesRedoThatWasScheduledButNotFinished(@TempDir File memoryDir) throws Exception {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-redo-pending", "目标");
+        checkpoint.setPlanSteps(List.of(
+                new AgentCheckpoint.PlanStep("step-1", "改实现", "code", List.of())));
+        checkpoint.addFailedStep("step-1", List.of("src/main/java/App.java"), "首次失败");
+        checkpoint.recordRedoAttempt("step-1", 1, "首次失败", List.of("src/main/java/App.java"));
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(memoryDir)) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    new GLMClient("test-key"), new ToolRegistry(), mm);
+
+            List<AgentOrchestrator.ExecutionStep> steps = invokeRebuildStepsFromCheckpoint(orchestrator, checkpoint);
+
+            assertEquals(AgentOrchestrator.StepStatus.PENDING, steps.get(0).status());
+        }
+    }
+
+    @Test
     void restoreUsesCheckpointWorkerTopologyAssignmentAndCursor(@TempDir File memoryDir) throws Exception {
         AgentCheckpoint checkpoint = new AgentCheckpoint("orch-agent-topology", "目标");
         checkpoint.ensureAgentIdentities(List.of(
@@ -2104,7 +2618,7 @@ class AgentOrchestratorTest {
                     new GLMClient("test-key"), new ToolRegistry(), mm);
             String result = orchestrator.resume("orch-resume1");
 
-            assertTrue(result.contains("多 Agent 协作任务完成"), result);
+            assertTrue(result.contains("Plan 任务完成"), result);
             assertTrue(result.contains("代码已改"), result);
             // 全部完成后 checkpoint 文件被删除
             assertNull(AgentCheckpoint.load("orch-resume1"));
@@ -2129,8 +2643,83 @@ class AgentOrchestratorTest {
                     new GLMClient("test-key"), new ToolRegistry(), mm);
             String result = orchestrator.resume("orch-resume2");
 
-            assertTrue(result.contains("多 Agent 协作任务完成"), result);
+            assertTrue(result.contains("Plan 任务完成"), result);
             assertNull(AgentCheckpoint.load("orch-resume2"));
+        }
+    }
+
+    @Test
+    void resumeLegacyPendingCheckpointRequiresHumanReviewForUnversionedCriteria(@TempDir File memoryDir) {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-legacy-criteria", "恢复旧任务");
+        checkpoint.setProtocolVersion(5);
+        checkpoint.setPlanSteps(List.of(
+                new AgentCheckpoint.PlanStep("step-1", "继续实现功能", "ANALYSIS", List.of())));
+        checkpoint.setAcceptanceCriteria(List.of(
+                new AgentCheckpoint.CriterionRecord(
+                        "AC-01", "behavior", "结果符合原始意图", "用户确认功能方向", "high")));
+        checkpoint.save();
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(memoryDir)) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    new GLMClient("test-key"), new ToolRegistry(), mm);
+            AtomicInteger reviewCalls = new AtomicInteger();
+            orchestrator.setPlanReviewHandler(request -> {
+                reviewCalls.incrementAndGet();
+                assertTrue(request.requiresHumanReview());
+                assertEquals("HUMAN", request.criteria().get(0).verificationMethod());
+                return AgentOrchestrator.TeamPlanReviewDecision.cancel("旧验收标准待人工确认");
+            });
+
+            String result = orchestrator.resume("orch-legacy-criteria");
+
+            assertEquals(1, reviewCalls.get());
+            assertTrue(result.contains("旧验收标准待人工确认"), result);
+        } finally {
+            checkpoint.delete();
+        }
+    }
+
+    @Test
+    void resumeShouldReviewPendingPlanBeforeWorkerExecution(@TempDir File memoryDir) {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-plan-review-resume", "恢复关键功能");
+        checkpoint.setPlanSteps(List.of(
+                new AgentCheckpoint.PlanStep("step-1", "继续实现功能", "ANALYSIS", List.of())));
+        checkpoint.setAcceptanceCriteria(List.of(new AgentCheckpoint.CriterionRecord(
+                "AC-01", "behavior", "结果符合原始意图", "list_dir 返回成功", "high",
+                "TOOL", "list_dir", List.of("step-1"))));
+        checkpoint.save();
+        AtomicInteger reviewCalls = new AtomicInteger();
+        AtomicInteger workerCalls = new AtomicInteger();
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("计划语义评审")) {
+                reviewCalls.incrementAndGet();
+                return response("""
+                        {"approved":false,"summary":"恢复计划缺少目标覆盖","requirement_coverage":[
+                          {"requirement":"恢复关键功能","status":"missing","step_ids":["step-1"],"criterion_ids":["AC-01"]}
+                        ],"criteria_reviews":[
+                          {"id":"AC-01","clear":true,"verifiable":true,"scope_valid":true,"evidence":"list_dir 可执行"}
+                        ],"issues":[
+                          {"type":"missing_requirement","severity":"high","requirement":"恢复关键功能","description":"节点没有覆盖完整目标","suggested_fix":"重新规划"}
+                        ]}
+                        """);
+            }
+            workerCalls.incrementAndGet();
+            return response("unexpected worker call");
+        };
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(memoryDir)) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    new DispatchingStubGLMClient(dispatcher), new ToolRegistry(), mm);
+            orchestrator.setPlanSemanticReviewEnabled(true);
+
+            String result = orchestrator.resume("orch-plan-review-resume");
+
+            assertEquals(1, reviewCalls.get());
+            assertEquals(0, workerCalls.get());
+            assertTrue(result.contains("计划语义评审未通过"), result);
+            assertNotNull(AgentCheckpoint.load("orch-plan-review-resume"));
+        } finally {
+            checkpoint.delete();
         }
     }
 

@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.config.ConfigResolver;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -29,26 +30,12 @@ final class TeamPlannerProtocol {
     }
 
     static int resolveRepairAttempts() {
-        String raw = System.getProperty("devcli.team.planner.repair.max.attempts");
-        if (raw == null || raw.isBlank()) {
-            raw = System.getenv("DEVCLI_TEAM_PLANNER_REPAIR_MAX_ATTEMPTS");
-        }
-        if (raw == null || raw.isBlank()) {
-            return DEFAULT_REPAIR_ATTEMPTS;
-        }
-        try {
-            int attempts = Integer.parseInt(raw.trim());
-            int clamped = Math.max(0, Math.min(MAX_REPAIR_ATTEMPTS, attempts));
-            if (clamped != attempts) {
-                log.warn("devcli.team.planner.repair.max.attempts={} 超出范围 [0,{}]，已夹取为 {}",
-                        attempts, MAX_REPAIR_ATTEMPTS, clamped);
-            }
-            return clamped;
-        } catch (NumberFormatException e) {
-            log.warn("非法 devcli.team.planner.repair.max.attempts={}，使用默认 {}",
-                    raw, DEFAULT_REPAIR_ATTEMPTS);
-            return DEFAULT_REPAIR_ATTEMPTS;
-        }
+        return ConfigResolver.intValue(
+                "devcli.team.planner.repair.max.attempts",
+                "DEVCLI_TEAM_PLANNER_REPAIR_MAX_ATTEMPTS",
+                DEFAULT_REPAIR_ATTEMPTS,
+                0,
+                MAX_REPAIR_ATTEMPTS);
     }
 
     static JsonNode parsePlanRoot(ObjectMapper mapper, String cleaned) throws IOException {
@@ -136,7 +123,11 @@ final class TeamPlannerProtocol {
                 %s
 
                 只输出一个 JSON 对象，禁止 Markdown 代码块、前置解释和后置说明。JSON 必须包含：
-                {"summary":"...","acceptance_criteria":[],"steps":[{"id":"step_1","description":"...","type":"FILE_READ | FILE_WRITE | COMMAND | ANALYSIS | VERIFICATION","dependencies":[]}]}
+                {"summary":"...","acceptance_criteria":[{"id":"AC-01","category":"...","description":"...","verification_method":"TOOL | HUMAN","verifier":"工具名或人工检查说明","test_signal":"可观察的通过证据","severity":"critical | high | medium | low","applies_to":["step_1 | FINAL"]}],"steps":[{"id":"step_1","description":"...","type":"FILE_READ | FILE_WRITE | COMMAND | ANALYSIS | VERIFICATION","dependencies":[]}]}
+
+                每条验收标准都必须声明 verification_method、verifier 和 test_signal。
+                TOOL 的 verifier 必须是当前运行时存在的工具名；HUMAN 的 verifier 必须写清人工检查步骤。
+                无法说明验证方式或通过证据的标准不可执行，必须改写为可判定标准。
 
                 工作区可能为空；空工作区是合法状态。不要调用工具或声称先检查工作区。
                 不要把 list_dir、检查目录、确认文件是否存在拆成阻塞性独立步骤。

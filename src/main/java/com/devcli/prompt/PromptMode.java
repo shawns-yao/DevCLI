@@ -6,6 +6,7 @@ public enum PromptMode {
     PLANNER("modes/planner.md"),
     TEAM_PLANNER("modes/team-planner.md"),
     TEAM_WORKER("modes/team-worker.md"),
+    TEAM_PLAN_REVIEWER("modes/team-plan-reviewer.md"),
     TEAM_REVIEWER("modes/team-reviewer.md");
 
     private final String resourcePath;

@@ -45,7 +45,7 @@ public class AgentCheckpoint {
         .enable(SerializationFeature.INDENT_OUTPUT);
     /** 步骤 result 落盘上限：buildStepContext 注入依赖结果最多 800 字符，8KB 足够保真。 */
     public static final int MAX_SUMMARY_LENGTH = 8 * 1024;
-    public static final int CURRENT_PROTOCOL_VERSION = 5;
+    public static final int CURRENT_PROTOCOL_VERSION = 7;
     private static final int MAX_AGENT_SUMMARY_LENGTH = 2 * 1024;
 
     private int protocolVersion = CURRENT_PROTOCOL_VERSION;
@@ -195,8 +195,40 @@ public class AgentCheckpoint {
     /** 计划层步骤快照：恢复时重建 ExecutionStep 所需的全部静态信息。 */
     public record PlanStep(String id, String description, String type, List<String> dependencies) {}
 
-    /** 计划层验收点快照，与 AgentOrchestrator.AcceptanceCriterion 字段一一对应。 */
-    public record CriterionRecord(String id, String category, String description, String testSignal, String severity) {}
+    /** 计划层验收点快照，与 AcceptanceCriterion 字段一一对应。 */
+    public record CriterionRecord(
+            String id,
+            String category,
+            String description,
+            String testSignal,
+            String severity,
+            String verificationMethod,
+            String verifier,
+            List<String> appliesTo
+    ) {
+        public CriterionRecord {
+            id = id == null ? "" : id;
+            category = category == null ? "" : category;
+            description = description == null ? "" : description;
+            testSignal = testSignal == null ? "" : testSignal;
+            severity = severity == null ? "" : severity;
+            verificationMethod = verificationMethod == null ? "" : verificationMethod;
+            verifier = verifier == null ? "" : verifier;
+            appliesTo = appliesTo == null ? List.of() : List.copyOf(appliesTo);
+        }
+
+        public CriterionRecord(String id, String category, String description,
+                               String testSignal, String severity) {
+            this(id, category, description, testSignal, severity, "", "", List.of());
+        }
+
+        public CriterionRecord(String id, String category, String description,
+                               String testSignal, String severity,
+                               String verificationMethod, String verifier) {
+            this(id, category, description, testSignal, severity,
+                    verificationMethod, verifier, List.of("FINAL"));
+        }
+    }
 
     public AgentCheckpoint() {
         PatchJournalPolicy.maintain(getCheckpointDir());

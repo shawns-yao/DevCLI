@@ -2,6 +2,7 @@ package com.devcli.cli;
 
 import com.devcli.agent.Agent;
 import com.devcli.agent.AgentOrchestrator;
+import com.devcli.agent.OrchestrationProfile;
 import com.devcli.agent.PlanExecuteAgent;
 import com.devcli.browser.BrowserAuditMetadata;
 import com.devcli.browser.BrowserConnectivityCheck;
@@ -42,12 +43,16 @@ import com.devcli.runtime.CancellationContext;
 import com.devcli.runtime.CancellationToken;
 import com.devcli.runtime.AgentSessionRuntime;
 import com.devcli.runtime.RunContext;
+import com.devcli.runtime.api.RuntimeThreadStore;
 import com.devcli.runtime.task.DurableTaskManager;
 import com.devcli.runtime.task.TaskCommandFormatter;
+import com.devcli.session.SessionTreeService;
 import com.devcli.snapshot.RestoreResult;
 import com.devcli.snapshot.SnapshotService;
 import com.devcli.snapshot.TurnSnapshot;
 import com.devcli.skill.SkillRegistry;
+import com.devcli.skill.SkillContextBuffer;
+import com.devcli.memory.StickyMemory;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.util.AnsiStyle;
 import org.jline.terminal.Terminal;
@@ -95,7 +100,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * DevCLI v16.1.0 - Terminal-First Agent IDE
- * 支持 ReAct、Plan-and-Execute、Memory、RAG、Multi-Agent、HITL、并行工具调用、多模型切换、MCP、CDP 会话复用
+ * 支持 ReAct、Plan、Memory、RAG、HITL、并行工具调用、多模型切换、MCP、CDP 会话复用
  * 第 15 期新增：Skill 系统（三层加载 + load_skill 工具 + SkillContextBuffer 注入）、内置 web-access skill
  * 第 16 期新增：TUI 界面（Lanterna 3）、文件树浏览、代码高亮、对话历史可视化、配置管理面板
  * 第 16.1 期形态修正：抽出 Renderer 接口 + 三个实现（inline/lanterna/plain），默认形态切换为 inline 流式 TUI（Claude Code 风格）
@@ -312,7 +317,9 @@ public class Main {
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
             AgentSessionRuntime reactSession = AgentSessionRuntime.adoptOwned(
                     reactAgent, Path.of(reactAgent.getToolRegistry().getProjectPath()));
-            CliConversationBranchManager branchManager = new CliConversationBranchManager(reactAgent);
+            RuntimeThreadStore cliRunStore = RuntimeCommandLauncher.openRuntimeStore();
+            shutdown.register(15, "cliRunStore", cliRunStore::close);
+            SessionTreeService sessionTree = SessionTreeService.open(reactAgent, cliRunStore);
             CliSessionArchive sessionArchive = CliSessionArchive.fromEnvironment();
             shutdown.register(20, "reactSession", reactSession::close);
             reactAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
@@ -365,7 +372,7 @@ public class Main {
                     return java.util.List.of();
                 }
             });
-            DurableTaskManager taskManager = RuntimeCommandLauncher.openTaskManager(llmClientRef);
+            DurableTaskManager taskManager = RuntimeCommandLauncher.openTaskManager(llmClientRef, cliRunStore);
             taskManager.start();
             // 后台任务管理器可能仍在驱动无头 Agent(依赖 MCP / 记忆资源),必须最先关闭。
             shutdown.register(10, "taskManager", taskManager::close);
@@ -376,24 +383,9 @@ public class Main {
             } else {
                 printStartupScreen(ui, startupScreenInfo);
             }
-            boolean nextTaskUsePlanMode = false;
-            boolean nextTaskUseTeamMode = false;
+            OrchestrationProfile nextTaskOrchestrationProfile = null;
             AgentTurnInbox turnInbox = reactAgent.getTurnInbox();
             String pendingDraft = "";
-
-            // === TUI / CLI 分支判断 ===
-            // 旧 DEVCLI_TUI=true 路径仍走 Lanterna 全屏 TUI（Day 5 后由 LanternaRenderer 接管）。
-            if (com.devcli.tui.TuiBootstrap.shouldUseTui(terminal)) {
-                try {
-                    com.devcli.tui.TuiBootstrap.launch(config, llmClient, reactAgent, hitlHandler);
-                    return;  // TUI 启动成功，不进入 CLI 循环
-                } catch (Exception e) {
-                    hitlHandler.setDelegate(terminalHitlHandler);
-                    log.warn("TUI startup failed; falling back to CLI", e);
-                    System.err.println("❌ TUI 启动失败，降级到 CLI: " + e.getMessage());
-                    // 降级到 CLI 继续执行
-                }
-            }
 
             reactAgent.setRenderer(renderer);
             reactAgent.setHitlEnabledSupplier(hitlHandler::isEnabled);
@@ -417,7 +409,7 @@ public class Main {
                         promptInput = PromptInput.submitted(queuedPrompt.text());
                     } else {
                         promptInput = readPromptInput(terminal, lineReader, renderer,
-                                nextTaskUsePlanMode || nextTaskUseTeamMode, spaciousPrompt, pendingDraft);
+                                nextTaskOrchestrationProfile != null, spaciousPrompt, pendingDraft);
                         pendingDraft = "";
                     }
                 } catch (UserInterruptException e) {
@@ -430,13 +422,10 @@ public class Main {
                 }
 
                 if (promptInput.canceled()) {
-                    if (nextTaskUsePlanMode) {
-                        nextTaskUsePlanMode = false;
-                        ui.println("↩️ 已取消待执行的 Plan-and-Execute，回到默认 ReAct。\n");
-                    }
-                    if (nextTaskUseTeamMode) {
-                        nextTaskUseTeamMode = false;
-                        ui.println("↩️ 已取消待执行的 Multi-Agent，回到默认 ReAct。\n");
+                    if (nextTaskOrchestrationProfile != null) {
+                        ui.println("↩️ 已取消待执行的 "
+                                + nextTaskOrchestrationProfile.displayName() + "，回到默认 ReAct。\n");
+                        nextTaskOrchestrationProfile = null;
                     }
                     continue;
                 }
@@ -475,9 +464,10 @@ public class Main {
                         input = command.payload();
                     }
                     case CLEAR -> {
-                        reactAgent.clearHistory();
+                        String cleared = sessionTree.clearCurrent();
                         hitlHandler.clearApprovedAll();
-                        ui.println("🗑️ 当前对话历史已清空，长期记忆保持不变\n");
+                        ui.println(cleared);
+                        ui.println("长期记忆和工作区保持不变\n");
                         continue;
                     }
                     case HISTORY_CLEAR -> {
@@ -561,18 +551,14 @@ public class Main {
                         }
                         continue;
                     }
-                    case SWITCH_PLAN -> {
+                    case ORCHESTRATE -> {
+                        OrchestrationProfile requestedProfile = command.orchestrationProfile() == null
+                                ? OrchestrationProfile.TEAM
+                                : command.orchestrationProfile();
                         if (command.payload() == null || command.payload().isEmpty()) {
-                            nextTaskUsePlanMode = true;
-                            ui.println("📋 下一条任务将使用 Plan-and-Execute 模式，输入任务前按 ESC 可取消，执行完成后自动回到默认 ReAct。\n");
-                            continue;
-                        }
-                        input = command.payload();
-                    }
-                    case SWITCH_TEAM -> {
-                        if (command.payload() == null || command.payload().isEmpty()) {
-                            nextTaskUseTeamMode = true;
-                            ui.println("👥 下一条任务将使用 Multi-Agent 协作模式（规划者 + 执行者 + 检查者），输入任务前按 ESC 可取消，执行完成后自动回到默认 ReAct。\n");
+                            nextTaskOrchestrationProfile = requestedProfile;
+                            ui.println("下一条任务将使用 " + requestedProfile.displayName()
+                                    + " 编排配置，输入任务前按 ESC 可取消，执行完成后自动回到默认 ReAct。\n");
                             continue;
                         }
                         input = command.payload();
@@ -722,17 +708,31 @@ public class Main {
                         renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
                         continue;
                     }
-                    case BRANCH -> {
+                    case SESSION, BRANCH -> {
                         try {
+                            if (command.type() == CliCommandParser.CommandType.BRANCH
+                                    && sessionTree.consumeLegacyAliasNotice()) {
+                                ui.println("/branch 已兼容映射到 /session，后续请使用 /session");
+                            }
                             String payload = command.payload() == null ? "status" : command.payload().trim();
-                            if (payload.equalsIgnoreCase("status") || payload.equalsIgnoreCase("list")) {
-                                ui.println(branchManager.status());
+                            if (payload.equalsIgnoreCase("status")) {
+                                ui.println(sessionTree.status());
+                            } else if (payload.equalsIgnoreCase("list") || payload.equalsIgnoreCase("tree")) {
+                                ui.println(sessionTree.renderTree());
+                            } else if (payload.equalsIgnoreCase("new")) {
+                                ui.println(sessionTree.newSession());
+                            } else if (payload.equalsIgnoreCase("clear")) {
+                                ui.println(sessionTree.clearCurrent());
                             } else if (payload.regionMatches(true, 0, "create ", 0, 7)) {
-                                ui.println(branchManager.create(payload.substring(7).trim()));
+                                ui.println(sessionTree.fork(payload.substring(7).trim()));
+                            } else if (payload.regionMatches(true, 0, "fork ", 0, 5)) {
+                                ui.println(handleSessionFork(sessionTree, payload.substring(5).trim()));
                             } else if (payload.regionMatches(true, 0, "use ", 0, 4)) {
-                                ui.println(branchManager.use(payload.substring(4).trim()));
+                                ui.println(sessionTree.use(payload.substring(4).trim()));
+                            } else if (payload.regionMatches(true, 0, "use-thread ", 0, 11)) {
+                                ui.println(sessionTree.useThread(payload.substring(11).trim()));
                             } else {
-                                ui.println("用法: /branch | /branch create <name> | /branch use <name>");
+                                ui.println("用法: /session status|tree|fork <name> [eventId]|use <branch>|new|clear|use-thread <threadId>");
                             }
                         } catch (IllegalArgumentException e) {
                             ui.println("❌ " + e.getMessage());
@@ -828,31 +828,22 @@ public class Main {
                 final String taskInput = input;
                 Callable<String> runTask;
                 String snapshotMode;
-                if (nextTaskUsePlanMode || command.type() == CliCommandParser.CommandType.SWITCH_PLAN) {
-                    snapshotMode = "plan";
+                OrchestrationProfile orchestrationProfile = command.type() == CliCommandParser.CommandType.ORCHESTRATE
+                        ? command.orchestrationProfile()
+                        : nextTaskOrchestrationProfile;
+                if (orchestrationProfile != null) {
+                    snapshotMode = orchestrationProfile.snapshotMode();
                     LlmClient activeClient = llmClient;
-                    runTask = () -> {
-                        PlanExecuteAgent planAgent = createPlanAgent(activeClient, reactAgent, terminal, lineReader, ui);
-                        planAgent.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
-                        planAgent.setStickyMemorySupplier(stickyMemory::renderForPrompt);
-                        planAgent.setSkillRegistry(skillRegistry);
-                        planAgent.setSkillContextBuffer(skillContextBuffer);
-                        return planAgent.run(taskInput);
-                    };
-                } else if (nextTaskUseTeamMode || command.type() == CliCommandParser.CommandType.SWITCH_TEAM) {
-                    snapshotMode = "team";
-                    LlmClient activeClient = llmClient;
-                    runTask = () -> {
-                        AgentOrchestrator orchestrator = createTeamAgent(activeClient, reactAgent, ui);
-                        orchestrator.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
-                        orchestrator.setStickyMemorySupplier(stickyMemory::renderForPrompt);
-                        orchestrator.setSkillSystem(skillRegistry, skillContextBuffer);
-                        String resumeId = parseTeamResumeId(taskInput);
-                        if (resumeId != null) {
-                            return orchestrator.resume(resumeId.isBlank() ? null : resumeId);
-                        }
-                        return orchestrator.run(taskInput);
-                    };
+                    runTask = () -> runOrchestratedTask(
+                            activeClient,
+                            reactAgent,
+                            lineReader,
+                            ui,
+                            mcpServerManager,
+                            stickyMemory,
+                            skillRegistry,
+                            skillContextBuffer,
+                            taskInput);
                 } else {
                     snapshotMode = "react";
                     runTask = () -> reactSession.runInCurrentContext(taskInput).output();
@@ -873,14 +864,20 @@ public class Main {
                 if (!"react".equals(snapshotMode)) {
                     renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
                 }
-                nextTaskUsePlanMode = false;
-                nextTaskUseTeamMode = false;
+                nextTaskOrchestrationProfile = null;
                 if (response != null && !response.isBlank()) {
                     ui.println(response);
                     ui.println();
                 }
-                sessionArchive.recordTurn(snapshotMode, submittedInput, taskInput, response,
-                        "react".equals(snapshotMode) ? reactAgent.getConversationHistory() : List.of());
+                List<LlmClient.Message> persistedMessages = "react".equals(snapshotMode)
+                        ? reactAgent.getConversationHistory()
+                        : List.of();
+                sessionTree.recordTurn(
+                                snapshotMode, submittedInput, taskInput, response, persistedMessages)
+                        .ifPresent(ui::println);
+                sessionArchive.recordTurn(
+                        sessionTree.threadId(), sessionTree.activeBranchId(),
+                        snapshotMode, submittedInput, taskInput, response, persistedMessages);
                 if (!turnResult.executionQuiesced()) {
                     ui.println("取消后执行线程未在限定时间内退出，为避免上下文并发写入，DevCLI 已停止接收新任务。");
                     break;
@@ -894,6 +891,28 @@ public class Main {
             System.err.println("❌ 终端初始化失败: " + e.getMessage());
             throw new RuntimeException("终端初始化失败", e);
         }
+    }
+
+    private static String handleSessionFork(SessionTreeService sessionTree, String arguments) {
+        if (arguments == null || arguments.isBlank()) {
+            throw new IllegalArgumentException("分支名称不能为空");
+        }
+        String[] parts = arguments.trim().split("\\s+");
+        if (parts.length == 1) {
+            return sessionTree.fork(parts[0]);
+        }
+        if (parts.length == 2) {
+            try {
+                long eventId = Long.parseLong(parts[1]);
+                if (eventId < 0) {
+                    throw new NumberFormatException("negative");
+                }
+                return sessionTree.fork(parts[0], eventId);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("eventId 必须为非负整数");
+            }
+        }
+        throw new IllegalArgumentException("用法: /session fork <name> [eventId]");
     }
 
 
@@ -920,19 +939,78 @@ public class Main {
         );
     }
 
-    private static AgentOrchestrator createTeamAgent(LlmClient llmClient, Agent reactAgent, PrintStream out) {
-        out.println("👥 使用 Multi-Agent 协作模式\n");
+    private static AgentOrchestrator createUnifiedPlanAgent(LlmClient llmClient, Agent reactAgent,
+                                                            LineReader lineReader, PrintStream out) {
+        out.println("📋 使用 Plan 模式\n");
         AgentOrchestrator orchestrator = new AgentOrchestrator(
                 llmClient, reactAgent.getToolRegistry(), reactAgent.getMemoryManager(), out);
+        orchestrator.setPlanReviewHandler(createTeamPlanReviewHandler(lineReader, out));
         return orchestrator;
     }
 
+    private static AgentOrchestrator.TeamPlanReviewHandler createTeamPlanReviewHandler(
+            LineReader lineReader, PrintStream out) {
+        return request -> {
+            out.println(formatTeamPlanReview(request));
+            out.println("   - 回车：按当前计划执行");
+            out.println("   - 输入补充要求：重新规划后再次评审");
+            out.println("   - /cancel：取消本次计划\n");
+            String input = lineReader.readLine("Plan 确认> ");
+            return mapTeamReviewDecision(PlanReviewInputParser.parse(input));
+        };
+    }
+
+    static String formatTeamPlanReview(AgentOrchestrator.TeamPlanReviewRequest request) {
+        StringBuilder text = new StringBuilder("📋 Plan 执行前评审\n")
+                .append(request.planSummary())
+                .append("\n验收标准：\n");
+        for (AgentOrchestrator.AcceptanceCriterionView criterion : request.criteria()) {
+            text.append("- ").append(criterion.id())
+                    .append(" [").append(criterion.verificationMethod()).append("] ")
+                    .append(criterion.description())
+                    .append("\n  验证者：").append(criterion.verifier())
+                    .append("\n  通过证据：").append(criterion.testSignal())
+                    .append("\n  作用节点：").append(criterion.appliesTo())
+                    .append('\n');
+        }
+        if (request.requiresHumanReview()) {
+            text.append("⚠️ 当前计划包含需要人工验收的标准，执行前必须明确确认。\n");
+        }
+        if (request.semanticReviewExecuted()) {
+            text.append("✅ Reviewer 计划语义评审：")
+                    .append(request.semanticReviewSummary().isBlank()
+                            ? "已通过" : request.semanticReviewSummary())
+                    .append('\n');
+        }
+        return text.toString().trim();
+    }
+
+    private static String runOrchestratedTask(LlmClient llmClient,
+                                              Agent reactAgent,
+                                              LineReader lineReader,
+                                              PrintStream out,
+                                              McpServerManager mcpServerManager,
+                                              StickyMemory stickyMemory,
+                                              SkillRegistry skillRegistry,
+                                              SkillContextBuffer skillContextBuffer,
+                                              String taskInput) {
+        AgentOrchestrator orchestrator = createUnifiedPlanAgent(
+                llmClient, reactAgent, lineReader, out);
+        orchestrator.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
+        orchestrator.setStickyMemorySupplier(stickyMemory::renderForPrompt);
+        orchestrator.setSkillSystem(skillRegistry, skillContextBuffer);
+        String resumeId = parsePlanResumeId(taskInput);
+        return resumeId == null
+                ? orchestrator.run(taskInput)
+                : orchestrator.resume(resumeId.isBlank() ? null : resumeId);
+    }
+
     /**
-     * 解析 /team 的 resume 子命令：
+     * 解析 Plan 的 resume 子命令；旧 /plan --team 与 /team 入口由命令解析器兼容归一化：
      * "resume" → ""（恢复最近 checkpoint）；"resume orch-xxxx" → "orch-xxxx"；
      * 其他输入 → null（按普通任务文本走 run）。
      */
-    static String parseTeamResumeId(String taskInput) {
+    static String parsePlanResumeId(String taskInput) {
         if (taskInput == null) {
             return null;
         }
@@ -1503,11 +1581,9 @@ public class Main {
                 new SlashCommandHint("/model kimi", "/model kimi", "切换到 Kimi（读取配置模型）"),
                 new SlashCommandHint("/now ", "/now <任务内容>", "中断活动轮次并优先执行；空闲时直接执行"),
                 new SlashCommandHint("/cancel", "/cancel", "取消当前活动轮次"),
-                new SlashCommandHint("/plan", "/plan", "下一条任务使用 Plan-and-Execute 模式"),
-                new SlashCommandHint("/plan ", "/plan <任务内容>", "直接用计划模式执行这条任务"),
-                new SlashCommandHint("/team", "/team", "下一条任务使用 Multi-Agent 协作模式"),
-                new SlashCommandHint("/team ", "/team <任务内容>", "直接用多 Agent 协作执行这条任务"),
-                new SlashCommandHint("/team resume", "/team resume [id]", "从 checkpoint 恢复中断的多 Agent 任务"),
+                new SlashCommandHint("/plan", "/plan", "下一条任务使用 Plan 模式"),
+                new SlashCommandHint("/plan ", "/plan <任务内容>", "直接用 Plan 模式执行这条任务"),
+                new SlashCommandHint("/plan resume", "/plan resume [id]", "恢复中断的 Plan 任务"),
                 new SlashCommandHint("/hitl", "/hitl", "查看 HITL 状态"),
                 new SlashCommandHint("/hitl on", "/hitl on", "启用危险操作人工审批"),
                 new SlashCommandHint("/hitl off", "/hitl off", "关闭 HITL 审批"),
@@ -1535,10 +1611,13 @@ public class Main {
                 new SlashCommandHint("/snapshot", "/snapshot", "查看最近 Side-Git 快照"),
                 new SlashCommandHint("/snapshot status", "/snapshot status", "查看 Side-Git 快照状态"),
                 new SlashCommandHint("/snapshot clean", "/snapshot clean", "清理当前项目 Side-Git 快照"),
-                new SlashCommandHint("/branch", "/branch", "查看当前对话分支"),
-                new SlashCommandHint("/branch status", "/branch status", "查看当前对话分支"),
-                new SlashCommandHint("/branch create ", "/branch create <name>", "从当前历史创建对话分支"),
-                new SlashCommandHint("/branch use ", "/branch use <name>", "切换到已有对话分支"),
+                new SlashCommandHint("/session", "/session", "查看持久会话状态"),
+                new SlashCommandHint("/session tree", "/session tree", "查看持久会话树"),
+                new SlashCommandHint("/session fork ", "/session fork <name> [eventId]", "从当前节点创建分支"),
+                new SlashCommandHint("/session use ", "/session use <branch>", "切换到持久分支"),
+                new SlashCommandHint("/session new", "/session new", "创建新会话"),
+                new SlashCommandHint("/session clear", "/session clear", "清空当前上下文并保留旧树"),
+                new SlashCommandHint("/branch", "/branch", "/session 的兼容别名"),
                 new SlashCommandHint("/restore ", "/restore <N>", "恢复到最近第 N 个 pre-turn 快照"),
                 new SlashCommandHint("/index", "/index", "索引当前代码库"),
                 new SlashCommandHint("/index ", "/index [路径]", "索引指定路径代码库"),
@@ -2121,6 +2200,15 @@ public class Main {
             case EXECUTE -> PlanExecuteAgent.PlanReviewDecision.execute();
             case CANCEL -> PlanExecuteAgent.PlanReviewDecision.cancel();
             case SUPPLEMENT -> PlanExecuteAgent.PlanReviewDecision.supplement(decision.feedback());
+        };
+    }
+
+    static AgentOrchestrator.TeamPlanReviewDecision mapTeamReviewDecision(
+            PlanReviewInputParser.Decision decision) {
+        return switch (decision.type()) {
+            case EXECUTE -> AgentOrchestrator.TeamPlanReviewDecision.execute();
+            case CANCEL -> AgentOrchestrator.TeamPlanReviewDecision.cancel("用户取消本次 Plan");
+            case SUPPLEMENT -> AgentOrchestrator.TeamPlanReviewDecision.supplement(decision.feedback());
         };
     }
 

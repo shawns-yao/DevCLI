@@ -21,6 +21,9 @@ import java.util.*;
  */
 public class Planner {
     private static final Logger log = LoggerFactory.getLogger(Planner.class);
+    private static final int MAX_PLAN_TASKS = 12;
+    private static final int MAX_PLAN_REPAIR_ATTEMPTS = 2;
+    private static final int INVALID_OUTPUT_PREVIEW_LIMIT = 2_000;
 
     private final LlmClient llmClient;
     private final PrintStream out;
@@ -46,102 +49,238 @@ public class Planner {
             return createMinimalPlan(goal);
         }
 
-        // 构建规划请求
-        List<LlmClient.Message> messages = Arrays.asList(
-                LlmClient.Message.system(promptAssembler.assemble(PromptMode.PLANNER, PromptContext.empty())),
-                LlmClient.Message.user("请为以下任务制定执行计划：\n" + goal)
-        );
+        return createPlanFromInput(goal, goal, 0, "", "", List.of());
+    }
 
-        // 调用LLM生成计划
-        PlanningStreamRenderer streamRenderer = new PlanningStreamRenderer(out);
-        LlmClient.ChatResponse response = llmClient.chat(messages, null, streamRenderer);
-        LlmTraceLogger.logReasoning(log, "planner", llmClient, response.reasoningContent());
-        streamRenderer.finish();
-        String planJson = response.content();
-
-        // 解析JSON计划
-        return parsePlan(goal, planJson);
+    private ExecutionPlan createPlanFromInput(String rootGoal, String planningInput,
+                                              int revision, String parentPlanId,
+                                              String revisionReason,
+                                              List<Task> completedTasks) throws IOException {
+        String request = "请为以下任务制定执行计划：\n" + planningInput;
+        IOException lastFailure = null;
+        for (int attempt = 0; attempt <= MAX_PLAN_REPAIR_ATTEMPTS; attempt++) {
+            List<LlmClient.Message> messages = Arrays.asList(
+                    LlmClient.Message.system(promptAssembler.assemble(
+                            PromptMode.PLANNER, PromptContext.empty())),
+                    LlmClient.Message.user(request)
+            );
+            PlanningStreamRenderer streamRenderer = new PlanningStreamRenderer(out);
+            LlmClient.ChatResponse response = llmClient.chat(messages, null, streamRenderer);
+            LlmTraceLogger.logReasoning(log, "planner", llmClient, response.reasoningContent());
+            streamRenderer.finish();
+            String planJson = response.content();
+            try {
+                return parsePlan(rootGoal, planJson, revision,
+                        parentPlanId, revisionReason, completedTasks);
+            } catch (IOException e) {
+                lastFailure = e;
+                if (attempt >= MAX_PLAN_REPAIR_ATTEMPTS) {
+                    break;
+                }
+                out.println("⚠️ 计划输出无效，正在请求修复（" + (attempt + 1)
+                        + "/" + MAX_PLAN_REPAIR_ATTEMPTS + "）...\n");
+                request = buildRepairPrompt(planningInput, planJson, e.getMessage(), attempt + 1);
+            }
+        }
+        throw lastFailure == null ? new IOException("计划输出无效") : lastFailure;
     }
 
     /**
      * 解析LLM生成的计划JSON
      */
-    private ExecutionPlan parsePlan(String goal, String planJson) throws IOException {
-        // 清理可能的markdown代码块
-        String cleaned = planJson.replaceAll("```json\\s*", "")
+    private ExecutionPlan parsePlan(String rootGoal, String planJson, int revision,
+                                    String parentPlanId, String revisionReason,
+                                    List<Task> completedTasks) throws IOException {
+        String cleaned = Objects.toString(planJson, "")
+                .replaceAll("```json\\s*", "")
                 .replaceAll("```\\s*", "")
                 .trim();
+        if (cleaned.isEmpty()) {
+            throw new IOException("计划输出为空");
+        }
 
-        JsonNode root = mapper.readTree(cleaned);
-        String summary = root.path("summary").asText();
+        JsonNode root;
+        try {
+            root = mapper.readTree(cleaned);
+        } catch (Exception e) {
+            throw new IOException("计划不是合法 JSON: " + e.getMessage(), e);
+        }
+        if (root == null || !root.isObject()) {
+            throw new IOException("计划根节点必须是 JSON 对象");
+        }
         JsonNode tasksNode = root.path("tasks");
+        if (!tasksNode.isArray() || tasksNode.isEmpty()) {
+            throw new IOException("计划必须包含至少一个任务");
+        }
+        if (tasksNode.size() > MAX_PLAN_TASKS) {
+            throw new IOException("计划任务数超过上限 " + MAX_PLAN_TASKS);
+        }
 
-        ExecutionPlan plan = new ExecutionPlan(generatePlanId(), goal);
-        plan.setSummary(summary);
+        ExecutionPlan plan = new ExecutionPlan(
+                generatePlanId(revision), rootGoal, revision, parentPlanId, revisionReason);
+        plan.setSummary(root.path("summary").asText(""));
+        copyCompletedTasks(plan, completedTasks);
 
-        // 第一遍：创建所有任务（不处理依赖，因为可能有前向引用）
-        Map<String, String> idMapping = new HashMap<>();
+        Map<String, String> idMapping = new LinkedHashMap<>();
+        Set<String> completedIds = completedTasks == null
+                ? Set.of()
+                : completedTasks.stream().map(Task::getId)
+                        .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
         int taskIndex = 1;
-
         for (JsonNode taskNode : tasksNode) {
-            String originalId = taskNode.path("id").asText();
-            String newId = "task_" + taskIndex++;
+            if (!taskNode.isObject()) {
+                throw new IOException("计划任务必须是 JSON 对象");
+            }
+            String originalId = taskNode.path("id").asText("").trim();
+            if (originalId.isEmpty()) {
+                throw new IOException("计划任务 id 不能为空");
+            }
+            if (idMapping.containsKey(originalId)) {
+                throw new IOException("计划任务 id 重复: " + originalId);
+            }
+            String description = taskNode.path("description").asText("").trim();
+            if (description.isEmpty()) {
+                throw new IOException("计划任务描述不能为空: " + originalId);
+            }
+            if (completedTasks != null && completedTasks.stream()
+                    .map(Task::getDescription)
+                    .map(Planner::normalizeDescription)
+                    .anyMatch(normalizeDescription(description)::equals)) {
+                throw new IOException("修订计划重复了已完成任务: " + description);
+            }
+            Task.TaskType type = parseTaskType(taskNode.path("type").asText(""));
+            String newId = revision == 0
+                    ? "task_" + taskIndex
+                    : "r" + revision + "_task_" + taskIndex;
+            taskIndex++;
             idMapping.put(originalId, newId);
-
-            String description = taskNode.path("description").asText();
-            String typeStr = taskNode.path("type").asText();
-            Task.TaskType type = parseTaskType(typeStr);
-
             plan.addTask(new Task(newId, description, type));
         }
 
-        // 第二遍：建立依赖和被依赖关系
         taskIndex = 1;
         for (JsonNode taskNode : tasksNode) {
-            String newId = "task_" + taskIndex++;
+            String newId = revision == 0
+                    ? "task_" + taskIndex
+                    : "r" + revision + "_task_" + taskIndex;
+            taskIndex++;
             Task task = plan.getTask(newId);
-
             JsonNode depsNode = taskNode.path("dependencies");
-            if (depsNode.isArray()) {
-                for (JsonNode depNode : depsNode) {
-                    String originalDepId = depNode.asText();
-                    String newDepId = idMapping.getOrDefault(originalDepId, originalDepId);
-                    Task dep = plan.getTask(newDepId);
-                    if (dep != null) {
-                        task.addDependency(newDepId);
-                        dep.addDependent(task.getId());
-                    }
+            if (!depsNode.isMissingNode() && !depsNode.isArray()) {
+                throw new IOException("任务 dependencies 必须是数组: " + taskNode.path("id").asText());
+            }
+            if (!depsNode.isArray()) {
+                continue;
+            }
+            for (JsonNode depNode : depsNode) {
+                String dependency = depNode.asText("").trim();
+                if (dependency.isEmpty()) {
+                    throw new IOException("任务依赖 id 不能为空: " + task.getId());
+                }
+                String mapped = resolveDependency(dependency, idMapping, completedIds);
+                if (mapped == null) {
+                    throw new IOException("计划缺少依赖: " + task.getId() + " -> " + dependency);
+                }
+                task.addDependency(mapped);
+                Task dependencyTask = plan.getTask(mapped);
+                if (dependencyTask != null) {
+                    dependencyTask.addDependent(task.getId());
                 }
             }
         }
 
-        // 计算执行顺序
         if (!plan.computeExecutionOrder()) {
-            throw new IOException("计划中存在循环依赖");
+            ExecutionGraph.ValidationResult validation = ExecutionGraph.validate(
+                    new ArrayList<>(plan.getAllTasks()));
+            throw new IOException("计划图无效: " + String.join("; ", validation.errors()));
         }
-
         return plan;
+    }
+
+    private static void copyCompletedTasks(ExecutionPlan plan, List<Task> completedTasks) {
+        if (completedTasks == null || completedTasks.isEmpty()) {
+            return;
+        }
+        for (Task source : completedTasks) {
+            Task copy = new Task(
+                    source.getId(), source.getDescription(), source.getType(), source.getDependencies());
+            copy.applyArtifact(source.getArtifact());
+            plan.addTask(copy);
+        }
+        for (Task task : plan.getAllTasks()) {
+            for (String dependency : task.getDependencies()) {
+                Task dependencyTask = plan.getTask(dependency);
+                if (dependencyTask != null) {
+                    dependencyTask.addDependent(task.getId());
+                }
+            }
+        }
+    }
+
+    private static String resolveDependency(String dependency,
+                                            Map<String, String> idMapping,
+                                            Set<String> completedIds) {
+        String mapped = idMapping.get(dependency);
+        if (mapped != null) {
+            return mapped;
+        }
+        String completedPrefix = "completed:";
+        if (dependency.startsWith(completedPrefix)) {
+            String completedId = dependency.substring(completedPrefix.length()).trim();
+            return completedIds.contains(completedId) ? completedId : null;
+        }
+        return completedIds.contains(dependency) ? dependency : null;
+    }
+
+    private static String normalizeDescription(String value) {
+        return Objects.toString(value, "")
+                .replaceAll("\\s+", " ")
+                .trim()
+                .toLowerCase(Locale.ROOT);
+    }
+
+    private static String buildRepairPrompt(String planningInput, String invalidOutput,
+                                            String failureReason, int attempt) {
+        String preview = compactForReplan(invalidOutput, INVALID_OUTPUT_PREVIEW_LIMIT);
+        return """
+                上一次计划输出未通过协议或 DAG 校验，请修复后重新输出。
+                原始规划输入：
+                %s
+
+                失败原因：%s
+                修复轮次：%d/%d
+                无效输出预览：
+                %s
+
+                只输出一个 JSON 对象，格式必须为：
+                {"summary":"...","tasks":[{"id":"task_1","description":"...","type":"FILE_READ | FILE_WRITE | COMMAND | ANALYSIS | VERIFICATION","dependencies":[]}]}
+                tasks 必须非空，id 必须唯一，依赖必须引用同一计划内任务；修订计划可以用 completed:<旧任务ID> 引用已完成任务。
+                """.formatted(
+                Objects.toString(planningInput, ""),
+                Objects.toString(failureReason, "计划输出无效"),
+                attempt,
+                MAX_PLAN_REPAIR_ATTEMPTS,
+                preview);
     }
 
     /**
      * 解析任务类型
      */
-    private Task.TaskType parseTaskType(String typeStr) {
-        return switch (typeStr.toUpperCase()) {
+    private Task.TaskType parseTaskType(String typeStr) throws IOException {
+        return switch (Objects.toString(typeStr, "").trim().toUpperCase(Locale.ROOT)) {
             case "FILE_READ" -> Task.TaskType.FILE_READ;
             case "FILE_WRITE" -> Task.TaskType.FILE_WRITE;
             case "COMMAND" -> Task.TaskType.COMMAND;
             case "ANALYSIS" -> Task.TaskType.ANALYSIS;
             case "VERIFICATION" -> Task.TaskType.VERIFICATION;
-            default -> Task.TaskType.ANALYSIS;
+            default -> throw new IOException("未知任务类型: " + typeStr);
         };
     }
 
     /**
      * 生成计划ID
      */
-    private String generatePlanId() {
-        return "plan_" + System.currentTimeMillis();
+    private String generatePlanId(int revision) {
+        return "plan_" + System.currentTimeMillis() + "_r" + Math.max(0, revision);
     }
 
     /**
@@ -151,7 +290,8 @@ public class Planner {
         out.println("🔄 重新规划，原因: " + failureReason + "\n");
 
         StringBuilder context = new StringBuilder();
-        context.append("原任务: ").append(failedPlan.getGoal()).append("\n");
+        context.append("原始目标: ").append(failedPlan.getGoal()).append("\n");
+        context.append("当前计划版本: r").append(failedPlan.getRevision()).append("\n");
         context.append("失败原因: ").append(failureReason).append("\n\n");
 
         appendReplanTaskSection(context,
@@ -167,10 +307,32 @@ public class Planner {
                         .toList());
 
         context.append("\n请制定新的执行计划，仅覆盖未完成或失败的任务。");
-        context.append("新计划不得包含已完成的任务；如果需要再次触达已修改文件，必须说明是基于当前落盘内容继续处理。");
+        context.append("新计划不得包含已完成的任务；如需依赖已完成任务，请在 dependencies 中使用 completed:<旧任务ID>。");
+        context.append("如果需要再次触达已修改文件，必须说明是基于当前落盘内容继续处理。");
         context.append("\n失败原因: ").append(failureReason);
 
-        return createPlan(context.toString());
+        List<Task> completedTasks = failedPlan.getAllTasks().stream()
+                .filter(task -> task.getStatus() == Task.TaskStatus.COMPLETED)
+                .toList();
+        return createPlanFromInput(
+                failedPlan.getGoal(),
+                context.toString(),
+                failedPlan.getRevision() + 1,
+                failedPlan.getId(),
+                failureReason,
+                completedTasks);
+    }
+
+    public ExecutionPlan reviseForFeedback(ExecutionPlan plan, String feedback) throws IOException {
+        String normalizedFeedback = Objects.toString(feedback, "").trim();
+        String input = plan.getGoal() + "\n补充要求：" + normalizedFeedback;
+        return createPlanFromInput(
+                plan.getGoal(),
+                input,
+                plan.getRevision() + 1,
+                plan.getId(),
+                "用户补充要求",
+                List.of());
     }
 
     private static void appendReplanTaskSection(StringBuilder context, String title, List<Task> tasks) {
@@ -184,6 +346,9 @@ public class Planner {
                     .append(": ").append(task.getDescription())
                     .append(" / 状态=").append(task.getStatus())
                     .append("\n");
+            if (task.getStatus() == Task.TaskStatus.COMPLETED) {
+                context.append("  可作为依赖引用: completed:").append(task.getId()).append("\n");
+            }
             if (!task.getModifiedFiles().isEmpty()) {
                 context.append("  修改文件: ").append(String.join(", ", task.getModifiedFiles())).append("\n");
             }
@@ -253,7 +418,7 @@ public class Planner {
     }
 
     private ExecutionPlan createMinimalPlan(String goal) {
-        ExecutionPlan plan = new ExecutionPlan(generatePlanId(), goal);
+        ExecutionPlan plan = new ExecutionPlan(generatePlanId(0), goal);
         plan.setSummary(buildMinimalSummary(goal));
         plan.addTask(new Task("task_1", goal.trim(), inferSimpleTaskType(goal)));
         if (!plan.computeExecutionOrder()) {

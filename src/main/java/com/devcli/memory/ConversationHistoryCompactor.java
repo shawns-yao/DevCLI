@@ -462,13 +462,13 @@ public class ConversationHistoryCompactor {
         for (int i = 0; i < systemEnd; i++) {
             rebuilt.add(history.get(i));
         }
-        rebuilt.add(LlmClient.Message.user(SUMMARY_MARKER + summary.trim()));
+        rebuilt.add(LlmClient.Message.internalUser(SUMMARY_MARKER + summary.trim()));
         // 占位确认消息只为维持 user/assistant 交替协议;用语言无关的最短文本,
         // 避免模型复述中文散文或在非中文模型下产生歧义。
         rebuilt.add(LlmClient.Message.assistant("OK."));
         String restoreContext = buildPostCompactRestoreContext();
         if (!restoreContext.isBlank()) {
-            rebuilt.add(LlmClient.Message.user(POST_COMPACT_RESTORE_MARKER + restoreContext));
+            rebuilt.add(LlmClient.Message.internalUser(POST_COMPACT_RESTORE_MARKER + restoreContext));
             rebuilt.add(LlmClient.Message.assistant("OK."));
         }
         rebuilt.addAll(history.subList(splitIdx, history.size()));
@@ -493,7 +493,7 @@ public class ConversationHistoryCompactor {
                 semanticValidation.protectedConstraintCount(),
                 semanticValidation.missingConstraints().size(),
                 semanticValidation.validBeforeRepair() ? "pass" : "repaired");
-        rebuilt.set(systemEnd, LlmClient.Message.user(
+        rebuilt.set(systemEnd, LlmClient.Message.internalUser(
                 SUMMARY_MARKER + metadata.renderBoundaryBlock() + "\n" + summary.trim()));
         history.clear();
         history.addAll(rebuilt);
@@ -585,7 +585,8 @@ public class ConversationHistoryCompactor {
                     : compactOversizeMessageContent(i, msg, content, head, tail);
             if (compacted.length() < content.length()) {
                 history.set(i, new LlmClient.Message(
-                        msg.role(), compacted, msg.reasoningContent(), msg.toolCalls(), msg.toolCallId()));
+                        msg.role(), compacted, msg.reasoningContent(), msg.toolCalls(),
+                        msg.toolCallId(), msg.contentParts(), msg.source()));
                 changed = true;
                 log.info("microcompact truncated message[{}] role={}: {} -> {} chars",
                         i, msg.role(), content.length(), compacted.length());
@@ -637,7 +638,8 @@ public class ConversationHistoryCompactor {
             String compacted = collapseOldToolResultContent(msg.toolCallId(), content);
             if (!compacted.equals(content)) {
                 history.set(i, new LlmClient.Message(
-                        msg.role(), compacted, msg.reasoningContent(), msg.toolCalls(), msg.toolCallId()));
+                        msg.role(), compacted, msg.reasoningContent(), msg.toolCalls(),
+                        msg.toolCallId(), msg.contentParts(), msg.source()));
                 changed = true;
                 log.info("microcompact cleared old tool_result[{}] toolCallId={} by round: {} -> {} chars",
                         i, msg.toolCallId(), content.length(), compacted.length());
@@ -1030,7 +1032,8 @@ public class ConversationHistoryCompactor {
             if (compacted.length() < message.content().length()) {
                 history.set(i, new LlmClient.Message(
                         message.role(), compacted, message.reasoningContent(),
-                        message.toolCalls(), message.toolCallId()));
+                        message.toolCalls(), message.toolCallId(), message.contentParts(),
+                        message.source()));
                 tailTokens = estimateRangeTokens(history, splitIdx, history.size());
             }
         }
@@ -1074,7 +1077,8 @@ public class ConversationHistoryCompactor {
             candidate = compactOversizeContent(content, head, tail, marker);
             int estimated = TokenBudget.estimateMessagesTokens(List.of(
                     new LlmClient.Message(message.role(), candidate,
-                            message.reasoningContent(), message.toolCalls(), message.toolCallId())));
+                            message.reasoningContent(), message.toolCalls(), message.toolCallId(),
+                            message.contentParts(), message.source())));
             if (estimated <= targetTokens || retainedChars <= 256) {
                 return candidate;
             }
@@ -1433,7 +1437,7 @@ public class ConversationHistoryCompactor {
 
         // 插入降级标记
         int keptMessages = history.size() - systemEnd - toRemove;
-        preserved.add(LlmClient.Message.user(
+        preserved.add(LlmClient.Message.internalUser(
             "[上下文压缩降级] 由于压缩连续失败，早期对话已截断。"
             + "当前保留最近 " + keptMessages + " 条消息。"
         ));
