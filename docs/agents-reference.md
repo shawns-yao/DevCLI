@@ -103,20 +103,24 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 用户显式要求忽略记忆（如“别管记忆”“忽略记忆”）时，本会话不注入长期记忆、通用 WorkingMemory 和角色裁剪后的 WorkingMemory
 - 反馈类长期记忆按 `FEEDBACK` 类型落库，不混入普通 `FACT`
 
-### Multi-Agent
+### Plan Multi-Agent
 
+- 唯一公开入口为 `/plan`，固定进入 Planner/Worker/Reviewer 链路；旧 `/plan --team` 与 `/team` 仅保留解析兼容，不再出现在帮助和补全中。串行或并行由 DAG 就绪状态与资源冲突决定。
+- `MultiAgentBatchExecutor` 委托 `OrchestrationWaveExecutor` 完成有界并发、异常归属、输出隔离和稳定顺序归并；`PlanExecuteAgent` 与 STANDARD profile 仅保留内部兼容，不进入 CLI 路由。
 - 三角色：Planner / Worker(默认 2 个) / Reviewer
-- 流程：规划 → 按依赖分配 Worker → Reviewer 审查 → 未通过重试(最多 2 次)
+- 流程：规划与确定性预检 → Reviewer 计划语义评审 → 用户确认 → 按依赖分配 Worker → Pre-Review / 产物 Reviewer → 未通过有界重试
+- 计划 Reviewer 使用独立、无工具上下文，逐项输出需求覆盖、节点引用、验收标准评审和结构化问题；拒绝反馈给 Planner 有界修复，协议错误失败关闭。恢复未完成 checkpoint 时重新评审，避免旧计划绕过新门禁。
+- 每条验收标准必须包含判定信号、`TOOL|HUMAN` 验证方式、验证器和 `applies_to`。目标只能是有效 DAG 节点或 `FINAL`；普通节点只接收自己的标准，Final integration 接收全部标准。缺失字段、重复 ID、未知节点、未知工具或具有项目写入副作用的自动验证器会在执行前拒绝。
 - Planner 输出先做协议与结构校验：支持从前后说明中提取完整 JSON；解析失败、DAG 无效或阻塞性空工作区纯检查步骤会触发有界修复。修复前清空 Planner 历史，并把原始任务、失败原因、无效输出预览和固定 schema 放入新请求。默认修复 2 次，可通过 `devcli.team.planner.repair.max.attempts` / `DEVCLI_TEAM_PLANNER_REPAIR_MAX_ATTEMPTS` 调整到 `[0, 3]`。
 - Planner 不调用工具；空工作区属于合法状态。目录和文件存在性检查不能成为阻塞实现的独立步骤，必要检查并入首个实现步骤并采用“若不存在则创建”语义。
 - SubAgent 按单次执行保存结构化工具证据。Worker 最终 content 为空但存在 `ToolStatus.SUCCESS` 时，由 Orchestrator 合成有界证据摘要进入 Pre-Review / Reviewer；无论 content 是否为空，只要没有成功工具证据，独立 Worker 协议守卫都会追加一次强制执行上下文，阻止文字方案或伪代码冒充执行结果，并要求文件任务调用 `write_file`、分析任务调用读取工具，并在该请求首轮设置命名 `LlmClient.ToolChoice`：FILE_WRITE / INTEGRATION 选择 `write_file`，COMMAND 选择 `execute_command`，其他类型选择 `list_dir`。Anthropic Messages 请求映射为 `tool_choice: {"type":"tool","name":"..."}`，OpenAI-compatible 请求映射为命名 function choice。FILE_WRITE / INTEGRATION 步骤出现成功 `write_file` 批次后直接以结构化证据结束当前 Worker 执行；强制修复中的指定工具也采用同一完成策略，避免再发起无必要的 LLM 收尾请求。Provider 忽略命名工具选择时，`AgentExecutionEngine` 追加一次严格 JSON 工具信封请求；SubAgent 只接受单一完整 JSON 对象、目标工具名及对象参数，拒绝 reasoning、Markdown、代码围栏、尾随文本和未知字段，解析后仍通过原有工具参数校验、能力范围、HITL 与策略管线。工具失败时才恢复 AUTO 进入下一轮纠正，最终仍无成功证据才返回“执行结果为空”。
 - SubAgent IOException 返回 ERROR 类型
 - Planner 共享主 ToolRegistry；副作用 Worker 使用 `WorkspaceExecutionSession` 创建隔离 ToolRegistry，Pre-Review 与 Reviewer 在同一隔离目录读取真实产物，MemoryManager 继续共享角色裁剪视图。
 - Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用 `ExecutionArtifact`，统一保存 state、output、summary、modifiedResources、error、attempt、startedAt、finishedAt。
-- checkpoint 协议版本 4 通过 `RecoveryState` 恢复共享 artifact、pending PatchSet 写前日志、稳定子代理身份、步骤分配和消息游标；版本 1/2/3 继续兼容，高于当前版本明确拒绝。恢复按 checkpoint 重建 Worker 拓扑并保持原步骤绑定，只注入 schema 兼容的最近摘要，不恢复完整私有对话。
-- `/team` Worker 每次尝试都通过隔离 ToolRegistry 的 `runWithResourceLease(stepId, ...)` 绑定资源租约上下文，并在 finally 中释放；并行工具线程显式继承步骤租约归属。ToolRegistry 统一托管 `ResourceLeaseMaintenance`，project fork 共享同一个定时线程；最后一个注册关闭后停止。默认每 60 秒清理过期租约，可通过 `devcli.resource.lease.cleanup.interval.seconds` / `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
-- `/plan` 副作用任务与 `/team` 副作用步骤在隔离工作区执行；`ToolEffect` / `ToolAccessScope` 在工具管线中强制限制非隔离任务只能使用只读能力。隔离命令和 Pre-Review 强制通过受限 Docker 执行，无网络且禁止回退主机。PatchSet 逐文件流式哈希，只保留变更内容；JVM 公平锁与跨进程文件锁共同串行提交，锁缓存按活跃使用者计数退役。应用前保存 before/after 哈希和原文件备份；备份限制为当前所有者访问，孤儿日志按 TTL 清理，恢复时提升完成、继续待执行或回滚，失败回滚会报告具体路径。
-- `PreReviewVerifier` 独立负责 Maven/javac 选择、Java 文件扫描、超时、进程输出解码和失败摘要；无 Maven 时使用 UTF-8 javac 参数文件并在执行后清理。结果区分“未执行硬检查”和“硬检查实际通过”；Reviewer 遇到可重试 LLM 故障时，普通步骤只有后者允许降级接受，未执行检查继续失败关闭。Reviewer 默认最多 2 轮，可通过 `devcli.team.reviewer.max.iterations` / `DEVCLI_TEAM_REVIEWER_MAX_ITERATIONS` 调整到 `[1, 8]`；达到硬轮数上限视为可恢复 Reviewer 故障，仍受同一硬检查条件约束。
+- checkpoint 协议版本 7 通过 `RecoveryState` 恢复共享 artifact、验收方式、验证器、适用节点、pending PatchSet 写前日志、稳定子代理身份、步骤分配、消息游标、已消耗的在位重做次数和重做失败现场；旧协议缺失适用节点时迁移为 `FINAL`，缺失验证字段时迁移为人工验收。恢复保持原步骤绑定和原重做额度，只注入 schema 兼容的最近摘要，不恢复完整私有对话。
+- Plan Worker 每次尝试都通过隔离 ToolRegistry 的 `runWithResourceLease(stepId, ...)` 绑定资源租约上下文，并在 finally 中释放；并行工具线程显式继承步骤租约归属。ToolRegistry 统一托管 `ResourceLeaseMaintenance`，project fork 共享同一个定时线程；最后一个注册关闭后停止。默认每 60 秒清理过期租约，可通过 `devcli.resource.lease.cleanup.interval.seconds` / `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
+- Plan 副作用步骤在隔离工作区执行；`ToolEffect` / `ToolAccessScope` 在工具管线中强制限制非隔离任务只能使用只读能力。隔离命令和 Pre-Review 强制通过受限 Docker 执行，无网络且禁止回退主机。PatchSet 逐文件流式哈希，只保留变更内容；JVM 公平锁与跨进程文件锁共同串行提交，锁缓存按活跃使用者计数退役。应用前保存 before/after 哈希和原文件备份；备份限制为当前所有者访问，孤儿日志按 TTL 清理，恢复时提升完成、继续待执行或回滚，失败回滚会报告具体路径。
+- `PreReviewVerifier` 独立负责 Maven/javac 选择、Java 文件扫描、超时、进程输出解码和失败摘要。Reviewer 声称 TOOL 标准通过时，声明验证器必须出现在本轮真实成功工具调用中；实际执行的 Pre-Review 命令计为 `execute_command` 证据。Reviewer 重试和节点重做耗尽后，结果显式输出失败步骤、额度、最后原因、checkpoint 和人工处理选项。
 - `Planner.replan()` 不是 Agent 循环，没有工具调用权，因此失败后重规划只读取 ExecutionArtifact 的最小结构化产物事实，不读取完整任务 result 作为主要依据。
 
 ### HITL System
@@ -196,11 +200,11 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 最近 2 个 user round 之前的旧 tool_result 会按 toolCallId 成批折叠为 boundary 引用；最近轮次保留原文，避免影响当前任务。
 - WorkingMemory 压缩后恢复区遇到 microcompact 工具引用时，只输出 toolCallId / originalChars / storedPath，并按 storedPath 或 toolCallId 去重。
 
-### TUI (v16.1 Renderer Architecture)
+### Terminal Renderer
 
-- 三个实现：InlineRenderer(默认) / LanternaRenderer / PlainRenderer
-- 环境变量：`DEVCLI_RENDERER=inline|lanterna|plain`
-- `DEVCLI_TUI=true`(旧) → lanterna + deprecation 提示
+- 活跃实现：InlineRenderer（默认）/ PlainRenderer
+- 环境变量：`DEVCLI_RENDERER=inline|plain`
+- `lanterna`、`tui` 和旧 `DEVCLI_TUI=true` 在兼容期输出迁移提示并映射到 Inline；Main 不再进入 TuiBootstrap
 - `DEVCLI_NO_STATUSBAR=true`：禁用底部状态栏
 - `NO_COLOR=1`：禁用 ANSI 颜色
 - 当前开屏 Banner 是无右侧盒线边框的简洁布局，避免 ANSI/CJK 字宽导致竖线错位
@@ -236,7 +240,9 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 ### Async Tasks + Runtime API (Phase 20)
 
-- DurableTaskManager(SQLite) / CLI: /task, /task list, /task add, /task cancel, /task log
+- `RunStore` 是 CLI turn、Runtime turn 和后台任务的运行状态事实来源；`DurableTaskManager` 只负责后台提交与 Worker 领取
+- 默认数据库统一为 `~/.devcli/runtime/runtime.db`；旧 `tasks.db` 使用只读连接导入，重复 id 不覆盖
+- CLI: /task, /task list, /task add, /task cancel, /task log
 - Runtime API: `serve --http --port 8080`，仅 127.0.0.1，需 API Key
 - 端点：POST /v1/threads / POST /v1/threads/{id}/turns / GET /v1/threads/{id}/events
 - Runtime API 的 turn 通过 `KeyedSerialExecutor` 调度：同 key 的通道创建、入队和空通道删除使用原子 compute，杜绝旧通道与新通道并存；底层调度拒绝会通知全部等待者，单个 turn 异常不会阻塞同通道后续任务
@@ -244,7 +250,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - Runtime API 另提供 `POST /v1/threads/{id}/queue/clear` 清空当前分支待处理队列，以及 `POST /v1/threads/{id}/cancel` 取消当前 turn；清空操作写入 `queue.updated(action=cleared)`，取消不伪造 turn 完成事件
 - Runtime 队列快照按 thread/branch 写入 SQLite；会话创建时恢复 Steering / Follow-up，入队和 turn 结束时重写当前分支快照。分支切换只恢复目标分支队列，不复制父分支待处理输入
 - Runtime thread 支持事件树分支：`GET/POST /v1/threads/{id}/branches` 列举或从当前可见事件创建分支，`POST /v1/threads/{id}/branches/{branchId}/activate` 切换活动分支；事件和 checkpoint 都保存 `branch_id`，恢复时按 parent_branch_id / fork_event_id lineage 截取，切换后关闭旧 session 并从目标分支重建
-- CLI 提供进程内对话分支命令：`/branch` 查看状态，`/branch create <name>` 从当前历史创建快照，`/branch use <name>` 切换历史；CLI 分支不写 SQLite，重启后丢失，也不复制待处理 Steering / Follow-up 队列
+- CLI `/session status|tree|fork|use|new|clear|use-thread` 直接操作同一持久事件树；`/branch` 是兼容别名并只提示一次迁移。Tree 切换只重建模型上下文，不修改工作区文件
 - thread 上下文从 SQLite 恢复最新压缩检查点，并完整追加检查点覆盖事件之后的已完成 turn；没有检查点时恢复全部已完成 turn，不再固定保留最近 20 轮
 - 历史默认达到 32,000 token 时生成持久化检查点，`DEVCLI_RUNTIME_CHECKPOINT_TRIGGER_TOKENS` / `devcli.runtime.checkpoint.trigger.tokens` 可调整，最小 4,000；检查点保存压缩消息、覆盖事件、摘要、token 变化和 `CompactBoundaryMetadata` 运行态快照
 - 检查点候选会移除动态 system prompt、reasoning 和图片正文；同时保存压缩 metadata 与消息树快照（稳定 `id`、`parentId`、role、index），当前默认从压缩边界生成线性 parent 链，为后续分支恢复保留协议字段；旧 SQLite 数据库启动时自动补充 `message_tree_json` 列。保存发生在 `turn.completed` 事件之后，失败只写入 `thread.checkpoint.failed`；最新记录损坏时按时间回退到更早可解析检查点
@@ -254,7 +260,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - Skill、Hook、MCP server 和 CLI command 的发现元数据统一通过 `ExtensionContract` / `ExtensionRegistry` 表达：稳定 id、kind、来源、启用状态、版本、能力和元数据；Main 启动后把命令、Skill、Hook 和 MCP server 注册进目录，`/skill reload` 会原子替换 Skill/Hook 目录，MCP enable/disable/restart 通过 `McpServerManager` 观察者同步 MCP 目录，CLI Skill/MCP 补全优先从统一目录读取。该目录契约不接管各自执行权限，Skill、Hook、MCP 和命令继续使用原有安全与策略管线
 - CLI 活动输入不再使用独立 `PromptQueue` / `ActiveTurnCoordinator`；生产路径唯一使用 `AgentTurnInbox`，由 AgentExecutionEngine 按 Steering / Follow-up 时机注入。旧队列实现已删除，避免两套取消和容量语义并存
 - 验证边界：plain renderer 的 `/help` 与 `/exit` 启动烟测已通过；非交互管道不能证明 JLine 补全、方向键、底部 dock 或 HITL 按键行为，未验证前不引入 TUI differential rendering 改造
-- Runtime JSON 投影集中维护协议字段和转义，每个 payload 固定携带 `schema_version=1`；工具 arguments 优先保持 JSON 对象，无法解析时保留原文本；工具结果携带 status、error_code、retryable、elapsed_millis 和 image_count，不持久化图片正文
+- Runtime JSON 投影集中维护协议字段和转义，每个 payload 固定携带 `schema_version=2`；工具 arguments 优先保持 JSON 对象，无法解析时保留原文本；工具结果携带 status、error_code、retryable、elapsed_millis、presentation 和 image_count，不持久化图片正文
 - Runtime runner 收到事件 sink 后可边执行边写入 SQLite/SSE；如果 Provider 没有产生 content delta，服务端才用最终输出补一个 `message.delta`，避免流式回答重复写入
 - 每次交互、后台任务和无头 turn 都在执行线程绑定有效 `RunContext`，其中包含项目路径与取消令牌；已有调用方上下文会跨会话工作线程复用并在任务结束后恢复，只有无外层上下文时才创建临时上下文；预先创建的线程池不读取其他运行的取消状态，线程中断也进入取消语义
 - CLI ReAct 通过 `AgentSessionRuntime.adoptOwned(...).runInCurrentContext(...)` 执行，保留输入监听线程创建的 RunContext 和取消令牌；Runtime API 与无头执行分别使用持久或临时 `AgentSessionRuntime`
@@ -293,7 +299,7 @@ ReAct 主循环 / 对话历史 / 工具调用与结果回灌
 规划后执行 / 计划审阅 / DAG 状态推进 / 失败重规划；冲突分波、并行调度和顺序输出归并委托给 `PlanTaskBatchExecutor`，结果摘要由 `PlanTaskExecutionResult` 统一生成，任务能力范围、隔离工作区、资源租约和 PatchSet 生命周期委托给 `PlanTaskWorkspaceExecutor`
 
 ### AgentOrchestrator.java
-Multi-Agent 编排器 / 三角色管理 / 按依赖推进 / 审查重试；资源冲突分波、Worker 并发协调和顺序输出归并委托给 `MultiAgentBatchExecutor`，PatchSet、checkpoint 写前日志、终态持久化和恢复对账委托给 `WorkspaceCommitCoordinator`
+Plan 编排策略 / 三角色管理 / 按依赖推进 / 审查重试；资源冲突分波和 Worker 协调委托给 `MultiAgentBatchExecutor`，通用并发与输出归并委托给 `OrchestrationWaveExecutor`，PatchSet、checkpoint 写前日志、终态持久化和恢复对账委托给 `WorkspaceCommitCoordinator`
 
 ### AgentExecutionEngine.java
 ReAct / Plan task / SubAgent 共用循环；统一取消和预算检查、LLM 调用、assistant/tool 消息协议、结构化工具错误记录与 IOException 出口；路径差异通过 Delegate 钩子注入
@@ -314,7 +320,7 @@ Plan Task / Multi-Agent ExecutionStep / checkpoint 共用任务产物；统一�
 任务状态 / 进度可视化；可执行任务判定和拓扑排序委托给 ExecutionGraph
 
 ### AgentCheckpoint.java
-checkpoint 协议版本 4；通过 RecoveryState 恢复共享 ExecutionArtifact、稳定子代理身份、步骤分配、单调消息游标和最小摘要，保存 PatchSet 写前日志与原文件备份，恢复时按文件哈希对账并保持原 Worker 绑定；兼容版本 1/2/3，损坏身份拓扑或未来版本明确拒绝
+checkpoint 协议版本 7；通过 RecoveryState 恢复共享 ExecutionArtifact、验收方式、验证器与适用节点、稳定子代理身份、步骤分配、单调消息游标、最小摘要、已消耗的在位重做次数和失败现场，保存 PatchSet 写前日志与原文件备份，恢复时按文件哈希对账并保持原 Worker 绑定和原重做额度；旧协议缺失适用节点时迁移为 `FINAL`，缺失验证字段时转为人工确认，损坏身份拓扑或未来版本明确拒绝
 
 ### PreReviewVerifier.java
 Reviewer 前 Java 硬验证；封装 Maven/javac 命令、扫描、超时、输出解码和失败摘要，无 Maven 时使用 javac 参数文件避免命令行过长
@@ -329,7 +335,7 @@ Reviewer 前 Java 硬验证；封装 Maven/javac 命令、扫描、超时、输�
 McpServerManager / McpClient / JsonRpcClient / StdioTransport / StreamableHttpTransport / McpSchemaSanitizer / resources/ / mention/ / notifications/
 
 ### TUI Package
-TuiBootstrap / LanternaWindow / TuiSessionController / pane/ / hitl/ / history/ / highlight/
+兼容源码仍位于 `tui/`，但生产入口已停用；待兼容周期和现存改动清理后物理删除
 
 ### LLM Clients
 - AnthropicClient：默认 provider，Claude / Anthropic Messages 原生兼容端点

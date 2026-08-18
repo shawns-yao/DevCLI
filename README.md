@@ -6,7 +6,7 @@
 
 DevCLI 是一个面向 Java 后端开发者的终端 Agent CLI。它可以在命令行中通过自然语言驱动代码阅读、生成、调试、重构、命令执行和仓库检索。
 
-ReAct 主循环、Plan-and-Execute、Multi-Agent 编排、MCP 协议客户端、上下文压缩、RAG 检索与终端渲染全部自行实现，不依赖 Spring AI、LangChain4j 等 Agent 框架。
+ReAct 主循环、Plan 多 Agent 编排、MCP 协议客户端、上下文压缩、RAG 检索与终端渲染全部自行实现，不依赖 Spring AI、LangChain4j 等 Agent 框架。
 
 ## Project Snapshot
 
@@ -31,7 +31,7 @@ ReAct 主循环、Plan-and-Execute、Multi-Agent 编排、MCP 协议客户端、
 
 **已实现**
 
-- ReAct 主循环、Plan-and-Execute、Multi-Agent（Planner / Worker / Reviewer）三条执行路径，共用取消、预算、DAG 依赖与执行产物协议。
+- ReAct 主循环与统一 `/plan` 编排入口；Plan 固定使用 Planner、Worker、Reviewer 协作链路，串行或并行由 DAG 依赖与资源冲突决定。
 - RAG（检索增强生成）：JavaParser 切分、SQLite 向量存储、关键词召回、代码关系图谱、RRF（倒数排名融合）与 CrossEncoderReranker（交叉编码器重排）。
 - 四层记忆（对话历史 / 工作记忆 / 长期记忆 / 强约束记忆）与两层上下文压缩（microcompact 落盘引用 + Map-Reduce 与增量九段摘要），含语义守卫、prompt-too-long 重试与失败熔断。
 - MCP（Model Context Protocol）：手写 JSON-RPC 2.0 客户端，支持 stdio 与 Streamable HTTP，动态注册工具与 resources。
@@ -41,13 +41,13 @@ ReAct 主循环、Plan-and-Execute、Multi-Agent 编排、MCP 协议客户端、
 - Prompt 分层组装（jar 内置 / 用户级 / 项目级覆盖），system prompt 只承载会话级稳定内容以保证前缀缓存命中。
 - 多模型运行时切换（Anthropic / OpenAI 兼容 / GLM / DeepSeek / StepFun / Kimi）。
 - 联网与浏览器：`web_search`、`web_fetch` 正文提取，以及经 Chrome DevTools MCP 的浏览器操作与调试实例登录态复用。
-- 三种终端渲染器：inline 流式（默认）、plain、Lanterna 全屏。
+- 两种终端渲染器：inline 流式（默认）与 plain；旧 lanterna/tui 配置在兼容期映射到 inline。
 
 **部分实现（MVP）**
 
 - LSP（语言服务器协议）诊断注入：仅实现协议子集，编辑后回灌编译诊断。
 - Git Side-History 快照与回滚：turn 粒度快照与 `/restore`，尚未覆盖全部编辑入口。
-- 后台任务与 Runtime API：SQLite 持久化任务队列与本地 HTTP/SSE 端点，仅监听回环地址。
+- 后台任务与 Runtime API：共用 SQLite RunStore 与本地 HTTP/SSE 端点，仅监听回环地址。
 - 图片输入：本地路径、file URL 与剪贴板图片。
 - SWE-bench Lite：已产出官方格式 predictions JSONL，官方 harness 尚未跑出有效 resolved 结果。
 
@@ -61,13 +61,12 @@ ReAct 主循环、Plan-and-Execute、Multi-Agent 编排、MCP 协议客户端、
 
 ## Feature Overview
 
-DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、代码仓库、记忆、审批、终端交互”串成一个本地开发工作流。核心执行路径分三类：
+DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、代码仓库、记忆、审批、终端交互”串成一个本地开发工作流。顶层控制流只有默认 ReAct 与显式 Plan 两类；系统不根据任务内容静默切换：
 
 - `ReAct`：默认模式。模型边思考边选择工具，工具结果会回灌到下一轮推理，适合阅读代码、定位问题、执行命令、做小范围修改。
-- `Plan-and-Execute`：通过 `/plan` 进入。Planner 先拆任务和依赖，再按 DAG（有向无环图）执行，适合多步骤改造、跨文件修复、需要先审计划的任务。任务状态与产物统一保存在 `ExecutionArtifact`；FILE_WRITE、COMMAND 和 VERIFICATION 在隔离工作区执行，任务成功后才通过 PatchSet 回写主项目。失败后 replan 是无工具的 Planner 调用，只用结构化产物事实生成后续计划，避免重复规划已落盘成果。
-- `Multi-Agent`：通过 `/team` 进入。Planner 负责拆解和验收标准，Worker 在隔离工作区执行具体子任务，Pre-Review 先做硬验证，Reviewer 读取同一隔离产物做质量审查；只有审查通过且 PatchSet 无冲突时才修改主项目。
+- `Plan`：通过 `/plan` 进入。Planner 生成 DAG 和可验证验收标准，计划 Reviewer 先检查语义闭环，Worker 在隔离工作区执行节点，Pre-Review 做硬验证，产物 Reviewer 根据真实证据验收；只有审查通过且 PatchSet 无冲突时才修改主项目。节点串行或并行由 DAG 就绪状态和资源冲突分波决定，不再由用户选择配置。`/plan --team` 与 `/team` 仅保留解析兼容，不出现在帮助和补全中。
 
-围绕这三条路径，DevCLI 提供以下能力：
+围绕这些路径，DevCLI 提供以下能力：
 
 - `ToolRegistry（工具注册表）`：统一管理内置工具、MCP 动态工具和 resource 读取工具；工具调用通过分阶段中间件执行取消检查、存在性检查、Skill 权限、JSON Schema 参数校验、HITL、策略、审计和结果尺寸治理。内置 Provider 直接返回带状态、错误码和重试语义的结构化结果，命令非零退出、参数错误、策略拒绝、超时和取消不再依赖文本识别。
 - `RAG（检索增强生成）`：用 JavaParser 切分 Java 代码，结合 SQLite 向量存储、关键词召回、代码关系图谱、RRF（倒数排名融合）、symbol-aware boost（符号感知加权）和 CrossEncoderReranker（交叉编码器重排），把相关类、方法、调用链注入模型上下文。
@@ -77,12 +76,14 @@ DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、�
 - `MCP（Model Context Protocol）`：支持 stdio / streamable HTTP MCP server，动态加载工具和 resources，并把 MCP server 状态、日志、重启能力暴露给 CLI。
 - `HITL（Human-in-the-Loop）`：危险工具和敏感页面操作进入人工审批；审批前先过策略层，策略拒绝的操作不能靠用户批准绕过。
 - `Snapshot（快照）`：通过 Side-Git 在 turn 前后保存快照，支持回滚最近一轮变更，并按 `devcli.snapshot.max` 自动裁剪旧快照，降低 Agent 自动改文件的风险。
-- `Renderer（渲染器）`：默认 inline 模式提供底部状态栏、行内 thinking、工具块和 diff；也保留 plain 和 Lanterna TUI 模式。
-- `Runtime API`：本地 HTTP API 暴露 threads / turns / events；同一 thread 的 turn 按提交顺序串行执行，不同 thread 可并行，避免同一会话并发读取过期历史。
+- `Renderer（渲染器）`：默认 inline 模式提供底部状态栏、行内 thinking、工具块和 diff；plain 用于无 ANSI、重定向和自动化环境。
+- `Runtime API + RunStore`：本地 HTTP API 暴露 threads / branches / turns / events；CLI turn、Runtime turn 和后台任务共用 `runtime.db` 中的 Run 生命周期。同一 thread 的 turn 按提交顺序串行执行，不同 thread 可并行。
+- `Session Tree（会话树）`：CLI 的 `/session` 与 Runtime branch 共用持久事件树；切换分支只重建模型上下文，不恢复或修改工作区文件。`/branch` 是兼容别名。
 - `RunContext（运行上下文）`：每次交互、后台任务或无头 turn 绑定独立项目路径、取消令牌和资源生命周期；预先创建的线程不会读取其他任务的取消状态，无头 Agent 结束后会关闭本次创建的工具与记忆资源。
 - `AgentExecutionEngine（执行引擎）`：ReAct、Plan task 和 SubAgent 共用同一套取消、预算、LLM 调用、工具消息回灌和异常控制流程；每次模型采样具有稳定请求标识和独立取消边界，重复请求会替换并取消旧请求。
 - `ExecutionGraph（执行图）`：Plan 与 Multi-Agent 共用依赖就绪判断、最终集成调度、缺失依赖和环检测，避免两条编排路径各自实现 DAG 规则。
-- `ExecutionArtifact（执行产物）`：Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用状态、输出、摘要、修改资源、错误、尝试次数与时间戳；checkpoint 协议版本 4 增加 PatchSet 写前日志、稳定子代理身份、步骤分配、消息游标和最小恢复摘要，兼容版本 1/2/3 并拒绝未来版本。
+- `OrchestrationProfile + OrchestrationWaveExecutor（编排配置与波次执行器）`：公开 Plan 固定启用 Worker、Reviewer 和 checkpoint；波次执行器按 DAG 与资源冲突使用有界线程池，并统一异常归属、独立输出缓冲与稳定顺序归并。STANDARD 仅保留为内部兼容实现，不再进入 CLI 路由。
+- `ExecutionArtifact（执行产物）`：Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用状态、输出、摘要、修改资源、错误、尝试次数与时间戳；checkpoint 协议版本 7 额外保存验收方式、验证器和适用节点，并保存 PatchSet 写前日志、稳定子代理身份、步骤分配、消息游标、最小恢复摘要和已消耗的在位重做额度，拒绝未来版本。
 - `Workspace + PatchSet（隔离工作区与补丁集）`：副作用任务通过可替换后端物化隔离目录；Git 仓库默认使用原生 worktree 并叠加当前脏文件、删除文件、未跟踪及被忽略文件，非 Git 目录优先使用文件系统级写时复制，不支持时回退有界复制；PatchSet 逐文件流式哈希，只把变更文件内容载入内存；JVM 公平锁与跨进程文件锁共同串行化补丁预检、应用和 checkpoint 终态。
 - `Image Input`：支持 `@image:` 本地路径、file URL 和剪贴板图片，图片会做尺寸、格式和大小处理后进入模型输入。
 
@@ -93,13 +94,12 @@ DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、�
 ```text
 Main
 ├── Agent                  # 默认 ReAct
-├── PlanExecuteAgent       # /plan
-│   ├── PlanTaskBatchExecutor      # 冲突分波、并行调度、顺序输出归并
-│   └── PlanTaskExecutionResult    # 任务结果与有界摘要
-└── AgentOrchestrator      # /team
-    └── MultiAgentBatchExecutor    # Worker 并发协调与批次输出归并
+└── AgentOrchestrator      # /plan；Planner / Worker / Reviewer
+    ├── ExecutionGraph             # DAG 校验与就绪节点
+    ├── MultiAgentBatchExecutor    # Worker 分配、资源分波与公平锁
+    └── OrchestrationWaveExecutor # 有界并发与稳定输出归并
 
-三条路径共享：
+各路径共享：
 ├── ToolRegistry           # 内置工具 + MCP 工具 + resources
 ├── MemoryManager          # WorkingMemory + LongTermMemory + StickyMemory
 ├── SnapshotService        # turn 前后快照
@@ -116,8 +116,8 @@ Main
 - `LongTermMemory（长期记忆）` 只保存跨会话稳定事实，默认不把临时任务请求写入长期层。每条记忆统一记录 schemaVersion、主题内 revision、expiresAt 和结构化 MemoryEvidence；证据包含置信度、来源引用、写入原因、审核状态和冲突条目。显式写入默认已审核，策略自动写入默认未审核；已拒绝记忆保留审计但不参与关键词、语义召回或 prompt 注入。新写入事实按类型应用 TTL，检索时自动清理过期项。同主题内容变化、配置赋值、默认值、当前值和正反使用声明发生冲突时自动记录 conflictsWith，旧事实进入 superseded 状态；相同主题同值的可确定改写不会重复保存。长期记忆注入时会抑制与 WorkingMemory 临时事实语义重复的条目。
 - `PathGuard（路径围栏）` 负责限制文件访问不逃逸项目根。
 - `ToolEffect + ToolAccessScope（工具副作用能力）` 由执行管线强制：非隔离分析任务只获得只读能力，隔离任务才允许项目写入和主机命令；MCP 缺失只读注解或声明 destructive/openWorld 时按外部副作用处理。工具参数先转换为稳定语义指纹，字段顺序、查询大小写、Unicode 等价字符和冗余空白不再绕过停滞检测；正则 pattern 保持大小写敏感，避免错误缓存命中；成功的只读结果会短期缓存，任何副作用执行都会清空缓存。
-- `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 和 `/team` 并行执行时拦截 `write_file`，同一文件只能被一个运行中 task / step 写入；并行工具线程会继承步骤租约归属，任务结束后释放租约。`ToolRegistry` 托管共享后台清理器，project fork 复用同一线程，最后一个注册表关闭后停止；周期可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
-- `PatchSet（补丁集）` 是隔离结果进入主项目的唯一文件回写边界：JVM 公平锁和 `~/.devcli/locks/project-commit/` 下的跨进程文件锁覆盖预检、应用和 checkpoint 终态；构建阶段流式计算哈希，未变化文件不读取完整内容。协议版本 4 在应用前保存目标哈希与原文件备份，并保存原步骤对应 Worker/Reviewer 身份；恢复时按最终哈希提升完成、继续待执行或自动回滚，同时保持原步骤分配。Reviewer 拒绝、任务失败、用户取消、前置哈希冲突、非普通文件覆盖或路径/链接逃逸都会阻止整批应用。
+- `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 并行执行时拦截 `write_file`，同一文件只能被一个运行中步骤写入；并行工具线程会继承步骤租约归属，任务结束后释放租约。`ToolRegistry` 托管共享后台清理器，project fork 复用同一线程，最后一个注册表关闭后停止；周期可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
+- `PatchSet（补丁集）` 是隔离结果进入主项目的唯一文件回写边界：JVM 公平锁和 `~/.devcli/locks/project-commit/` 下的跨进程文件锁覆盖预检、应用和 checkpoint 终态；构建阶段流式计算哈希，未变化文件不读取完整内容。协议版本 7 在应用前保存目标哈希与原文件备份，并保存验收元数据及适用节点、原步骤对应 Worker/Reviewer 身份、在位重做次数和失败现场；恢复时按最终哈希提升完成、继续待执行或自动回滚，同时保持原步骤分配和原重做额度。Reviewer 拒绝、任务失败、用户取消、前置哈希冲突、非普通文件覆盖或路径/链接逃逸都会阻止整批应用。
 - `CommandGuard（命令防线）` 是危险命令快速拒绝层，不替代 HITL 和路径策略。
 - `HitlToolRegistry（审批工具注册表）` 位于真实工具执行前，保证危险操作先经过审批和策略判定。
 
@@ -410,27 +410,21 @@ Runtime API 默认仅绑定 `127.0.0.1`。HTTP 请求线程和 Agent 执行线�
 * 分析 @image:/absolute/path/screenshot.png 里的报错
 ```
 
-进入 Plan-and-Execute：
+进入 Plan：
 
 ```text
 /plan 重构订单模块，把校验逻辑从 Controller 下沉到 Service，并补充测试
 ```
 
-进入 Multi-Agent：
-
-```text
-/team 检查认证模块的安全问题，修复高风险项并补充测试
-```
-
-Multi-Agent：Planner 拆 DAG 并提取 `acceptance_criteria`，Worker 在步骤级隔离工作区实现，`PreReviewVerifier` 在同一隔离目录通过强制 Docker 沙箱执行 Java 编译硬检查；无 Maven 项目通过 javac 参数文件传递源码清单，避免 Windows 命令行长度限制。Reviewer 再读取真实隔离产物做质量审查。验收点会前置注入 Worker，并由 Reviewer 用 `criteria_results` 逐条验证；Planner 给出的 `severity` 会随计划和 checkpoint 固化，critical/high 失败或缺少覆盖强制不通过。三角色注入 role-scoped WorkingMemory：Planner 看任务状态 + 关键事件，Worker 看完整上下文，Reviewer 看任务状态 + 工具证据。Reviewer 必须输出可解析 JSON，并采用 `functional_correctness` / `integration_completeness` / `code_quality` 三层评分，未达阈值强制不通过，非 JSON 文本不再凭关键词放行。Pre-Review 会记录硬检查是否实际执行；Reviewer 遇到可重试模型故障时，普通步骤只有在硬检查实际通过后才允许降级接受，未执行硬检查继续失败关闭。审查通过或满足该降级条件后生成 PatchSet，只有全量冲突预检通过才一次性写回主项目。
+Plan 使用 Multi-Agent 链路：Planner 拆 DAG 并提取 `acceptance_criteria`。每条标准必须声明 `test_signal`、`verification_method=TOOL|HUMAN`、`verifier` 和 `applies_to`；适用范围只能引用有效节点或 `FINAL`。普通节点只接收直接相关标准，Final integration 重新检查全部标准。计划先经过确定性结构与可执行性预检，再由独立、无工具上下文的 Reviewer 对照原始目标检查需求、节点和验收标准的覆盖关系；语义拒绝会带结构化问题退回 Planner 有界修复，Reviewer 协议错误则失败关闭。机器评审通过后才展示给用户，可选择执行、补充后重规划或取消；非交互环境遇到人工标准时失败关闭。Worker 在步骤级隔离工作区实现，`PreReviewVerifier` 在同一隔离目录执行硬检查。Reviewer 再以独立产物评审上下文读取真实隔离产物，使用 `criteria_results` 逐条核对；TOOL 标准的声明验证器必须在本轮真实成功工具调用中出现，人工标准只能保持待确认。审查通过后生成 PatchSet，只有全量冲突预检通过才写回主项目。未完成 checkpoint 恢复前会重新执行计划语义评审。
 
 Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个完整计划对象；无法解析、DAG 无效或出现“检查空工作区后再实现”这类阻塞性纯检查步骤时，会清空 Planner 历史并携带失败原因请求结构化修复。默认最多修复 2 次，可通过 `DEVCLI_TEAM_PLANNER_REPAIR_MAX_ATTEMPTS` 或 `-Ddevcli.team.planner.repair.max.attempts` 调整，取值范围 `[0, 3]`。空工作区属于合法输入，必要检查必须并入实现步骤并采用“若不存在则创建”的语义。Worker 最终文本为空时不再直接判失败：本轮存在 `SUCCESS` 工具证据则生成结构化执行摘要进入 Reviewer；没有成功证据时先执行一次强制协议修复，明确要求代码任务调用 `write_file` 并做最小验证、分析任务调用读取工具取得真实证据；该次 LLM 请求同时按步骤类型强制具体工具：文件写入与集成步骤选择 `write_file`，命令步骤选择 `execute_command`，其他步骤选择 `list_dir`；Anthropic Messages 映射为命名 `tool_choice`，OpenAI-compatible 映射为命名 function choice。FILE_WRITE / INTEGRATION 步骤出现成功 `write_file` 批次后直接以结构化证据结束当前 Worker 执行；强制修复中的指定工具也采用同一规则，不再请求模型生成收尾文本。Provider 忽略命名工具选择时，执行引擎追加一次严格 JSON 工具信封请求；只接受完整 JSON、目标工具名和对象参数，随后仍通过工具参数校验与权限管线执行，不解析 reasoning、Markdown 或代码围栏。工具失败时继续进入下一轮纠正，最终仍没有成功工具证据才判失败。
 
-并行 Worker 数量默认 `2`，可通过 `DEVCLI_TEAM_WORKERS` 环境变量或 `-Ddevcli.team.workers` 系统属性调整（取值夹在 `[1, 8]`，非法值回退默认）。同一依赖批次内相互独立的步骤由 `MultiAgentBatchExecutor` 按 Worker 池大小并行执行；涉及相同写资源的步骤先分入不同执行波次，同一 Worker 通过公平锁避免历史竞争，每个步骤使用独立输出缓冲并按步骤顺序归并。Plan 路径采用独立的 `PlanTaskBatchExecutor` 执行同类冲突分波和输出治理，任务文本、流式状态、修改文件、摘要与错误统一封装为 `PlanTaskExecutionResult`。Reviewer 默认最多执行 2 轮，通常对应“读取证据 + 输出 JSON 审查”，可通过 `DEVCLI_TEAM_REVIEWER_MAX_ITERATIONS` 或 `-Ddevcli.team.reviewer.max.iterations` 调整到 `[1, 8]`；达到上限视为可恢复 Reviewer 故障，普通步骤仍要求 Pre-Review 硬检查实际通过才可降级。
+并行 Worker 数量默认 `2`，可通过 `DEVCLI_TEAM_WORKERS` 环境变量或 `-Ddevcli.team.workers` 系统属性调整（取值夹在 `[1, 8]`，非法值回退默认）。同一依赖批次内相互独立的步骤由 `MultiAgentBatchExecutor` 按 Worker 池大小并行执行；涉及相同写资源的步骤先分入不同执行波次，同一 Worker 通过公平锁避免历史竞争。`OrchestrationWaveExecutor` 统一使用有界线程池、异常归属、独立输出缓冲和稳定顺序归并。每个 Plan 执行波次会记录 `peakConcurrency`、墙钟耗时、步骤累计耗时和 `parallelismFactor` 到 trace，便于用真实任务计算并行利用率和加速效果。同批次使用冻结的 ForkContext，批次内步骤不会读取其他并行步骤中途产生的上下文；确有数据依赖的步骤必须通过 DAG dependency 进入后续波次。任务文本、流式状态、修改文件、摘要与错误统一封装为 `PlanTaskExecutionResult`。Reviewer 默认最多执行 2 轮，通常对应“读取证据 + 输出 JSON 审查”，可通过 `DEVCLI_TEAM_REVIEWER_MAX_ITERATIONS` 或 `-Ddevcli.team.reviewer.max.iterations` 调整到 `[1, 8]`；达到上限视为可恢复 Reviewer 故障，普通步骤仍要求 Pre-Review 硬检查实际通过才可降级。
 
 隔离工作区默认开启，可通过 `DEVCLI_WORKSPACE_ISOLATION_ENABLED=false` 或 `-Ddevcli.workspace.isolation.enabled=false` 临时关闭；默认目录为项目下的 `Temp/devcli-workspaces`，可用 `-Ddevcli.workspace.dir=/path/to/workspaces` 覆盖。物化后端默认 `auto`：项目根是 Git 仓库时使用原生 worktree，共享 Git 对象并叠加当前工作区状态；非 Git 目录优先使用文件系统级写时复制。Linux 使用强制 reflink，现代 Windows 只在 ReFS 上启用系统块克隆；能力探测失败、克隆失败或内容校验不一致时清理部分结果并回退复制。可通过 `DEVCLI_WORKSPACE_BACKEND=git|cow|copy|auto` 显式选择。worktree 物化后会删除排除目录和符号链接，关闭时通过 Git 注销，崩溃残留元数据在后续创建前 prune。创建前会清理超过 24 小时且没有活动文件租约的孤儿目录，TTL 可用 `DEVCLI_WORKSPACE_ORPHAN_TTL_HOURS` 或 `-Ddevcli.workspace.orphan.ttl.hours` 调整。复制等待默认最多 300 秒，可用 `DEVCLI_WORKSPACE_COPY_TIMEOUT_SECONDS` 调整；超时或中断会取消复制线程，不再无限等待。隔离任务的 `execute_command` 和 Pre-Review 强制进入 Docker，使用无网络、只读根文件系统、能力清空和资源上限；Docker 不可用时明确失败，不回退主机。默认镜像为 `maven:3.9.9-eclipse-temurin-17`，必须提前拉取，可通过 `DEVCLI_COMMAND_SANDBOX_IMAGE` 覆盖；其他技术栈应配置包含所需工具的镜像。写时复制后端设计见 `docs/filesystem-cow-workspace-design.md`。
 
-失败恢复采用「在位重做」而非平行重规划：失败步骤保持原 id/依赖在 DAG 原位换思路重做（默认 1 次，带上次失败反馈），恢复始终长在原 DAG 上、通过依赖关系看到已完成成果；redo 用尽仍失败则保持失败终态。Plan `Task`、Multi-Agent `ExecutionStep` 与 checkpoint 共用 `ExecutionArtifact`；协议版本 4 在恢复执行前对账未完成的 PatchSet 提交，并恢复稳定子代理身份、原步骤分配、消息游标和 schema 兼容的最近摘要，保存失败、回滚不完整或身份拓扑损坏时停止 resume，未来协议版本明确报告不兼容。PatchSet 写前备份使用 POSIX `600/700` 或 Windows 所有者专用 ACL；超过 TTL 且不存在对应 checkpoint 的孤儿日志会自动清理。write_file/execute_command 的工具证据在工作记忆中优先保留，已批准的 PatchSet 修改资源会同步进入运行态、checkpoint 和后续依赖上下文。
+失败恢复采用「在位重做」而非平行重规划：失败步骤保持原 id/依赖在 DAG 原位换思路重做（默认 1 次，带上次失败反馈），恢复始终长在原 DAG 上、通过依赖关系看到已完成成果。Reviewer 重试和 redo 用尽后保持失败终态，最终结果显式列出失败步骤、两类额度、最后原因、checkpoint ID 和人工处理选项，不自动改写整张图。协议版本 7 固化验收方式、验证器和适用节点，并恢复原 Worker 绑定、消息游标、摘要、重做次数和失败现场。旧协议缺失适用节点时迁移为 `FINAL`；缺失验证方式时迁移为人工验收。保存失败、回滚不完整、身份拓扑损坏或未来协议版本都会停止 resume。
 
 常见任务写法：
 
@@ -452,9 +446,8 @@ Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个
 |---------|-------------|
 | `/help` | 查看帮助 |
 | `/model` | 查看或切换模型 |
-| `/plan` | 使用 Plan-and-Execute 执行下一条任务 |
-| `/team` | 使用 Multi-Agent 协作执行任务 |
-| `/team resume [id]` | 从 checkpoint 恢复中断的多 Agent 任务 |
+| `/plan` | 使用 Planner、Worker、Reviewer 编排执行任务 |
+| `/plan resume [id]` | 从 checkpoint 恢复中断的 Plan 任务 |
 | `/index` | 为当前仓库建立 RAG 索引 |
 | `/search <query>` | 检索代码库 |
 | `/graph <class>` | 查看代码关系图谱 |
@@ -473,7 +466,11 @@ Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个
 | `/audit [N]` | 查看最近 N 条审计日志 |
 | `/snapshot` | 查看 Side-Git 快照状态 |
 | `/browser connect` | 连接可复用 Chrome 会话 |
-| `/clear` | 清空当前对话 |
+| `/session status` | 查看当前持久会话与分支 |
+| `/session tree` | 查看持久会话树 |
+| `/session fork <name> [eventId]` | 从当前或指定事件创建分支 |
+| `/session use <branch>` | 切换持久分支，只切换模型上下文 |
+| `/clear` | 创建无继承历史的新根分支，旧历史保留 |
 | `/exit` | 退出 |
 
 命令补全：
@@ -631,13 +628,15 @@ MCP 安全边界：
 
 ## Runtime API
 
-Runtime API 适合把 DevCLI 接入本地脚本、编辑器插件或自动化系统。当前提供三个端点：
+Runtime API 适合把 DevCLI 接入本地脚本、编辑器插件或自动化系统。核心端点包括：
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/v1/threads` | `POST` | 创建 thread |
 | `/v1/threads/{id}/turns` | `POST` | 提交一轮 Agent 输入，异步执行 |
 | `/v1/threads/{id}/events` | `GET` | 以 SSE 格式回放事件 |
+| `/v1/threads/{id}/branches` | `GET/POST` | 列出或创建持久事件分支 |
+| `/v1/threads/{id}/branches/{branchId}/activate` | `POST` | 切换活动分支 |
 
 事件类型：
 
@@ -652,11 +651,11 @@ Runtime API 适合把 DevCLI 接入本地脚本、编辑器插件或自动化系
 - `thread.checkpoint.created`
 - `thread.checkpoint.failed`
 
-模型流、工具调用、工具结果和 turn 生命周期统一使用强类型 `RunEvent`。CLI Renderer 通过适配器消费同一事件流，Runtime API 将事件投影为带 `schema_version: 1` 的稳定 JSON 后写入 SSE；远程客户端不需要解析终端文本。工具参数在协议中保持 JSON 对象，工具结果包含结构化状态、错误码、重试标记、耗时和图片数量，不包含图片正文。
+模型流、工具调用、工具结果和 turn 生命周期统一使用强类型 `RunEvent`。CLI Renderer 通过适配器消费同一事件流，Runtime API 将事件投影为带 `schema_version: 2` 的稳定 JSON 后写入 SSE；远程客户端不需要解析终端文本。工具参数在协议中保持 JSON 对象，工具结果包含结构化状态、错误码、重试标记、耗时、展示意图和图片数量，不包含图片正文。
 
 默认只绑定本机地址 `127.0.0.1`，并要求 API Key。HTTP 请求线程与 Agent turn 执行线程隔离，turn 队列满时返回 `429 runtime_busy`。
 
-同一 thread 的多个 turn 有上下文延续：每个 turn 仍然新建独立 Agent 保持隔离。执行前从 SQLite 恢复最新压缩检查点，并完整重放检查点之后的已完成 turn；没有检查点时重放全部已完成 turn，不再固定截断最近 20 轮。检查点保存压缩后的消息窗口、覆盖事件、摘要、token 变化、语义守卫状态、Skill、RAG epoch 和 MCP 快照；动态 system prompt、reasoning 与图片正文不会持久化。检查点写入发生在 `turn.completed` 之后，失败只记录独立事件，不改变 turn 已完成终态。历史和检查点均持久化到磁盘；失败或被拒的 turn 不进入恢复上下文。
+同一 thread 的多个 turn 由 `RuntimeSessionTurnRunner` 复用会话运行时；进程恢复时从 SQLite 读取最新压缩检查点，并完整重放检查点之后的已完成 turn。没有检查点时重放全部已完成 turn。检查点保存压缩消息窗口与恢复元数据；事件日志仍是事实来源，失败或被拒的 turn 不进入模型上下文。
 
 ## Hooks
 
@@ -732,7 +731,7 @@ LLM tool call
 - LLM reasoning 会进入 live thinking 区，正文输出前会收敛为完整引用块。
 - 工具调用以紧凑块展示，文件写入会展示 diff。
 
-Lanterna renderer 保留为全屏三栏 TUI；plain renderer 适合 CI、日志或不支持 ANSI 的终端。
+plain renderer 适合 CI、日志或不支持 ANSI 的终端。Lanterna 不再有生产启动入口；旧配置会输出迁移提示并使用 inline。
 
 ## Benchmark Evaluation
 

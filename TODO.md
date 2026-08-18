@@ -1,5 +1,78 @@
 # TODO
 
+## 2026-08-18 Team 可判定验收与执行前评审
+
+- 状态：已实现并通过限定验证
+- 设计文档：`docs/superpowers/plans/2026-08-18-verifiable-acceptance-gate.md`
+- 增强设计：`docs/superpowers/plans/2026-08-18-scoped-acceptance-evidence-escalation.md`
+- 面试文档：`docs/interview-agent-architecture-review.md`
+- 生产化问答：`docs/interview-agent-current-vs-production-qa.md`
+- 已实现：验收标准强制声明 `TOOL` 或 `HUMAN`、判定信号和验证器；执行前拒绝缺失字段、重复 ID、未知工具和具有项目写入副作用的验证器；无效计划进入有界 Planner 修复
+- 已实现：每条标准通过 `applies_to` 绑定有效 DAG 节点或 `FINAL`；Planner 原始节点 ID 规范化时同步重写验收目标；普通 Worker/Reviewer 只接收节点局部标准，Final integration 重新检查全部标准
+- 已实现：确定性预检后由独立、无工具上下文的计划 Reviewer 检查原始需求到节点和验收标准的映射；结构化拒绝进入 Planner 有界修复，评审协议错误失败关闭；机器通过后用户仍可执行、补充重规划或取消；未完成 checkpoint 恢复前重新评审
+- 已实现：Reviewer 声称 TOOL 标准通过时，声明验证器必须出现在本轮真实成功工具调用中；Pre-Review 实际执行的命令计为 `execute_command` 证据，其他工具不能替代
+- 已实现：Reviewer 重试和原位重做结束后，最终结果显式输出失败节点、两类额度、最后原因、checkpoint ID 和人工处理选项，不自动重写整张 DAG
+- 已实现：checkpoint 协议升级到版本 7；旧协议缺失适用节点时迁移为 `FINAL`，未声明验证方式时迁移为人工验收；没有可执行验收标准的未完成 checkpoint 拒绝恢复
+- 验证：计划评审协议、SubAgent、Orchestrator、CLI 和 checkpoint 专项回归 124 项通过；全量回归共执行 1592 项测试，0 项失败、10 项跳过，主代码与测试代码编译通过
+- 未验证：真实 LLM、真实 Docker、真实终端交互和外部 MCP；未启动项目
+- 剩余风险：复杂自动验证的工具参数仍由 Reviewer 根据上下文选择；产物 Reviewer 问题列表尚未强制携带文件、行号、期望值和实际值；Planner 与计划 Reviewer 仍可能共享同一语义偏差，关键任务需要外部需求清单、隐藏测试或人工确认兜底
+
+## 2026-08-16 Team 在位重做恢复增强
+
+- 状态：已实现并通过限定验证
+- 已实现：checkpoint 协议升级到版本 5，持久化每个步骤已经消耗的在位重做次数；进程恢复后沿用原额度，不再重新获得一次重做机会
+- 已实现：每次在位重做记录步骤 ID、重做次数、失败原因、已修改文件和记录时间；另行保存未完成重做标记，恢复时不会重复执行额度耗尽的失败步骤，也不会丢失中途崩溃的合法重做
+- 影响范围：Team 步骤失败恢复、checkpoint 兼容与审计、在位重做测试
+- 未实现：执行中动态增加或删除任务、失败后自动修改整个依赖图、外部支付或消息等副作用补偿、每次 Agent 与工具尝试的完整事件账本
+- 验证：`StepRedoTrackerTest`、`AgentCheckpointTest` 与 `AgentOrchestratorTest` 共 95 项通过；主代码与测试代码编译通过
+- 剩余风险：恢复会继续执行已经批准但尚未形成终态的重做步骤；不提供跨外部系统的幂等或补偿保证
+
+## 2026-08-14 多用户与多租户会话隔离
+
+- 状态：设计方案已完成，尚未实施
+- 设计文档：`docs/multi-user-session-isolation-design.md`
+- 当前结论：现有 Runtime 只实现单一可信本地用户下的 thread 级会话隔离；全局 API Key、无 tenant_id 的存储、共享项目路径、长期记忆和审计目录均不满足多租户安全要求
+- 目标：保留默认 `local` 模式，新增失败关闭的 `server` 模式；统一引入 TenantContext、SessionKey 和 TenantResourceScope，并完成认证授权、数据范围、会话执行、工具资源、配额和强沙箱隔离
+- Hook 决策：保留现有受控 Hook，不新增第二套框架；多用户实现需扩展租户上下文、配置来源、用户审批、租户预算和审计字段，禁止让 Hook 承担身份认证、资源授权、数据库过滤和 PatchSet 冲突校验
+- 实施顺序：本地租户兼容 -> 认证与存储范围化 -> SessionCoordinator/TurnRuntime 拆分 -> 项目、记忆、RAG、Hook、MCP、浏览器和凭据隔离 -> Worker 沙箱、配额、公平调度和分布式租约 -> 安全验收
+- 影响范围：runtime、agent、tool、workspace、memory、rag、hook、mcp、browser、policy、audit、配置、迁移、测试和部署
+- 未实现：本条全部为待实施设计；当前 Runtime API 不得经反向代理直接作为多用户服务暴露
+- 验证计划：跨租户 API 攻击矩阵、相同资源 ID 复合范围、会话串行与幂等、缓存和记忆泄漏、路径逃逸、Hook/MCP/Browser/凭据隔离、配额公平性、多节点 lease/fencing、崩溃恢复和旧数据迁移
+- 剩余风险：组织内会话共享策略、管理员正文访问边界、租户 BYOK、PostgreSQL 部署和 Worker 容器平台仍需在实施前确定
+
+## 2026-08-14 DeepSeek Harness 可靠性机制对照
+
+- 状态：已实现并通过限定验证
+- 已实现：重复提醒和工具超时配置对语义非法值直接拒绝；工具调用使用独立期限和调用级取消信号，命令、Web 与 MCP 传递取消并在执行停止后返回；MCP 发送标准取消通知
+- 已实现：模型请求前写入 `model.context` 完整消息快照，`model.message` 保存用户、系统内部、插件、转向、跟进、助手和工具来源；Runtime 只从已完成 turn 恢复，新事件协议优先，旧 turn 输入输出与 checkpoint 保持兼容
+- 已实现：新增版本化会话投影缓存，记录日志身份、事件游标、标题、状态、Token、费用及工具/Hook 审计；缓存损坏、版本或分支身份不匹配时从事件日志重建
+- 已实现：工具契约携带普通、终端、差异和位置展示类型，工具调用与结果事件持久化展示元数据，Plain、Inline、Lanterna 和 Runtime API 使用同一结构化字段
+- 已实现：Hook 调用与结果成对记录稳定 Hook id、调用 id、耗时、状态和决策；按 `BLOCK > WARN > CONTINUE` 合并，多 Hook 全部执行后再阻断；生命周期结束前等待后台 Hook，安全权限和 HITL 边界不变
+- 已补强（2026-08-17）：执行内核按原始 `tool_call_id` 对工具结果去重、拒绝未知结果、补齐缺失结果并恢复原始顺序；并行危险工具的人工审批使用共享公平锁串行化；工具契约声明 `COOPERATIVE` / `INTERRUPT_ONLY` 取消能力；新增强类型执行状态事件，并区分重复提醒与硬熔断动作
+- 影响范围：工具执行与 Provider、MCP JSON-RPC/transport、运行事件、Runtime 会话恢复和投影、终端渲染、Hook 生命周期及配置
+- 验证：`mvn -q -DskipTests test-compile` 通过；工具取消、MCP、事件协议、Hook、渲染、压缩和 Web 相关 20 个限定测试类共 188 项通过
+- 未验证：未启动项目，未运行全量测试；未执行依赖 SQLite 的 Runtime 会话存储与 API 测试
+- 剩余风险：`INTERRUPT_ONLY` 第三方进程内工具仍可能忽略线程中断，系统会等待其实际结束，不能提供进程隔离级强制终止；模型上下文事件按现有安全约束不持久化图片正文，只保留文本和图片数量
+
+## 2026-08-12 运行治理、能力收敛与终端界面重构
+
+- 状态：分阶段实施中
+- 设计文档：`docs/superpowers/plans/2026-08-12-runtime-governance-terminal-ui-consolidation.md`
+- 目标：删除重复能力，合并 Plan/Team 的公共执行链，使用持久 Session Tree 取代 CLI 进程内分支，保留 Side-Git、PatchSet、Checkpoint 各自不可替代的恢复职责；终端只保留 Inline 与 Plain
+- 已实现（2026-08-18）：公开入口收敛为 ReAct 与 `/plan`；`/plan` 固定进入 Planner/Worker/Reviewer、Pre-Review、checkpoint 和隔离提交链路，串行或并行由 DAG 与资源冲突决定。`/plan --team` 与 `/team` 仅保留解析兼容并从帮助、补全中隐藏；STANDARD profile 与 `PlanExecuteAgent` 仅保留内部兼容
+- 已实现（2026-08-14，第二批）：抽取 `AgentRuntimeSupport` 与 `AgentStreamPresenter`，统一四条 Agent 路径的运行装配和流式状态机；Plan `Task` 与 Team `ExecutionStep` 实现公共只读 `ExecutionNode`；关键启动配置统一使用 `ConfigResolver` 并拒绝显式非法值；新增 `RunStore` / `SqliteRunStore` / `RunCoordinator`，后台任务和 Runtime API 共用 `runtime.db` 与同一 Run 状态；旧 `tasks.db` 只读导入；持久 `SessionTreeService` 替换 CLI 进程内分支；CLI JSONL 归档降级为可选诊断导出；生产入口不再进入 Lanterna，旧配置映射到 Inline
+- 已验证（2026-08-14）：主代码与测试代码编译通过；配置、RunStore、旧库导入、后台任务、Runtime API、Session Tree、CLI、渲染器、执行图、ReAct/Plan/Team 公共内核等 21 个限定测试类共 329 项通过
+- 成本控制：新增统一 RunBudget、预算档位、并行原子账本和 PricingCatalog；Planner、Worker、Reviewer、压缩与重试全部计入同一 run，未知模型不得展示猜测价格
+- 安全性：新增 Project Trust 与统一 ExecutionSecurityPolicy；ReAct 命令默认沙箱执行，项目写入使用工作区事务与 PatchSet；HITL 不得绕过策略拒绝
+- 可靠性（部分实现）：RuntimeThreadStore、DurableTaskManager、Runtime API turn 与 CLI turn 已统一写入 RunStore；后台崩溃残留保留 attempt 和恢复原因后回到队列。AgentCheckpoint、Patch Journal 和 Side-Git 引用尚未接入 RunStore
+- 可观测性：RunEvent 作为 UI 和 Runtime 状态事实，Trace、Metric、Audit 保持专用存储；统一 run/turn/step/agent/attempt 关联，并增加预算、沙箱、重试、恢复和快照事件
+- UI（部分实现）：新增持久 Session Tree；交互入口只创建 Inline 或 Plain，Lanterna/TUI 配置兼容映射到 Inline。完整 RunSnapshot 投影、四区状态重构和 `tui/` 源码物理删除尚未完成
+- Temporal 决策：当前本地版不引入；未来服务端出现跨机器 Worker、长时间审批、定时器和故障转移需求时，可实现 `TemporalWorkflowRuntime` 替换本地调度，禁止与 DurableTaskManager 叠加；Temporal history 只保存控制状态和 Artifact 引用
+- 影响范围：agent、runtime、budget、security、tool、workspace、snapshot、trace、render、tui、cli、配置、测试和文档
+- 未实现：RunBudget、PricingCatalog、Project Trust、RunStore 的 checkpoint/Side-Git 引用与完整恢复对账、统一可观测上下文、RunSnapshot 终端投影；内部 STANDARD 兼容实现尚未物理删除
+- 验证计划：各阶段完成后运行对应限定测试；本轮按用户要求不执行全量回归，真实终端启动仍需单独许可
+- 剩余风险：旧 `tasks.db` 当前只在启动时导入，不反向同步；剩余传统配置解析器仍需按模块迁移；ReAct 写入事务化、RunStore 完整恢复对账和 `tui/` 物理删除仍需分阶段实施
+
 ## 2026-08-11 上下文压缩预算治理优化
 
 - 状态：已实现并通过限定回归
@@ -36,7 +109,7 @@
 - 影响范围：AgentExecutionEngine、AgentTurnInbox、AgentSessionRuntime、CLI、无头 Runtime API、RunEvent 和会话测试
 - 已实现：Agent 执行层支持 Steering / Follow-up 双通道注入；CLI 活动输入复用 Agent 收件箱；无头执行复用统一 AgentSessionRuntime；运行事件支持 queue.updated；收件箱容量、优先级、批量消费和事件编码已有限定测试；Runtime checkpoint 已保存压缩 metadata，并增加稳定消息 id、parentId、role 和 index 的消息树快照，旧 SQLite 数据库启动时自动补列
 - 已修复：AgentSessionRuntime 的异步执行会复用调用方已有的 RunContext，并在工作线程结束后恢复原上下文；无外层上下文时才创建并关闭临时上下文
-- 未实现：Runtime API 尚未提供 SSE 长连接推送；CLI 分支目前只保存进程内快照；Extension Contract 尚未负责外部配置加载和扩展执行权限统一
+- 未实现：Runtime API 尚未提供 SSE 长连接推送；Extension Contract 尚未负责外部配置加载和扩展执行权限统一
 - 验证建议：运行收件箱与 RunEvent 编码限定测试；已通过 `mvn -DskipTests package` 和 plain renderer 的 `/help`、`/exit` 启动烟测；交互式方向键、底部 dock、HITL 按键仍需在真实终端现场验证
 - 风险：跨进程恢复不保存尚未交付的队列输入；Runtime API 和无头路径已使用会话运行时，CLI 已通过同步会话入口复用同一 RunContext
 
@@ -77,18 +150,18 @@
 - 影响范围：Runtime SQLite schema、事件与 checkpoint 归属、上下文恢复、RuntimeSessionTurnRunner、Runtime API 和测试
 - 已实现：新增 runtime branch 记录，包含 parent_branch_id、fork_event_id、name 和 active 状态；事件与 checkpoint 增加 branch_id；上下文按根到当前分支的 lineage 截取，fork 后主分支和子分支互不污染；提供分支创建、列举和激活接口；切换分支后关闭旧 AgentSessionRuntime，下一轮按目标分支重建；旧 SQLite 表启动时自动补列并把既有数据归入 main
 - 未实现：尚未实现分支重命名、删除和图形化展示；未对正在运行的 turn 允许强制切换分支
-- 验证建议：运行 RuntimeThreadStoreTest、RuntimeApiServerTest、CliCommandParserTest、DevCliCompleterTest、CliConversationBranchManagerTest；真实模型下验证从 fork 前约束继续两条不同任务
+- 验证建议：运行 RuntimeThreadStoreTest、RuntimeApiServerTest、CliCommandParserTest、DevCliCompleterTest、SessionTreeServiceTest；真实模型下验证从 fork 前约束继续两条不同任务
 - 风险：分支切换不会复制父分支的待处理队列，避免把旧分支输入带入新分支；大规模分支树和队列仍需分页接口
 
 ## 2026-08-07 CLI 对话分支
 
-- 状态：已实现（仅进程内快照）
+- 状态：已由 2026-08-14 持久 Session Tree 实现取代
 - 来源：Runtime API 已支持持久分支，CLI 需要提供一致的最小操作入口
-- 影响范围：CLI 命令解析、JLine 补全、Agent 历史切换和 CLI 测试
-- 已实现：新增 `/branch`、`/branch status`、`/branch create <name>`、`/branch use <name>`；分支名称经过长度和字符校验；CLI 只保存当前进程内的消息历史快照，不伪装成跨进程持久分支
-- 未实现：尚未接入 SQLite 持久化、分支重命名、删除、强制中断活动 turn 后切换和图形化分支树
-- 验证建议：运行 CLI 解析、补全和分支管理限定测试；真实终端验证 Tab 补全、切换后上下文隔离和活动 turn 边界
-- 风险：CLI 重启后分支快照丢失；当前实现不复制待处理 Steering / Follow-up 队列
+- 影响范围：CLI 命令解析、JLine 补全、SessionTreeService、RuntimeThreadStore、Agent 历史切换和 CLI 测试
+- 已实现：`/session status|tree|fork|use|new|clear|use-thread` 操作 `runtime.db` 中的持久会话树；`/branch` 保留兼容别名并只提示一次迁移；切换分支时重建模型上下文并清空待处理 Steering / Follow-up 队列
+- 未实现：分支重命名、删除、活动 turn 强制切换和图形化分支树
+- 验证建议：运行 CLI 解析、补全、RuntimeThreadStore 和 SessionTreeService 限定测试；真实终端验证 Tab 补全、跨进程恢复、切换后上下文隔离和活动 turn 边界
+- 风险：会话树只恢复模型上下文，不切换或回滚工作区文件；大规模会话树仍需分页和保留期限治理
 
 ## 2026-08-07 移除旧 CLI 活动队列
 
@@ -230,7 +303,7 @@
 ## 2026-07-09 Multi-Agent 资源租约释放补强
 
 - 状态：已实现
-- 来源：资源租约边界检查发现 `/team` Worker 只绑定 `runWithResourceLease` 上下文，步骤尝试结束后没有显式释放 step 租约；异常、Reviewer 打回或在位重做路径可能依赖超时抢占回收
+- 来源：资源租约边界检查发现 Plan Worker 只绑定 `runWithResourceLease` 上下文，步骤尝试结束后没有显式释放 step 租约；异常、Reviewer 打回或在位重做路径可能依赖超时抢占回收
 - 影响范围：`src/main/java/com/devcli/agent/AgentOrchestrator.java`、`src/test/java/com/devcli/agent/AgentOrchestratorTest.java`、`README.md`、`AGENTS.md`、`docs/agents-reference.md`、`docs/runtime-resource-lease-design.md`
 - 已实现：`AgentOrchestrator.executeWorkerOnce` 在 finally 中调用 `releaseResourceLeases(stepId)`；新增测试覆盖 Worker 尝试结束后释放资源租约
 - 后续实现（2026-07-13）：ToolRegistry 托管共享 `ResourceLeaseMaintenance`，project fork 复用单个后台线程；默认每 60 秒清理过期租约，最后一个注册关闭后可靠终止，周期支持系统属性和环境变量配置
@@ -282,7 +355,7 @@
 - 状态：已实现
 - 来源：用户指出 `stepModifiedFiles` 未进入后续步骤上下文、RAG 证据解析依赖展示文本、长期记忆英文策略和跨层去重存在缺口
 - 影响范围：`src/main/java/com/devcli/agent/`、`src/main/java/com/devcli/rag/`、`src/main/java/com/devcli/memory/`、`src/main/java/com/devcli/tool/`、`AGENTS.md`、`README.md`、`docs/agents-reference.md`
-- 已实现：Multi-Agent 步骤终态把 `stepModifiedFiles` 同步到运行态 `ExecutionStep`、checkpoint 和 WorkingMemory；依赖步骤上下文和 `/team resume` 恢复 completed artifact 时保留修改文件清单；`search_code` 已将结构化证据迁移到强类型旁路载荷，WorkingMemory 优先读取旁路证据并兼容旧 JSON 与旧展示文本；`ToolRegistry` 按项目路径复用 `CodeRetriever` / SQLite 连接；RAG 与 Memory 向量余弦相似度统一；`LongTermMemoryPolicy` 补充英文显式记忆、临时信息、个人属性和新状态规则；长期记忆注入抑制与 WorkingMemory 临时事实语义重复的条目
+- 已实现：Multi-Agent 步骤终态把 `stepModifiedFiles` 同步到运行态 `ExecutionStep`、checkpoint 和 WorkingMemory；依赖步骤上下文和 `/plan resume` 恢复 completed artifact 时保留修改文件清单；`search_code` 已将结构化证据迁移到强类型旁路载荷，WorkingMemory 优先读取旁路证据并兼容旧 JSON 与旧展示文本；`ToolRegistry` 按项目路径复用 `CodeRetriever` / SQLite 连接；RAG 与 Memory 向量余弦相似度统一；`LongTermMemoryPolicy` 补充英文显式记忆、临时信息、个人属性和新状态规则；长期记忆注入抑制与 WorkingMemory 临时事实语义重复的条目
 - 验证建议：`mvn -q -DskipTests=false "-Dtest=AgentOrchestratorTest,MemoryManagerTest,LongTermMemoryPolicyTest,SearchResultFormatterTest,VectorStoreTest,ToolRegistryTest" test`
 - 风险：已于 2026-07-17 迁移为强类型旁路结果；当前剩余风险是旁路对象只在进程内传递，历史 checkpoint 仍依赖旧文本兼容解析
 
