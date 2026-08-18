@@ -89,6 +89,27 @@ final class RuntimeCommandLauncher {
         }
     }
 
+    static DurableTaskManager openTaskManager(
+            AtomicReference<LlmClient> llmClientRef, RuntimeThreadStore store) {
+        try {
+            store.importLegacyTasks(DurableTaskManager.legacyDbPath());
+        } catch (Exception e) {
+            throw new IllegalStateException("旧后台任务导入失败: " + e.getMessage(), e);
+        }
+        return new DurableTaskManager(
+                store,
+                Path.of("."),
+                prompt -> runTask(prompt, llmClientRef.get()));
+    }
+
+    static RuntimeThreadStore openRuntimeStore() {
+        try {
+            return new RuntimeThreadStore(RuntimeThreadStore.defaultDbPath());
+        } catch (Exception e) {
+            throw new IllegalStateException("Runtime 存储初始化失败: " + e.getMessage(), e);
+        }
+    }
+
     private static String runTask(String prompt, LlmClient llmClient) {
         return HeadlessAgentRunner.run(
                 llmClient,

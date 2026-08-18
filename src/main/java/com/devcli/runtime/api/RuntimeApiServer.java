@@ -1,5 +1,7 @@
 package com.devcli.runtime.api;
 
+import com.devcli.config.ConfigResolver;
+import com.devcli.runtime.RunCoordinator;
 import com.devcli.runtime.event.RunEvent;
 import com.devcli.agent.AgentTurnInbox;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -28,6 +30,7 @@ public class RuntimeApiServer implements AutoCloseable {
     private static final int DEFAULT_TURN_QUEUE_SIZE = 64;
 
     private final RuntimeThreadStore store;
+    private final RunCoordinator runCoordinator;
     private final TurnRunner runner;
     private final String apiKey;
     private final HttpServer server;
@@ -40,6 +43,7 @@ public class RuntimeApiServer implements AutoCloseable {
             throw new IllegalArgumentException("Runtime API 需要配置 DEVCLI_RUNTIME_API_KEY 或 -Ddevcli.runtime.api.key");
         }
         this.store = store;
+        this.runCoordinator = new RunCoordinator(store);
         this.runner = runner;
         this.apiKey = apiKey;
         this.server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
@@ -64,11 +68,7 @@ public class RuntimeApiServer implements AutoCloseable {
     }
 
     public static String configuredApiKey() {
-        String configured = System.getProperty("devcli.runtime.api.key");
-        if (configured == null || configured.isBlank()) {
-            configured = System.getenv("DEVCLI_RUNTIME_API_KEY");
-        }
-        return configured;
+        return ConfigResolver.optional("devcli.runtime.api.key", "DEVCLI_RUNTIME_API_KEY");
     }
 
     public void start() {
@@ -116,6 +116,10 @@ public class RuntimeApiServer implements AutoCloseable {
                 handleEvents(exchange, threadId(path));
                 return;
             }
+            if ("GET".equals(method) && path.matches("/v1/threads/[^/]+")) {
+                handleThreadProjection(exchange, threadId(path));
+                return;
+            }
             if ("GET".equals(method) && path.matches("/v1/threads/[^/]+/branches")) {
                 handleBranches(exchange, threadId(path));
                 return;
@@ -147,12 +151,18 @@ public class RuntimeApiServer implements AutoCloseable {
             return;
         }
         String turnId = "turn_" + Long.toHexString(System.nanoTime());
+        runCoordinator.submitRuntime(
+                turnId, threadId, store.activeBranchId(threadId), input);
         try {
             serialTurnExecutor.execute(threadId,
                     () -> runTurn(threadId, turnId, input),
-                    fatal -> new RuntimeEventPublisher(store, threadId, turnId)
-                            .emit(new RunEvent.TurnFailed("fatal_runtime_error")));
+                    fatal -> {
+                        new RuntimeEventPublisher(store, threadId, turnId)
+                                .emit(new RunEvent.TurnFailed("fatal_runtime_error"));
+                        runCoordinator.fail(turnId, "fatal_runtime_error");
+                    });
         } catch (RejectedExecutionException e) {
+            runCoordinator.reject(turnId, "runtime_busy");
             new RuntimeEventPublisher(store, threadId, turnId)
                     .emit(new RunEvent.TurnRejected("runtime_busy"));
             writeJson(exchange, 429, "{\"error\":\"runtime_busy\"}");
@@ -215,11 +225,15 @@ public class RuntimeApiServer implements AutoCloseable {
             return;
         }
         boolean cancelled = runner.cancelCurrent(threadId);
+        runCoordinator.cancelActive(threadId, "user_cancelled");
         writeJson(exchange, 202, "{\"cancelled\":" + cancelled + "}");
     }
 
     private void runTurn(String threadId, String turnId, String input) {
         RuntimeEventPublisher events = new RuntimeEventPublisher(store, threadId, turnId);
+        if (!runCoordinator.start(turnId)) {
+            return;
+        }
         try {
             events.emit(new RunEvent.TurnStarted(input));
             TurnRunner.TurnResult runResult = runner.run(threadId, input, events);
@@ -230,8 +244,10 @@ public class RuntimeApiServer implements AutoCloseable {
                 events.emit(new RunEvent.MessageDelta(runResult.output()));
             }
             long completedEventId = events.publish(new RunEvent.TurnCompleted("completed"));
+            runCoordinator.complete(turnId, runResult.output());
             persistCheckpoint(events, threadId, completedEventId, runResult.checkpoint());
         } catch (Exception e) {
+            runCoordinator.fail(turnId, e.getMessage());
             events.emit(new RunEvent.TurnFailed(e.getMessage()));
         }
     }
@@ -265,6 +281,34 @@ public class RuntimeApiServer implements AutoCloseable {
         try (OutputStream os = exchange.getResponseBody()) {
             os.write(body);
         }
+    }
+
+    private void handleThreadProjection(HttpExchange exchange, String threadId) throws IOException {
+        if (!store.exists(threadId)) {
+            writeJson(exchange, 404, "{\"error\":\"thread_not_found\"}");
+            return;
+        }
+        RuntimeThreadStore.SessionProjection projection = store.sessionProjection(threadId);
+        var root = MAPPER.createObjectNode();
+        root.put("id", threadId);
+        root.put("object", "thread");
+        root.put("active_branch_id", store.activeBranchId(threadId));
+        root.put("projection_version", projection.projectionVersion());
+        root.put("log_identity", projection.logIdentity());
+        root.put("event_cursor", projection.eventCursor());
+        root.put("title", projection.title());
+        root.put("state", projection.state());
+        var usage = root.putObject("usage");
+        usage.put("input_tokens", projection.inputTokens());
+        usage.put("output_tokens", projection.outputTokens());
+        usage.put("cached_input_tokens", projection.cachedInputTokens());
+        usage.put("estimated_cost_cny", projection.estimatedCostCny());
+        var audit = root.putObject("audit");
+        audit.put("tool_calls", projection.toolCalls());
+        audit.put("tool_failures", projection.toolFailures());
+        audit.put("hook_calls", projection.hookCalls());
+        audit.put("hook_failures", projection.hookFailures());
+        writeJson(exchange, 200, root.toString());
     }
 
     private void handleBranches(HttpExchange exchange, String threadId) throws IOException {
@@ -373,16 +417,9 @@ public class RuntimeApiServer implements AutoCloseable {
     }
 
     private static int configuredPositiveInt(String propertyName, int defaultValue) {
-        String raw = System.getProperty(propertyName);
-        if (raw == null || raw.isBlank()) {
-            return defaultValue;
-        }
-        try {
-            int value = Integer.parseInt(raw.trim());
-            return value > 0 ? value : defaultValue;
-        } catch (NumberFormatException e) {
-            return defaultValue;
-        }
+        String environment = propertyName.toUpperCase(java.util.Locale.ROOT).replace('.', '_');
+        return ConfigResolver.intValue(
+                propertyName, environment, defaultValue, 1, Integer.MAX_VALUE);
     }
 
     private static ThreadFactory daemonThreadFactory(String prefix) {

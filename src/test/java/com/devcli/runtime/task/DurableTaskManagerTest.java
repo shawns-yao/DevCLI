@@ -2,6 +2,7 @@ package com.devcli.runtime.task;
 
 import com.devcli.runtime.CancellationContext;
 import com.devcli.runtime.RunContext;
+import com.devcli.runtime.store.SqliteRunStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -132,13 +133,8 @@ class DurableTaskManagerTest {
     }
 
     private static void markRunning(DurableTaskManager manager, String id) throws Exception {
-        var field = DurableTaskManager.class.getDeclaredField("connection");
-        field.setAccessible(true);
-        java.sql.Connection connection = (java.sql.Connection) field.get(manager);
-        try (java.sql.PreparedStatement ps = connection.prepareStatement(
-                "UPDATE runtime_tasks SET status = 'running' WHERE id = ?")) {
-            ps.setString(1, id);
-            ps.executeUpdate();
+        try (SqliteRunStore store = new SqliteRunStore(manager.dbPath())) {
+            assertTrue(store.start(id));
         }
     }
 }

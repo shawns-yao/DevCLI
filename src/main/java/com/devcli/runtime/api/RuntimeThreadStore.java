@@ -1,12 +1,16 @@
 package com.devcli.runtime.api;
 
 import com.devcli.agent.AgentTurnInbox;
+import com.devcli.config.ConfigResolver;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.CompactBoundaryMetadata;
 import com.devcli.runtime.event.RunEvent;
+import com.devcli.runtime.store.RunStore;
+import com.devcli.runtime.store.SqliteRunStore;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -21,11 +25,14 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
-public class RuntimeThreadStore implements AutoCloseable {
+public class RuntimeThreadStore implements RunStore {
     private static final Logger log = LoggerFactory.getLogger(RuntimeThreadStore.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final int SESSION_PROJECTION_VERSION = 1;
 
+    private final Path dbPath;
     private final Connection connection;
+    private final SqliteRunStore runStore;
 
     /** 一次完整 turn 的输入/输出对，供后续 turn 重放历史上下文。 */
     public record TurnRecord(String input, String output, long completedEventId) {
@@ -77,25 +84,129 @@ public class RuntimeThreadStore implements AutoCloseable {
         }
     }
 
+    private record EventReplay(List<LlmClient.Message> messages, long completedEventId) {
+    }
+
+    public record SessionProjection(
+            int projectionVersion,
+            String logIdentity,
+            long eventCursor,
+            String title,
+            String state,
+            long inputTokens,
+            long outputTokens,
+            long cachedInputTokens,
+            double estimatedCostCny,
+            long toolCalls,
+            long toolFailures,
+            long hookCalls,
+            long hookFailures) {
+        public SessionProjection {
+            logIdentity = logIdentity == null ? "" : logIdentity;
+            title = title == null ? "" : title;
+            state = state == null || state.isBlank() ? "idle" : state;
+            eventCursor = Math.max(0, eventCursor);
+            inputTokens = Math.max(0, inputTokens);
+            outputTokens = Math.max(0, outputTokens);
+            cachedInputTokens = Math.max(0, cachedInputTokens);
+            estimatedCostCny = Math.max(0D, estimatedCostCny);
+            toolCalls = Math.max(0, toolCalls);
+            toolFailures = Math.max(0, toolFailures);
+            hookCalls = Math.max(0, hookCalls);
+            hookFailures = Math.max(0, hookFailures);
+        }
+    }
+
     public RuntimeThreadStore(Path dbPath) throws SQLException {
+        this.dbPath = dbPath.toAbsolutePath().normalize();
         try {
-            Files.createDirectories(dbPath.getParent());
+            Path parent = this.dbPath.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
         } catch (Exception e) {
             throw new SQLException("无法创建 Runtime API 数据库目录: " + e.getMessage(), e);
         }
-        this.connection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
-        initTables();
+        this.runStore = new SqliteRunStore(this.dbPath);
+        try {
+            this.connection = DriverManager.getConnection("jdbc:sqlite:" + this.dbPath);
+            initTables();
+        } catch (SQLException e) {
+            runStore.close();
+            throw e;
+        }
     }
 
     public static Path defaultDbPath() {
-        String configured = System.getProperty("devcli.runtime.dir");
-        if (configured == null || configured.isBlank()) {
-            configured = System.getenv("DEVCLI_RUNTIME_DIR");
-        }
-        if (configured == null || configured.isBlank()) {
-            configured = Path.of(System.getProperty("user.home"), ".devcli", "runtime").toString();
-        }
+        String configured = ConfigResolver.stringValue(
+                "devcli.runtime.dir",
+                "DEVCLI_RUNTIME_DIR",
+                Path.of(System.getProperty("user.home"), ".devcli", "runtime").toString());
         return Path.of(configured).resolve("runtime.db");
+    }
+
+    @Override
+    public RunRecord create(Submission submission) {
+        return runStore.create(submission);
+    }
+
+    @Override
+    public Optional<RunRecord> find(String id) {
+        return runStore.find(id);
+    }
+
+    @Override
+    public List<RunRecord> list(Source source, int limit) {
+        return runStore.list(source, limit);
+    }
+
+    @Override
+    public Optional<RunRecord> claimNext(Source source) {
+        return runStore.claimNext(source);
+    }
+
+    @Override
+    public boolean start(String id) {
+        return runStore.start(id);
+    }
+
+    @Override
+    public boolean complete(String id, String result) {
+        return runStore.complete(id, result);
+    }
+
+    @Override
+    public boolean fail(String id, String error) {
+        return runStore.fail(id, error);
+    }
+
+    @Override
+    public boolean reject(String id, String reason) {
+        return runStore.reject(id, reason);
+    }
+
+    @Override
+    public boolean cancel(String id, String reason) {
+        return runStore.cancel(id, reason);
+    }
+
+    @Override
+    public Optional<RunRecord> activeRun(String threadId) {
+        return runStore.activeRun(threadId);
+    }
+
+    @Override
+    public int recoverRunning(Source source, Status target, String reason) {
+        return runStore.recoverRunning(source, target, reason);
+    }
+
+    @Override
+    public Path dbPath() {
+        return dbPath;
+    }
+
+    public int importLegacyTasks(Path legacyDbPath) throws SQLException {
+        return runStore.importLegacyTasks(legacyDbPath);
     }
 
     public synchronized String createThread() {
@@ -179,6 +290,18 @@ public class RuntimeThreadStore implements AutoCloseable {
         insertBranch(threadId, id, name == null || name.isBlank() ? id : name.trim(),
                 parentId, fork);
         return branches(threadId).stream().filter(branch -> branch.id().equals(id)).findFirst().orElseThrow();
+    }
+
+    public synchronized BranchRecord createRootBranch(String threadId, String name) {
+        ensureRootBranch(threadId);
+        String parentId = activeBranchId(threadId);
+        String id = "branch_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        insertBranch(threadId, id, name == null || name.isBlank() ? id : name.trim(),
+                parentId, 0);
+        return branches(threadId).stream()
+                .filter(branch -> branch.id().equals(id))
+                .findFirst()
+                .orElseThrow();
     }
 
     public synchronized void activateBranch(String threadId, String branchId) {
@@ -361,6 +484,15 @@ public class RuntimeThreadStore implements AutoCloseable {
     }
 
     public synchronized ContextView contextView(String threadId) {
+        Optional<EventReplay> replay = completedEventReplay(threadId);
+        if (replay.isPresent()) {
+            EventReplay value = replay.get();
+            return new ContextView(
+                    value.messages(),
+                    List.of(),
+                    value.completedEventId(),
+                    latestCheckpoint(threadId));
+        }
         Optional<RuntimeCheckpoint> checkpoint = latestCheckpoint(threadId);
         long coveredThrough = checkpoint.map(RuntimeCheckpoint::coveredThroughEventId).orElse(0L);
         List<TurnRecord> turns = turnHistoryAfter(threadId, coveredThrough);
@@ -372,6 +504,303 @@ public class RuntimeThreadStore implements AutoCloseable {
                 turns,
                 lastCompletedEventId,
                 checkpoint);
+    }
+
+    public synchronized SessionProjection sessionProjection(String threadId) {
+        List<RuntimeEvent> visible = events(threadId, 0);
+        String branchId = activeBranchId(threadId);
+        String logIdentity = projectionLogIdentity(threadId);
+        long currentCursor = visible.stream().mapToLong(RuntimeEvent::id).max().orElse(0L);
+        Optional<SessionProjection> cached = loadSessionProjection(threadId, branchId);
+        SessionProjection base = cached
+                .filter(value -> value.projectionVersion() == SESSION_PROJECTION_VERSION)
+                .filter(value -> value.logIdentity().equals(logIdentity))
+                .filter(value -> value.eventCursor() <= currentCursor)
+                .orElse(null);
+        if (base != null && base.eventCursor() == currentCursor) {
+            return base;
+        }
+
+        ProjectionAccumulator accumulator = base == null
+                ? new ProjectionAccumulator(logIdentity)
+                : ProjectionAccumulator.from(base);
+        long afterCursor = base == null ? 0L : base.eventCursor();
+        for (RuntimeEvent event : visible) {
+            if (event.id() > afterCursor) {
+                accumulator.apply(event);
+            }
+        }
+        SessionProjection projection = accumulator.finish(currentCursor);
+        saveSessionProjection(threadId, branchId, projection);
+        return projection;
+    }
+
+    private Optional<SessionProjection> loadSessionProjection(String threadId, String branchId) {
+        try (PreparedStatement ps = connection.prepareStatement("""
+                SELECT projection_version, log_identity, event_cursor, data_json
+                FROM runtime_session_projections
+                WHERE thread_id = ? AND branch_id = ?
+                """)) {
+            ps.setString(1, threadId);
+            ps.setString(2, branchId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return Optional.empty();
+                }
+                try {
+                    JsonNode data = MAPPER.readTree(rs.getString("data_json"));
+                    SessionProjection projection = new SessionProjection(
+                            rs.getInt("projection_version"),
+                            rs.getString("log_identity"),
+                            rs.getLong("event_cursor"),
+                            data.path("title").asText(""),
+                            data.path("state").asText("idle"),
+                            data.path("input_tokens").asLong(0),
+                            data.path("output_tokens").asLong(0),
+                            data.path("cached_input_tokens").asLong(0),
+                            data.path("estimated_cost_cny").asDouble(0D),
+                            data.path("tool_calls").asLong(0),
+                            data.path("tool_failures").asLong(0),
+                            data.path("hook_calls").asLong(0),
+                            data.path("hook_failures").asLong(0));
+                    return Optional.of(projection);
+                } catch (Exception corrupted) {
+                    log.warn("runtime session projection 损坏，将从事件重建: thread={}, branch={}",
+                            threadId, branchId);
+                    return Optional.empty();
+                }
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("读取 runtime session projection 失败: " + e.getMessage(), e);
+        }
+    }
+
+    private void saveSessionProjection(
+            String threadId, String branchId, SessionProjection projection) {
+        ObjectNode data = MAPPER.createObjectNode();
+        data.put("title", projection.title());
+        data.put("state", projection.state());
+        data.put("input_tokens", projection.inputTokens());
+        data.put("output_tokens", projection.outputTokens());
+        data.put("cached_input_tokens", projection.cachedInputTokens());
+        data.put("estimated_cost_cny", projection.estimatedCostCny());
+        data.put("tool_calls", projection.toolCalls());
+        data.put("tool_failures", projection.toolFailures());
+        data.put("hook_calls", projection.hookCalls());
+        data.put("hook_failures", projection.hookFailures());
+        try (PreparedStatement ps = connection.prepareStatement("""
+                INSERT INTO runtime_session_projections(
+                    thread_id, branch_id, projection_version, log_identity,
+                    event_cursor, data_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(thread_id, branch_id) DO UPDATE SET
+                    projection_version = excluded.projection_version,
+                    log_identity = excluded.log_identity,
+                    event_cursor = excluded.event_cursor,
+                    data_json = excluded.data_json,
+                    updated_at = excluded.updated_at
+                """)) {
+            ps.setString(1, threadId);
+            ps.setString(2, branchId);
+            ps.setInt(3, projection.projectionVersion());
+            ps.setString(4, projection.logIdentity());
+            ps.setLong(5, projection.eventCursor());
+            ps.setString(6, data.toString());
+            ps.setString(7, Instant.now().toString());
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("写入 runtime session projection 失败: " + e.getMessage(), e);
+        }
+    }
+
+    private String projectionLogIdentity(String threadId) {
+        StringBuilder identity = new StringBuilder(threadId);
+        for (BranchRecord branch : activeLineage(threadId)) {
+            identity.append('|').append(branch.id()).append('@').append(branch.forkEventId());
+        }
+        return identity.toString();
+    }
+
+    private static String projectionTitle(String input) {
+        if (input == null || input.isBlank()) {
+            return "";
+        }
+        String normalized = input.replaceAll("\\s+", " ").trim();
+        int codePoints = normalized.codePointCount(0, normalized.length());
+        if (codePoints <= 80) {
+            return normalized;
+        }
+        return normalized.substring(0, normalized.offsetByCodePoints(0, 80)) + "...";
+    }
+
+    private static final class ProjectionAccumulator {
+        private final String logIdentity;
+        private String title = "";
+        private String state = "idle";
+        private long inputTokens;
+        private long outputTokens;
+        private long cachedInputTokens;
+        private double estimatedCostCny;
+        private long toolCalls;
+        private long toolFailures;
+        private long hookCalls;
+        private long hookFailures;
+
+        private ProjectionAccumulator(String logIdentity) {
+            this.logIdentity = logIdentity;
+        }
+
+        private static ProjectionAccumulator from(SessionProjection projection) {
+            ProjectionAccumulator value = new ProjectionAccumulator(projection.logIdentity());
+            value.title = projection.title();
+            value.state = projection.state();
+            value.inputTokens = projection.inputTokens();
+            value.outputTokens = projection.outputTokens();
+            value.cachedInputTokens = projection.cachedInputTokens();
+            value.estimatedCostCny = projection.estimatedCostCny();
+            value.toolCalls = projection.toolCalls();
+            value.toolFailures = projection.toolFailures();
+            value.hookCalls = projection.hookCalls();
+            value.hookFailures = projection.hookFailures();
+            return value;
+        }
+
+        private void apply(RuntimeEvent event) {
+            try {
+                JsonNode data = MAPPER.readTree(event.data());
+                switch (event.type()) {
+                    case "turn.started" -> {
+                        if (title.isBlank()) {
+                            title = projectionTitle(data.path("input").asText(""));
+                        }
+                        state = "running";
+                    }
+                    case "turn.completed" -> state = "idle";
+                    case "turn.failed" -> state = "failed";
+                    case "turn.rejected" -> state = "rejected";
+                    case "session.state" -> state = data.path("state").asText(state);
+                    case "model.usage" -> {
+                        inputTokens += data.path("input_tokens").asLong(0);
+                        outputTokens += data.path("output_tokens").asLong(0);
+                        cachedInputTokens += data.path("cached_input_tokens").asLong(0);
+                        estimatedCostCny += data.path("estimated_cost_cny").asDouble(0D);
+                    }
+                    case "tool.calls" -> toolCalls += data.path("calls").size();
+                    case "tool.results" -> {
+                        JsonNode results = data.path("results");
+                        if (results.isArray()) {
+                            for (JsonNode result : results) {
+                                if (!"SUCCESS".equals(result.path("status").asText(""))) {
+                                    toolFailures++;
+                                }
+                            }
+                        }
+                    }
+                    case "hook.result" -> {
+                        hookCalls++;
+                        String decision = data.path("decision").asText("CONTINUE");
+                        if (!"CONTINUE".equals(decision)) {
+                            hookFailures++;
+                        }
+                    }
+                    default -> { }
+                }
+            } catch (Exception ignored) {
+                // 单条坏事件不破坏投影；事件日志仍保留以供诊断。
+            }
+        }
+
+        private SessionProjection finish(long cursor) {
+            return new SessionProjection(
+                    SESSION_PROJECTION_VERSION,
+                    logIdentity,
+                    cursor,
+                    title,
+                    state,
+                    inputTokens,
+                    outputTokens,
+                    cachedInputTokens,
+                    estimatedCostCny,
+                    toolCalls,
+                    toolFailures,
+                    hookCalls,
+                    hookFailures);
+        }
+    }
+
+    private Optional<EventReplay> completedEventReplay(String threadId) {
+        List<RuntimeEvent> visible = events(threadId, 0);
+        Map<String, Long> completedTurns = new HashMap<>();
+        for (RuntimeEvent event : visible) {
+            if (!"turn.completed".equals(event.type())) {
+                continue;
+            }
+            String turnId = eventTurnId(event);
+            if (!turnId.isBlank()) {
+                completedTurns.put(turnId, event.id());
+            }
+        }
+
+        RuntimeEvent selected = null;
+        RunEvent.ModelContext selectedContext = null;
+        String selectedTurnId = "";
+        for (RuntimeEvent event : visible) {
+            if (!"model.context".equals(event.type())) {
+                continue;
+            }
+            String turnId = eventTurnId(event);
+            Long completedEventId = completedTurns.get(turnId);
+            if (completedEventId == null || completedEventId < event.id()) {
+                continue;
+            }
+            Optional<RunEvent.ModelContext> decoded = RunEventJsonCodec.decodeModelContext(event.data());
+            if (decoded.isPresent() && (selected == null || event.id() > selected.id())) {
+                selected = event;
+                selectedContext = decoded.get();
+                selectedTurnId = turnId;
+            }
+        }
+        if (selected == null || selectedContext == null) {
+            return Optional.empty();
+        }
+
+        long completedEventId = completedTurns.get(selectedTurnId);
+        List<LlmClient.Message> messages = new ArrayList<>(selectedContext.toLlmMessages());
+        StringBuilder streamedOutput = new StringBuilder();
+        boolean assistantMessageRecorded = messages.stream()
+                .anyMatch(message -> "assistant".equals(message.role()));
+        for (RuntimeEvent event : visible) {
+            if (event.id() <= selected.id() || event.id() > completedEventId
+                    || !selectedTurnId.equals(eventTurnId(event))) {
+                continue;
+            }
+            if ("model.message".equals(event.type())) {
+                Optional<RunEvent.ModelMessage> decoded = RunEventJsonCodec.decodeModelMessage(event.data());
+                if (decoded.isPresent()) {
+                    LlmClient.Message message = decoded.get().message().toLlmMessage();
+                    messages.add(message);
+                    assistantMessageRecorded |= "assistant".equals(message.role());
+                }
+            } else if ("message.delta".equals(event.type())) {
+                try {
+                    streamedOutput.append(MAPPER.readTree(event.data()).path("content").asText(""));
+                } catch (Exception ignored) {
+                    // model.message 是主协议；delta 仅作为旧写入端的兼容回退。
+                }
+            }
+        }
+        if (!assistantMessageRecorded && !streamedOutput.isEmpty()) {
+            messages.add(LlmClient.Message.assistant(streamedOutput.toString()));
+        }
+        return Optional.of(new EventReplay(List.copyOf(messages), completedEventId));
+    }
+
+    private static String eventTurnId(RuntimeEvent event) {
+        try {
+            return MAPPER.readTree(event.data()).path("turn_id").asText("");
+        } catch (Exception ignored) {
+            return "";
+        }
     }
 
     public synchronized void saveCheckpoint(
@@ -586,6 +1015,18 @@ public class RuntimeThreadStore implements AutoCloseable {
                         PRIMARY KEY(thread_id, branch_id, sequence)
                     )
                     """);
+            stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS runtime_session_projections (
+                        thread_id TEXT NOT NULL,
+                        branch_id TEXT NOT NULL,
+                        projection_version INTEGER NOT NULL,
+                        log_identity TEXT NOT NULL,
+                        event_cursor INTEGER NOT NULL,
+                        data_json TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY(thread_id, branch_id)
+                    )
+                    """);
             ensureColumn(stmt, "runtime_threads", "active_branch_id",
                     "TEXT NOT NULL DEFAULT 'main'");
             ensureColumn(stmt, "runtime_events", "branch_id",
@@ -617,5 +1058,6 @@ public class RuntimeThreadStore implements AutoCloseable {
             connection.close();
         } catch (SQLException ignored) {
         }
+        runStore.close();
     }
 }

@@ -1,6 +1,8 @@
 package com.devcli.runtime.api;
 
+import com.devcli.llm.LlmClient;
 import com.devcli.runtime.event.RunEvent;
+import com.devcli.tool.ToolPresentation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -23,11 +25,13 @@ class RunEventJsonCodecTest {
 
         JsonNode payload = MAPPER.readTree(RunEventJsonCodec.encode(event, "turn_1"));
 
-        assertEquals(1, payload.path("schema_version").asInt());
+        assertEquals(2, payload.path("schema_version").asInt());
         assertEquals("turn_1", payload.path("turn_id").asText());
         assertEquals("call_1", payload.path("calls").get(0).path("id").asText());
         assertEquals("read_file", payload.path("calls").get(0).path("name").asText());
         assertEquals("a\"b.txt", payload.path("calls").get(0).path("arguments").path("path").asText());
+        assertEquals("LOCATIONS", payload.path("calls").get(0)
+                .path("presentation").path("kind").asText());
     }
 
     @Test
@@ -74,5 +78,44 @@ class RunEventJsonCodecTest {
         assertEquals("lsp.diagnostic", custom.path("message_type").asText());
         assertEquals("found issue", custom.path("content").asText());
         assertEquals("warning", custom.path("attributes").path("severity").asText());
+    }
+
+    @Test
+    void modelContextRoundTripsMessageSourceWithoutPersistingImageBody() throws Exception {
+        LlmClient.Message pluginMessage = LlmClient.Message.user(List.of(
+                LlmClient.ContentPart.text("inspect image"),
+                LlmClient.ContentPart.imageBase64("secret-base64", "image/png")),
+                LlmClient.MessageSource.PLUGIN);
+        RunEvent.ModelContext event = RunEvent.ModelContext.from(
+                3, List.of(LlmClient.Message.system("system"), pluginMessage));
+
+        String encoded = RunEventJsonCodec.encode(event, "turn_1");
+        RunEvent.ModelContext decoded = RunEventJsonCodec.decodeModelContext(encoded).orElseThrow();
+
+        assertFalse(encoded.contains("secret-base64"));
+        assertEquals(3, decoded.iteration());
+        assertEquals("PLUGIN", decoded.messages().get(1).source());
+        assertEquals(1, decoded.messages().get(1).imageCount());
+        assertEquals(LlmClient.MessageSource.PLUGIN,
+                decoded.toLlmMessages().get(1).source());
+    }
+
+    @Test
+    void toolResultPresentationMetadataIsReplayable() throws Exception {
+        ToolPresentation presentation = new ToolPresentation(
+                ToolPresentation.Kind.TERMINAL,
+                "执行检查",
+                "command",
+                Map.of("stream", "stdout"));
+        RunEvent.ToolResults event = new RunEvent.ToolResults(List.of(
+                new RunEvent.ToolResultData(
+                        "call_1", "check", "{\"command\":\"mvn test\"}", "ok",
+                        "SUCCESS", "NONE", false, 12, 0, presentation)));
+
+        JsonNode payload = MAPPER.readTree(RunEventJsonCodec.encode(event, "turn_1"));
+
+        JsonNode encodedPresentation = payload.path("results").get(0).path("presentation");
+        assertEquals("TERMINAL", encodedPresentation.path("kind").asText());
+        assertEquals("stdout", encodedPresentation.path("metadata").path("stream").asText());
     }
 }

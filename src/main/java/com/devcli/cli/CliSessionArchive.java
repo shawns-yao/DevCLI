@@ -1,5 +1,6 @@
 package com.devcli.cli;
 
+import com.devcli.config.ConfigResolver;
 import com.devcli.llm.LlmClient;
 import com.devcli.policy.SensitiveDataRedactor;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,7 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-/** 可选的普通 CLI 会话归档。默认关闭；ReAct 保存模型消息，Plan / Team 保存顶层输入输出。 */
+/** 可选的脱敏诊断导出；RunStore 才是会话恢复事实来源。 */
 final class CliSessionArchive {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Logger log = LoggerFactory.getLogger(CliSessionArchive.class);
@@ -27,11 +28,13 @@ final class CliSessionArchive {
     private final String sessionId = Instant.now().toString().replace(':', '-') + "-" + UUID.randomUUID();
 
     static CliSessionArchive fromEnvironment() {
-        boolean enabled = readBoolean("devcli.session.archive.enabled", "DEVCLI_SESSION_ARCHIVE_ENABLED", false);
-        int retention = readInt("devcli.session.archive.retention.days",
+        boolean enabled = ConfigResolver.booleanValue(
+                "devcli.session.archive.enabled", "DEVCLI_SESSION_ARCHIVE_ENABLED", false);
+        int retention = ConfigResolver.intValue(
+                "devcli.session.archive.retention.days",
                 "DEVCLI_SESSION_ARCHIVE_RETENTION_DAYS", 30, 1, 3650);
-        String configured = firstNonBlank(System.getProperty("devcli.session.archive.dir"),
-                System.getenv("DEVCLI_SESSION_ARCHIVE_DIR"));
+        String configured = ConfigResolver.optional(
+                "devcli.session.archive.dir", "DEVCLI_SESSION_ARCHIVE_DIR");
         Path directory = configured == null
                 ? Path.of(System.getProperty("user.home"), ".devcli", "history", "sessions")
                 : Path.of(configured).toAbsolutePath().normalize();
@@ -45,12 +48,16 @@ final class CliSessionArchive {
         cleanupExpired();
     }
 
-    synchronized void recordTurn(String mode, String submittedInput, String expandedInput,
+    synchronized void recordTurn(String threadId, String branchId, String mode,
+                                 String submittedInput, String expandedInput,
                                  String response, List<LlmClient.Message> modelMessages) {
         if (!enabled) return;
         Map<String, Object> record = new LinkedHashMap<>();
         record.put("timestamp", Instant.now().toString());
         record.put("sessionId", sessionId);
+        record.put("canonicalThreadId", threadId == null ? "" : threadId);
+        record.put("canonicalBranchId", branchId == null ? "" : branchId);
+        record.put("source", "derived_diagnostic_export");
         record.put("mode", mode);
         record.put("submittedInput", SensitiveDataRedactor.redact(submittedInput));
         record.put("expandedInput", SensitiveDataRedactor.redact(expandedInput));
@@ -119,23 +126,4 @@ final class CliSessionArchive {
         return result;
     }
 
-    private static boolean readBoolean(String property, String env, boolean fallback) {
-        String value = firstNonBlank(System.getProperty(property), System.getenv(env));
-        return value == null ? fallback : Boolean.parseBoolean(value);
-    }
-
-    private static int readInt(String property, String env, int fallback, int min, int max) {
-        String value = firstNonBlank(System.getProperty(property), System.getenv(env));
-        try {
-            int parsed = value == null ? fallback : Integer.parseInt(value);
-            return Math.max(min, Math.min(max, parsed));
-        } catch (NumberFormatException ignored) {
-            return fallback;
-        }
-    }
-
-    private static String firstNonBlank(String first, String second) {
-        if (first != null && !first.isBlank()) return first.trim();
-        return second == null || second.isBlank() ? null : second.trim();
-    }
 }

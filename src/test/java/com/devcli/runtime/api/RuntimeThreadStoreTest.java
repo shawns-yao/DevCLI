@@ -3,6 +3,8 @@ package com.devcli.runtime.api;
 import com.devcli.llm.LlmClient;
 import com.devcli.agent.AgentTurnInbox;
 import com.devcli.memory.CompactBoundaryMetadata;
+import com.devcli.runtime.event.RunEvent;
+import com.devcli.tool.ToolPresentation;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -11,6 +13,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -182,6 +185,101 @@ class RuntimeThreadStoreTest {
                     .map(AgentTurnInbox.Item::text).toList());
             assertEquals(List.of("continue"), snapshot.followUp().stream()
                     .map(AgentTurnInbox.Item::text).toList());
+        }
+    }
+
+    @Test
+    void contextViewPrefersCompletedModelContextAndIgnoresFailedTurn(@TempDir Path tempDir)
+            throws Exception {
+        try (RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"))) {
+            String threadId = store.createThread();
+            String completedTurn = "completed-turn";
+            store.appendEvent(threadId, "turn.started", RunEventJsonCodec.encode(
+                    new RunEvent.TurnStarted("original input"), completedTurn));
+            RunEvent.ModelContext context = RunEvent.ModelContext.from(1, List.of(
+                    LlmClient.Message.system("system"),
+                    LlmClient.Message.plugin("internal reminder")));
+            store.appendEvent(threadId, context.type(),
+                    RunEventJsonCodec.encode(context, completedTurn));
+            RunEvent.ModelMessage answer = RunEvent.ModelMessage.from(
+                    LlmClient.Message.assistant("answer"));
+            store.appendEvent(threadId, answer.type(),
+                    RunEventJsonCodec.encode(answer, completedTurn));
+            long completedEventId = store.appendEvent(threadId, "turn.completed",
+                    RunEventJsonCodec.encode(new RunEvent.TurnCompleted("completed"), completedTurn));
+
+            String failedTurn = "failed-turn";
+            store.appendEvent(threadId, "turn.started", RunEventJsonCodec.encode(
+                    new RunEvent.TurnStarted("must not replay"), failedTurn));
+            RunEvent.ModelContext failedContext = RunEvent.ModelContext.from(1, List.of(
+                    LlmClient.Message.system("wrong"), LlmClient.Message.user("wrong")));
+            store.appendEvent(threadId, failedContext.type(),
+                    RunEventJsonCodec.encode(failedContext, failedTurn));
+            store.appendEvent(threadId, "turn.failed",
+                    RunEventJsonCodec.encode(new RunEvent.TurnFailed("boom"), failedTurn));
+
+            RuntimeThreadStore.ContextView view = store.contextView(threadId);
+
+            assertEquals(completedEventId, view.lastCompletedEventId());
+            assertTrue(view.turns().isEmpty());
+            assertEquals(List.of("system", "internal reminder", "answer"),
+                    view.checkpointMessages().stream().map(LlmClient.Message::content).toList());
+            assertEquals(LlmClient.MessageSource.PLUGIN,
+                    view.checkpointMessages().get(1).source());
+        }
+    }
+
+    @Test
+    void sessionProjectionRebuildsCorruptedCacheFromEventLog(@TempDir Path tempDir)
+            throws Exception {
+        Path db = tempDir.resolve("runtime.db");
+        try (RuntimeThreadStore store = new RuntimeThreadStore(db)) {
+            String threadId = store.createThread();
+            String turnId = "turn-projection";
+            store.appendEvent(threadId, "turn.started", RunEventJsonCodec.encode(
+                    new RunEvent.TurnStarted("projection title"), turnId));
+            store.appendEvent(threadId, "model.usage", RunEventJsonCodec.encode(
+                    new RunEvent.ModelUsage(10, 4, 2, 0.125), turnId));
+            ToolPresentation presentation = new ToolPresentation(
+                    ToolPresentation.Kind.TERMINAL, "执行检查", "command",
+                    Map.of("stream", "stdout"));
+            store.appendEvent(threadId, "tool.calls", RunEventJsonCodec.encode(
+                    new RunEvent.ToolCalls(List.of(new RunEvent.ToolCallData(
+                            "call-1", "check", "{\"command\":\"verify\"}", presentation))),
+                    turnId));
+            store.appendEvent(threadId, "tool.results", RunEventJsonCodec.encode(
+                    new RunEvent.ToolResults(List.of(new RunEvent.ToolResultData(
+                            "call-1", "check", "{}", "failed", "ERROR",
+                            "EXECUTION_FAILED", false, 20, 0, presentation))), turnId));
+            store.appendEvent(threadId, "hook.result", RunEventJsonCodec.encode(
+                    new RunEvent.HookInvocationCompleted(
+                            "hook-call", "audit", "turn_end", "record",
+                            "FAILED", "WARN", 3, "failed"), turnId));
+            store.appendEvent(threadId, "turn.completed", RunEventJsonCodec.encode(
+                    new RunEvent.TurnCompleted("completed"), turnId));
+
+            RuntimeThreadStore.SessionProjection first = store.sessionProjection(threadId);
+            assertEquals("projection title", first.title());
+            assertEquals(10, first.inputTokens());
+            assertEquals(1, first.toolCalls());
+            assertEquals(1, first.toolFailures());
+            assertEquals(1, first.hookCalls());
+            assertEquals(1, first.hookFailures());
+
+            try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + db);
+                 PreparedStatement ps = connection.prepareStatement("""
+                         UPDATE runtime_session_projections
+                         SET data_json = 'not-json'
+                         WHERE thread_id = ? AND branch_id = 'main'
+                         """)) {
+                ps.setString(1, threadId);
+                ps.executeUpdate();
+            }
+
+            RuntimeThreadStore.SessionProjection rebuilt = store.sessionProjection(threadId);
+            assertEquals(first.title(), rebuilt.title());
+            assertEquals(first.eventCursor(), rebuilt.eventCursor());
+            assertEquals(first.estimatedCostCny(), rebuilt.estimatedCostCny());
         }
     }
 

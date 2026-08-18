@@ -1,21 +1,28 @@
 package com.devcli.runtime.api;
 
 import com.devcli.runtime.event.RunEvent;
+import com.devcli.tool.ToolPresentation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
 /** Runtime API 运行事件的稳定 JSON 投影。 */
-final class RunEventJsonCodec {
+public final class RunEventJsonCodec {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private RunEventJsonCodec() {
     }
 
-    static String encode(RunEvent event, String turnId) {
+    public static String encode(RunEvent event, String turnId) {
         ObjectNode payload = MAPPER.createObjectNode();
-        payload.put("schema_version", 1);
+        payload.put("schema_version", 2);
         if (turnId != null && !turnId.isBlank()) {
             payload.put("turn_id", turnId);
         }
@@ -27,6 +34,21 @@ final class RunEventJsonCodec {
             payload.put("content", reasoning.content());
         } else if (event instanceof RunEvent.MessageDelta message) {
             payload.put("content", message.content());
+        } else if (event instanceof RunEvent.ModelContext context) {
+            payload.put("iteration", context.iteration());
+            ArrayNode messages = payload.putArray("messages");
+            context.messages().forEach(message -> writeModelMessage(messages.addObject(), message));
+        } else if (event instanceof RunEvent.ModelMessage message) {
+            writeModelMessage(payload.putObject("message"), message.message());
+        } else if (event instanceof RunEvent.ModelUsage usage) {
+            payload.put("input_tokens", usage.inputTokens());
+            payload.put("output_tokens", usage.outputTokens());
+            payload.put("cached_input_tokens", usage.cachedInputTokens());
+            payload.put("estimated_cost_cny", usage.estimatedCostCny());
+        } else if (event instanceof RunEvent.ExecutionStateChanged state) {
+            payload.put("iteration", state.iteration());
+            payload.put("state", state.state().name());
+            payload.put("reason", state.reason());
         } else if (event instanceof RunEvent.QueueUpdated queue) {
             payload.put("channel", queue.channel());
             payload.put("steering_pending", queue.steeringPending());
@@ -48,6 +70,7 @@ final class RunEventJsonCodec {
                 item.put("id", call.id());
                 item.put("name", call.name());
                 item.set("arguments", parseArguments(call.argumentsJson()));
+                writePresentation(item.putObject("presentation"), call.presentation());
             }
         } else if (event instanceof RunEvent.ToolResults toolResults) {
             ArrayNode results = payload.putArray("results");
@@ -62,7 +85,22 @@ final class RunEventJsonCodec {
                 item.put("retryable", result.retryable());
                 item.put("elapsed_millis", result.elapsedMillis());
                 item.put("image_count", result.imageCount());
+                writePresentation(item.putObject("presentation"), result.presentation());
             }
+        } else if (event instanceof RunEvent.HookInvocationStarted hook) {
+            payload.put("invocation_id", hook.invocationId());
+            payload.put("hook_id", hook.hookId());
+            payload.put("hook_event", hook.hookEvent());
+            payload.put("tool_name", hook.toolName());
+        } else if (event instanceof RunEvent.HookInvocationCompleted hook) {
+            payload.put("invocation_id", hook.invocationId());
+            payload.put("hook_id", hook.hookId());
+            payload.put("hook_event", hook.hookEvent());
+            payload.put("tool_name", hook.toolName());
+            payload.put("status", hook.status());
+            payload.put("decision", hook.decision());
+            payload.put("elapsed_millis", hook.elapsedMillis());
+            payload.put("error", hook.error());
         } else if (event instanceof RunEvent.TurnCompleted completed) {
             payload.put("status", completed.status());
         } else if (event instanceof RunEvent.TurnFailed failed) {
@@ -81,6 +119,117 @@ final class RunEventJsonCodec {
             throw new IllegalArgumentException("不支持的运行事件: " + event.getClass().getName());
         }
         return payload.toString();
+    }
+
+    static Optional<RunEvent.ModelContext> decodeModelContext(String data) {
+        if (data == null || data.isBlank()) {
+            return Optional.empty();
+        }
+        try {
+            JsonNode root = MAPPER.readTree(data);
+            JsonNode values = root.path("messages");
+            if (!values.isArray()) {
+                return Optional.empty();
+            }
+            List<RunEvent.ModelMessageData> messages = new ArrayList<>();
+            for (JsonNode value : values) {
+                messages.add(readModelMessage(value));
+            }
+            return Optional.of(new RunEvent.ModelContext(
+                    root.path("iteration").asInt(0), messages));
+        } catch (Exception ignored) {
+            return Optional.empty();
+        }
+    }
+
+    static Optional<RunEvent.ModelMessage> decodeModelMessage(String data) {
+        if (data == null || data.isBlank()) {
+            return Optional.empty();
+        }
+        try {
+            JsonNode root = MAPPER.readTree(data);
+            JsonNode value = root.path("message");
+            return value.isObject()
+                    ? Optional.of(new RunEvent.ModelMessage(readModelMessage(value)))
+                    : Optional.empty();
+        } catch (Exception ignored) {
+            return Optional.empty();
+        }
+    }
+
+    private static void writeModelMessage(ObjectNode target, RunEvent.ModelMessageData message) {
+        target.put("role", message.role());
+        target.put("source", message.source());
+        target.put("content", message.content());
+        target.put("reasoning_content", message.reasoningContent());
+        target.put("tool_call_id", message.toolCallId());
+        target.put("image_count", message.imageCount());
+        ArrayNode toolCalls = target.putArray("tool_calls");
+        for (RunEvent.ToolCallData call : message.toolCalls()) {
+            ObjectNode item = toolCalls.addObject();
+            item.put("id", call.id());
+            item.put("name", call.name());
+            item.set("arguments", parseArguments(call.argumentsJson()));
+        }
+    }
+
+    private static RunEvent.ModelMessageData readModelMessage(JsonNode value) {
+        List<RunEvent.ToolCallData> calls = new ArrayList<>();
+        JsonNode toolCalls = value.path("tool_calls");
+        if (toolCalls.isArray()) {
+            for (JsonNode call : toolCalls) {
+                calls.add(new RunEvent.ToolCallData(
+                        call.path("id").asText(""),
+                        call.path("name").asText(""),
+                        argumentsJson(call.get("arguments"))));
+            }
+        }
+        return new RunEvent.ModelMessageData(
+                value.path("role").asText(""),
+                value.path("source").asText(""),
+                value.path("content").asText(""),
+                value.path("reasoning_content").asText(""),
+                calls,
+                value.path("tool_call_id").asText(""),
+                value.path("image_count").asInt(0));
+    }
+
+    private static void writePresentation(ObjectNode target, ToolPresentation presentation) {
+        ToolPresentation value = presentation == null
+                ? ToolPresentation.generic("")
+                : presentation;
+        target.put("kind", value.kind().name());
+        target.put("title", value.title());
+        target.put("primary_argument", value.primaryArgument());
+        ObjectNode metadata = target.putObject("metadata");
+        value.metadata().forEach(metadata::put);
+    }
+
+    static ToolPresentation readPresentation(JsonNode node, String toolName) {
+        if (node == null || !node.isObject()) {
+            return ToolPresentation.defaultFor(toolName);
+        }
+        ToolPresentation.Kind kind;
+        try {
+            kind = ToolPresentation.Kind.valueOf(node.path("kind").asText("GENERIC"));
+        } catch (IllegalArgumentException ignored) {
+            kind = ToolPresentation.Kind.GENERIC;
+        }
+        Map<String, String> metadata = new LinkedHashMap<>();
+        node.path("metadata").fields().forEachRemaining(entry ->
+                metadata.put(entry.getKey(), entry.getValue().asText("")));
+        return new ToolPresentation(
+                kind,
+                node.path("title").asText(toolName),
+                node.path("primary_argument").asText(""),
+                metadata);
+    }
+
+    private static String argumentsJson(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return "{}";
+        }
+        return node.isTextual() ? node.asText() : node.toString();
     }
 
     private static JsonNode parseArguments(String argumentsJson) {

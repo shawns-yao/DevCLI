@@ -3,6 +3,7 @@ package com.devcli.runtime.api;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.CompactBoundaryMetadata;
 import com.devcli.runtime.event.RunEvent;
+import com.devcli.runtime.store.RunStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -39,12 +40,18 @@ class RuntimeApiServerTest {
                             "{\"input\":\"hello\"}").build(),
                     HttpResponse.BodyHandlers.ofString());
             assertEquals(202, turn.statusCode());
+            String turnId = extract(turn.body(), "turn_");
 
             String events = waitForEvents(client, base, threadId);
             assertTrue(events.contains("event: turn.started"));
             assertTrue(events.contains("event: message.delta"));
             assertTrue(events.contains("reply:hello"));
             assertTrue(events.contains("event: turn.completed"));
+            RunStore.RunRecord run = store.find(turnId).orElseThrow();
+            assertEquals(RunStore.Source.RUNTIME_API, run.source());
+            assertEquals(RunStore.Status.COMPLETED, run.status());
+            assertEquals(threadId, run.threadId());
+            assertEquals("reply:hello", run.result());
         }
     }
 
