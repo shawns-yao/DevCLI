@@ -2,6 +2,8 @@ package com.devcli.hook;
 
 import com.devcli.hitl.ApprovalPolicy;
 import com.devcli.hitl.HitlToolRegistry;
+import com.devcli.runtime.event.RunEvent;
+import com.devcli.runtime.event.RunEventSink;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -14,10 +16,16 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
 import java.util.EnumMap;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Hook 执行器。Hook 只能调用已注册工具，所有调用继续经过 ToolRegistry 管线。
@@ -28,6 +36,12 @@ public final class HookDispatcher {
 
     private final ToolRegistry registry;
     private final Map<HookEvent, List<HookDefinition>> hooksByEvent;
+    private final AtomicLong invocationSequence = new AtomicLong();
+    private final CopyOnWriteArrayList<CompletableFuture<DispatchResult>> pending =
+            new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<Throwable> backgroundFailures =
+            new CopyOnWriteArrayList<>();
+    private volatile RunEventSink eventSink = RunEventSink.NO_OP;
 
     private HookDispatcher(ToolRegistry registry, List<HookDefinition> hooks) {
         this.registry = Objects.requireNonNull(registry, "registry");
@@ -55,16 +69,76 @@ public final class HookDispatcher {
         return hooksByEvent.isEmpty();
     }
 
-    public void dispatch(HookEvent event, HookContext context) {
+    public void setEventSink(RunEventSink eventSink) {
+        this.eventSink = eventSink == null ? RunEventSink.NO_OP : eventSink;
+    }
+
+    public DispatchResult dispatch(HookEvent event, HookContext context) {
         List<HookDefinition> hooks = hooksByEvent.get(event);
-        if (hooks == null || hooks.isEmpty()) return;
+        if (hooks == null || hooks.isEmpty()) return DispatchResult.continueExecution();
         HookContext effectiveContext = context == null ? HookContext.empty() : context;
+        List<InvocationResult> results = new ArrayList<>(hooks.size());
+        Decision merged = Decision.CONTINUE;
         for (HookDefinition hook : hooks) {
-            execute(hook, event, effectiveContext);
+            InvocationResult result = execute(hook, event, effectiveContext);
+            results.add(result);
+            merged = Decision.merge(merged, result.decision());
+        }
+        DispatchResult dispatchResult = new DispatchResult(merged, results);
+        if (merged == Decision.BLOCK) {
+            String errors = results.stream()
+                    .filter(result -> result.decision() == Decision.BLOCK)
+                    .map(result -> result.hookId() + ": " + result.error())
+                    .reduce((left, right) -> left + "; " + right)
+                    .orElse("required hook failed");
+            throw new HookExecutionException("Hook 执行失败并阻断: event="
+                    + event.wireName() + ", " + errors, dispatchResult);
+        }
+        return dispatchResult;
+    }
+
+    public CompletableFuture<DispatchResult> dispatchAsync(
+            HookEvent event, HookContext context, Executor executor) {
+        Objects.requireNonNull(executor, "executor");
+        CompletableFuture<DispatchResult> future = CompletableFuture.supplyAsync(
+                () -> dispatch(event, context), executor);
+        pending.add(future);
+        future.whenComplete((ignored, error) -> {
+            if (error != null) {
+                backgroundFailures.add(error instanceof CompletionException && error.getCause() != null
+                        ? error.getCause()
+                        : error);
+            }
+            pending.remove(future);
+        });
+        return future;
+    }
+
+    public void awaitPending() {
+        while (!pending.isEmpty()) {
+            for (CompletableFuture<DispatchResult> future : List.copyOf(pending)) {
+                future.handle((result, error) -> null).join();
+            }
+        }
+        if (!backgroundFailures.isEmpty()) {
+            Throwable failure = backgroundFailures.remove(0);
+            backgroundFailures.clear();
+            if (failure instanceof HookExecutionException hookFailure) {
+                throw hookFailure;
+            }
+            throw new HookExecutionException(Objects.requireNonNullElse(
+                    failure.getMessage(), failure.getClass().getSimpleName()));
         }
     }
 
-    private void execute(HookDefinition hook, HookEvent event, HookContext context) {
+    private InvocationResult execute(HookDefinition hook, HookEvent event, HookContext context) {
+        String invocationId = hookInvocationId(hook, event, context);
+        long startedAt = System.nanoTime();
+        eventSink.emit(new RunEvent.HookInvocationStarted(
+                invocationId, hook.id(), event.wireName(), hook.tool()));
+        String error = "";
+        Decision decision = Decision.CONTINUE;
+        String status = "SUCCESS";
         try {
             ToolRegistry.ToolEffect effect = registry.toolEffect(hook.tool());
             enforceEffectPolicy(hook, effect);
@@ -77,15 +151,30 @@ public final class HookDispatcher {
                             () -> registry.executeToolOutput(hook.tool(), argumentsJson))
                     : registry.executeToolOutput(hook.tool(), argumentsJson);
             if (output == null || !output.isSuccess()) {
-                fail(hook, event, output == null
+                error = output == null
                         ? "工具没有返回结果"
-                        : output.errorCode() + ": " + output.text());
+                        : output.errorCode() + ": " + output.text();
+                decision = failureDecision(hook);
+                status = "FAILED";
             }
-        } catch (HookExecutionException e) {
-            throw e;
         } catch (Exception e) {
-            fail(hook, event, e.getMessage());
+            error = Objects.requireNonNullElse(e.getMessage(), e.getClass().getSimpleName());
+            decision = failureDecision(hook);
+            status = "FAILED";
         }
+        long elapsedMillis = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                System.nanoTime() - startedAt);
+        InvocationResult result = new InvocationResult(
+                invocationId, hook.id(), event.wireName(), hook.tool(),
+                status, decision, elapsedMillis, error);
+        eventSink.emit(new RunEvent.HookInvocationCompleted(
+                result.invocationId(), result.hookId(), result.hookEvent(), result.toolName(),
+                result.status(), result.decision().name(), result.elapsedMillis(), result.error()));
+        if (decision == Decision.WARN) {
+            log.warn("Hook 执行警告: id={}, event={}, tool={}, error={}",
+                    hook.id(), event.wireName(), hook.tool(), error);
+        }
+        return result;
     }
 
     private void enforceEffectPolicy(HookDefinition hook, ToolRegistry.ToolEffect effect) {
@@ -105,15 +194,16 @@ public final class HookDispatcher {
         }
     }
 
-    private void fail(HookDefinition hook, HookEvent event, String message) {
-        String detail = "Hook 执行失败: id=" + hook.id()
-                + ", event=" + event.wireName()
-                + ", tool=" + hook.tool()
-                + ", error=" + Objects.requireNonNullElse(message, "unknown");
-        if (hook.failureMode() == HookDefinition.FailureMode.REQUIRED) {
-            throw new HookExecutionException(detail);
-        }
-        log.warn(detail);
+    private static Decision failureDecision(HookDefinition hook) {
+        return hook.failureMode() == HookDefinition.FailureMode.REQUIRED
+                ? Decision.BLOCK
+                : Decision.WARN;
+    }
+
+    private String hookInvocationId(HookDefinition hook, HookEvent event, HookContext context) {
+        String runId = context.runId().isBlank() ? "local" : context.runId();
+        return runId + ":" + hook.id() + ":" + event.wireName()
+                + ":" + invocationSequence.incrementAndGet();
     }
 
     private static Map<String, String> placeholders(HookEvent event, HookContext context) {
@@ -179,9 +269,64 @@ public final class HookDispatcher {
         }
     }
 
+    public enum Decision {
+        CONTINUE,
+        WARN,
+        BLOCK;
+
+        static Decision merge(Decision left, Decision right) {
+            Decision first = left == null ? CONTINUE : left;
+            Decision second = right == null ? CONTINUE : right;
+            return first.ordinal() >= second.ordinal() ? first : second;
+        }
+    }
+
+    public record InvocationResult(
+            String invocationId,
+            String hookId,
+            String hookEvent,
+            String toolName,
+            String status,
+            Decision decision,
+            long elapsedMillis,
+            String error) {
+        public InvocationResult {
+            invocationId = Objects.requireNonNullElse(invocationId, "");
+            hookId = Objects.requireNonNullElse(hookId, "");
+            hookEvent = Objects.requireNonNullElse(hookEvent, "");
+            toolName = Objects.requireNonNullElse(toolName, "");
+            status = Objects.requireNonNullElse(status, "");
+            decision = decision == null ? Decision.CONTINUE : decision;
+            elapsedMillis = Math.max(0, elapsedMillis);
+            error = Objects.requireNonNullElse(error, "");
+        }
+    }
+
+    public record DispatchResult(Decision decision, List<InvocationResult> invocations) {
+        public DispatchResult {
+            decision = decision == null ? Decision.CONTINUE : decision;
+            invocations = invocations == null ? List.of() : List.copyOf(invocations);
+        }
+
+        static DispatchResult continueExecution() {
+            return new DispatchResult(Decision.CONTINUE, List.of());
+        }
+    }
+
     public static final class HookExecutionException extends RuntimeException {
+        private final DispatchResult result;
+
         public HookExecutionException(String message) {
+            this(message, DispatchResult.continueExecution());
+        }
+
+        public HookExecutionException(String message, DispatchResult result) {
             super(message);
+            this.result = result == null ? DispatchResult.continueExecution() : result;
+        }
+
+        public DispatchResult result() {
+            return result;
         }
     }
 }

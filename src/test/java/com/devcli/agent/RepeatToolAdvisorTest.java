@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RepeatToolAdvisorTest {
@@ -182,6 +183,30 @@ class RepeatToolAdvisorTest {
             } else {
                 assertFalse(Character.isLowSurrogate(c));
             }
+        }
+    }
+
+    @Test
+    void rejectsInvalidThresholdConfiguration() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new RepeatToolAdvisor(List.of(1, 3), 500, List.of(), List.of()));
+        assertThrows(IllegalArgumentException.class,
+                () -> new RepeatToolAdvisor(List.of(3, 3), 500, List.of(), List.of()));
+    }
+
+    @Test
+    void rejectsInvalidSystemPropertyConfiguration() {
+        String thresholdsProperty = "devcli.repeat.tool.thresholds";
+        String previewProperty = "devcli.repeat.tool.arguments.preview.chars";
+        try {
+            System.setProperty(thresholdsProperty, "3,invalid,8");
+            assertThrows(IllegalArgumentException.class, RepeatToolAdvisor::fromSystemProperties);
+            System.clearProperty(thresholdsProperty);
+            System.setProperty(previewProperty, "0");
+            assertThrows(IllegalArgumentException.class, RepeatToolAdvisor::fromSystemProperties);
+        } finally {
+            System.clearProperty(thresholdsProperty);
+            System.clearProperty(previewProperty);
         }
     }
 }

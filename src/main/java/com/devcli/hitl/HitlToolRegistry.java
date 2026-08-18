@@ -9,6 +9,7 @@ import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
 
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 在统一工具执行管线的 HITL 阶段插入人工审批。
@@ -16,17 +17,25 @@ import java.util.concurrent.TimeUnit;
 public class HitlToolRegistry extends ToolRegistry {
 
     private final HitlHandler hitlHandler;
+    private final ReentrantLock approvalLock;
 
     public HitlToolRegistry(HitlHandler hitlHandler) {
+        this(hitlHandler, new ReentrantLock(true));
+    }
+
+    private HitlToolRegistry(HitlHandler hitlHandler, ReentrantLock approvalLock) {
         super();
         this.hitlHandler = hitlHandler;
+        this.approvalLock = approvalLock;
         registerExecutionMiddleware(ToolExecutionPipeline.Stage.HITL, this::applyHitl);
     }
 
     private HitlToolRegistry(HitlHandler hitlHandler,
-                             ResourceLeaseMaintenance maintenance) {
+                             ResourceLeaseMaintenance maintenance,
+                             ReentrantLock approvalLock) {
         super(maintenance);
         this.hitlHandler = hitlHandler;
+        this.approvalLock = approvalLock;
         registerExecutionMiddleware(ToolExecutionPipeline.Stage.HITL, this::applyHitl);
     }
 
@@ -65,7 +74,18 @@ public class HitlToolRegistry extends ToolRegistry {
         String originalArguments = context.argumentsJson();
         ApprovalRequest request = ApprovalRequest.of(
                 context.name(), originalArguments, null, null, sensitiveNotice);
-        ApprovalResult result = hitlHandler.requestApproval(request);
+        ApprovalResult result;
+        try {
+            approvalLock.lockInterruptibly();
+            try {
+                result = hitlHandler.requestApproval(request);
+            } finally {
+                approvalLock.unlock();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return ToolOutput.cancelled("等待人工审批时执行被取消");
+        }
 
         if (result.isRejected()) {
             String reason = result.reason() != null && !result.reason().isBlank()
@@ -101,7 +121,7 @@ public class HitlToolRegistry extends ToolRegistry {
 
     @Override
     protected ToolRegistry createProjectForkRegistry(ResourceLeaseMaintenance maintenance) {
-        return new HitlToolRegistry(hitlHandler, maintenance);
+        return new HitlToolRegistry(hitlHandler, maintenance, approvalLock);
     }
 
     public HitlHandler getHitlHandler() {

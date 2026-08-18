@@ -151,18 +151,11 @@ class ZhipuSearchProviderTest {
     }
 
     @Test
-    void invalidEngineFallsBackToDefault() throws IOException, InterruptedException {
-        server.enqueue(new MockResponse()
-                .setHeader("Content-Type", "application/json")
-                .setBody("{\"search_result\":[]}"));
+    void invalidEngineIsRejected() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> new ZhipuSearchProvider("test-key", "not_an_engine", client));
 
-        ZhipuSearchProvider provider = new ZhipuSearchProvider("test-key", "not_an_engine", client);
-        provider.search("test", 5);
-
-        RecordedRequest req = server.takeRequest();
-        String body = req.getBody().readUtf8();
-        assertTrue(body.contains("\"search_engine\":\"search_std\""),
-                "未知 engine 应回退到 search_std: " + body);
+        assertTrue(error.getMessage().contains("not_an_engine"));
     }
 
     @Test

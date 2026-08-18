@@ -2,6 +2,7 @@ package com.devcli.web;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.devcli.tool.ToolExecutionContext;
 import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -60,6 +61,12 @@ public class SerpApiSearchProvider implements SearchProvider {
 
     @Override
     public List<SearchResult> search(String query, int topK) throws IOException {
+        return search(query, topK, ToolExecutionContext.current(""));
+    }
+
+    @Override
+    public List<SearchResult> search(String query, int topK,
+                                     ToolExecutionContext executionContext) throws IOException {
         if (!isReady()) {
             throw new IOException(unavailableHint());
         }
@@ -75,7 +82,7 @@ public class SerpApiSearchProvider implements SearchProvider {
         Request request = new Request.Builder().url(url).get().build();
         log.info("SerpAPI search: query={}, topK={}", query, maxResults);
 
-        try (Response response = httpClient.newCall(request).execute()) {
+        return CancellableHttpCall.execute(httpClient, request, executionContext, response -> {
             if (!response.isSuccessful()) {
                 if (response.code() == 401) {
                     throw new IOException("SerpAPI Key 无效或已过期");
@@ -84,7 +91,7 @@ public class SerpApiSearchProvider implements SearchProvider {
             }
             String body = response.body() == null ? "" : response.body().string();
             return parse(body, maxResults);
-        }
+        });
     }
 
     private List<SearchResult> parse(String json, int maxResults) throws IOException {

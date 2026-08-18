@@ -4,6 +4,7 @@ import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.ResponseBody;
+import com.devcli.tool.ToolExecutionContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -55,6 +56,10 @@ public class WebFetcher {
     }
 
     public RawResponse fetch(String url) throws IOException {
+        return fetch(url, ToolExecutionContext.current(""));
+    }
+
+    public RawResponse fetch(String url, ToolExecutionContext executionContext) throws IOException {
         Request request = new Request.Builder()
                 .url(url)
                 .header("Accept", "text/html,application/xhtml+xml,*/*;q=0.9")
@@ -65,7 +70,7 @@ public class WebFetcher {
                 .build();
 
         log.info("web_fetch: GET {}", url);
-        try (Response response = httpClient.newCall(request).execute()) {
+        return CancellableHttpCall.execute(httpClient, request, executionContext, response -> {
             if (!response.isSuccessful()) {
                 throw new IOException("HTTP " + response.code() + " " + response.message());
             }
@@ -75,12 +80,12 @@ public class WebFetcher {
             }
 
             Charset charset = resolveCharset(response, body);
-            byte[] bytes = readBounded(body.byteStream());
+            byte[] bytes = readBounded(body.byteStream(), executionContext);
             boolean truncated = bytes.length >= maxBytes;
             String text = new String(bytes, charset);
             String contentType = response.header("Content-Type", "");
             return new RawResponse(url, text, contentType, charset.name(), truncated);
-        }
+        });
     }
 
     private Charset resolveCharset(Response response, ResponseBody body) {
@@ -93,12 +98,14 @@ public class WebFetcher {
         return StandardCharsets.UTF_8;
     }
 
-    private byte[] readBounded(InputStream input) throws IOException {
+    private byte[] readBounded(InputStream input,
+                               ToolExecutionContext executionContext) throws IOException {
         java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
         byte[] buffer = new byte[8192];
         int total = 0;
         int n;
         while ((n = input.read(buffer)) != -1) {
+            executionContext.throwIfCancelled();
             int remaining = maxBytes - total;
             if (remaining <= 0) {
                 break;

@@ -16,9 +16,11 @@ import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ToolRegistryTest {
@@ -391,6 +393,103 @@ class ToolRegistryTest {
         assertTrue(results.get(0).result().contains("工具执行超时"));
         assertEquals("result-fast", results.get(1).result(),
                 "未声明超时的工具继承批次超时，正常完成");
+    }
+
+    @Test
+    void shouldApplyTimeoutToSingleToolInvocation() {
+        ToolRegistry registry = new ToolRegistry(1, 10) {
+            @Override
+            public String executeTool(String name, String argumentsJson) {
+                try {
+                    Thread.sleep(3000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return "late";
+            }
+        };
+        registry.registerTool(new ToolRegistry.Tool(
+                "slow", "slow tool", JsonNodeFactory.instance.objectNode(),
+                args -> "slow", ToolRegistry.ToolEffect.READ_ONLY, 1));
+
+        long startedAt = System.nanoTime();
+        ToolRegistry.ToolExecutionResult result = registry.executeTools(List.of(
+                new ToolRegistry.ToolInvocation("call_1", "slow", "{}"))).get(0);
+
+        assertTrue(result.timedOut());
+        assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt) < 2500,
+                "单工具调用应遵守独立超时声明");
+    }
+
+    @Test
+    void shouldWaitForNonCooperativeToolToActuallyStopAfterTimeout() {
+        AtomicBoolean stopped = new AtomicBoolean();
+        try (ToolRegistry registry = new ToolRegistry(1, 5)) {
+            registry.registerTool(ToolRegistry.Tool.contextualStructured(
+                    "slow_cleanup",
+                    "slow cleanup",
+                    JsonNodeFactory.instance.objectNode(),
+                    (args, executionContext) -> {
+                        long finishAt = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(1250);
+                        while (System.nanoTime() < finishAt) {
+                            try {
+                                Thread.sleep(25);
+                            } catch (InterruptedException ignored) {
+                                Thread.interrupted();
+                            }
+                        }
+                        stopped.set(true);
+                        return ToolOutput.success("stopped");
+                    },
+                    1));
+
+            long startedAt = System.nanoTime();
+            ToolRegistry.ToolExecutionResult result = registry.executeTools(List.of(
+                    new ToolRegistry.ToolInvocation("call_1", "slow_cleanup", "{}"))).getFirst();
+            long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+
+            assertTrue(result.timedOut());
+            assertTrue(stopped.get(), "返回超时结果前工具任务必须已经停止");
+            assertTrue(elapsedMillis >= 1200,
+                    "不协作的工具不能在后台继续，收集端应等待其实际结束");
+        }
+    }
+
+    @Test
+    void shouldMeasureParallelToolDeadlineFromSubmission() {
+        ToolRegistry registry = new ToolRegistry(1, 10) {
+            @Override
+            public String executeTool(String name, String argumentsJson) {
+                try {
+                    Thread.sleep(3000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return "late-" + name;
+            }
+        };
+        registry.registerTool(new ToolRegistry.Tool(
+                "slow_a", "slow tool", JsonNodeFactory.instance.objectNode(),
+                args -> "slow", ToolRegistry.ToolEffect.READ_ONLY, 1));
+        registry.registerTool(new ToolRegistry.Tool(
+                "slow_b", "slow tool", JsonNodeFactory.instance.objectNode(),
+                args -> "slow", ToolRegistry.ToolEffect.READ_ONLY, 1));
+
+        long startedAt = System.nanoTime();
+        List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
+                new ToolRegistry.ToolInvocation("call_1", "slow_a", "{}"),
+                new ToolRegistry.ToolInvocation("call_2", "slow_b", "{}")));
+
+        assertTrue(results.stream().allMatch(ToolRegistry.ToolExecutionResult::timedOut));
+        assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt) < 2500,
+                "并行工具的独立超时应从提交时计算，不能随结果收集顺序延后");
+    }
+
+    @Test
+    void shouldRejectInvalidToolTimeoutDeclaration() {
+        assertThrows(IllegalArgumentException.class, () -> new ToolRegistry.Tool(
+                "invalid", "invalid", JsonNodeFactory.instance.objectNode(),
+                args -> "unused", ToolRegistry.ToolEffect.READ_ONLY, 0));
     }
 
     @Test

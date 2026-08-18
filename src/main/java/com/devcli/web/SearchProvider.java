@@ -1,5 +1,7 @@
 package com.devcli.web;
 
+import com.devcli.tool.ToolExecutionContext;
+
 import java.io.IOException;
 import java.util.List;
 
@@ -37,4 +39,10 @@ public interface SearchProvider {
      * @param topK  期望返回结果数量，实现可酌情截断
      */
     List<SearchResult> search(String query, int topK) throws IOException;
+
+    default List<SearchResult> search(String query, int topK,
+                                      ToolExecutionContext executionContext) throws IOException {
+        executionContext.throwIfCancelled();
+        return search(query, topK);
+    }
 }

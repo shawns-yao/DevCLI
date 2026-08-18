@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.devcli.mcp.McpClient;
 import com.devcli.mcp.protocol.McpToolDescriptor;
+import com.devcli.tool.ToolExecutionContext;
+import com.devcli.tool.ToolOutput;
 
 import java.util.List;
 import java.util.function.Function;
@@ -39,26 +41,38 @@ public final class McpResourceTool {
     }
 
     public static Function<String, String> invoker(McpClient client, McpToolDescriptor descriptor) {
-        return argumentsJson -> {
-            try {
-                if (LIST_RESOURCES.equals(descriptor.name())) {
-                    return McpClient.formatResources(client.listResources());
-                }
-                if (READ_RESOURCE.equals(descriptor.name())) {
-                    JsonNode args = argumentsJson == null || argumentsJson.isBlank()
-                            ? JsonNodeFactory.instance.objectNode()
-                            : MAPPER.readTree(argumentsJson);
-                    String uri = args.path("uri").asText("");
-                    if (uri.isBlank()) {
-                        return "读取 MCP resource 失败: 缺少必填参数 uri";
-                    }
-                    return McpClient.formatResourceContents(client.readResource(uri));
-                }
-                return "未知 MCP resource 虚拟工具: " + descriptor.name();
-            } catch (Exception e) {
-                return "MCP resource 工具调用失败 (" + descriptor.serverName() + "/" + descriptor.name() + "): " + e.getMessage();
+        return argumentsJson -> invoke(client, descriptor, argumentsJson, null).text();
+    }
+
+    public static ToolOutput invoke(
+            McpClient client,
+            McpToolDescriptor descriptor,
+            String argumentsJson,
+            ToolExecutionContext executionContext) {
+        try {
+            if (executionContext != null) {
+                executionContext.throwIfCancelled();
             }
-        };
+            if (LIST_RESOURCES.equals(descriptor.name())) {
+                return ToolOutput.text(McpClient.formatResources(
+                        client.listResources(executionContext)));
+            }
+            if (READ_RESOURCE.equals(descriptor.name())) {
+                JsonNode args = argumentsJson == null || argumentsJson.isBlank()
+                        ? JsonNodeFactory.instance.objectNode()
+                        : MAPPER.readTree(argumentsJson);
+                String uri = args.path("uri").asText("");
+                if (uri.isBlank()) {
+                    return ToolOutput.text("读取 MCP resource 失败: 缺少必填参数 uri");
+                }
+                return ToolOutput.text(McpClient.formatResourceContents(
+                        client.readResource(uri, executionContext)));
+            }
+            return ToolOutput.text("未知 MCP resource 虚拟工具: " + descriptor.name());
+        } catch (Exception e) {
+            return ToolOutput.text("MCP resource 工具调用失败 ("
+                    + descriptor.serverName() + "/" + descriptor.name() + "): " + e.getMessage());
+        }
     }
 
     private static ObjectNode emptyObjectSchema() {

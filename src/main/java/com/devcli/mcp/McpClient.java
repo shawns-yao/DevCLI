@@ -14,6 +14,7 @@ import com.devcli.mcp.protocol.McpToolDescriptor;
 import com.devcli.mcp.resources.McpResourceContent;
 import com.devcli.mcp.resources.McpResourceDescriptor;
 import com.devcli.mcp.transport.McpTransport;
+import com.devcli.tool.ToolExecutionContext;
 import com.devcli.tool.ToolOutput;
 
 import java.io.IOException;
@@ -57,9 +58,14 @@ public class McpClient implements AutoCloseable {
         }
         try {
             int seconds = Integer.parseInt(configured.trim());
-            return seconds > 0 ? seconds : DEFAULT_INITIALIZE_TIMEOUT_SECONDS;
-        } catch (NumberFormatException ignored) {
-            return DEFAULT_INITIALIZE_TIMEOUT_SECONDS;
+            if (seconds <= 0) {
+                throw new IllegalArgumentException(
+                        INITIALIZE_TIMEOUT_PROPERTY + " 必须是正整数: " + configured);
+            }
+            return seconds;
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                    INITIALIZE_TIMEOUT_PROPERTY + " 必须是正整数: " + configured, e);
         }
     }
 
@@ -113,6 +119,14 @@ public class McpClient implements AutoCloseable {
     }
 
     public ToolOutput callToolOutput(String toolName, String argumentsJson) throws IOException {
+        return callToolOutput(toolName, argumentsJson, null);
+    }
+
+    public ToolOutput callToolOutput(String toolName, String argumentsJson,
+                                     ToolExecutionContext executionContext) throws IOException {
+        if (executionContext != null) {
+            executionContext.throwIfCancelled();
+        }
         JsonNode args;
         if (argumentsJson == null || argumentsJson.isBlank()) {
             args = JsonNodeFactory.instance.objectNode();
@@ -127,7 +141,16 @@ public class McpClient implements AutoCloseable {
                 captureProgress(progressEvents, progressToken, message);
         rpc.onNotification(progressListener);
         try {
-            JsonNode result = rpc.request("tools/call", params, 60);
+            JsonNode result = executionContext == null
+                    ? rpc.request("tools/call", params, 60)
+                    : rpc.request(
+                            "tools/call",
+                            params,
+                            requestTimeoutSeconds(executionContext, 60),
+                            executionContext.cancellationToken());
+            if (executionContext != null) {
+                executionContext.throwIfCancelled();
+            }
             McpCallToolResult callResult = MAPPER.treeToValue(result, McpCallToolResult.class);
             ToolOutput output = appendProgress(callResult.toToolOutput(), progressEvents);
             if (callResult.isError()) {
@@ -205,8 +228,25 @@ public class McpClient implements AutoCloseable {
     }
 
     public List<McpResourceDescriptor> listResources() throws IOException {
+        return listResources(null);
+    }
+
+    public List<McpResourceDescriptor> listResources(
+            ToolExecutionContext executionContext) throws IOException {
         try {
-            JsonNode result = rpc.request("resources/list", JsonNodeFactory.instance.objectNode(), 30);
+            if (executionContext != null) {
+                executionContext.throwIfCancelled();
+            }
+            JsonNode result = executionContext == null
+                    ? rpc.request("resources/list", JsonNodeFactory.instance.objectNode(), 30)
+                    : rpc.request(
+                            "resources/list",
+                            JsonNodeFactory.instance.objectNode(),
+                            requestTimeoutSeconds(executionContext, 30),
+                            executionContext.cancellationToken());
+            if (executionContext != null) {
+                executionContext.throwIfCancelled();
+            }
             JsonNode resources = result.path("resources");
             if (!resources.isArray()) {
                 return List.of();
@@ -228,9 +268,26 @@ public class McpClient implements AutoCloseable {
     }
 
     public List<McpResourceContent> readResource(String uri) throws IOException {
+        return readResource(uri, null);
+    }
+
+    public List<McpResourceContent> readResource(
+            String uri, ToolExecutionContext executionContext) throws IOException {
+        if (executionContext != null) {
+            executionContext.throwIfCancelled();
+        }
         ObjectNode params = JsonNodeFactory.instance.objectNode();
         params.put("uri", uri);
-        JsonNode result = rpc.request("resources/read", params, 60);
+        JsonNode result = executionContext == null
+                ? rpc.request("resources/read", params, 60)
+                : rpc.request(
+                        "resources/read",
+                        params,
+                        requestTimeoutSeconds(executionContext, 60),
+                        executionContext.cancellationToken());
+        if (executionContext != null) {
+            executionContext.throwIfCancelled();
+        }
         JsonNode contents = result.path("contents");
         if (!contents.isArray()) {
             return List.of();
@@ -243,6 +300,19 @@ public class McpClient implements AutoCloseable {
             }
         }
         return resourceContents;
+    }
+
+    private static long requestTimeoutSeconds(
+            ToolExecutionContext executionContext, long fallbackSeconds) {
+        long remainingNanos = executionContext.remainingNanos();
+        if (remainingNanos == Long.MAX_VALUE) {
+            return fallbackSeconds;
+        }
+        long seconds = java.util.concurrent.TimeUnit.NANOSECONDS.toSeconds(remainingNanos);
+        if (java.util.concurrent.TimeUnit.SECONDS.toNanos(seconds) < remainingNanos) {
+            seconds++;
+        }
+        return Math.max(1L, seconds);
     }
 
     public void subscribeResource(String uri) throws IOException {

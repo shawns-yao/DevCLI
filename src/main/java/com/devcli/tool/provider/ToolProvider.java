@@ -1,6 +1,7 @@
 package com.devcli.tool.provider;
 
 import com.devcli.tool.ToolOutput;
+import com.devcli.tool.ToolExecutionContext;
 import com.devcli.tool.ToolRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 
@@ -52,6 +53,11 @@ public interface ToolProvider {
         String executeCommand(String command);
 
         ToolOutput executeCommandOutput(String command);
+
+        default ToolOutput executeCommandOutput(
+                String command, ToolExecutionContext executionContext) {
+            return executeCommandOutput(command);
+        }
 
         Consumer<String> memorySaver();
 

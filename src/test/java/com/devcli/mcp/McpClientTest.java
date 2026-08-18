@@ -225,6 +225,23 @@ class McpClientTest {
     }
 
     @Test
+    void invalidInitializeTimeoutFailsFast() {
+        String previous = System.getProperty("devcli.mcp.initialize.timeout.seconds");
+        try {
+            System.setProperty("devcli.mcp.initialize.timeout.seconds", "0");
+            assertThrows(IllegalArgumentException.class, McpClient::initializeTimeoutSeconds);
+            System.setProperty("devcli.mcp.initialize.timeout.seconds", "not-a-number");
+            assertThrows(IllegalArgumentException.class, McpClient::initializeTimeoutSeconds);
+        } finally {
+            if (previous == null) {
+                System.clearProperty("devcli.mcp.initialize.timeout.seconds");
+            } else {
+                System.setProperty("devcli.mcp.initialize.timeout.seconds", previous);
+            }
+        }
+    }
+
+    @Test
     void closeIsBestEffortAndDoesNotBlockOnServerSilence() throws Exception {
         // close 不再发 shutdown notification（server 卡死时会让 DevCLI 退出阻塞）。
         // 关闭语义改由 transport 层承担：stdio = stdin EOF + destroy；HTTP = DELETE session。

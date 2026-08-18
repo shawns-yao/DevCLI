@@ -2,6 +2,7 @@ package com.devcli.agent;
 
 import com.devcli.hook.HookDispatcher;
 import com.devcli.hook.HookLifecycle;
+import com.devcli.context.TokenUsageFormatter;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.SamplingRequestCoordinator;
 import com.devcli.runtime.CancellationContext;
@@ -10,6 +11,7 @@ import com.devcli.runtime.event.RunEvent;
 import com.devcli.runtime.event.RunEventSink;
 import com.devcli.runtime.event.RunEventStreamListener;
 import com.devcli.tool.ToolRegistry;
+import com.devcli.tool.ToolPresentation;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -37,6 +39,10 @@ final class AgentExecutionEngine<R> {
 
         default LlmClient.ToolChoice toolChoice(int iteration) {
             return LlmClient.ToolChoice.AUTO;
+        }
+
+        default ToolPresentation toolPresentation(String toolName) {
+            return ToolPresentation.defaultFor(toolName);
         }
 
         default int maxIterations() {
@@ -139,6 +145,7 @@ final class AgentExecutionEngine<R> {
         HookDispatcher.HookExecutionException hookFailure = null;
         Throwable primaryFailure = null;
         try {
+            hookLifecycle.bindEventSink(delegate.eventSink());
             hookLifecycle.startAgent();
             result = runLoop(delegate);
         } catch (HookDispatcher.HookExecutionException e) {
@@ -171,14 +178,25 @@ final class AgentExecutionEngine<R> {
 
     private R runLoop(Delegate<R> delegate) {
         while (true) {
+            RunEventSink eventSink = RunEventSink.composite(
+                    delegate.eventSink(),
+                    RunEventSink.fromStreamListener(delegate.streamListener()));
             if (delegate.isCancelled()) {
+                emitState(eventSink, RunEvent.ExecutionState.CANCELLED,
+                        budget.iteration(), "运行已取消");
                 return delegate.cancelled(budget);
             }
             if (budget.iteration() >= delegate.maxIterations()) {
+                emitState(eventSink, RunEvent.ExecutionState.ITERATION_LIMIT_REACHED,
+                        budget.iteration(), "达到当前执行入口的迭代上限");
                 return delegate.iterationLimitReached(budget);
             }
             AgentBudget.ExitReason exitReason = budget.check();
             if (exitReason != AgentBudget.ExitReason.WITHIN_BUDGET) {
+                String reason = budget.describeExit(exitReason);
+                emitState(eventSink, RunEvent.ExecutionState.BUDGET_EXCEEDED,
+                        budget.iteration(), reason);
+                emitCircuitBreaker(eventSink, exitReason, reason);
                 return delegate.budgetExceeded(exitReason, budget);
             }
 
@@ -189,12 +207,13 @@ final class AgentExecutionEngine<R> {
             delegate.beforeIteration(iteration, budget);
 
             try {
-                RunEventSink eventSink = RunEventSink.composite(
-                        delegate.eventSink(),
-                        RunEventSink.fromStreamListener(delegate.streamListener()));
+                emitState(eventSink, RunEvent.ExecutionState.THINKING,
+                        iteration, "正在请求模型生成下一步动作");
                 LlmClient.ChatResponse response;
                 try (SamplingRequestCoordinator.RequestScope ignored =
                              samplingRequests.begin(samplingRequestId(iteration))) {
+                    eventSink.emit(RunEvent.ModelContext.from(
+                            iteration, List.copyOf(delegate.history())));
                     response = llmClient.chat(
                             delegate.history(),
                             delegate.toolDefinitions(iteration),
@@ -202,6 +221,8 @@ final class AgentExecutionEngine<R> {
                             delegate.toolChoice(iteration));
                 }
                 if (delegate.isCancelled()) {
+                    emitState(eventSink, RunEvent.ExecutionState.CANCELLED,
+                            iteration, "模型响应后检测到运行取消");
                     return delegate.cancelled(budget);
                 }
 
@@ -209,6 +230,15 @@ final class AgentExecutionEngine<R> {
                         response.inputTokens(),
                         response.outputTokens(),
                         response.cachedInputTokens());
+                eventSink.emit(new RunEvent.ModelUsage(
+                        response.inputTokens(),
+                        response.outputTokens(),
+                        response.cachedInputTokens(),
+                        TokenUsageFormatter.estimatedCostCnyValue(
+                                llmClient,
+                                response.inputTokens(),
+                                response.outputTokens(),
+                                response.cachedInputTokens())));
                 delegate.afterResponse(response, iteration, budget);
                 response = Objects.requireNonNullElse(
                         delegate.normalizeResponse(response, iteration, budget), response);
@@ -220,25 +250,36 @@ final class AgentExecutionEngine<R> {
 
                 if (response.hasToolCalls()) {
                     budget.recordToolCalls(response.toolCalls());
-                    delegate.history().add(LlmClient.Message.assistant(
+                    LlmClient.Message assistantMessage = LlmClient.Message.assistant(
                             response.reasoningContent(),
                             response.content(),
-                            response.toolCalls()));
+                            response.toolCalls());
+                    delegate.history().add(assistantMessage);
+                    eventSink.emit(RunEvent.ModelMessage.from(assistantMessage));
                     delegate.beforeToolExecution(response, iteration, budget);
-                    eventSink.emit(RunEvent.ToolCalls.from(response.toolCalls()));
+                    eventSink.emit(RunEvent.ToolCalls.from(
+                            response.toolCalls(), delegate::toolPresentation));
                     if (hookLifecycle != null) {
                         hookLifecycle.toolExecutionsStarted(iteration, response.toolCalls());
                     }
 
-                    List<ToolRegistry.ToolExecutionResult> toolResults = delegate.executeTools(
+                    emitState(eventSink, RunEvent.ExecutionState.TOOL_EXECUTING,
+                            iteration, response.toolCalls().size() + " 个工具调用开始执行");
+                    List<ToolRegistry.ToolExecutionResult> returnedResults = delegate.executeTools(
                             response.toolCalls(), iteration);
-                    if (toolResults == null) {
-                        toolResults = List.of();
-                    }
+                    ToolResultReconciler.Reconciliation reconciliation =
+                            ToolResultReconciler.reconcile(
+                                    response.toolCalls(), returnedResults, delegate::toolPresentation);
+                    List<ToolRegistry.ToolExecutionResult> toolResults = reconciliation.results();
+                    emitPairingIssues(eventSink, reconciliation.issues());
+                    emitState(eventSink, RunEvent.ExecutionState.TOOL_RESULTS_PAIRED,
+                            iteration, toolResults.size() + " 个工具结果已按原调用顺序对账");
                     for (ToolRegistry.ToolExecutionResult toolResult : toolResults) {
                         budget.recordToolResult(toolResult);
-                        delegate.history().add(LlmClient.Message.tool(
-                                toolResult.id(), toolResult.result()));
+                        LlmClient.Message toolMessage = LlmClient.Message.tool(
+                                toolResult.id(), toolResult.result());
+                        delegate.history().add(toolMessage);
+                        eventSink.emit(RunEvent.ModelMessage.from(toolMessage));
                     }
                     eventSink.emit(RunEvent.ToolResults.from(toolResults));
                     if (hookLifecycle != null) {
@@ -248,9 +289,11 @@ final class AgentExecutionEngine<R> {
                     Optional<R> completed = delegate.completedAfterToolResults(
                             response, toolResults, iteration, budget);
                     if (completed.isPresent()) {
+                        emitState(eventSink, RunEvent.ExecutionState.COMPLETED,
+                                iteration, "工具结果满足当前执行入口的完成条件");
                         return completed.get();
                     }
-                    deliverQueuedMessages(delegate, AgentTurnInbox.Channel.STEERING,
+                    deliverQueuedMessages(delegate, eventSink, AgentTurnInbox.Channel.STEERING,
                             delegate.drainSteeringMessages());
                     injectRepeatToolReminders(delegate, eventSink, toolResults);
                     continue;
@@ -259,24 +302,34 @@ final class AgentExecutionEngine<R> {
                 String retryInstruction = delegate.retryInstructionAfterResponseWithoutTools(
                         response, iteration, budget);
                 if (retryInstruction != null && !retryInstruction.isBlank()) {
-                    delegate.history().add(LlmClient.Message.assistant(
-                            response.reasoningContent(), response.content()));
-                    delegate.history().add(LlmClient.Message.user(retryInstruction));
+                    LlmClient.Message assistantMessage = LlmClient.Message.assistant(
+                            response.reasoningContent(), response.content());
+                    LlmClient.Message retryMessage = LlmClient.Message.internalUser(retryInstruction);
+                    delegate.history().add(assistantMessage);
+                    delegate.history().add(retryMessage);
+                    eventSink.emit(RunEvent.ModelMessage.from(assistantMessage));
+                    eventSink.emit(RunEvent.ModelMessage.from(retryMessage));
                     continue;
                 }
 
-                delegate.history().add(LlmClient.Message.assistant(
-                        response.reasoningContent(), response.content()));
-                if (deliverQueuedMessages(delegate, AgentTurnInbox.Channel.STEERING,
+                LlmClient.Message assistantMessage = LlmClient.Message.assistant(
+                        response.reasoningContent(), response.content());
+                delegate.history().add(assistantMessage);
+                eventSink.emit(RunEvent.ModelMessage.from(assistantMessage));
+                if (deliverQueuedMessages(delegate, eventSink, AgentTurnInbox.Channel.STEERING,
                         delegate.drainSteeringMessages())) {
                     continue;
                 }
-                if (deliverQueuedMessages(delegate, AgentTurnInbox.Channel.FOLLOW_UP,
+                if (deliverQueuedMessages(delegate, eventSink, AgentTurnInbox.Channel.FOLLOW_UP,
                         delegate.drainFollowUpMessages())) {
                     continue;
                 }
+                emitState(eventSink, RunEvent.ExecutionState.COMPLETED,
+                        iteration, "模型返回最终答复");
                 return delegate.completed(response, budget);
             } catch (IOException e) {
+                emitState(eventSink, RunEvent.ExecutionState.FAILED,
+                        iteration, e.getMessage());
                 return delegate.failed(e, budget);
             }
         }
@@ -307,14 +360,23 @@ final class AgentExecutionEngine<R> {
         }
         if (!reminders.isEmpty()) {
             String text = joinReminders(reminders);
-            delegate.history().add(LlmClient.Message.user(text));
+            LlmClient.Message reminderMessage = LlmClient.Message.plugin(text);
+            delegate.history().add(reminderMessage);
+            eventSink.emit(RunEvent.ModelMessage.from(reminderMessage));
             RepeatToolAdvisor.Reminder first = reminders.get(0);
             eventSink.emit(new RunEvent.CustomMessage(
                     "repeat_tool_reminder",
                     text,
                     Map.of("tool", first.toolName(),
                             "consecutive", String.valueOf(first.consecutiveCount()),
-                            "gentle", String.valueOf(first.gentle()))));
+                            "gentle", String.valueOf(first.gentle()),
+                            "action", "ADVISORY")));
+            eventSink.emit(new RunEvent.CustomMessage(
+                    "tool_loop_guard",
+                    text,
+                    Map.of("tool", first.toolName(),
+                            "consecutive", String.valueOf(first.consecutiveCount()),
+                            "action", "ADVISORY")));
         }
         if (repeatToolAdvisor.suspendsStagnationExit()) {
             budget.resetStagnation();
@@ -332,14 +394,62 @@ final class AgentExecutionEngine<R> {
         return sb.toString();
     }
 
+    private void emitCircuitBreaker(RunEventSink eventSink,
+                                    AgentBudget.ExitReason exitReason,
+                                    String reason) {
+        if (exitReason != AgentBudget.ExitReason.STAGNATION_DETECTED
+                && exitReason != AgentBudget.ExitReason.REPEATED_TOOL_ERROR) {
+            return;
+        }
+        eventSink.emit(new RunEvent.CustomMessage(
+                "tool_loop_guard",
+                reason,
+                Map.of("action", "CIRCUIT_BREAKER",
+                        "reason", exitReason.name(),
+                        "window", String.valueOf(budget.stagnationWindow()))));
+    }
+
+    private static void emitPairingIssues(
+            RunEventSink eventSink, List<ToolResultReconciler.Issue> issues) {
+        if (issues == null || issues.isEmpty()) {
+            return;
+        }
+        String codes = issues.stream()
+                .map(ToolResultReconciler.Issue::code)
+                .distinct()
+                .sorted()
+                .reduce((left, right) -> left + "," + right)
+                .orElse("");
+        String content = issues.stream()
+                .map(issue -> issue.code() + "[" + issue.toolCallId() + "]: " + issue.detail())
+                .reduce((left, right) -> left + "; " + right)
+                .orElse("");
+        eventSink.emit(new RunEvent.CustomMessage(
+                "tool_result_pairing_anomaly",
+                content,
+                Map.of("count", String.valueOf(issues.size()), "codes", codes)));
+    }
+
+    private static void emitState(RunEventSink eventSink,
+                                  RunEvent.ExecutionState state,
+                                  int iteration,
+                                  String reason) {
+        eventSink.emit(new RunEvent.ExecutionStateChanged(iteration, state, reason));
+    }
+
     private boolean deliverQueuedMessages(Delegate<R> delegate,
+                                          RunEventSink eventSink,
                                           AgentTurnInbox.Channel channel,
                                           List<AgentTurnInbox.Item> items) {
         if (items == null || items.isEmpty()) {
             return false;
         }
         for (AgentTurnInbox.Item item : items) {
-            delegate.history().add(LlmClient.Message.user(item.text()));
+            LlmClient.Message message = channel == AgentTurnInbox.Channel.STEERING
+                    ? LlmClient.Message.steering(item.text())
+                    : LlmClient.Message.followUp(item.text());
+            delegate.history().add(message);
+            eventSink.emit(RunEvent.ModelMessage.from(message));
         }
         delegate.queuedMessagesDelivered(channel, List.copyOf(items));
         return true;

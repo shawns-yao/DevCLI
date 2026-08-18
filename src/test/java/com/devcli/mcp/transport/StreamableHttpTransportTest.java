@@ -2,9 +2,11 @@ package com.devcli.mcp.transport;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.devcli.runtime.CancellationToken;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
+import okhttp3.mockwebserver.SocketPolicy;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -14,6 +16,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -152,5 +156,30 @@ class StreamableHttpTransportTest {
         assertEquals("acme", req.getHeader("X-Tenant"));
         assertEquals("application/json, text/event-stream", req.getHeader("Accept"));
         assertNotNull(req.getHeader("MCP-Protocol-Version"), "必须发送协议版本 header");
+    }
+
+    @Test
+    void cancellationTokenCancelsActiveHttpCall() throws Exception {
+        server.enqueue(new MockResponse()
+                .setSocketPolicy(SocketPolicy.NO_RESPONSE));
+        StreamableHttpTransport transport = new StreamableHttpTransport(
+                server.url("/mcp").toString(), Map.of());
+        CancellationToken token = new CancellationToken();
+        CompletableFuture<Void> request = CompletableFuture.runAsync(() -> {
+            try {
+                transport.send(MAPPER.createObjectNode()
+                        .put("jsonrpc", "2.0")
+                        .put("id", 1)
+                        .put("method", "tools/call"), token);
+            } catch (IOException e) {
+                throw new CompletionException(e);
+            }
+        });
+        assertNotNull(server.takeRequest(2, TimeUnit.SECONDS));
+
+        token.cancel(CancellationToken.Reason.TIMEOUT, "deadline");
+
+        assertThrows(java.util.concurrent.ExecutionException.class,
+                () -> request.get(2, TimeUnit.SECONDS));
     }
 }

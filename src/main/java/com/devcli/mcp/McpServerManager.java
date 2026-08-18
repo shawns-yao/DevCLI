@@ -583,11 +583,13 @@ public class McpServerManager implements AutoCloseable {
                         McpResourceTool.LIST_RESOURCES,
                         McpResourceTool.READ_RESOURCE);
         toolRegistry.setMcpToolTrustPolicy(server.name(), trustPolicy);
-        toolRegistry.replaceMcpToolOutputsForServer(server.name(), tools,
+        toolRegistry.replaceContextualMcpToolOutputsForServer(server.name(), tools,
                 server.lifecycleVersion(),
                 descriptor -> isResourceVirtualTool(descriptor)
-                        ? args -> ToolOutput.text(McpResourceTool.invoker(client, descriptor).apply(args))
-                        : args -> invokeMcpToolOutput(client, descriptor, args));
+                        ? (args, executionContext) -> McpResourceTool.invoke(
+                                client, descriptor, args, executionContext)
+                        : (args, executionContext) -> invokeMcpToolOutput(
+                                client, descriptor, args, executionContext));
     }
 
     private boolean isResourceVirtualTool(McpToolDescriptor descriptor) {
@@ -642,9 +644,13 @@ public class McpServerManager implements AutoCloseable {
      * MCP 工具执行入口：把 LLM 给的 JSON 参数透传给 server 的 tools/call，并把异常转成 LLM 可读字符串。
      * 提取成独立方法是为了让 server 维度的错误信息（serverName/toolName）在堆栈和日志里清晰可见。
      */
-    private static ToolOutput invokeMcpToolOutput(McpClient client, McpToolDescriptor descriptor, String argumentsJson) {
+    private static ToolOutput invokeMcpToolOutput(
+            McpClient client,
+            McpToolDescriptor descriptor,
+            String argumentsJson,
+            com.devcli.tool.ToolExecutionContext executionContext) {
         try {
-            return client.callToolOutput(descriptor.name(), argumentsJson);
+            return client.callToolOutput(descriptor.name(), argumentsJson, executionContext);
         } catch (Exception e) {
             return ToolOutput.text("MCP 工具调用失败 (" + descriptor.serverName() + "/" + descriptor.name() + "): "
                     + e.getMessage());

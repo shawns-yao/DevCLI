@@ -3,6 +3,7 @@ package com.devcli.web;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.devcli.tool.ToolExecutionContext;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -75,7 +76,10 @@ public class ZhipuSearchProvider implements SearchProvider {
             return DEFAULT_ENGINE;
         }
         String trimmed = raw.trim();
-        return ALLOWED_ENGINES.contains(trimmed) ? trimmed : DEFAULT_ENGINE;
+        if (!ALLOWED_ENGINES.contains(trimmed)) {
+            throw new IllegalArgumentException("不支持的智谱搜索引擎: " + trimmed);
+        }
+        return trimmed;
     }
 
     @Override
@@ -96,6 +100,12 @@ public class ZhipuSearchProvider implements SearchProvider {
 
     @Override
     public List<SearchResult> search(String query, int topK) throws IOException {
+        return search(query, topK, ToolExecutionContext.current(""));
+    }
+
+    @Override
+    public List<SearchResult> search(String query, int topK,
+                                     ToolExecutionContext executionContext) throws IOException {
         if (!isReady()) {
             throw new IOException(unavailableHint());
         }
@@ -115,7 +125,7 @@ public class ZhipuSearchProvider implements SearchProvider {
                 .build();
         log.info("Zhipu search: query={}, engine={}, count={}", query, searchEngine, count);
 
-        try (Response response = httpClient.newCall(request).execute()) {
+        return CancellableHttpCall.execute(httpClient, request, executionContext, response -> {
             String body = response.body() == null ? "" : response.body().string();
             if (!response.isSuccessful()) {
                 if (response.code() == 401) {
@@ -125,7 +135,7 @@ public class ZhipuSearchProvider implements SearchProvider {
                         + truncate(body, 200));
             }
             return parse(body, count);
-        }
+        });
     }
 
     private List<SearchResult> parse(String json, int maxResults) throws IOException {

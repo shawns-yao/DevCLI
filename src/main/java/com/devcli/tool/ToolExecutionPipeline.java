@@ -44,13 +44,16 @@ public final class ToolExecutionPipeline {
     public static final class Context {
         private final String name;
         private final String invocationId;
+        private final ToolExecutionContext executionContext;
         private String argumentsJson;
         private final Map<String, Object> attributes = new HashMap<>();
 
-        private Context(String name, String argumentsJson, String invocationId) {
+        private Context(String name, String argumentsJson, String invocationId,
+                        ToolExecutionContext executionContext) {
             this.name = name;
             this.argumentsJson = argumentsJson == null || argumentsJson.isBlank() ? "{}" : argumentsJson;
             this.invocationId = invocationId;
+            this.executionContext = Objects.requireNonNull(executionContext, "executionContext");
         }
 
         public String name() {
@@ -63,6 +66,10 @@ public final class ToolExecutionPipeline {
 
         public String invocationId() {
             return invocationId;
+        }
+
+        public ToolExecutionContext executionContext() {
+            return executionContext;
         }
 
         public void replaceArguments(String argumentsJson) {
@@ -109,11 +116,18 @@ public final class ToolExecutionPipeline {
     }
 
     public ToolOutput execute(String name, String argumentsJson, String invocationId) {
+        return execute(name, argumentsJson, invocationId,
+                ToolExecutionContext.current(invocationId));
+    }
+
+    public ToolOutput execute(String name, String argumentsJson, String invocationId,
+                              ToolExecutionContext executionContext) {
         List<RegisteredMiddleware> snapshot;
         synchronized (this) {
             snapshot = List.copyOf(middleware);
         }
-        return proceed(snapshot, 0, new Context(name, argumentsJson, invocationId));
+        return proceed(snapshot, 0, new Context(
+                name, argumentsJson, invocationId, executionContext));
     }
 
     private ToolOutput proceed(List<RegisteredMiddleware> snapshot, int index, Context context) {

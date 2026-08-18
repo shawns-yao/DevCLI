@@ -1,6 +1,7 @@
 package com.devcli.tool.provider;
 
 import com.devcli.tool.ToolErrorCode;
+import com.devcli.tool.ToolExecutionContext;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.web.FetchResult;
@@ -25,7 +26,7 @@ public final class WebToolProvider implements ToolProvider {
 
     @Override
     public void register(ToolContext context) {
-        context.registerTool(ToolRegistry.Tool.structured(
+        context.registerTool(ToolRegistry.Tool.contextualStructured(
                 "web_search",
                 "搜索互联网，获取实时信息（最新版本、官方文档、技术资讯等）。" +
                         "支持 SerpAPI（默认）和 SearXNG（自托管）两种 provider，由 SEARCH_PROVIDER 环境变量切换。",
@@ -33,11 +34,12 @@ public final class WebToolProvider implements ToolProvider {
                         new ToolParameter("query", "string", "搜索关键词，例如'Java 21 新特性'、'Spring Boot 3.3 release notes'", true),
                         new ToolParameter("top_k", "integer", "返回结果数量（默认5）", false)
                 ),
-                args -> webSearchOutput(args.get("query"), parseInt(args.get("top_k"), 5)),
+                (args, executionContext) -> webSearchOutput(
+                        args.get("query"), parseInt(args.get("top_k"), 5), executionContext),
                 WEB_TOOL_TIMEOUT_SECONDS
         ));
 
-        context.registerTool(ToolRegistry.Tool.structured(
+        context.registerTool(ToolRegistry.Tool.contextualStructured(
                 "web_fetch",
                 "抓取指定 URL，提取正文转 Markdown。" +
                         "适用静态 / SSR 页面（博客、文档、官网）；JS 渲染或防爬站会返回空正文，本期不重试。",
@@ -45,16 +47,20 @@ public final class WebToolProvider implements ToolProvider {
                         new ToolParameter("url", "string", "完整 URL，需 http 或 https 协议", true),
                         new ToolParameter("max_chars", "integer", "返回 Markdown 最大字符数（默认 8000，超出截断）", false)
                 ),
-                args -> webFetchOutput(args.get("url"), parseInt(args.get("max_chars"), DEFAULT_FETCH_MAX_CHARS)),
+                (args, executionContext) -> webFetchOutput(
+                        args.get("url"),
+                        parseInt(args.get("max_chars"), DEFAULT_FETCH_MAX_CHARS),
+                        executionContext),
                 WEB_TOOL_TIMEOUT_SECONDS
         ));
     }
 
     String webSearch(String query, int topK) {
-        return webSearchOutput(query, topK).text();
+        return webSearchOutput(query, topK, ToolExecutionContext.current("")).text();
     }
 
-    private ToolOutput webSearchOutput(String query, int topK) {
+    private ToolOutput webSearchOutput(String query, int topK,
+                                       ToolExecutionContext executionContext) {
         if (query == null || query.isBlank()) {
             return ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS,
                     "搜索关键词不能为空", false);
@@ -65,7 +71,8 @@ public final class WebToolProvider implements ToolProvider {
                     provider.unavailableHint(), true);
         }
         try {
-            List<SearchResult> results = provider.search(query.trim(), topK);
+            List<SearchResult> results = provider.search(
+                    query.trim(), topK, executionContext);
             return ToolOutput.success(formatSearchResults(provider.name(), query, results));
         } catch (Exception e) {
             return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
@@ -74,10 +81,11 @@ public final class WebToolProvider implements ToolProvider {
     }
 
     String webFetch(String url, int maxChars) {
-        return webFetchOutput(url, maxChars).text();
+        return webFetchOutput(url, maxChars, ToolExecutionContext.current("")).text();
     }
 
-    private ToolOutput webFetchOutput(String url, int maxChars) {
+    private ToolOutput webFetchOutput(String url, int maxChars,
+                                      ToolExecutionContext executionContext) {
         if (url == null || url.isBlank()) {
             return ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS,
                     "URL 不能为空", false);
@@ -95,7 +103,8 @@ public final class WebToolProvider implements ToolProvider {
         }
 
         try {
-            WebFetcher.RawResponse raw = webFetcher().fetch(url.trim());
+            WebFetcher.RawResponse raw = webFetcher().fetch(
+                    url.trim(), executionContext);
             HtmlExtractor.Extracted extracted = htmlExtractor().extract(raw.body(), raw.url());
             String markdown = extracted.markdown();
             int originalLength = markdown.length();

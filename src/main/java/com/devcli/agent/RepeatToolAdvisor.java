@@ -1,10 +1,12 @@
 package com.devcli.agent;
 
+import com.devcli.config.ConfigResolver;
 import com.devcli.tool.ToolInvocationFingerprint;
 import com.devcli.tool.ToolRegistry;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.regex.Pattern;
@@ -61,10 +63,15 @@ public final class RepeatToolAdvisor {
     private static final List<Integer> DEFAULT_THRESHOLDS = List.of(3, 5, 8);
     private static final int DEFAULT_ARGUMENTS_PREVIEW_CHARS = 500;
     private static final String ENABLED_PROPERTY = "devcli.repeat.tool.reminder.enabled";
+    private static final String ENABLED_ENV = "DEVCLI_REPEAT_TOOL_REMINDER_ENABLED";
     private static final String THRESHOLDS_PROPERTY = "devcli.repeat.tool.thresholds";
+    private static final String THRESHOLDS_ENV = "DEVCLI_REPEAT_TOOL_THRESHOLDS";
     private static final String PREVIEW_CHARS_PROPERTY = "devcli.repeat.tool.arguments.preview.chars";
+    private static final String PREVIEW_CHARS_ENV = "DEVCLI_REPEAT_TOOL_ARGUMENTS_PREVIEW_CHARS";
     private static final String INCLUDE_PROPERTY = "devcli.repeat.tool.include";
+    private static final String INCLUDE_ENV = "DEVCLI_REPEAT_TOOL_INCLUDE";
     private static final String EXCLUDE_PROPERTY = "devcli.repeat.tool.exclude";
+    private static final String EXCLUDE_ENV = "DEVCLI_REPEAT_TOOL_EXCLUDE";
 
     private final List<Integer> thresholds;
     private final int argumentsPreviewChars;
@@ -91,13 +98,16 @@ public final class RepeatToolAdvisor {
     }
 
     public static RepeatToolAdvisor fromSystemProperties() {
-        if (!Boolean.parseBoolean(System.getProperty(ENABLED_PROPERTY, "true"))) {
+        if (!ConfigResolver.booleanValue(ENABLED_PROPERTY, ENABLED_ENV, true)) {
             return disabled();
         }
-        List<Integer> thresholds = parseThresholds(System.getProperty(THRESHOLDS_PROPERTY));
-        int previewChars = readPositiveInt(PREVIEW_CHARS_PROPERTY, DEFAULT_ARGUMENTS_PREVIEW_CHARS);
-        List<String> include = splitPatterns(System.getProperty(INCLUDE_PROPERTY));
-        List<String> exclude = splitPatterns(System.getProperty(EXCLUDE_PROPERTY));
+        List<Integer> thresholds = parseThresholds(
+                ConfigResolver.optional(THRESHOLDS_PROPERTY, THRESHOLDS_ENV));
+        int previewChars = ConfigResolver.intValue(
+                PREVIEW_CHARS_PROPERTY, PREVIEW_CHARS_ENV,
+                DEFAULT_ARGUMENTS_PREVIEW_CHARS, 1, Integer.MAX_VALUE);
+        List<String> include = splitPatterns(ConfigResolver.optional(INCLUDE_PROPERTY, INCLUDE_ENV));
+        List<String> exclude = splitPatterns(ConfigResolver.optional(EXCLUDE_PROPERTY, EXCLUDE_ENV));
         return new RepeatToolAdvisor(thresholds, previewChars, include, exclude);
     }
 
@@ -173,23 +183,36 @@ public final class RepeatToolAdvisor {
         if (thresholds == null || thresholds.isEmpty()) {
             return DEFAULT_THRESHOLDS;
         }
-        List<Integer> distinct = new ArrayList<>(thresholds.stream()
-                .filter(v -> v != null && v >= 2)
-                .distinct()
-                .sorted(Comparator.naturalOrder())
-                .toList());
-        return distinct.isEmpty() ? DEFAULT_THRESHOLDS : distinct;
+        for (Integer threshold : thresholds) {
+            if (threshold == null || threshold < 2) {
+                throw new IllegalArgumentException(
+                        "重复工具提醒阈值必须是大于等于 2 的整数: " + threshold);
+            }
+        }
+        if (new HashSet<>(thresholds).size() != thresholds.size()) {
+            throw new IllegalArgumentException("重复工具提醒阈值不能重复: " + thresholds);
+        }
+        List<Integer> normalized = new ArrayList<>(thresholds);
+        normalized.sort(Comparator.naturalOrder());
+        return List.copyOf(normalized);
     }
 
     private static List<Integer> parseThresholds(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return DEFAULT_THRESHOLDS;
+        }
         List<Integer> values = new ArrayList<>();
-        if (raw != null && !raw.isBlank()) {
-            for (String part : raw.split(",")) {
-                try {
-                    values.add(Integer.parseInt(part.trim()));
-                } catch (NumberFormatException ignored) {
-                    // 跳过非法片段，其余阈值继续生效
-                }
+        for (String part : raw.split(",", -1)) {
+            String value = part.trim();
+            if (value.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "系统属性 " + THRESHOLDS_PROPERTY + " 包含空阈值: " + raw);
+            }
+            try {
+                values.add(Integer.parseInt(value));
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                        "系统属性 " + THRESHOLDS_PROPERTY + " 包含非法整数: " + value, e);
             }
         }
         return normalizeThresholds(values);
@@ -207,19 +230,6 @@ public final class RepeatToolAdvisor {
             }
         }
         return patterns;
-    }
-
-    private static int readPositiveInt(String property, int defaultValue) {
-        String raw = System.getProperty(property);
-        if (raw == null || raw.isBlank()) {
-            return defaultValue;
-        }
-        try {
-            int parsed = Integer.parseInt(raw.trim());
-            return parsed > 0 ? parsed : defaultValue;
-        } catch (NumberFormatException e) {
-            return defaultValue;
-        }
     }
 
     /** 通配符 {@code *} 编译为锚定正则，其余元字符按字面匹配。 */

@@ -6,6 +6,7 @@ import com.devcli.hitl.HitlHandler;
 import com.devcli.hitl.HitlToolRegistry;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
+import com.devcli.runtime.event.RunEvent;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -14,6 +15,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.ArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -69,6 +71,50 @@ class HookDispatcherTest {
             assertThrows(HookDispatcher.HookExecutionException.class, () ->
                     HookDispatcher.create(registry, List.of(hook))
                             .dispatch(HookEvent.AGENT_START, HookDispatcher.HookContext.empty()));
+        }
+    }
+
+    @Test
+    void recordsPairedAuditEventsAndMergesAllHookDecisions(@TempDir Path projectRoot)
+            throws Exception {
+        try (RecordingRegistry registry = new RecordingRegistry(ToolRegistry.ToolEffect.READ_ONLY)) {
+            registry.output = ToolOutput.error(
+                    com.devcli.tool.ToolErrorCode.EXECUTION_FAILED, "failed", false);
+            HookDefinition warn = new HookDefinition(
+                    "warn-hook", "warn", HookEvent.AGENT_START, true,
+                    "record", JSON.createObjectNode(), HookDefinition.FailureMode.WARN, false);
+            HookDefinition required = new HookDefinition(
+                    "required-hook", "required", HookEvent.AGENT_START, true,
+                    "record", JSON.createObjectNode(), HookDefinition.FailureMode.REQUIRED, false);
+            HookDispatcher dispatcher = HookDispatcher.create(registry, List.of(warn, required));
+            List<RunEvent> events = new ArrayList<>();
+            dispatcher.setEventSink(events::add);
+
+            HookDispatcher.HookExecutionException error = assertThrows(
+                    HookDispatcher.HookExecutionException.class,
+                    () -> dispatcher.dispatch(
+                            HookEvent.AGENT_START,
+                            new HookDispatcher.HookContext(
+                                    projectRoot.toString(), "run_1", 0, "", "", "")));
+
+            assertEquals(2, registry.calls.get(), "required 失败不能跳过同事件的其他 Hook");
+            assertEquals(HookDispatcher.Decision.BLOCK, error.result().decision());
+            assertEquals(List.of(
+                            HookDispatcher.Decision.WARN,
+                            HookDispatcher.Decision.BLOCK),
+                    error.result().invocations().stream()
+                            .map(HookDispatcher.InvocationResult::decision)
+                            .toList());
+            assertEquals(4, events.size());
+            for (int index = 0; index < events.size(); index += 2) {
+                RunEvent.HookInvocationStarted started =
+                        (RunEvent.HookInvocationStarted) events.get(index);
+                RunEvent.HookInvocationCompleted completed =
+                        (RunEvent.HookInvocationCompleted) events.get(index + 1);
+                assertEquals(started.invocationId(), completed.invocationId());
+                assertEquals(started.hookId(), completed.hookId());
+                assertTrue(completed.elapsedMillis() >= 0);
+            }
         }
     }
 

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.devcli.mcp.transport.McpTransport;
+import com.devcli.runtime.CancellationToken;
 
 import java.io.IOException;
 import java.util.List;
@@ -11,6 +12,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
@@ -40,6 +42,11 @@ public class JsonRpcClient implements AutoCloseable {
     }
 
     public JsonNode request(String method, JsonNode params, long timeoutSeconds) throws IOException {
+        return request(method, params, timeoutSeconds, null);
+    }
+
+    public JsonNode request(String method, JsonNode params, long timeoutSeconds,
+                            CancellationToken cancellationToken) throws IOException {
         long id = ids.getAndIncrement();
         ObjectNode request = MAPPER.createObjectNode();
         request.put("jsonrpc", "2.0");
@@ -51,16 +58,34 @@ public class JsonRpcClient implements AutoCloseable {
 
         CompletableFuture<JsonNode> future = new CompletableFuture<>();
         pending.put(id, future);
-        scheduler.schedule(() -> {
+        ScheduledFuture<?> timeoutTask = scheduler.schedule(() -> {
+            if (cancellationToken != null) {
+                cancellationToken.cancel(
+                        CancellationToken.Reason.TIMEOUT,
+                        "JSON-RPC request timed out: " + method);
+                return;
+            }
             CompletableFuture<JsonNode> removed = pending.remove(id);
             if (removed != null) {
                 removed.completeExceptionally(new TimeoutException("JSON-RPC request timed out: " + method));
             }
         }, timeoutSeconds, TimeUnit.SECONDS);
 
+        CancellationToken.Registration cancellationRegistration = cancellationToken == null
+                ? CancellationToken.Registration.NO_OP
+                : cancellationToken.onCancel(cancellation -> {
+                    timeoutTask.cancel(false);
+                    try {
+                        transport.sendCancellation(cancellationNotification(
+                                id, cancellation.message()));
+                    } catch (IOException ignored) {
+                        // Cancellation remains authoritative even if the peer is already unreachable.
+                    }
+                });
+
         try {
-            transport.send(request);
-            return future.get(timeoutSeconds + 1, TimeUnit.SECONDS);
+            transport.send(request, cancellationToken);
+            return awaitResponse(future, cancellationToken, timeoutSeconds);
         } catch (JsonRpcException e) {
             throw e;
         } catch (Exception e) {
@@ -69,6 +94,9 @@ public class JsonRpcClient implements AutoCloseable {
                 throw jsonRpcException;
             }
             throw new IOException(e.getMessage(), e);
+        } finally {
+            timeoutTask.cancel(false);
+            cancellationRegistration.close();
         }
     }
 
@@ -80,6 +108,45 @@ public class JsonRpcClient implements AutoCloseable {
             notification.set("params", params);
         }
         transport.send(notification);
+    }
+
+    private static ObjectNode cancellationNotification(long requestId, String reason) {
+        ObjectNode notification = MAPPER.createObjectNode();
+        notification.put("jsonrpc", "2.0");
+        notification.put("method", "notifications/cancelled");
+        ObjectNode params = notification.putObject("params");
+        params.put("requestId", requestId);
+        if (reason != null && !reason.isBlank()) {
+            params.put("reason", reason);
+        }
+        return notification;
+    }
+
+    private static JsonNode awaitResponse(
+            CompletableFuture<JsonNode> future,
+            CancellationToken cancellationToken,
+            long timeoutSeconds) throws Exception {
+        boolean interrupted = false;
+        try {
+            while (true) {
+                try {
+                    if (cancellationToken != null && cancellationToken.isCancelled()) {
+                        return future.get();
+                    }
+                    return future.get(timeoutSeconds + 1, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                    if (cancellationToken == null || !cancellationToken.isCancelled()) {
+                        throw e;
+                    }
+                    Thread.interrupted();
+                }
+            }
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     public void onNotification(Consumer<JsonNode> listener) {
@@ -120,6 +187,9 @@ public class JsonRpcClient implements AutoCloseable {
     @Override
     public void close() {
         scheduler.shutdownNow();
+        IOException closed = new IOException("JSON-RPC client closed");
+        pending.values().forEach(future -> future.completeExceptionally(closed));
+        pending.clear();
         transport.close();
     }
 }

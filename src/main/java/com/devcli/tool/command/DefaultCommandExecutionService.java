@@ -1,5 +1,7 @@
 package com.devcli.tool.command;
 
+import com.devcli.runtime.CancellationToken;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -13,6 +15,7 @@ import java.util.Properties;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
 
 public final class DefaultCommandExecutionService implements CommandExecutionService {
@@ -73,8 +76,7 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
     private static final class HostBackend implements Backend {
         @Override
         public Result execute(Request request) {
-            return runProcess(hostShellCommand(request.command()), request.projectRoot(),
-                    request.timeoutSeconds(), false);
+            return runProcess(hostShellCommand(request.command()), request, false);
         }
     }
 
@@ -87,31 +89,39 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
 
         @Override
         public Result execute(Request request) {
-            return runProcess(dockerCommand(request, config), request.projectRoot(),
-                    request.timeoutSeconds(), true);
+            return runProcess(dockerCommand(request, config), request, true);
         }
     }
 
-    private static Result runProcess(List<String> command, Path workingDirectory,
-                                     long timeoutSeconds, boolean sandbox) {
+    private static Result runProcess(List<String> command, Request request, boolean sandbox) {
         ExecutorService outputReader = Executors.newSingleThreadExecutor(task -> {
             Thread thread = new Thread(task, "devcli-command-output");
             thread.setDaemon(true);
             return thread;
         });
         Process process = null;
+        CancellationToken.Registration cancellationRegistration =
+                CancellationToken.Registration.NO_OP;
         try {
+            request.executionContext().throwIfCancelled();
             ProcessBuilder builder = new ProcessBuilder(command);
-            builder.directory(workingDirectory.toFile());
+            builder.directory(request.projectRoot().toFile());
             builder.redirectErrorStream(true);
             process = builder.start();
             Process running = process;
+            cancellationRegistration = request.executionContext().cancellationToken()
+                    .onCancel(ignored -> signalProcessTree(running));
             Future<String> output = outputReader.submit(() -> readOutput(running));
-            if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
+            if (!process.waitFor(request.timeoutSeconds(), TimeUnit.SECONDS)) {
                 terminateProcessTree(process);
-                process.waitFor(5, TimeUnit.SECONDS);
                 output.cancel(true);
-                return Result.timedOut("命令执行超时（" + timeoutSeconds + "秒），已强制终止");
+                return Result.timedOut("命令执行超时（" + request.timeoutSeconds()
+                        + "秒），已强制终止");
+            }
+            if (request.executionContext().cancellation().isPresent()) {
+                terminateProcessTree(process);
+                output.cancel(true);
+                return cancellationResult(request);
             }
             String text = output.get(3, TimeUnit.SECONDS);
             int exitCode = process.exitValue();
@@ -124,7 +134,14 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
             if (process != null) {
                 terminateProcessTree(process);
             }
-            return Result.cancelled("用户取消了此次工具调用");
+            return request.executionContext().cancellation().isPresent()
+                    ? cancellationResult(request)
+                    : Result.cancelled("用户取消了此次工具调用");
+        } catch (CancellationException e) {
+            if (process != null) {
+                terminateProcessTree(process);
+            }
+            return cancellationResult(request);
         } catch (IOException e) {
             if (process != null) {
                 terminateProcessTree(process);
@@ -143,8 +160,25 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
             }
             throw new IllegalStateException("命令执行失败: " + e.getMessage(), e);
         } finally {
+            cancellationRegistration.close();
             outputReader.shutdownNow();
+            awaitOutputReader(outputReader);
         }
+    }
+
+    private static Result cancellationResult(Request request) {
+        CancellationToken.Cancellation cancellation = request.executionContext()
+                .cancellation()
+                .orElse(new CancellationToken.Cancellation(
+                        CancellationToken.Reason.INTERRUPTED, "工具执行被中断"));
+        if (cancellation.reason() == CancellationToken.Reason.TIMEOUT) {
+            return Result.timedOut(cancellation.message().isBlank()
+                    ? "命令执行超过工具期限，已强制终止"
+                    : cancellation.message());
+        }
+        return Result.cancelled(cancellation.message().isBlank()
+                ? "用户取消了此次工具调用"
+                : cancellation.message());
     }
 
     private static List<String> hostShellCommand(String command) {
@@ -186,7 +220,26 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
     }
 
     private static void terminateProcessTree(Process process) {
+        boolean restoreInterrupt = Thread.interrupted();
         List<ProcessHandle> descendants = process.toHandle().descendants().toList();
+        signalProcessTree(process, descendants);
+        try {
+            process.onExit().join();
+            for (ProcessHandle descendant : descendants) {
+                descendant.onExit().join();
+            }
+        } finally {
+            if (restoreInterrupt) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private static void signalProcessTree(Process process) {
+        signalProcessTree(process, process.toHandle().descendants().toList());
+    }
+
+    private static void signalProcessTree(Process process, List<ProcessHandle> descendants) {
         for (int i = descendants.size() - 1; i >= 0; i--) {
             descendants.get(i).destroyForcibly();
         }
@@ -196,11 +249,21 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
         } catch (IOException ignored) {
             // 进程终止后的输出流关闭失败不改变终止结果。
         }
-        for (ProcessHandle descendant : descendants) {
-            try {
-                descendant.onExit().get(2, TimeUnit.SECONDS);
-            } catch (Exception ignored) {
-                // 已发送强制终止信号，等待超时不阻塞调用方。
+    }
+
+    private static void awaitOutputReader(ExecutorService outputReader) {
+        boolean restoreInterrupt = Thread.interrupted();
+        try {
+            while (!outputReader.isTerminated()) {
+                try {
+                    outputReader.awaitTermination(1, TimeUnit.DAYS);
+                } catch (InterruptedException e) {
+                    restoreInterrupt = true;
+                }
+            }
+        } finally {
+            if (restoreInterrupt) {
+                Thread.currentThread().interrupt();
             }
         }
     }

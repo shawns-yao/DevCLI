@@ -91,8 +91,36 @@ public interface LlmClient {
         }
     }
 
+    enum MessageSource {
+        USER,
+        SYSTEM_INTERNAL,
+        PLUGIN,
+        STEERING,
+        FOLLOW_UP,
+        ASSISTANT,
+        TOOL;
+
+        static MessageSource forRole(String role) {
+            return switch (role == null ? "" : role) {
+                case "system" -> SYSTEM_INTERNAL;
+                case "assistant" -> ASSISTANT;
+                case "tool" -> TOOL;
+                default -> USER;
+            };
+        }
+    }
+
     record Message(String role, String content, String reasoningContent, List<ToolCall> toolCalls,
-                   String toolCallId, List<ContentPart> contentParts) {
+                   String toolCallId, List<ContentPart> contentParts, MessageSource source) {
+        public Message {
+            source = source == null ? MessageSource.forRole(role) : source;
+        }
+
+        public Message(String role, String content, String reasoningContent, List<ToolCall> toolCalls,
+                       String toolCallId, List<ContentPart> contentParts) {
+            this(role, content, reasoningContent, toolCalls, toolCallId, contentParts, null);
+        }
+
         public Message(String role, String content, String reasoningContent, List<ToolCall> toolCalls,
                        String toolCallId) {
             this(role, content, reasoningContent, toolCalls, toolCallId, null);
@@ -110,9 +138,34 @@ public interface LlmClient {
             return new Message("user", content);
         }
 
+        public static Message user(String content, MessageSource source) {
+            return new Message("user", content, null, null, null, null, source);
+        }
+
         public static Message user(List<ContentPart> contentParts) {
             return new Message("user", plainText(contentParts), null, null, null,
                     contentParts == null ? null : List.copyOf(contentParts));
+        }
+
+        public static Message user(List<ContentPart> contentParts, MessageSource source) {
+            return new Message("user", plainText(contentParts), null, null, null,
+                    contentParts == null ? null : List.copyOf(contentParts), source);
+        }
+
+        public static Message internalUser(String content) {
+            return user(content, MessageSource.SYSTEM_INTERNAL);
+        }
+
+        public static Message plugin(String content) {
+            return user(content, MessageSource.PLUGIN);
+        }
+
+        public static Message steering(String content) {
+            return user(content, MessageSource.STEERING);
+        }
+
+        public static Message followUp(String content) {
+            return user(content, MessageSource.FOLLOW_UP);
         }
 
         public static Message assistant(String content) {
@@ -174,14 +227,15 @@ public interface LlmClient {
             }
             stripped.add(ContentPart.text("[历史图片附件已省略 " + omitted
                     + " 张；如需重新查看，请使用上文 Image source 或相关工具结果。]"));
-            return new Message(role, plainText(stripped), reasoningContent, toolCalls, toolCallId, List.copyOf(stripped));
+            return new Message(role, plainText(stripped), reasoningContent, toolCalls,
+                    toolCallId, List.copyOf(stripped), source);
         }
 
         public Message withoutReasoningContent() {
             if (reasoningContent == null || reasoningContent.isBlank()) {
                 return this;
             }
-            return new Message(role, content, null, toolCalls, toolCallId, contentParts);
+            return new Message(role, content, null, toolCalls, toolCallId, contentParts, source);
         }
 
         private static String plainText(List<ContentPart> parts) {

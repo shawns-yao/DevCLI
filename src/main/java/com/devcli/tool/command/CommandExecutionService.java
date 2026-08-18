@@ -1,6 +1,7 @@
 package com.devcli.tool.command;
 
 import com.devcli.tool.ToolErrorCode;
+import com.devcli.tool.ToolExecutionContext;
 import com.devcli.tool.ToolOutput;
 
 import java.nio.file.Path;
@@ -49,7 +50,13 @@ public interface CommandExecutionService {
     }
 
     record Request(String command, Path projectRoot, long timeoutSeconds,
-                   boolean sandboxRequired) {
+                   boolean sandboxRequired, ToolExecutionContext executionContext) {
+        public Request(String command, Path projectRoot, long timeoutSeconds,
+                       boolean sandboxRequired) {
+            this(command, projectRoot, timeoutSeconds, sandboxRequired,
+                    ToolExecutionContext.current(""));
+        }
+
         public Request {
             if (command == null || command.isBlank()) {
                 throw new IllegalArgumentException("command is required");
@@ -60,7 +67,12 @@ public interface CommandExecutionService {
             if (projectRoot == null) {
                 throw new IllegalArgumentException("projectRoot is required");
             }
-            timeoutSeconds = Math.max(1, timeoutSeconds);
+            if (timeoutSeconds <= 0) {
+                throw new IllegalArgumentException("timeoutSeconds must be positive");
+            }
+            executionContext = executionContext == null
+                    ? ToolExecutionContext.current("")
+                    : executionContext;
         }
     }
 }

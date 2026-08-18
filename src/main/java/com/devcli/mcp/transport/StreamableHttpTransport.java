@@ -3,7 +3,10 @@ package com.devcli.mcp.transport;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.mcp.protocol.McpInitializeRequest;
+import com.devcli.runtime.CancellationToken;
 import com.devcli.web.RetryInterceptor;
+import okhttp3.Call;
+import okhttp3.Callback;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -23,13 +26,8 @@ public class StreamableHttpTransport implements McpTransport {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final MediaType JSON = MediaType.parse("application/json");
 
-    private final OkHttpClient client = new OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
-            .writeTimeout(30, TimeUnit.SECONDS)
-            .callTimeout(60, TimeUnit.SECONDS)
-            .addInterceptor(new RetryInterceptor())
-            .build();
+    private final OkHttpClient client;
+    private final OkHttpClient cancellationClient;
     private final String url;
     private final Map<String, String> headers;
     private final List<Consumer<JsonNode>> listeners = new CopyOnWriteArrayList<>();
@@ -38,10 +36,55 @@ public class StreamableHttpTransport implements McpTransport {
     public StreamableHttpTransport(String url, Map<String, String> headers) {
         this.url = url;
         this.headers = headers == null ? Map.of() : Map.copyOf(headers);
+        this.client = new OkHttpClient.Builder()
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(60, TimeUnit.SECONDS)
+                .writeTimeout(30, TimeUnit.SECONDS)
+                .callTimeout(60, TimeUnit.SECONDS)
+                .addInterceptor(new RetryInterceptor())
+                .build();
+        this.cancellationClient = new OkHttpClient.Builder()
+                .connectTimeout(2, TimeUnit.SECONDS)
+                .readTimeout(5, TimeUnit.SECONDS)
+                .writeTimeout(5, TimeUnit.SECONDS)
+                .callTimeout(5, TimeUnit.SECONDS)
+                .build();
     }
 
     @Override
     public void send(JsonNode message) throws IOException {
+        send(message, null);
+    }
+
+    @Override
+    public void send(JsonNode message, CancellationToken cancellationToken) throws IOException {
+        Request request = buildRequest(message);
+        Call call = client.newCall(request);
+        try (CancellationToken.Registration ignored = cancellationToken == null
+                ? CancellationToken.Registration.NO_OP
+                : cancellationToken.onCancel(cancellation -> call.cancel());
+             Response response = call.execute()) {
+            dispatchResponse(response);
+        }
+    }
+
+    @Override
+    public void sendCancellation(JsonNode notification) throws IOException {
+        Request request = buildRequest(notification);
+        cancellationClient.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                // Best effort: the original request cancellation remains authoritative.
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) {
+                response.close();
+            }
+        });
+    }
+
+    private Request buildRequest(JsonNode message) throws IOException {
         RequestBody body = RequestBody.create(MAPPER.writeValueAsString(message), JSON);
         Request.Builder builder = new Request.Builder()
                 .url(url)
@@ -53,33 +96,32 @@ public class StreamableHttpTransport implements McpTransport {
         if (sessionId != null && !sessionId.isBlank()) {
             builder.header("Mcp-Session-Id", sessionId);
         }
+        return builder.build();
+    }
 
-        try (Response response = client.newCall(builder.build()).execute()) {
-            String newSession = response.header("Mcp-Session-Id");
-            if (newSession != null && !newSession.isBlank()) {
-                sessionId = newSession;
-            }
-            if (!response.isSuccessful()) {
-                throw new IOException("HTTP " + response.code() + " " + response.message());
-            }
-            ResponseBody responseBody = response.body();
-            if (responseBody == null) {
-                return;
-            }
-            String contentType = response.header("Content-Type", "");
-            String raw = responseBody.string();
-            // notification 路径下 server 可以返回 202 + 空 body 或 200 + 空 body。
-            // 这里 swallow 空响应，避免 Jackson 对空字符串抛 MismatchedInputException。
-            if (raw == null || raw.isBlank()) {
-                return;
-            }
-            List<JsonNode> messages = contentType.contains("text/event-stream")
-                    ? parseSse(raw)
-                    : List.of(MAPPER.readTree(raw));
-            for (JsonNode node : messages) {
-                for (Consumer<JsonNode> listener : listeners) {
-                    listener.accept(node);
-                }
+    private void dispatchResponse(Response response) throws IOException {
+        String newSession = response.header("Mcp-Session-Id");
+        if (newSession != null && !newSession.isBlank()) {
+            sessionId = newSession;
+        }
+        if (!response.isSuccessful()) {
+            throw new IOException("HTTP " + response.code() + " " + response.message());
+        }
+        ResponseBody responseBody = response.body();
+        if (responseBody == null) {
+            return;
+        }
+        String contentType = response.header("Content-Type", "");
+        String raw = responseBody.string();
+        if (raw == null || raw.isBlank()) {
+            return;
+        }
+        List<JsonNode> messages = contentType.contains("text/event-stream")
+                ? parseSse(raw)
+                : List.of(MAPPER.readTree(raw));
+        for (JsonNode node : messages) {
+            for (Consumer<JsonNode> listener : listeners) {
+                listener.accept(node);
             }
         }
     }

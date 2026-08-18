@@ -20,6 +20,7 @@ import com.devcli.policy.AuditLog;
 import com.devcli.policy.PathGuard;
 import com.devcli.policy.PolicyException;
 import com.devcli.runtime.CancellationContext;
+import com.devcli.runtime.CancellationToken;
 import com.devcli.snapshot.SnapshotService;
 import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillRegistry;
@@ -131,6 +132,14 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     ToolRegistry(long commandTimeoutSeconds, long toolBatchTimeoutSeconds,
                  ResourceLeaseMaintenance maintenance) {
+        if (commandTimeoutSeconds <= 0) {
+            throw new IllegalArgumentException(
+                    "commandTimeoutSeconds 必须为正整数: " + commandTimeoutSeconds);
+        }
+        if (toolBatchTimeoutSeconds <= 0) {
+            throw new IllegalArgumentException(
+                    "toolBatchTimeoutSeconds 必须为正整数: " + toolBatchTimeoutSeconds);
+        }
         this.commandTimeoutSeconds = commandTimeoutSeconds;
         this.toolBatchTimeoutSeconds = toolBatchTimeoutSeconds;
         this.resourceLeaseMaintenance = Objects.requireNonNull(maintenance, "maintenance");
@@ -219,6 +228,11 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         return tool == null ? ToolEffect.EXTERNAL_MUTATION : tool.effect();
     }
 
+    public ToolPresentation toolPresentation(String name) {
+        Tool tool = tools.get(name);
+        return tool == null ? ToolPresentation.generic(name) : tool.presentation();
+    }
+
     /**
      * 为隔离工作区创建项目级工具注册表。内置 Provider 重新绑定到新根目录，
      * MCP 描述与调用器、策略配置和记忆处理器沿用父注册表。
@@ -239,7 +253,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         fork.commandExecutionService = commandExecutionService;
         fork.mcpTrustPolicies.putAll(mcpTrustPolicies);
         mcpTools.values().forEach(registered ->
-                fork.registerMcpToolOutput(registered.descriptor(), registered.invoker()));
+                fork.registerContextualMcpToolOutput(
+                        registered.descriptor(), registered.invoker()));
         fork.mcpServerLifecycleVersions.putAll(mcpServerLifecycleVersions);
         fork.activatedMcpToolDefinitions.addAll(activatedMcpToolDefinitions);
         return fork;
@@ -476,9 +491,15 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
     @Override
     public ToolOutput executeCommandOutput(String command) {
+        return executeCommandOutput(command, ToolExecutionContext.current(""));
+    }
+
+    @Override
+    public ToolOutput executeCommandOutput(String command, ToolExecutionContext executionContext) {
         boolean sandboxRequired = currentToolAccessScope() == ToolAccessScope.ISOLATED_PROJECT;
         return commandExecutionService.execute(new CommandExecutionService.Request(
-                command, Path.of(projectPath), commandTimeoutSeconds, sandboxRequired)).toToolOutput();
+                command, Path.of(projectPath), commandTimeoutSeconds, sandboxRequired,
+                executionContext)).toToolOutput();
     }
     @Override
     public java.util.function.Consumer<String> memorySaver() { return memorySaver; }
@@ -644,6 +665,13 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     public synchronized void registerMcpToolOutput(McpToolDescriptor descriptor, Function<String, ToolOutput> invoker) {
+        Objects.requireNonNull(invoker, "invoker");
+        registerContextualMcpToolOutput(descriptor,
+                (argumentsJson, ignored) -> invoker.apply(argumentsJson));
+    }
+
+    public synchronized void registerContextualMcpToolOutput(
+            McpToolDescriptor descriptor, McpToolInvoker invoker) {
         Objects.requireNonNull(descriptor, "descriptor");
         Objects.requireNonNull(invoker, "invoker");
         String toolName = descriptor.namespacedName();
@@ -661,7 +689,10 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                 mcpDescription(descriptor),
                 descriptor.inputSchema(),
                 args -> "MCP 工具不应通过 Map<String,String> 入口执行",
-                ToolEffect.fromMcp(descriptor, policy)
+                ToolEffect.fromMcp(descriptor, policy),
+                -1,
+                ToolCancellationCapability.COOPERATIVE,
+                ToolPresentation.generic(toolName)
         ));
         invalidateToolSearchIndex();
     }
@@ -809,6 +840,32 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         }
     }
 
+    public synchronized void replaceContextualMcpToolOutputsForServer(
+            String serverName,
+            List<McpToolDescriptor> newTools,
+            long lifecycleVersion,
+            Function<McpToolDescriptor, McpToolInvoker> invokerFactory) {
+        Objects.requireNonNull(serverName, "serverName");
+        Objects.requireNonNull(newTools, "newTools");
+        Objects.requireNonNull(invokerFactory, "invokerFactory");
+        setMcpServerLifecycleVersion(serverName, lifecycleVersion);
+        String prefix = "mcp__" + serverName + "__";
+        List<String> existing = mcpTools.keySet().stream()
+                .filter(name -> name.startsWith(prefix))
+                .toList();
+        for (String toolName : existing) {
+            mcpTools.remove(toolName);
+            tools.remove(toolName);
+            activatedMcpToolDefinitions.remove(toolName);
+        }
+        if (!existing.isEmpty()) {
+            invalidateToolSearchIndex();
+        }
+        for (McpToolDescriptor descriptor : newTools) {
+            registerContextualMcpToolOutput(descriptor, invokerFactory.apply(descriptor));
+        }
+    }
+
     private static String normalizeMcpServerName(String serverName) {
         if (serverName == null || serverName.isBlank()) {
             return null;
@@ -847,7 +904,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     private void configureExecutionPipeline() {
         executionPipeline.register(ToolExecutionPipeline.Stage.CANCELLATION, (context, chain) ->
-                CancellationContext.isCancelled()
+                context.executionContext().isCancelled()
                         ? ToolOutput.cancelled("用户取消了此次工具调用")
                         : chain.proceed(context));
         executionPipeline.register(ToolExecutionPipeline.Stage.EXISTENCE, (context, chain) ->
@@ -961,7 +1018,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private ToolOutput executeResolvedTool(ToolExecutionPipeline.Context context) {
         McpRegisteredTool mcpTool = mcpTools.get(context.name());
         if (mcpTool != null) {
-            ToolOutput output = mcpTool.invoker().apply(context.argumentsJson());
+            ToolOutput output = mcpTool.invoker().invoke(
+                    context.argumentsJson(), context.executionContext());
             if (browserGuard != null) {
                 browserGuard.applyAfterExecution(context.name(), context.argumentsJson(), output == null ? "" : output.text());
             }
@@ -976,7 +1034,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         Map<String, String> argMap = new HashMap<>();
         parsedArgs.fields().forEachRemaining(entry ->
                 argMap.put(entry.getKey(), entry.getValue().asText()));
-        return tool.executor().executeOutput(argMap);
+        return tool.executor().executeOutput(argMap, context.executionContext());
     }
 
     private static String unknownToolGuidance(String name) {
@@ -1059,13 +1117,14 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                 true);
     }
 
-    private ToolOutput executeToolOutput(ToolInvocation invocation) {
+    private ToolOutput executeToolOutput(ToolInvocation invocation,
+                                         ToolExecutionContext executionContext) {
         if (isLegacyExecuteToolOverride() || isExecuteToolOutputOverride()) {
             return governToolOutput(invocation.name(), invocation.id(),
                     executeToolOutput(invocation.name(), invocation.argumentsJson()));
         }
         return executionPipeline.execute(
-                invocation.name(), invocation.argumentsJson(), invocation.id());
+                invocation.name(), invocation.argumentsJson(), invocation.id(), executionContext);
     }
 
     private boolean isLegacyExecuteToolOverride() {
@@ -1110,17 +1169,11 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         }
         if (CancellationContext.isCancelled()) {
             return invocations.stream()
-                    .map(invocation -> ToolExecutionResult.cancelled(invocation, "用户取消了此次工具调用"))
+                    .map(invocation -> ToolExecutionResult.cancelled(
+                            invocation, "用户取消了此次工具调用", 0,
+                            toolPresentation(invocation.name())))
                     .toList();
         }
-        if (invocations.size() == 1) {
-            ToolInvocation invocation = invocations.get(0);
-            long startedAt = System.nanoTime();
-            ToolOutput output = executeToolOutput(invocation);
-            return List.of(ToolExecutionResult.completed(
-                    invocation, output, elapsedMillis(startedAt)));
-        }
-
         int parallelism = Math.min(invocations.size(), MAX_PARALLEL_TOOLS);
         SkillContextBuffer activeSkillBuffer = activeSkillContextBuffer();
         ToolAccessScope activeAccessScope = currentToolAccessScope();
@@ -1130,77 +1183,181 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
             thread.setDaemon(true);
             return thread;
         });
+        ScheduledExecutorService deadlineExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread thread = new Thread(r, "devcli-tool-deadline");
+            thread.setDaemon(true);
+            return thread;
+        });
+        CancellationToken upstream = CancellationContext.current();
+        List<CancellationToken> callTokens = invocations.stream()
+                .map(ignored -> upstream == null
+                        ? new CancellationToken()
+                        : upstream.childToken())
+                .toList();
+        long batchStartedAt = System.nanoTime();
+        long batchDeadlineNanos = deadlineAfterSeconds(
+                batchStartedAt, toolBatchTimeoutSeconds);
+        boolean restoreInterrupt = false;
 
         try {
-            List<Callable<ToolExecutionResult>> tasks = invocations.stream()
-                    .<Callable<ToolExecutionResult>>map(invocation -> () -> {
-                        if (CancellationContext.isCancelled()) {
-                            return ToolExecutionResult.cancelled(invocation, "用户取消了此次工具调用");
-                        }
-                        long startedAt = System.nanoTime();
-                        java.util.concurrent.atomic.AtomicReference<ToolOutput> output =
-                                new java.util.concurrent.atomic.AtomicReference<>(ToolOutput.text(""));
-                        runWithToolAccess(activeAccessScope, () ->
-                                runWithResourceLease(activeResourceLeaseStep, () -> {
-                                    runWithSkillContextBuffer(activeSkillBuffer,
-                                            () -> output.set(executeToolOutput(invocation)));
-                                    return null;
-                                }));
-                        return ToolExecutionResult.completed(
-                                invocation, output.get(), elapsedMillis(startedAt));
-                    })
-                    .toList();
-
-            long batchDeadlineNanos = System.nanoTime()
-                    + TimeUnit.SECONDS.toNanos(toolBatchTimeoutSeconds);
-            List<Future<ToolExecutionResult>> futures = tasks.stream()
-                    .map(executor::submit)
-                    .toList();
+            List<Future<ToolExecutionResult>> futures = new ArrayList<>(invocations.size());
+            for (int i = 0; i < invocations.size(); i++) {
+                ToolInvocation invocation = invocations.get(i);
+                CancellationToken callToken = callTokens.get(i);
+                futures.add(executor.submit(() -> executeInvocation(
+                        invocation,
+                        callToken,
+                        batchDeadlineNanos,
+                        deadlineExecutor,
+                        activeSkillBuffer,
+                        activeAccessScope,
+                        activeResourceLeaseStep)));
+            }
 
             List<ToolExecutionResult> results = new ArrayList<>();
             for (int i = 0; i < futures.size(); i++) {
                 ToolInvocation invocation = invocations.get(i);
                 Future<ToolExecutionResult> future = futures.get(i);
-                long toolTimeoutSeconds = toolTimeoutSeconds(invocation.name());
-                long deadlineNanos = Math.min(batchDeadlineNanos,
-                        System.nanoTime() + TimeUnit.SECONDS.toNanos(toolTimeoutSeconds));
-                if (future.isDone()) {
+                while (true) {
                     try {
                         results.add(future.get());
+                        break;
                     } catch (CancellationException e) {
-                        results.add(ToolExecutionResult.timedOut(invocation, toolTimeoutSeconds));
+                        results.add(resultForCancellation(
+                                invocation, callTokens.get(i), 0));
+                        break;
                     } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        results.add(ToolExecutionResult.failed(invocation, "工具执行被中断"));
+                        restoreInterrupt = true;
+                        cancelAll(callTokens, CancellationToken.Reason.UPSTREAM,
+                                "等待工具结果时收到上游中断");
                     } catch (ExecutionException e) {
-                        results.add(ToolExecutionResult.failed(invocation, causeMessage(e)));
+                        CancellationToken token = callTokens.get(i);
+                        results.add(token.cancellation().isPresent()
+                                ? resultForCancellation(invocation, token, 0)
+                                : ToolExecutionResult.failed(
+                                        invocation, causeMessage(e), 0,
+                                        toolPresentation(invocation.name())));
+                        break;
                     }
-                    continue;
-                }
-                long remainingNanos = deadlineNanos - System.nanoTime();
-                if (remainingNanos <= 0) {
-                    future.cancel(true);
-                    results.add(ToolExecutionResult.timedOut(invocation, toolTimeoutSeconds));
-                    continue;
-                }
-                try {
-                    results.add(future.get(remainingNanos, TimeUnit.NANOSECONDS));
-                } catch (TimeoutException e) {
-                    future.cancel(true);
-                    results.add(ToolExecutionResult.timedOut(invocation, toolTimeoutSeconds));
-                } catch (CancellationException e) {
-                    results.add(ToolExecutionResult.timedOut(invocation, toolTimeoutSeconds));
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    results.add(ToolExecutionResult.failed(invocation, "工具执行被中断"));
-                } catch (ExecutionException e) {
-                    results.add(ToolExecutionResult.failed(invocation, causeMessage(e)));
                 }
             }
             return results;
         } finally {
-            executor.shutdownNow();
+            deadlineExecutor.shutdownNow();
+            executor.shutdown();
+            callTokens.forEach(CancellationToken::close);
+            if (restoreInterrupt) {
+                Thread.currentThread().interrupt();
+            }
         }
+    }
+
+    private ToolExecutionResult executeInvocation(
+            ToolInvocation invocation,
+            CancellationToken callToken,
+            long batchDeadlineNanos,
+            ScheduledExecutorService deadlineExecutor,
+            SkillContextBuffer activeSkillBuffer,
+            ToolAccessScope activeAccessScope,
+            String activeResourceLeaseStep) {
+        long startedAt = System.nanoTime();
+        long timeoutSeconds = toolTimeoutSeconds(invocation.name());
+        long invocationDeadline = Math.min(
+                batchDeadlineNanos, deadlineAfterSeconds(startedAt, timeoutSeconds));
+        ToolExecutionContext executionContext = new ToolExecutionContext(
+                invocation.id(), callToken, startedAt, invocationDeadline);
+        long delayNanos = invocationDeadline - System.nanoTime();
+        ScheduledFuture<?> timeoutTask = null;
+        if (delayNanos <= 0) {
+            callToken.cancel(CancellationToken.Reason.TIMEOUT,
+                    "工具调用期限已到");
+        } else {
+            timeoutTask = deadlineExecutor.schedule(
+                    () -> callToken.cancel(
+                            CancellationToken.Reason.TIMEOUT,
+                            "工具调用超过期限 " + timeoutSeconds + " 秒"),
+                    delayNanos,
+                    TimeUnit.NANOSECONDS);
+        }
+
+        Thread worker = Thread.currentThread();
+        try (CancellationToken.Registration ignored = callToken.onCancel(
+                cancellation -> worker.interrupt())) {
+            if (callToken.cancellation().isPresent()) {
+                return resultForCancellation(
+                        invocation, callToken, executionContext.elapsedMillis());
+            }
+            java.util.concurrent.atomic.AtomicReference<ToolOutput> output =
+                    new java.util.concurrent.atomic.AtomicReference<>(ToolOutput.text(""));
+            runWithToolAccess(activeAccessScope, () ->
+                    runWithResourceLease(activeResourceLeaseStep, () -> {
+                        runWithSkillContextBuffer(activeSkillBuffer,
+                                () -> output.set(executeToolOutput(invocation, executionContext)));
+                        return null;
+                    }));
+            if (callToken.cancellation().isPresent()) {
+                return resultForCancellation(
+                        invocation, callToken, executionContext.elapsedMillis());
+            }
+            return ToolExecutionResult.completed(
+                    invocation,
+                    output.get(),
+                    executionContext.elapsedMillis(),
+                    toolPresentation(invocation.name()));
+        } catch (RuntimeException e) {
+            if (callToken.cancellation().isPresent()) {
+                return resultForCancellation(
+                        invocation, callToken, executionContext.elapsedMillis());
+            }
+            return ToolExecutionResult.failed(
+                    invocation,
+                    e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage(),
+                    executionContext.elapsedMillis(),
+                    toolPresentation(invocation.name()));
+        } finally {
+            if (timeoutTask != null) {
+                timeoutTask.cancel(false);
+            }
+            if (callToken.cancellation().isPresent()) {
+                Thread.interrupted();
+            }
+        }
+    }
+
+    private ToolExecutionResult resultForCancellation(
+            ToolInvocation invocation, CancellationToken token, long elapsedMillis) {
+        CancellationToken.Cancellation cancellation = token.cancellation()
+                .orElse(new CancellationToken.Cancellation(
+                        CancellationToken.Reason.INTERRUPTED, "工具执行被中断"));
+        ToolPresentation presentation = toolPresentation(invocation.name());
+        if (cancellation.reason() == CancellationToken.Reason.TIMEOUT) {
+            return ToolExecutionResult.timedOut(
+                    invocation,
+                    toolTimeoutSeconds(invocation.name()),
+                    elapsedMillis,
+                    presentation);
+        }
+        String message = cancellation.message().isBlank()
+                ? "用户取消了此次工具调用"
+                : cancellation.message();
+        return ToolExecutionResult.cancelled(
+                invocation, message, elapsedMillis, presentation);
+    }
+
+    private static void cancelAll(List<CancellationToken> tokens,
+                                  CancellationToken.Reason reason,
+                                  String message) {
+        for (CancellationToken token : tokens) {
+            token.cancel(reason, message);
+        }
+    }
+
+    private static long deadlineAfterSeconds(long startedAtNanos, long timeoutSeconds) {
+        long duration = TimeUnit.SECONDS.toNanos(timeoutSeconds);
+        if (duration == Long.MAX_VALUE || Long.MAX_VALUE - startedAtNanos < duration) {
+            return Long.MAX_VALUE;
+        }
+        return startedAtNanos + duration;
     }
 
     private long elapsedMillis(long startedAtNanos) {
@@ -1219,6 +1376,13 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
             return tool.timeoutSeconds();
         }
         return toolBatchTimeoutSeconds;
+    }
+
+    public ToolCancellationCapability toolCancellationCapability(String toolName) {
+        Tool tool = toolName == null ? null : tools.get(toolName);
+        return tool == null
+                ? ToolCancellationCapability.INTERRUPT_ONLY
+                : tool.cancellationCapability();
     }
 
     public boolean hasTool(String name) {
@@ -1319,20 +1483,46 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         abstract boolean permits(ToolEffect effect);
     }
 
+    public enum ToolCancellationCapability {
+        COOPERATIVE,
+        INTERRUPT_ONLY
+    }
+
     public record Tool(String name, String description, JsonNode parameters,
-                       ToolExecutor executor, ToolEffect effect, long timeoutSeconds) {
+                       ToolExecutor executor, ToolEffect effect, long timeoutSeconds,
+                       ToolCancellationCapability cancellationCapability,
+                       ToolPresentation presentation) {
         public Tool(String name, String description, JsonNode parameters, ToolExecutor executor) {
-            this(name, description, parameters, executor, ToolEffect.builtIn(name), -1);
+            this(name, description, parameters, executor, ToolEffect.builtIn(name), -1,
+                    inferCancellationCapability(executor),
+                    ToolPresentation.defaultFor(name));
         }
 
         public Tool(String name, String description, JsonNode parameters, ToolExecutor executor,
                     ToolEffect effect) {
-            this(name, description, parameters, executor, effect, -1);
+            this(name, description, parameters, executor, effect, -1,
+                    inferCancellationCapability(executor),
+                    ToolPresentation.defaultFor(name));
+        }
+
+        public Tool(String name, String description, JsonNode parameters, ToolExecutor executor,
+                    ToolEffect effect, long timeoutSeconds) {
+            this(name, description, parameters, executor, effect, timeoutSeconds,
+                    inferCancellationCapability(executor),
+                    ToolPresentation.defaultFor(name));
+        }
+
+        public Tool(String name, String description, JsonNode parameters, ToolExecutor executor,
+                    ToolEffect effect, long timeoutSeconds, ToolPresentation presentation) {
+            this(name, description, parameters, executor, effect, timeoutSeconds,
+                    inferCancellationCapability(executor), presentation);
         }
 
         public static Tool structured(String name, String description, JsonNode parameters,
                                       StructuredToolExecutor executor) {
-            return new Tool(name, description, parameters, executor, ToolEffect.builtIn(name), -1);
+            return new Tool(name, description, parameters, executor, ToolEffect.builtIn(name), -1,
+                    ToolCancellationCapability.INTERRUPT_ONLY,
+                    ToolPresentation.defaultFor(name));
         }
 
         /**
@@ -1342,21 +1532,53 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         public static Tool structured(String name, String description, JsonNode parameters,
                                       StructuredToolExecutor executor, long timeoutSeconds) {
             return new Tool(name, description, parameters, executor, ToolEffect.builtIn(name),
-                    timeoutSeconds);
+                    timeoutSeconds, ToolCancellationCapability.INTERRUPT_ONLY,
+                    ToolPresentation.defaultFor(name));
+        }
+
+        public static Tool contextualStructured(
+                String name,
+                String description,
+                JsonNode parameters,
+                ContextualStructuredToolExecutor executor,
+                long timeoutSeconds) {
+            return new Tool(name, description, parameters, executor, ToolEffect.builtIn(name),
+                    timeoutSeconds, ToolCancellationCapability.COOPERATIVE,
+                    ToolPresentation.defaultFor(name));
         }
 
         public Tool {
             effect = effect == null ? ToolEffect.EXTERNAL_MUTATION : effect;
-            timeoutSeconds = timeoutSeconds <= 0 ? -1 : timeoutSeconds;
+            cancellationCapability = cancellationCapability == null
+                    ? inferCancellationCapability(executor)
+                    : cancellationCapability;
+            presentation = presentation == null
+                    ? ToolPresentation.defaultFor(name)
+                    : presentation;
+            if (timeoutSeconds == 0 || timeoutSeconds < -1) {
+                throw new IllegalArgumentException(
+                        "工具 " + name + " 的 timeoutSeconds 必须为正整数或 -1: " + timeoutSeconds);
+            }
         }
 
         /** 是否声明了独立超时（&gt; 0 生效，-1 继承批次超时）。 */
         public boolean hasOwnTimeout() {
             return timeoutSeconds > 0;
         }
+
+        private static ToolCancellationCapability inferCancellationCapability(ToolExecutor executor) {
+            return executor instanceof ContextualStructuredToolExecutor
+                    ? ToolCancellationCapability.COOPERATIVE
+                    : ToolCancellationCapability.INTERRUPT_ONLY;
+        }
     }
 
-    private record McpRegisteredTool(McpToolDescriptor descriptor, Function<String, ToolOutput> invoker) {}
+    private record McpRegisteredTool(McpToolDescriptor descriptor, McpToolInvoker invoker) {}
+
+    @FunctionalInterface
+    public interface McpToolInvoker {
+        ToolOutput invoke(String argumentsJson, ToolExecutionContext executionContext);
+    }
 
     public record MemorySaveResult(boolean stored, String message) {}
 
@@ -1376,10 +1598,14 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                                       String result, long elapsedMillis,
                                       ToolStatus status, ToolErrorCode errorCode, boolean retryable,
                                       List<com.devcli.llm.LlmClient.ContentPart> imageParts,
-                                      List<ToolSideChannel> sideChannels) {
+                                      List<ToolSideChannel> sideChannels,
+                                      ToolPresentation presentation) {
         public ToolExecutionResult {
             imageParts = imageParts == null ? List.of() : List.copyOf(imageParts);
             sideChannels = sideChannels == null ? List.of() : List.copyOf(sideChannels);
+            presentation = presentation == null
+                    ? ToolPresentation.defaultFor(name)
+                    : presentation;
         }
 
         /** 兼容迁移前的工具执行结果构造方式。 */
@@ -1388,11 +1614,28 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                                    ToolStatus status, ToolErrorCode errorCode, boolean retryable,
                                    List<com.devcli.llm.LlmClient.ContentPart> imageParts) {
             this(id, name, argumentsJson, result, elapsedMillis, status, errorCode,
-                    retryable, imageParts, List.of());
+                    retryable, imageParts, List.of(), ToolPresentation.defaultFor(name));
+        }
+
+        /** 兼容迁移前带 side channel 的构造方式。 */
+        public ToolExecutionResult(String id, String name, String argumentsJson,
+                                   String result, long elapsedMillis,
+                                   ToolStatus status, ToolErrorCode errorCode, boolean retryable,
+                                   List<com.devcli.llm.LlmClient.ContentPart> imageParts,
+                                   List<ToolSideChannel> sideChannels) {
+            this(id, name, argumentsJson, result, elapsedMillis, status, errorCode,
+                    retryable, imageParts, sideChannels, ToolPresentation.defaultFor(name));
         }
 
         private static ToolExecutionResult completed(ToolInvocation invocation, ToolOutput output,
                                                      long elapsedMillis) {
+            return completed(invocation, output, elapsedMillis,
+                    ToolPresentation.defaultFor(invocation.name()));
+        }
+
+        private static ToolExecutionResult completed(ToolInvocation invocation, ToolOutput output,
+                                                     long elapsedMillis,
+                                                     ToolPresentation presentation) {
             String result = output == null ? "" : output.text();
             List<com.devcli.llm.LlmClient.ContentPart> images = output == null ? List.of() : output.imageParts();
             return new ToolExecutionResult(
@@ -1405,46 +1648,69 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                     output == null ? ToolErrorCode.NONE : output.errorCode(),
                     output != null && output.retryable(),
                     images,
-                    output == null ? List.of() : output.sideChannels());
+                    output == null ? List.of() : output.sideChannels(),
+                    presentation);
         }
 
         public static ToolExecutionResult failed(ToolInvocation invocation, String message) {
+            return failed(invocation, message, 0,
+                    ToolPresentation.defaultFor(invocation.name()));
+        }
+
+        public static ToolExecutionResult failed(ToolInvocation invocation, String message,
+                                                 long elapsedMillis,
+                                                 ToolPresentation presentation) {
             return new ToolExecutionResult(
                     invocation.id(),
                     invocation.name(),
                     invocation.argumentsJson(),
                     "工具执行失败: " + message,
-                    0,
+                    elapsedMillis,
                     ToolStatus.ERROR,
                     ToolErrorCode.EXECUTION_FAILED,
                     true,
-                    List.of());
+                    List.of(),
+                    List.of(),
+                    presentation);
         }
 
         public static ToolExecutionResult cancelled(ToolInvocation invocation, String message) {
+            return cancelled(invocation, message, 0,
+                    ToolPresentation.defaultFor(invocation.name()));
+        }
+
+        public static ToolExecutionResult cancelled(ToolInvocation invocation, String message,
+                                                    long elapsedMillis,
+                                                    ToolPresentation presentation) {
             return new ToolExecutionResult(
                     invocation.id(),
                     invocation.name(),
                     invocation.argumentsJson(),
                     message,
-                    0,
+                    elapsedMillis,
                     ToolStatus.CANCELLED,
                     ToolErrorCode.CANCELLED,
                     false,
-                    List.of());
+                    List.of(),
+                    List.of(),
+                    presentation);
         }
 
-        private static ToolExecutionResult timedOut(ToolInvocation invocation, long timeoutSeconds) {
+        private static ToolExecutionResult timedOut(ToolInvocation invocation, long timeoutSeconds,
+                                                    long elapsedMillis,
+                                                    ToolPresentation presentation) {
             return new ToolExecutionResult(
                     invocation.id(),
                     invocation.name(),
                     invocation.argumentsJson(),
                     "工具执行超时（" + timeoutSeconds + "秒），已取消",
-                    timeoutSeconds * 1000,
+                    elapsedMillis,
                     ToolStatus.TIMEOUT,
                     ToolErrorCode.TIMEOUT,
                     true,
-                    List.of()
+                    List.of(),
+                    List.of(),
+                    presentation
             );
         }
 
@@ -1463,6 +1729,12 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         default ToolOutput executeOutput(Map<String, String> args) {
             return ToolOutput.success(execute(args));
         }
+
+        default ToolOutput executeOutput(Map<String, String> args,
+                                         ToolExecutionContext executionContext) {
+            executionContext.throwIfCancelled();
+            return executeOutput(args);
+        }
     }
 
     @FunctionalInterface
@@ -1477,6 +1749,29 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         @Override
         default ToolOutput executeOutput(Map<String, String> args) {
             return executeStructured(args);
+        }
+    }
+
+    @FunctionalInterface
+    public interface ContextualStructuredToolExecutor extends ToolExecutor {
+        ToolOutput executeStructured(Map<String, String> args,
+                                     ToolExecutionContext executionContext);
+
+        @Override
+        default String execute(Map<String, String> args) {
+            return executeStructured(args, ToolExecutionContext.current("")).text();
+        }
+
+        @Override
+        default ToolOutput executeOutput(Map<String, String> args) {
+            return executeStructured(args, ToolExecutionContext.current(""));
+        }
+
+        @Override
+        default ToolOutput executeOutput(Map<String, String> args,
+                                         ToolExecutionContext executionContext) {
+            executionContext.throwIfCancelled();
+            return executeStructured(args, executionContext);
         }
     }
 }

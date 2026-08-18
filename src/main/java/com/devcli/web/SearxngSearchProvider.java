@@ -2,6 +2,7 @@ package com.devcli.web;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.devcli.tool.ToolExecutionContext;
 import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -71,6 +72,12 @@ public class SearxngSearchProvider implements SearchProvider {
 
     @Override
     public List<SearchResult> search(String query, int topK) throws IOException {
+        return search(query, topK, ToolExecutionContext.current(""));
+    }
+
+    @Override
+    public List<SearchResult> search(String query, int topK,
+                                     ToolExecutionContext executionContext) throws IOException {
         if (!isReady()) {
             throw new IOException(unavailableHint());
         }
@@ -91,14 +98,14 @@ public class SearxngSearchProvider implements SearchProvider {
                 .build();
         log.info("SearXNG search: query={}, topK={}, base={}", query, maxResults, baseUrl);
 
-        try (Response response = httpClient.newCall(request).execute()) {
+        return CancellableHttpCall.execute(httpClient, request, executionContext, response -> {
             if (!response.isSuccessful()) {
                 throw new IOException("SearXNG 请求失败 (HTTP " + response.code()
                         + ")。某些公共实例禁用了 JSON API，建议自托管 docker 实例。");
             }
             String body = response.body() == null ? "" : response.body().string();
             return parse(body, maxResults);
-        }
+        });
     }
 
     private List<SearchResult> parse(String json, int maxResults) throws IOException {

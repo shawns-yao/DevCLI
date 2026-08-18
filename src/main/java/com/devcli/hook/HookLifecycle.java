@@ -3,6 +3,7 @@ package com.devcli.hook;
 import com.devcli.llm.LlmClient;
 import com.devcli.runtime.CancellationContext;
 import com.devcli.runtime.RunContext;
+import com.devcli.runtime.event.RunEventSink;
 import com.devcli.tool.ToolRegistry;
 
 import java.util.List;
@@ -45,6 +46,10 @@ public final class HookLifecycle {
 
     public boolean isEmpty() {
         return dispatcher.isEmpty();
+    }
+
+    public void bindEventSink(RunEventSink eventSink) {
+        dispatcher.setEventSink(eventSink);
     }
 
     public void startAgent() {
@@ -126,7 +131,9 @@ public final class HookLifecycle {
         if (turnStarted && !turnEnded) {
             endTurn(activeIteration);
         }
+        dispatcher.awaitPending();
         agentEnded = true;
         dispatcher.dispatch(HookEvent.AGENT_END, baseContext);
+        dispatcher.awaitPending();
     }
 }

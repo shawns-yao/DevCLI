@@ -43,7 +43,29 @@ class AgentExecutionEngineTest {
                 delegate.history.stream().map(LlmClient.Message::role).toList());
         assertEquals(List.of(LlmClient.ToolChoice.REQUIRED, LlmClient.ToolChoice.AUTO), llm.toolChoices);
         assertEquals(List.of(RunEvent.ToolCalls.class, RunEvent.ToolResults.class),
-                delegate.runEvents.stream().map(Object::getClass).toList());
+                delegate.runEvents.stream()
+                        .filter(event -> event instanceof RunEvent.ToolCalls
+                                || event instanceof RunEvent.ToolResults)
+                        .map(Object::getClass)
+                        .toList());
+        List<RunEvent.ModelContext> contexts = delegate.runEvents.stream()
+                .filter(RunEvent.ModelContext.class::isInstance)
+                .map(RunEvent.ModelContext.class::cast)
+                .toList();
+        assertEquals(2, contexts.size());
+        assertEquals("SYSTEM_INTERNAL", contexts.getFirst().messages().getFirst().source());
+        assertTrue(delegate.runEvents.stream().anyMatch(RunEvent.ModelUsage.class::isInstance));
+        assertEquals(List.of(
+                        RunEvent.ExecutionState.THINKING,
+                        RunEvent.ExecutionState.TOOL_EXECUTING,
+                        RunEvent.ExecutionState.TOOL_RESULTS_PAIRED,
+                        RunEvent.ExecutionState.THINKING,
+                        RunEvent.ExecutionState.COMPLETED),
+                delegate.runEvents.stream()
+                        .filter(RunEvent.ExecutionStateChanged.class::isInstance)
+                        .map(RunEvent.ExecutionStateChanged.class::cast)
+                        .map(RunEvent.ExecutionStateChanged::state)
+                        .toList());
     }
 
     @Test
@@ -106,6 +128,7 @@ class AgentExecutionEngineTest {
                 .toList();
         assertEquals(1, reminders.size());
         assertTrue(reminders.get(0).content().contains("read_file"));
+        assertEquals(LlmClient.MessageSource.PLUGIN, reminders.get(0).source());
         assertEquals("assistant", delegate.history.get(delegate.history.size() - 1).role());
     }
 
@@ -128,6 +151,41 @@ class AgentExecutionEngineTest {
                         && m.content().contains("系统提醒"))
                 .count();
         assertEquals(3, reminders);
+        assertTrue(delegate.runEvents.stream()
+                .filter(RunEvent.CustomMessage.class::isInstance)
+                .map(RunEvent.CustomMessage.class::cast)
+                .anyMatch(event -> "tool_loop_guard".equals(event.messageType())
+                        && "CIRCUIT_BREAKER".equals(event.attributes().get("action"))));
+    }
+
+    @Test
+    void reconcilesMalformedDelegateResultsBeforeWritingToolMessages() {
+        List<LlmClient.ToolCall> calls = List.of(
+                new LlmClient.ToolCall("call_a",
+                        new LlmClient.ToolCall.Function("read_file", "{\"path\":\"a.txt\"}")),
+                new LlmClient.ToolCall("call_b",
+                        new LlmClient.ToolCall.Function("list_dir", "{\"path\":\".\"}")));
+        ScriptedClient llm = new ScriptedClient(List.of(
+                new LlmClient.ChatResponse("assistant", "", "reasoning", calls, 1, 1),
+                new LlmClient.ChatResponse("assistant", "done", null, null, 1, 1)));
+        MalformedResultDelegate delegate = new MalformedResultDelegate();
+
+        String result = new AgentExecutionEngine<String>(
+                llm, new AgentBudget(1_000, 3, 10)).run(delegate);
+
+        assertEquals("done", result);
+        List<LlmClient.Message> toolMessages = delegate.history.stream()
+                .filter(message -> "tool".equals(message.role()))
+                .toList();
+        assertEquals(List.of("call_a", "call_b"),
+                toolMessages.stream().map(LlmClient.Message::toolCallId).toList());
+        assertTrue(toolMessages.get(0).content().contains("未返回结果"));
+        assertEquals("b", toolMessages.get(1).content());
+        assertTrue(delegate.runEvents.stream()
+                .filter(RunEvent.CustomMessage.class::isInstance)
+                .map(RunEvent.CustomMessage.class::cast)
+                .anyMatch(event -> "tool_result_pairing_anomaly".equals(event.messageType())
+                        && "3".equals(event.attributes().get("count"))));
     }
 
     private static LlmClient.ChatResponse toolCallResponse(String tool, String arguments) {
@@ -271,6 +329,76 @@ class AgentExecutionEngineTest {
         @Override
         public String completed(LlmClient.ChatResponse response, AgentBudget budget) {
             events.add("complete");
+            return response.content();
+        }
+
+        @Override
+        public String cancelled(AgentBudget budget) {
+            return "cancelled";
+        }
+
+        @Override
+        public String budgetExceeded(AgentBudget.ExitReason reason, AgentBudget budget) {
+            return "budget";
+        }
+
+        @Override
+        public String iterationLimitReached(AgentBudget budget) {
+            return "limit";
+        }
+
+        @Override
+        public String failed(IOException error, AgentBudget budget) {
+            return "failed";
+        }
+    }
+
+    private static final class MalformedResultDelegate implements AgentExecutionEngine.Delegate<String> {
+        private final List<LlmClient.Message> history =
+                new ArrayList<>(List.of(LlmClient.Message.system("system")));
+        private final List<RunEvent> runEvents = new ArrayList<>();
+
+        @Override
+        public List<LlmClient.Message> history() {
+            return history;
+        }
+
+        @Override
+        public List<LlmClient.Tool> toolDefinitions(int iteration) {
+            return List.of();
+        }
+
+        @Override
+        public LlmClient.StreamListener streamListener() {
+            return LlmClient.StreamListener.NO_OP;
+        }
+
+        @Override
+        public RunEventSink eventSink() {
+            return runEvents::add;
+        }
+
+        @Override
+        public void beforeIteration(int iteration, AgentBudget budget) {
+        }
+
+        @Override
+        public List<ToolRegistry.ToolExecutionResult> executeTools(
+                List<LlmClient.ToolCall> toolCalls, int iteration) {
+            return List.of(
+                    new ToolRegistry.ToolExecutionResult(
+                            "call_b", "list_dir", "{\"path\":\".\"}", "b", 1,
+                            ToolStatus.SUCCESS, ToolErrorCode.NONE, false, List.of()),
+                    new ToolRegistry.ToolExecutionResult(
+                            "unknown", "grep_code", "{}", "unknown", 1,
+                            ToolStatus.SUCCESS, ToolErrorCode.NONE, false, List.of()),
+                    new ToolRegistry.ToolExecutionResult(
+                            "call_b", "list_dir", "{\"path\":\".\"}", "duplicate", 1,
+                            ToolStatus.SUCCESS, ToolErrorCode.NONE, false, List.of()));
+        }
+
+        @Override
+        public String completed(LlmClient.ChatResponse response, AgentBudget budget) {
             return response.content();
         }
 

@@ -31,14 +31,15 @@ public final class FileToolProvider implements ToolProvider {
                 }
         ));
 
-        context.registerTool(ToolRegistry.Tool.structured(
+        context.registerTool(ToolRegistry.Tool.contextualStructured(
                 "write_file",
                 "写入文件内容（仅限项目根目录之内，单文件 5MB 上限）",
                 context.createToolParameters(
                         new ToolParameter("path", "string", "文件路径", true),
                         new ToolParameter("content", "string", "文件内容", true)
                 ),
-                args -> {
+                (args, executionContext) -> {
+                    executionContext.throwIfCancelled();
                     String path = args.get("path");
                     String content = args.get("content") == null ? "" : args.get("content");
                     int contentBytes = content.getBytes(StandardCharsets.UTF_8).length;
@@ -70,18 +71,21 @@ public final class FileToolProvider implements ToolProvider {
                         throw new PolicyException(staleReason);
                     }
                     try {
+                        executionContext.throwIfCancelled();
                         Path parent = safe.getParent();
                         if (parent != null) {
                             Files.createDirectories(parent);
                         }
                         Files.writeString(safe, content);
                         context.recordFileWrite(path, safe, before, content, activeStep);
+                        executionContext.throwIfCancelled();
                         return ToolOutput.success("文件已写入: " + path);
                     } catch (Exception e) {
                         return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
                                 "写入文件失败: " + e.getMessage(), false);
                     }
-                }
+                },
+                -1
         ));
 
         context.registerTool(ToolRegistry.Tool.structured(

@@ -17,6 +17,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -270,6 +271,23 @@ class HitlToolRegistryTest {
         assertEquals(0, stub.requestCount());
     }
 
+    @Test
+    void serializesApprovalPromptsForParallelDangerousTools(@TempDir Path tempDir) {
+        ConcurrentApprovalHandler handler = new ConcurrentApprovalHandler();
+        HitlToolRegistry registry = new HitlToolRegistry(handler);
+        registry.setProjectPath(tempDir.toString());
+
+        List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
+                new ToolRegistry.ToolInvocation("call_a", "write_file",
+                        "{\"path\":\"a.txt\",\"content\":\"a\"}"),
+                new ToolRegistry.ToolInvocation("call_b", "write_file",
+                        "{\"path\":\"b.txt\",\"content\":\"b\"}")));
+
+        assertEquals(1, handler.maxConcurrent(), "审批输入必须串行化");
+        assertEquals(2, handler.requestCount());
+        assertTrue(results.stream().allMatch(result -> result.status() == ToolStatus.SUCCESS));
+    }
+
     /** 可预设决策结果的 HitlHandler stub。 */
     private static final class StubHandler implements HitlHandler {
         private final Function<ApprovalRequest, ApprovalResult> decision;
@@ -308,6 +326,45 @@ class HitlToolRegistryTest {
         @Override
         public boolean isApprovedAllByServer(String serverName) {
             return approvedServers.contains(serverName);
+        }
+    }
+
+    private static final class ConcurrentApprovalHandler implements HitlHandler {
+        private final AtomicInteger inFlight = new AtomicInteger();
+        private final AtomicInteger maxConcurrent = new AtomicInteger();
+        private final AtomicInteger requests = new AtomicInteger();
+
+        @Override
+        public ApprovalResult requestApproval(ApprovalRequest request) {
+            int current = inFlight.incrementAndGet();
+            maxConcurrent.accumulateAndGet(current, Math::max);
+            requests.incrementAndGet();
+            try {
+                Thread.sleep(100);
+                return ApprovalResult.approve();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return ApprovalResult.reject("审批线程被中断");
+            } finally {
+                inFlight.decrementAndGet();
+            }
+        }
+
+        @Override
+        public boolean isEnabled() {
+            return true;
+        }
+
+        @Override
+        public void setEnabled(boolean enabled) {
+        }
+
+        int maxConcurrent() {
+            return maxConcurrent.get();
+        }
+
+        int requestCount() {
+            return requests.get();
         }
     }
 
