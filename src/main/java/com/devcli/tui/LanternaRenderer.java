@@ -7,6 +7,7 @@ import com.googlecode.lanterna.gui2.dialogs.ListSelectDialogBuilder;
 import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.llm.LlmClient;
+import com.devcli.runtime.event.RunEvent;
 import com.devcli.render.Renderer;
 import com.devcli.render.StatusInfo;
 import com.devcli.tui.pane.CenterPane;
@@ -78,6 +79,17 @@ public final class LanternaRenderer implements Renderer {
             String name = tc.function().name();
             String args = tc.function().arguments();
             window.runOnGuiThread(() -> centerPane.appendToolCall(name, args));
+        }
+    }
+
+    @Override
+    public void appendToolCallEvents(List<RunEvent.ToolCallData> toolCalls) {
+        if (toolCalls == null || toolCalls.isEmpty()) {
+            return;
+        }
+        for (RunEvent.ToolCallData call : toolCalls) {
+            window.runOnGuiThread(() -> centerPane.appendToolCall(
+                    call.presentation(), call.argumentsJson()));
         }
     }
 

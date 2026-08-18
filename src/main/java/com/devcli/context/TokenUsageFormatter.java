@@ -29,6 +29,12 @@ public final class TokenUsageFormatter {
     }
 
     public static String estimatedCostCny(LlmClient llmClient, int inputTokens, int outputTokens, int cachedInputTokens) {
+        return String.format(Locale.ROOT, "¥%.4f",
+                estimatedCostCnyValue(llmClient, inputTokens, outputTokens, cachedInputTokens));
+    }
+
+    public static double estimatedCostCnyValue(
+            LlmClient llmClient, int inputTokens, int outputTokens, int cachedInputTokens) {
         String provider = llmClient == null ? "" : llmClient.getProviderName();
         double inputPerMillion;
         double cachedPerMillion;
@@ -48,9 +54,8 @@ public final class TokenUsageFormatter {
         }
         int cached = Math.max(0, Math.min(inputTokens, cachedInputTokens));
         int uncachedInput = Math.max(0, inputTokens - cached);
-        double cny = (uncachedInput / 1_000_000.0) * inputPerMillion
+        return (uncachedInput / 1_000_000.0) * inputPerMillion
                 + (cached / 1_000_000.0) * cachedPerMillion
                 + (Math.max(0, outputTokens) / 1_000_000.0) * outputPerMillion;
-        return String.format(Locale.ROOT, "¥%.4f", cny);
     }
 }

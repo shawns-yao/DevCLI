@@ -3,6 +3,8 @@ package com.devcli.render;
 import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.llm.LlmClient;
+import com.devcli.runtime.event.RunEvent;
+import com.devcli.tool.ToolPresentation;
 import org.jline.reader.LineReader;
 import org.junit.jupiter.api.Test;
 
@@ -14,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -90,6 +93,27 @@ class PlainRendererTest {
                 new LlmClient.ToolCall.Function("custom_tool", "{}"));
         renderer.appendToolCalls(List.of(call));
         assertTrue(sink.toString(StandardCharsets.UTF_8).contains("🔧 custom_tool × 1"));
+    }
+
+    @Test
+    void appendToolCallEventsUsesPresentationContract() {
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+        PlainRenderer renderer = new PlainRenderer(
+                new PrintStream(sink, true, StandardCharsets.UTF_8),
+                new BufferedReader(new StringReader("")));
+        renderer.appendToolCallEvents(List.of(new RunEvent.ToolCallData(
+                "tc-presented",
+                "custom_tool",
+                "{\"target\":\"module-a\",\"ignored\":\"noise\"}",
+                new ToolPresentation(
+                        ToolPresentation.Kind.LOCATIONS,
+                        "定位模块",
+                        "target"))));
+
+        String text = sink.toString(StandardCharsets.UTF_8);
+        assertTrue(text.contains("定位模块"), text);
+        assertTrue(text.contains("module-a"), text);
+        assertFalse(text.contains("noise"), text);
     }
 
     @Test

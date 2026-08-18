@@ -4,8 +4,10 @@ import com.googlecode.lanterna.gui2.*;
 import com.googlecode.lanterna.gui2.LinearLayout.Alignment;
 import com.googlecode.lanterna.gui2.LinearLayout.GrowPolicy;
 import com.devcli.llm.LlmClient;
+import com.devcli.tool.ToolPresentation;
 import com.devcli.tui.highlight.CodeHighlighter;
 import com.devcli.util.AnsiStyle;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
@@ -23,6 +25,8 @@ import java.util.regex.Pattern;
  * <p>Day 3: 流式输出 + Markdown + 代码高亮
  */
 public class CenterPane extends Panel {
+
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final LlmClient llmClient;
     private final TextBox chatArea;
@@ -122,6 +126,27 @@ public class CenterPane extends Panel {
     public void appendToolCall(String toolName, String args) {
         String toolBlock = "🔧 工具调用: " + (toolName != null ? toolName : "unknown") + "\n"
                 + (args != null ? "  参数: " + args : "")
+                + "\n";
+        chatArea.setText(chatArea.getText() + "\n" + toolBlock);
+        scrollToBottom();
+    }
+
+    public void appendToolCall(ToolPresentation presentation, String argumentsJson) {
+        ToolPresentation value = presentation == null
+                ? ToolPresentation.generic("工具调用")
+                : presentation;
+        String detail = "";
+        if (!value.primaryArgument().isBlank()) {
+            try {
+                detail = JSON.readTree(argumentsJson)
+                        .path(value.primaryArgument()).asText("");
+            } catch (Exception ignored) {
+                // 展示参数缺失时只显示契约标题，不解析工具结果文本。
+            }
+        }
+        String toolBlock = "[" + value.kind().name().toLowerCase(java.util.Locale.ROOT)
+                + "] " + value.title()
+                + (detail.isBlank() ? "" : "\n  " + detail)
                 + "\n";
         chatArea.setText(chatArea.getText() + "\n" + toolBlock);
         scrollToBottom();

@@ -3,6 +3,7 @@ package com.devcli.render.inline;
 import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.llm.LlmClient;
+import com.devcli.runtime.event.RunEvent;
 import com.devcli.render.PlainRenderer;
 import com.devcli.render.Renderer;
 import com.devcli.render.StatusInfo;
@@ -250,6 +251,25 @@ public final class InlineRenderer implements Renderer {
         FoldableBlock block = new FoldableBlock(out,
                 ToolCallRenderer.collapsedHeader(grouped),
                 ToolCallRenderer.expandedLines(grouped));
+        blockRegistry.register(block);
+        TranscriptEntry entry = new BlockEntry(block);
+        String rendered = entry.render();
+        synchronized (transcriptLock) {
+            transcript.add(entry);
+            renderedRows += estimateRows(rendered);
+            emit(rendered);
+        }
+    }
+
+    @Override
+    public void appendToolCallEvents(List<RunEvent.ToolCallData> toolCalls) {
+        if (toolCalls == null || toolCalls.isEmpty()) {
+            return;
+        }
+        Map<String, List<RunEvent.ToolCallData>> grouped = ToolCallRenderer.groupPresented(toolCalls);
+        FoldableBlock block = new FoldableBlock(out,
+                ToolCallRenderer.collapsedPresentedHeader(grouped),
+                ToolCallRenderer.expandedPresentedLines(grouped));
         blockRegistry.register(block);
         TranscriptEntry entry = new BlockEntry(block);
         String rendered = entry.render();

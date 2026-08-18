@@ -4,8 +4,10 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RendererFactoryTest {
 
@@ -33,9 +35,16 @@ class RendererFactoryTest {
     }
 
     @Test
-    void propertyValueLanternaResolves() {
+    void exposesOnlyInlineAndPlainModes() {
+        assertArrayEquals(
+                new RendererFactory.Mode[]{RendererFactory.Mode.INLINE, RendererFactory.Mode.PLAIN},
+                RendererFactory.Mode.values());
+    }
+
+    @Test
+    void propertyValueLanternaMapsToInline() {
         System.setProperty("devcli.renderer", "lanterna");
-        assertEquals(RendererFactory.Mode.LANTERNA, RendererFactory.resolveMode());
+        assertEquals(RendererFactory.Mode.INLINE, RendererFactory.resolveMode());
     }
 
     @Test
@@ -47,19 +56,19 @@ class RendererFactoryTest {
     @Test
     void propertyValueIsCaseInsensitive() {
         System.setProperty("devcli.renderer", "LANTERNA");
-        assertEquals(RendererFactory.Mode.LANTERNA, RendererFactory.resolveMode());
-    }
-
-    @Test
-    void unknownValueFallsBackToInline() {
-        System.setProperty("devcli.renderer", "weird");
         assertEquals(RendererFactory.Mode.INLINE, RendererFactory.resolveMode());
     }
 
     @Test
-    void tuiAliasResolvesToLanterna() {
+    void unknownValueFailsFast() {
+        System.setProperty("devcli.renderer", "weird");
+        assertThrows(IllegalArgumentException.class, RendererFactory::resolveMode);
+    }
+
+    @Test
+    void tuiAliasMapsToInline() {
         System.setProperty("devcli.renderer", "tui");
-        assertEquals(RendererFactory.Mode.LANTERNA, RendererFactory.resolveMode());
+        assertEquals(RendererFactory.Mode.INLINE, RendererFactory.resolveMode());
     }
 
     @Test
@@ -70,7 +79,6 @@ class RendererFactoryTest {
 
     @Test
     void createInlineReturnsRendererInstance() {
-        // Day 1 stub still returns PlainRenderer; Day 2 will swap to InlineRenderer.
         Renderer renderer = RendererFactory.create(RendererFactory.Mode.INLINE, null);
         assertInstanceOf(PlainRenderer.class, renderer);
     }

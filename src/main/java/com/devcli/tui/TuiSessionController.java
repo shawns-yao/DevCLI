@@ -178,10 +178,18 @@ public final class TuiSessionController implements AutoCloseable {
             ui(showConfigPanel);
             return true;
         }
-        if (lower.startsWith("/plan ")) {
+        if (lower.startsWith("/plan ") || lower.startsWith("/team ")) {
+            boolean teamProfile = lower.startsWith("/team ");
             String task = input.substring(6).trim();
+            if (!teamProfile && task.equalsIgnoreCase("--team")) {
+                teamProfile = true;
+                task = "";
+            } else if (!teamProfile && task.regionMatches(true, 0, "--team ", 0, 7)) {
+                teamProfile = true;
+                task = task.substring(7).trim();
+            }
             if (task.isEmpty()) {
-                appendSystem("请提供计划任务，例如 /plan 重构这个类。");
+                appendSystem("请提供编排任务，例如 /plan 重构这个类，或 /plan --team 检查并修复测试。");
                 return true;
             }
             if (isTaskRunning()) {
@@ -189,21 +197,9 @@ public final class TuiSessionController implements AutoCloseable {
                 return true;
             }
             appendUser(input);
-            currentTask = executor.submit(() -> runAgentTask(task, RunMode.PLAN));
-            return true;
-        }
-        if (lower.startsWith("/team ")) {
-            String task = input.substring(6).trim();
-            if (task.isEmpty()) {
-                appendSystem("请提供协作任务，例如 /team 检查并修复测试。");
-                return true;
-            }
-            if (isTaskRunning()) {
-                appendSystem("当前任务仍在运行，请等待完成或输入 /cancel。");
-                return true;
-            }
-            appendUser(input);
-            currentTask = executor.submit(() -> runAgentTask(task, RunMode.TEAM));
+            String orchestrationTask = task;
+            RunMode mode = teamProfile ? RunMode.TEAM : RunMode.PLAN;
+            currentTask = executor.submit(() -> runAgentTask(orchestrationTask, mode));
             return true;
         }
         if (input.startsWith("/")) {
@@ -212,7 +208,7 @@ public final class TuiSessionController implements AutoCloseable {
                     /clear, /context, /memory, /memory clear, /save <事实>
                     /hitl, /hitl on, /hitl off
                     /snapshot, /snapshot status, /snapshot clean, /restore <N>
-                    /config, /plan <任务>, /team <任务>, /cancel, /exit
+                    /config, /plan <任务>, /plan --team <任务>, /team <任务>（兼容入口）, /cancel, /exit
                     其余管理命令请暂时在默认 CLI 模式执行。
                     """);
             return true;

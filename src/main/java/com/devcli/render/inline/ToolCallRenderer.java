@@ -3,6 +3,7 @@ package com.devcli.render.inline;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.llm.LlmClient;
+import com.devcli.runtime.event.RunEvent;
 import com.devcli.util.AnsiStyle;
 
 import java.io.PrintStream;
@@ -50,6 +51,67 @@ public final class ToolCallRenderer {
             grouped.computeIfAbsent(tc.function().name(), k -> new ArrayList<>()).add(tc);
         }
         return grouped;
+    }
+
+    static Map<String, List<RunEvent.ToolCallData>> groupPresented(
+            List<RunEvent.ToolCallData> toolCalls) {
+        Map<String, List<RunEvent.ToolCallData>> grouped = new LinkedHashMap<>();
+        for (RunEvent.ToolCallData call : toolCalls) {
+            grouped.computeIfAbsent(call.name(), ignored -> new ArrayList<>()).add(call);
+        }
+        return grouped;
+    }
+
+    static String collapsedPresentedHeader(
+            Map<String, List<RunEvent.ToolCallData>> grouped) {
+        if (grouped.size() == 1) {
+            List<RunEvent.ToolCallData> calls = grouped.values().iterator().next();
+            RunEvent.ToolCallData first = calls.get(0);
+            String title = presentationTitle(first);
+            String detail = calls.size() == 1 ? presentationDetail(first) : "";
+            String label = calls.size() == 1
+                    ? title + (detail.isBlank() ? "" : " · " + detail)
+                    : title + " × " + calls.size();
+            return AnsiStyle.subtle("⏵ " + label + " (ctrl+o to expand)");
+        }
+        int totalCalls = grouped.values().stream().mapToInt(List::size).sum();
+        return AnsiStyle.subtle("⏵ " + grouped.size() + " 组工具调用 / "
+                + totalCalls + " 次 (ctrl+o to expand)");
+    }
+
+    static List<String> expandedPresentedLines(
+            Map<String, List<RunEvent.ToolCallData>> grouped) {
+        List<String> lines = new ArrayList<>();
+        for (List<RunEvent.ToolCallData> calls : grouped.values()) {
+            RunEvent.ToolCallData first = calls.get(0);
+            lines.add(AnsiStyle.subtle("  " + presentationTitle(first)
+                    + (calls.size() > 1 ? " × " + calls.size() : "")));
+            for (RunEvent.ToolCallData call : calls) {
+                String detail = presentationDetail(call);
+                if (!detail.isBlank()) {
+                    lines.add(AnsiStyle.subtle("    └ " + detail));
+                }
+            }
+        }
+        return lines;
+    }
+
+    private static String presentationTitle(RunEvent.ToolCallData call) {
+        String title = call.presentation().title();
+        return title == null || title.isBlank() ? call.name() : title;
+    }
+
+    private static String presentationDetail(RunEvent.ToolCallData call) {
+        String key = call.presentation().primaryArgument();
+        if (key == null || key.isBlank()) {
+            return "";
+        }
+        try {
+            String value = JSON.readTree(call.argumentsJson()).path(key).asText("");
+            return value.length() > 80 ? value.substring(0, 77) + "..." : value;
+        } catch (Exception ignored) {
+            return "";
+        }
     }
 
     static String collapsedHeader(Map<String, List<LlmClient.ToolCall>> grouped) {

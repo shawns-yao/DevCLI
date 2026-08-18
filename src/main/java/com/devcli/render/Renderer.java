@@ -3,6 +3,7 @@ package com.devcli.render;
 import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.llm.LlmClient;
+import com.devcli.runtime.event.RunEvent;
 import org.jline.reader.LineReader;
 
 import java.io.PrintStream;
@@ -91,6 +92,19 @@ public interface Renderer extends AutoCloseable {
      * PlainRenderer 直接 println 当前 Agent 内已有的标签格式。
      */
     void appendToolCalls(List<LlmClient.ToolCall> toolCalls);
+
+    /** 使用工具契约携带的展示意图渲染，避免界面从结果文本反推类型。 */
+    default void appendToolCallEvents(List<RunEvent.ToolCallData> toolCalls) {
+        if (toolCalls == null || toolCalls.isEmpty()) {
+            return;
+        }
+        appendToolCalls(toolCalls.stream()
+                .map(call -> new LlmClient.ToolCall(
+                        call.id(),
+                        new LlmClient.ToolCall.Function(
+                                call.name(), call.argumentsJson())))
+                .toList());
+    }
 
     /**
      * 渲染一个文件 diff 块。

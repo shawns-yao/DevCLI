@@ -6,6 +6,7 @@ import com.devcli.hitl.ApprovalPolicy;
 import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.llm.LlmClient;
+import com.devcli.runtime.event.RunEvent;
 import com.devcli.util.AnsiStyle;
 import org.jline.reader.EndOfFileException;
 import org.jline.reader.LineReader;
@@ -81,6 +82,24 @@ public final class PlainRenderer implements Renderer {
                 if (!detail.isEmpty()) {
                     out.println(AnsiStyle.subtle("    └ " + detail));
                 }
+            }
+        }
+    }
+
+    @Override
+    public void appendToolCallEvents(List<RunEvent.ToolCallData> toolCalls) {
+        if (toolCalls == null || toolCalls.isEmpty()) {
+            return;
+        }
+        for (RunEvent.ToolCallData call : toolCalls) {
+            String title = call.presentation().title().isBlank()
+                    ? call.name()
+                    : call.presentation().title();
+            out.println(AnsiStyle.subtle("  " + title));
+            String detail = extractPresentationArgument(
+                    call.presentation().primaryArgument(), call.argumentsJson());
+            if (!detail.isBlank()) {
+                out.println(AnsiStyle.subtle("    └ " + detail));
             }
         }
     }
@@ -325,6 +344,18 @@ public final class PlainRenderer implements Renderer {
             return value;
         } catch (Exception e) {
             return argsJson.length() > 80 ? argsJson.substring(0, 77) + "..." : argsJson;
+        }
+    }
+
+    private static String extractPresentationArgument(String key, String argsJson) {
+        if (key == null || key.isBlank()) {
+            return "";
+        }
+        try {
+            String value = JSON.readTree(argsJson).path(key).asText("");
+            return value.length() > 80 ? value.substring(0, 77) + "..." : value;
+        } catch (Exception ignored) {
+            return "";
         }
     }
 }
