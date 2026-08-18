@@ -1,0 +1,61 @@
+{
+  "benchmark": "checkout-collaboration",
+  "date": "2026-08-15",
+  "run_status": "invalid_paired_run",
+  "provider": "DeepSeek-compatible OpenCode Go endpoint",
+  "model": "deepseek-v4-flash",
+  "scenario": "multi-tenant checkout Saga with access policy, inventory, payment, shipping, notification outbox, audit trail, and final checkout orchestration",
+  "hidden_check_total": 38,
+  "fairness_controls": {
+    "same_task_prompt": true,
+    "same_initial_workspace": true,
+    "same_tool_policy": [
+      "read_file",
+      "write_file",
+      "list_dir"
+    ],
+    "same_hidden_validator": true,
+    "same_model_provider": true
+  },
+  "single_agent": {
+    "valid": false,
+    "invalid_reason": "DeepSeek transport timeout on the second model call; no implementation artifact was completed",
+    "checks_passed": 1,
+    "checks_total": 38,
+    "elapsed_ms": 365293,
+    "llm_calls": 2,
+    "failed_llm_calls": 1,
+    "reported_input_tokens": 2853,
+    "reported_output_tokens": 122,
+    "reported_cached_input_tokens": 1792,
+    "reported_total_tokens": 2975,
+    "unexpected_java_sources": [],
+    "agent_retry_signals": 0
+  },
+  "planner_worker_reviewer": {
+    "valid": true,
+    "checks_passed": 38,
+    "checks_total": 38,
+    "elapsed_ms": 630597,
+    "llm_calls": 31,
+    "failed_llm_calls": 0,
+    "reported_input_tokens": 499978,
+    "reported_output_tokens": 68301,
+    "reported_cached_input_tokens": 411904,
+    "reported_total_tokens": 568279,
+    "unexpected_java_sources": [],
+    "agent_retry_signals": 4
+  },
+  "earlier_invalid_attempt": {
+    "single_agent_invalid_reason": "The endpoint rejected named tool_choice while DeepSeek thinking mode was enabled",
+    "action_taken": "Removed the single-Agent-only named initial tool choice so both modes use the same tool definitions without an asymmetric provider-incompatible request"
+  },
+  "conclusion": "The Team run demonstrates that the Planner/Worker/Reviewer pipeline can complete this controlled production-like task. It does not establish a comparative advantage over a single Agent because the single-Agent run did not complete normally.",
+  "statistical_limitations": [
+    "No valid paired run exists",
+    "Only one Team completion was observed",
+    "The task intentionally has separable modules and therefore favors explicit decomposition",
+    "Provider-reported cost was unavailable"
+  ],
+  "raw_report": "target/agent-benchmark/checkout-run-1786763914976/checkout-collaboration-benchmark.json"
+}
