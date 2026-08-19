@@ -47,7 +47,7 @@ ReAct 主循环、Plan 多 Agent 编排、MCP 协议客户端、上下文压缩�
 
 - LSP（语言服务器协议）诊断注入：仅实现协议子集，编辑后回灌编译诊断。
 - Git Side-History 快照与回滚：turn 粒度快照与 `/restore`，尚未覆盖全部编辑入口。
-- 后台任务与 Runtime API：共用 SQLite RunStore 与本地 HTTP/SSE 端点，仅监听回环地址。
+- 后台任务与 Runtime API：共用 SQLite RunStore 与本地 HTTP/SSE 端点；Runtime events 支持可续传实时流，仅监听回环地址。
 - 图片输入：本地路径、file URL 与剪贴板图片。
 - SWE-bench Lite：已产出官方格式 predictions JSONL，官方 harness 尚未跑出有效 resolved 结果。
 
@@ -77,7 +77,7 @@ DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、�
 - `HITL（Human-in-the-Loop）`：危险工具和敏感页面操作进入人工审批；审批前先过策略层，策略拒绝的操作不能靠用户批准绕过。
 - `Snapshot（快照）`：通过 Side-Git 在 turn 前后保存快照，支持回滚最近一轮变更，并按 `devcli.snapshot.max` 自动裁剪旧快照，降低 Agent 自动改文件的风险。
 - `Renderer（渲染器）`：默认 inline 模式提供底部状态栏、行内 thinking、工具块和 diff；plain 用于无 ANSI、重定向和自动化环境。
-- `Runtime API + RunStore`：本地 HTTP API 暴露 threads / branches / turns / events；CLI turn、Runtime turn 和后台任务共用 `runtime.db` 中的 Run 生命周期。同一 thread 的 turn 按提交顺序串行执行，不同 thread 可并行。
+- `Runtime API + RunStore`：本地 HTTP API 暴露 threads / branches / turns / events；events 端点支持按游标续传的 chunked SSE 实时尾随。CLI turn、Runtime turn 和后台任务共用 `runtime.db` 中的 Run 生命周期，并登记 checkpoint、Patch Journal、Side-Git 的元数据恢复引用。同一 thread 的 turn 按提交顺序串行执行，不同 thread 可并行。
 - `Session Tree（会话树）`：CLI 的 `/session` 与 Runtime branch 共用持久事件树；切换分支只重建模型上下文，不恢复或修改工作区文件。`/branch` 是兼容别名。
 - `RunContext（运行上下文）`：每次交互、后台任务或无头 turn 绑定独立项目路径、取消令牌和资源生命周期；预先创建的线程不会读取其他任务的取消状态，无头 Agent 结束后会关闭本次创建的工具与记忆资源。
 - `AgentExecutionEngine（执行引擎）`：ReAct、Plan task 和 SubAgent 共用同一套取消、预算、LLM 调用、工具消息回灌和异常控制流程；每次模型采样具有稳定请求标识和独立取消边界，重复请求会替换并取消旧请求。
@@ -118,6 +118,7 @@ Main
 - `ToolEffect + ToolAccessScope（工具副作用能力）` 由执行管线强制：非隔离分析任务只获得只读能力，隔离任务才允许项目写入和主机命令；MCP 缺失只读注解或声明 destructive/openWorld 时按外部副作用处理。工具参数先转换为稳定语义指纹，字段顺序、查询大小写、Unicode 等价字符和冗余空白不再绕过停滞检测；正则 pattern 保持大小写敏感，避免错误缓存命中；成功的只读结果会短期缓存，任何副作用执行都会清空缓存。
 - `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 并行执行时拦截 `write_file`，同一文件只能被一个运行中步骤写入；并行工具线程会继承步骤租约归属，任务结束后释放租约。`ToolRegistry` 托管共享后台清理器，project fork 复用同一线程，最后一个注册表关闭后停止；周期可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
 - `PatchSet（补丁集）` 是隔离结果进入主项目的唯一文件回写边界：JVM 公平锁和 `~/.devcli/locks/project-commit/` 下的跨进程文件锁覆盖预检、应用和 checkpoint 终态；构建阶段流式计算哈希，未变化文件不读取完整内容。协议版本 7 在应用前保存目标哈希与原文件备份，并保存验收元数据及适用节点、原步骤对应 Worker/Reviewer 身份、在位重做次数和失败现场；恢复时按最终哈希提升完成、继续待执行或自动回滚，同时保持原步骤分配和原重做额度。Reviewer 拒绝、任务失败、用户取消、前置哈希冲突、非普通文件覆盖或路径/链接逃逸都会阻止整批应用。
+- `RecoveryEvidenceRef（恢复证据引用）`：RunStore 的 `runtime_recovery_evidence` 只保存 `CHECKPOINT`、`PATCH_JOURNAL`、`SIDE_GIT` 的 run/thread/branch 身份、逻辑键、规范化引用、可选 SHA-256、状态和版本等元数据，不复制 checkpoint、补丁或快照内容。相同 `(run_id, kind, logical_key)` 幂等更新，失败只告警；回滚不完整时保留 journal，真实 reconcile 后才可从 `FAILED` 提升为 `COMPLETED` 或 `ROLLED_BACK`。
 - `CommandGuard（命令防线）` 是危险命令快速拒绝层，不替代 HITL 和路径策略。
 - `HitlToolRegistry（审批工具注册表）` 位于真实工具执行前，保证危险操作先经过审批和策略判定。
 
@@ -381,7 +382,7 @@ Authorization: Bearer your_local_api_key
 ```
 
 Runtime API 默认仅绑定 `127.0.0.1`。HTTP 请求线程和 Agent 执行线程隔离；Agent 执行池默认 `2` 个线程、队列 `64`，可通过
-`-Ddevcli.runtime.api.turn.threads` / `-Ddevcli.runtime.api.turn.queue` 调整。队列满时返回 `429 {"error":"runtime_busy"}`。长 thread 默认在历史达到 32,000 token 后持久化压缩检查点，可通过 `DEVCLI_RUNTIME_CHECKPOINT_TRIGGER_TOKENS` 或 `-Ddevcli.runtime.checkpoint.trigger.tokens` 调整，最小值为 4,000。
+`-Ddevcli.runtime.api.turn.threads` / `-Ddevcli.runtime.api.turn.queue` 调整。队列满时返回 `429 {"error":"runtime_busy"}`。每个 SSE 连接占用一个 HTTP worker，当前本地 Runtime 的并发上限受 `-Ddevcli.runtime.api.http.threads`（默认 `16`）约束，不代表生产服务吞吐。heartbeat 默认每 `15` 秒发送一次，可通过 `DEVCLI_RUNTIME_API_SSE_HEARTBEAT_SECONDS` 或 `-Ddevcli.runtime.api.sse.heartbeat.seconds` 调整。长 thread 默认在历史达到 32,000 token 后持久化压缩检查点，可通过 `DEVCLI_RUNTIME_CHECKPOINT_TRIGGER_TOKENS` 或 `-Ddevcli.runtime.checkpoint.trigger.tokens` 调整，最小值为 4,000。
 
 ## Usage
 
@@ -651,11 +652,13 @@ Runtime API 适合把 DevCLI 接入本地脚本、编辑器插件或自动化系
 - `thread.checkpoint.created`
 - `thread.checkpoint.failed`
 
+`GET /v1/threads/{id}/events` 返回 chunked `text/event-stream`。服务端先发送当前活动分支可见的 replay，再持续读取新事件；`after` 查询参数与 `Last-Event-ID` 请求头都只接受非负游标，初始游标取两者中较大的合法值，非法值按 `0` 处理。每批最多读取 128 条，事件提交 SQLite 后才通知等待连接，避免客户端看到未提交数据。空闲时发送 `: heartbeat` 注释，不推进事件游标；客户端断开、服务关闭或连接中断都会清理订阅和等待资源。写入按阻塞 socket 自然形成 backpressure，不维护每客户端无界队列。
+
 模型流、工具调用、工具结果和 turn 生命周期统一使用强类型 `RunEvent`。CLI Renderer 通过适配器消费同一事件流，Runtime API 将事件投影为带 `schema_version: 2` 的稳定 JSON 后写入 SSE；远程客户端不需要解析终端文本。工具参数在协议中保持 JSON 对象，工具结果包含结构化状态、错误码、重试标记、耗时、展示意图和图片数量，不包含图片正文。
 
 默认只绑定本机地址 `127.0.0.1`，并要求 API Key。HTTP 请求线程与 Agent turn 执行线程隔离，turn 队列满时返回 `429 runtime_busy`。
 
-同一 thread 的多个 turn 由 `RuntimeSessionTurnRunner` 复用会话运行时；进程恢复时从 SQLite 读取最新压缩检查点，并完整重放检查点之后的已完成 turn。没有检查点时重放全部已完成 turn。检查点保存压缩消息窗口与恢复元数据；事件日志仍是事实来源，失败或被拒的 turn 不进入模型上下文。
+同一 thread 的多个 turn 由 `RuntimeSessionTurnRunner` 复用会话运行时；进程恢复时从 SQLite 读取最新压缩检查点，并完整重放检查点之后的已完成 turn。没有检查点时重放全部已完成 turn。CLI 执行开始前生成稳定 `runId`，`SessionTree` 记录同一 ID；`RunContext` 通过注入的 evidence sink 登记 checkpoint 保存/删除、Patch Journal 准备与终态、Side-Git 前后快照。事件日志仍是事实来源，失败或被拒的 turn 不进入模型上下文。RunStore 恢复引用只存元数据，不替代或复制本地 checkpoint、patch journal、Side-Git 内容。
 
 ## Hooks
 
@@ -735,7 +738,7 @@ plain renderer 适合 CI、日志或不支持 ANSI 的终端。Lanterna 不再�
 
 ## Benchmark Evaluation
 
-项目提供 RAG、Agent、Memory 和 Context Compression / Long Context 四类量化评测。公开集合已接入 CodeSearchNet Java、SWE-bench Lite、LongMemEval Oracle Cleaned、LongBench v1 和 RULER v1；固定版本、SHA-256、许可、原始文件边界和官方 harness 记录在 `Config/public-benchmarks.json` 与数据清单中。项目内受控任务继续独立报告，禁止与公开集合结果混算。受控 Agent benchmark 不暴露 `execute_command`，统一由隐藏验证器在 Agent 运行后编译并执行行为检查；另有订单履约 Saga 协作场景，以六个模块和 30 项隐藏检查比较单 Agent 与 Planner/Worker/Reviewer 的拆解、集成、补偿、幂等和并发能力。SWE-bench 则输出官方 predictions JSONL，并由 Linux Docker 中的官方 harness 执行真实测试。
+项目提供 RAG、Agent、Memory 和 Context Compression / Long Context 四类量化评测。公开集合已接入 CodeSearchNet Java、SWE-bench Lite、LongMemEval Oracle Cleaned、LongBench v1 和 RULER v1；固定版本、SHA-256、许可、原始文件边界和官方 harness 记录在 `Config/public-benchmarks.json` 与数据清单中。项目内受控任务继续独立报告，禁止与公开集合结果混算。受控 Agent benchmark 不暴露 `execute_command`，统一由隐藏验证器在 Agent 运行后编译并执行行为检查；checkout 协作评测把单 Agent 与 Planner/Worker/Reviewer 作为一个 whole-pair attempt，默认最多 2 次并保留全部尝试，只有首个完整配对才计算比较指标。另有订单履约 Saga 协作场景，以六个模块和 30 项隐藏检查比较两种模式的拆解、集成、补偿、幂等和并发能力。SWE-bench 则输出官方 predictions JSONL，并由 Linux Docker 中的官方 harness 执行真实测试。
 
 评测原始报告默认写入 `target/benchmark-reports/` 和 `target/agent-benchmark/`。聚合器会生成可提交的 JSON、CSV 与数据清单到 `Data/processed/` 和 `Data/manifest/`。完整方法、命令、基线结果和适用边界见 `docs/benchmark-evaluation.md`。
 

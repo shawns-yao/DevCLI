@@ -23,7 +23,8 @@ For the primary entry point, see `/AGENTS.md`.
 | RAG 索引 | `~/.devcli/rag/codebase.db` | `-Ddevcli.rag.dir` |
 | 审计日志 | `~/.devcli/audit/audit-YYYY-MM-DD.jsonl` | `DEVCLI_AUDIT_DIR` / `-Ddevcli.audit.dir` |
 | Side-Git 快照 | `~/.devcli/snapshots/<project_hash>/<worktree_hash>/.git` | `DEVCLI_SNAPSHOT_DIR` / `-Ddevcli.snapshot.dir` |
-| 后台任务 | `~/.devcli/tasks/tasks.db` | — |
+| 后台任务与 Runtime Run | `~/.devcli/runtime/runtime.db` | — |
+| 恢复证据索引 | `runtime.db` 的 `runtime_recovery_evidence` 表 | — |
 
 ### Snapshot Config
 
@@ -48,6 +49,10 @@ For the primary entry point, see `/AGENTS.md`.
 系统属性 > 默认值：`devcli.llm.connect.timeout.seconds`(60) / `devcli.llm.read.timeout.seconds`(300) / `devcli.llm.write.timeout.seconds`(60) / `devcli.llm.call.timeout.seconds`(600)
 
 SSE 流式下 readTimeout 是两次 read 间最大间隔，GLM-5.1 生成大段 reasoning 时可能长时间静默，所以放宽到 300 秒。
+
+### Runtime API Config
+
+系统属性 > 默认值：`devcli.runtime.api.http.threads`(16) / `devcli.runtime.api.turn.threads`(2) / `devcli.runtime.api.turn.queue`(64) / `devcli.runtime.api.sse.heartbeat.seconds`(15)。每个 SSE 连接占用一个 HTTP worker；这些线程数只描述本地 Runtime 的并发约束，不代表生产服务吞吐。heartbeat 可用 `DEVCLI_RUNTIME_API_SSE_HEARTBEAT_SECONDS` 覆盖。
 
 ### Web Search Provider Config
 
@@ -245,11 +250,14 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - CLI: /task, /task list, /task add, /task cancel, /task log
 - Runtime API: `serve --http --port 8080`，仅 127.0.0.1，需 API Key
 - 端点：POST /v1/threads / POST /v1/threads/{id}/turns / GET /v1/threads/{id}/events
+- events 端点返回 chunked `text/event-stream`：先 replay 当前活动分支可见事件，再 tail 新事件；`after` 与 `Last-Event-ID` 取较大合法游标，单批最多 128 条。SQLite commit 后才通知等待连接，heartbeat 使用 `: heartbeat` 注释且不推进游标。
+- SSE 写入使用阻塞 socket 形成 backpressure；每个连接占用一个 HTTP worker，断线、服务关闭、线程中断或写入失败都会清理订阅。heartbeat 默认 15 秒，可用 `devcli.runtime.api.sse.heartbeat.seconds` / `DEVCLI_RUNTIME_API_SSE_HEARTBEAT_SECONDS` 调整。
 - Runtime API 的 turn 通过 `KeyedSerialExecutor` 调度：同 key 的通道创建、入队和空通道删除使用原子 compute，杜绝旧通道与新通道并存；底层调度拒绝会通知全部等待者，单个 turn 异常不会阻塞同通道后续任务
 - Runtime API 为每个 thread 复用 `RuntimeSessionTurnRunner` / `AgentSessionRuntime`；除普通 turn 外，`POST /v1/threads/{id}/steer` 在当前工具批次后注入 Steering，`POST /v1/threads/{id}/follow-up` 在 Agent 原本准备结束时注入 Follow-up，两个操作都会写入 `queue.updated`
 - Runtime API 另提供 `POST /v1/threads/{id}/queue/clear` 清空当前分支待处理队列，以及 `POST /v1/threads/{id}/cancel` 取消当前 turn；清空操作写入 `queue.updated(action=cleared)`，取消不伪造 turn 完成事件
 - Runtime 队列快照按 thread/branch 写入 SQLite；会话创建时恢复 Steering / Follow-up，入队和 turn 结束时重写当前分支快照。分支切换只恢复目标分支队列，不复制父分支待处理输入
 - Runtime thread 支持事件树分支：`GET/POST /v1/threads/{id}/branches` 列举或从当前可见事件创建分支，`POST /v1/threads/{id}/branches/{branchId}/activate` 切换活动分支；事件和 checkpoint 都保存 `branch_id`，恢复时按 parent_branch_id / fork_event_id lineage 截取，切换后关闭旧 session 并从目标分支重建
+- Runtime API 仍只绑定 loopback；HTTP worker 默认 16 个，turn worker 默认 2 个、队列 64 个，前者限制 SSE 连接并发，后者限制 turn 调度，不代表生产吞吐
 - CLI `/session status|tree|fork|use|new|clear|use-thread` 直接操作同一持久事件树；`/branch` 是兼容别名并只提示一次迁移。Tree 切换只重建模型上下文，不修改工作区文件
 - thread 上下文从 SQLite 恢复最新压缩检查点，并完整追加检查点覆盖事件之后的已完成 turn；没有检查点时恢复全部已完成 turn，不再固定保留最近 20 轮
 - 历史默认达到 32,000 token 时生成持久化检查点，`DEVCLI_RUNTIME_CHECKPOINT_TRIGGER_TOKENS` / `devcli.runtime.checkpoint.trigger.tokens` 可调整，最小 4,000；检查点保存压缩消息、覆盖事件、摘要、token 变化和 `CompactBoundaryMetadata` 运行态快照
@@ -267,6 +275,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 每次执行引擎模型调用通过共享采样协调器注册稳定请求标识、独立取消令牌和请求代次；同标识的新请求原子替换旧请求并取消旧执行线程，作用域关闭时只清理自己的代次，避免旧请求结束时误删新请求
 - `HeadlessAgentRunner` 统一管理无头 Agent、ToolRegistry 和 MemoryManager 生命周期；后台任务取消时同时取消对应 RunContext 并中断执行线程
 - ToolResultSizeManager 的落盘项目路径来自执行该工具的 ToolRegistry 实例，不再通过静态活动路径跨运行共享
+- CLI turn 开始前生成稳定 `runId` 并传入 `RunContext`；`SessionTree` 记录同一 run，RunStore 通过 `RecoveryEvidenceSink` 登记 checkpoint 保存/删除、Patch Journal prepare/terminal/rollback 和 Side-Git pre/post。恢复证据写入失败只记录 warning，不改变本地产物；恢复证据只存元数据，不复制本地内容。
 
 ### Controlled Hook Lifecycle
 
@@ -321,6 +330,9 @@ Plan Task / Multi-Agent ExecutionStep / checkpoint 共用任务产物；统一�
 
 ### AgentCheckpoint.java
 checkpoint 协议版本 7；通过 RecoveryState 恢复共享 ExecutionArtifact、验收方式、验证器与适用节点、稳定子代理身份、步骤分配、单调消息游标、最小摘要、已消耗的在位重做次数和失败现场，保存 PatchSet 写前日志与原文件备份，恢复时按文件哈希对账并保持原 Worker 绑定和原重做额度；旧协议缺失适用节点时迁移为 `FINAL`，缺失验证字段时转为人工确认，损坏身份拓扑或未来版本明确拒绝
+
+### RecoveryEvidenceRef.java
+RunStore 中的 metadata-only 恢复证据索引；登记 `CHECKPOINT`、`PATCH_JOURNAL`、`SIDE_GIT` 的 run/thread/branch 身份、逻辑键、规范化引用、可选 SHA-256、状态、时间戳和版本。`runtime_recovery_evidence` 以 `(run_id, kind, logical_key)` 幂等 upsert 并保护状态迁移，不复制 checkpoint、patch 或 snapshot 内容；`RunContext` 注入的 sink 在写入失败时只告警。CLI 预先生成稳定 `runId`，SessionTree 复用该 ID；`FAILED` journal 只有在真实 reconcile 后才能转为 `COMPLETED` 或 `ROLLED_BACK`。
 
 ### PreReviewVerifier.java
 Reviewer 前 Java 硬验证；封装 Maven/javac 命令、扫描、超时、输出解码和失败摘要，无 Maven 时使用 javac 参数文件避免命令行过长
@@ -413,7 +425,7 @@ EMBEDDING_BASE_URL=http://localhost:11434
 
 评测入口位于 `src/test/java/com/devcli/benchmark/`，默认不进入快速回归。RAG benchmark 支持 CodeSearchNet Java 公共 test split，并统一计算 Recall@5、MRR@5、nDCG@5；长文档型 definition 查询直接走 semantic route，短符号和调用链查询继续使用 keyword、semantic、graph、RRF 与可选 rerank。
 
-Agent benchmark 对同一组隐藏检查任务比较单 Agent 与 Planner/Worker/Reviewer，任务成功要求 LLM 流程完成且隐藏检查全部通过。Memory benchmark 统计写入策略准确率、低价值拦截率、Recall@5 和注入命中率。Compression benchmark 在 230k token 生产阈值下执行多次真实摘要，再通过分层事实问答统计保真率。
+Agent benchmark 对同一组隐藏检查任务比较单 Agent 与 Planner/Worker/Reviewer，任务成功要求 LLM 流程完成且隐藏检查全部通过。Checkout 协作评测把两种模式作为一个 whole-pair attempt，默认最多 2 次、范围 `[1, 5]`，旧 `devcli.benchmark.llm.maxAttempts` 兼容读取；每次使用独立目录，首个同轮完整 pair 才能进入比较，全部失败则 `valid_paired_run=false` 且比较指标置空。报告保留 `max_attempts`、`attempt_count`、`valid_paired_run`、`selected_attempt` 和 `attempts` 中的独立 workspace、complete_pair、failure 与两侧结果，同时记录任务 prompt SHA-256、tool policy、同一初始工作区和同一隐藏验证器，保证公平性可审计。Memory benchmark 统计写入策略准确率、低价值拦截率、Recall@5 和注入命中率。Compression benchmark 在 230k token 生产阈值下执行多次真实摘要，再通过分层事实问答统计保真率。
 
 公开集合扩展由 `PublicBenchmarkCatalog` 读取固定配置并校验原始文件 SHA-256 与官方 harness。`PublicBenchmarkReadinessIT` 验证 SWE-bench Lite、LongMemEval、LongBench 和 RULER 数据入口；`RulerDatasetGenerationIT` 直接调用固定版本官方生成器，避免 Windows shell 对换行模板的破坏；`PublicLongContextBenchmarkIT` 生成 LongMemEval hypothesis、复用 LongBench 官方 prompt/数字指标和 RULER string match；`SweBenchLiteAgentBenchmarkIT` 生成官方 predictions JSONL，并可通过 Linux Docker harness 执行 resolved 评测。代理指标与官方指标在报告中分字段保存。
 

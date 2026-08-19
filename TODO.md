@@ -64,12 +64,12 @@
 - 已验证（2026-08-14）：主代码与测试代码编译通过；配置、RunStore、旧库导入、后台任务、Runtime API、Session Tree、CLI、渲染器、执行图、ReAct/Plan/Team 公共内核等 21 个限定测试类共 329 项通过
 - 成本控制：新增统一 RunBudget、预算档位、并行原子账本和 PricingCatalog；Planner、Worker、Reviewer、压缩与重试全部计入同一 run，未知模型不得展示猜测价格
 - 安全性：新增 Project Trust 与统一 ExecutionSecurityPolicy；ReAct 命令默认沙箱执行，项目写入使用工作区事务与 PatchSet；HITL 不得绕过策略拒绝
-- 可靠性（部分实现）：RuntimeThreadStore、DurableTaskManager、Runtime API turn 与 CLI turn 已统一写入 RunStore；后台崩溃残留保留 attempt 和恢复原因后回到队列。AgentCheckpoint、Patch Journal 和 Side-Git 引用尚未接入 RunStore
+- 可靠性（已补强，2026-08-19）：RuntimeThreadStore、DurableTaskManager、Runtime API turn 与 CLI turn 已统一写入 RunStore；后台崩溃残留保留 attempt 和恢复原因后回到队列。RunStore 新增 metadata-only `RecoveryEvidenceRef`，登记 AgentCheckpoint、Patch Journal 和 Side-Git 引用；CLI 预先生成稳定 runId，SessionTree 复用，写入失败只记录 warning
 - 可观测性：RunEvent 作为 UI 和 Runtime 状态事实，Trace、Metric、Audit 保持专用存储；统一 run/turn/step/agent/attempt 关联，并增加预算、沙箱、重试、恢复和快照事件
 - UI（部分实现）：新增持久 Session Tree；交互入口只创建 Inline 或 Plain，Lanterna/TUI 配置兼容映射到 Inline。完整 RunSnapshot 投影、四区状态重构和 `tui/` 源码物理删除尚未完成
 - Temporal 决策：当前本地版不引入；未来服务端出现跨机器 Worker、长时间审批、定时器和故障转移需求时，可实现 `TemporalWorkflowRuntime` 替换本地调度，禁止与 DurableTaskManager 叠加；Temporal history 只保存控制状态和 Artifact 引用
 - 影响范围：agent、runtime、budget、security、tool、workspace、snapshot、trace、render、tui、cli、配置、测试和文档
-- 未实现：RunBudget、PricingCatalog、Project Trust、RunStore 的 checkpoint/Side-Git 引用与完整恢复对账、统一可观测上下文、RunSnapshot 终端投影；内部 STANDARD 兼容实现尚未物理删除
+- 未实现：RunBudget、PricingCatalog、Project Trust、RunStore 的跨产物完整恢复对账与服务化恢复、统一可观测上下文、RunSnapshot 终端投影；内部 STANDARD 兼容实现尚未物理删除
 - 验证计划：各阶段完成后运行对应限定测试；本轮按用户要求不执行全量回归，真实终端启动仍需单独许可
 - 剩余风险：旧 `tasks.db` 当前只在启动时导入，不反向同步；剩余传统配置解析器仍需按模块迁移；ReAct 写入事务化、RunStore 完整恢复对账和 `tui/` 物理删除仍需分阶段实施
 
@@ -109,7 +109,7 @@
 - 影响范围：AgentExecutionEngine、AgentTurnInbox、AgentSessionRuntime、CLI、无头 Runtime API、RunEvent 和会话测试
 - 已实现：Agent 执行层支持 Steering / Follow-up 双通道注入；CLI 活动输入复用 Agent 收件箱；无头执行复用统一 AgentSessionRuntime；运行事件支持 queue.updated；收件箱容量、优先级、批量消费和事件编码已有限定测试；Runtime checkpoint 已保存压缩 metadata，并增加稳定消息 id、parentId、role 和 index 的消息树快照，旧 SQLite 数据库启动时自动补列
 - 已修复：AgentSessionRuntime 的异步执行会复用调用方已有的 RunContext，并在工作线程结束后恢复原上下文；无外层上下文时才创建并关闭临时上下文
-- 未实现：Runtime API 尚未提供 SSE 长连接推送；Extension Contract 尚未负责外部配置加载和扩展执行权限统一
+- 已实现（2026-08-19）：Runtime API events 端点升级为可续传实时 SSE，支持 after/Last-Event-ID、先 replay 后 tail、heartbeat、128 条批次和活动分支可见性；Extension Contract 尚未负责外部配置加载和扩展执行权限统一
 - 验证建议：运行收件箱与 RunEvent 编码限定测试；已通过 `mvn -DskipTests package` 和 plain renderer 的 `/help`、`/exit` 启动烟测；交互式方向键、底部 dock、HITL 按键仍需在真实终端现场验证
 - 风险：跨进程恢复不保存尚未交付的队列输入；Runtime API 和无头路径已使用会话运行时，CLI 已通过同步会话入口复用同一 RunContext
 
@@ -119,7 +119,7 @@
 - 来源：Runtime API 之前每个 turn 通过无头执行入口重新构造 Agent，无法从 API 控制正在运行的会话队列
 - 影响范围：Runtime API 路由、RuntimeSessionTurnRunner、AgentSessionRuntime、RunEvent、Runtime API 测试和启动器
 - 已实现：Runtime API 通过持久 `RuntimeSessionTurnRunner` 为每个 thread 复用 `AgentSessionRuntime`；新增 `POST /v1/threads/{id}/steer` 与 `POST /v1/threads/{id}/follow-up`；两个入口复用 AgentTurnInbox，返回队列水位并写入 `queue.updated` 事件；旧 TurnRunner lambda 保持兼容，不支持队列时返回 501
-- 未实现：Runtime API 仍未提供 SSE 长连接推送；真实模型交互仍需现场验证
+- 已实现（2026-08-19）：Runtime API 提供 chunked SSE 长连接推送，断线可用 Last-Event-ID 续传；真实模型交互仍需现场验证
 - 验证建议：运行 RuntimeApiServerTest；已覆盖 steer、follow-up、queue clear 和 cancel；再使用真实 API Key 启动 `serve --http` 验证 Steering 在工具批次后注入、Follow-up 在自然结束前注入
 - 风险：队列快照现在按 thread/branch 持久化，进程退出瞬间正在交付的消息仍以 turn 终态对账；大规模队列仍需分页和上限治理
 
@@ -222,6 +222,7 @@
 - 已验证：覆盖说明文本包裹 JSON、非 JSON 修复、合法 JSON 中阻塞性检查步骤修复、成功工具证据放行、失败工具证据可见、空结果强制工具修复、修复后仍无证据保持失败、文件写入步骤成功批次后结束、命名工具成功后单轮结束、失败后继续纠正、步骤类型映射、严格工具信封解析与拒绝规则、两类 Provider 请求体映射、Reviewer 轮数边界以及 Planner / Worker 提示词约束；2026-07-16 完整复跑中，单 Agent 0/5、隐藏检查平均完成率 0%；Planner/Worker/Reviewer 0/5、隐藏检查平均完成率 27.33%，其中 logops 9/10、ordermvc 7/15
 - 已补强（2026-07-16）：OpenAI 兼容流式工具调用同时支持标准增量、累积快照和完整字段重复发送，避免工具名与 JSON 参数重复拼接；Krill AI `gpt-5.5` 完整 5 任务复跑中，单 Agent 成功 3/5、隐藏检查平均完成率 94%，Planner/Worker/Reviewer 成功 1/5、平均完成率 76%
 - 已实现（2026-07-16）：新增订单履约 Saga 协作评测场景，预置只读公共契约，将库存、支付、配送、通知、审计拆为五个独立模块，并把履约编排设为最终集成步骤；单 Agent 与 Planner/Worker/Reviewer 使用同一任务说明、工具边界和隐藏验证器；测试工具白名单在隔离 ToolRegistry fork 中保持，避免 Worker 重新获得 `execute_command`
+- 已实现（2026-08-19）：Checkout 协作评测把单 Agent 与 Planner/Worker/Reviewer 作为同一 whole-pair attempt；默认最多 2 次、限制 `[1, 5]`，每次使用独立目录，首个完整配对才计入比较，全部失败时报告无效且不计算比较指标；报告保留全部尝试及 workspace、complete_pair、failure、selected_attempt 等审计字段，并兼容旧 maxAttempts 配置
 - 实验目的：验证 Multi-Agent 是否只在具备明确模块边界、可并行子任务和最终集成依赖的任务上取得收益，避免继续使用单文件 CLI 任务得出不适用的结论
 - 实验变量：自变量只有执行模式，分别为单 Agent 与 Planner/Worker/Reviewer；控制变量包括同一 `gpt-5.5` 模型、同一 Provider、同一只读契约、同一初始空工作区、同一任务说明、同一工具白名单、同一 JDK 编译器、同一隐藏检查和相互独立的运行目录
 - 实验流程：每种模式复制相同的 `SagaContracts.java` 到独立工作区；单 Agent 首轮强制读取契约后完成全部模块；Multi-Agent 由 Planner 生成 DAG，库存、支付、配送、通知、审计五个实现步骤可并行，履约编排依赖前五步，Reviewer 在最终集成前逐项审查；模型结束后再由模型不可见的外部验证器编译源码并通过隔离类加载器执行行为检查

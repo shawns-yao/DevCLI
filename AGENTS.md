@@ -24,7 +24,7 @@
 - 项目名：`DevCLI`
 - 定位：面向商业使用的 Java Agent CLI 产品，对标 Claude Code
 - 已交付 21 期（ReAct → Plan+DAG → Memory → RAG → Multi-Agent → HITL → 并行工具 → 多模型 → 联网 → MCP 核心 → MCP 高级 → 长上下文 → Chrome DevTools → CDP 会话复用 → Skill → TUI → LSP 诊断 → Side-Git 快照 → Prompt 分层 → Runtime API → 图片输入）
-- 下一步：sampling / recovery 作为后续增强；OAuth 暂不纳入个人使用优先级
+- 下一步：sampling 作为后续增强；Runtime recovery refs 已实现为元数据登记，但不等于服务化、多租户或跨主机恢复；OAuth 暂不纳入个人使用优先级
 - Banner 版本：`v16.1.0`，Maven 产物：`devcli-1.0-SNAPSHOT.jar`
 
 ## 运行前提
@@ -89,7 +89,7 @@ Side-Git 快照按 `devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX` 保留最近快
 
 Code RAG 检索链路当前为 keyword + semantic + bounded graph → `RRF（倒数排名融合）` → symbol-aware boost → `CrossEncoderReranker（交叉编码器重排）`。Rerank 默认开启，默认指向本地 Docker 暴露的 OpenAI-compatible `/rerank` endpoint；不可用时自动降级回 RRF 结果，不阻断检索。`/index` 按文件批量生成 chunk embedding；批量请求失败或返回数量异常时逐条降级并保留成功 chunk。`ToolRegistry` 会按项目路径复用 `CodeRetriever` / SQLite 连接，项目路径切换时关闭旧连接。索引替换会为变更和删除的 symbol 生成 `negativeFact`，`search_code` 会输出相关失效事实，并通过工具结果强类型旁路载荷把 evidence 与 negativeFact 传给 WorkingMemory；展示文本不再嵌入结构化 JSON，旧 JSON 与旧展示文本解析只保留历史兼容。keyword 通道保持 SQLite 索引实现，`grep_code` 作为独立实时精确检索工具存在，不替代 `search_code`，用于类名、方法名、配置键、错误文本和固定字符串片段定位。长文档型 definition 查询直接使用 semantic route，避免 keyword fusion 与 reranker 对文档描述引入排序噪声；短符号查询仍保留 precise-first 链路。
 
-量化评测覆盖 RAG、Agent、Memory 和 Context Compression / Long Context。公开集合固定接入 CodeSearchNet Java、SWE-bench Lite、LongMemEval Oracle Cleaned、LongBench v1 和 RULER v1；版本、SHA-256、许可、原始文件边界与官方 harness 由 `Config/public-benchmarks.json` 和数据清单统一记录。RAG 输出 Recall@5、MRR@5、nDCG@5；受控 Agent 输出任务成功率；SWE-bench 只接受官方 Docker harness resolved 结果；LongMemEval 区分 normalized answer hit 代理指标和官方 LLM judge accuracy；LongBench 与 RULER 复用官方 prompt/指标并记录子任务、长度和样本量。受控 Agent benchmark 不暴露 `execute_command`，由隐藏验证器统一检查；订单履约 Saga 场景以只读契约、六个实现模块和 30 项隐藏检查比较单 Agent 与 Planner/Worker/Reviewer，测试工具白名单在隔离 ToolRegistry fork 中保持，真实模型运行由 `devcli.benchmark.saga` 显式启用；2026-07-16 的 `gpt-5.5` 单次有效结果为单 Agent 27/30、Planner/Worker/Reviewer 30/30，后者耗时为前者 3.76 倍；生产 Pre-Review 仍强制 Docker。原始报告位于 `target/benchmark-reports/` 和 `target/agent-benchmark/`，聚合报告写入 `Data/processed/` 与 `Data/manifest/`；详细方法见 `docs/benchmark-evaluation.md`。
+量化评测覆盖 RAG、Agent、Memory 和 Context Compression / Long Context。公开集合固定接入 CodeSearchNet Java、SWE-bench Lite、LongMemEval Oracle Cleaned、LongBench v1 和 RULER v1；版本、SHA-256、许可、原始文件边界与官方 harness 由 `Config/public-benchmarks.json` 和数据清单统一记录。RAG 输出 Recall@5、MRR@5、nDCG@5；受控 Agent 输出任务成功率；SWE-bench 只接受官方 Docker harness resolved 结果；LongMemEval 区分 normalized answer hit 代理指标和官方 LLM judge accuracy；LongBench 与 RULER 复用官方 prompt/指标并记录子任务、长度和样本量。受控 Agent benchmark 不暴露 `execute_command`，由隐藏验证器统一检查；订单履约 Saga 场景以只读契约、六个实现模块和 30 项隐藏检查比较单 Agent 与 Planner/Worker/Reviewer，测试工具白名单在隔离 ToolRegistry fork 中保持，真实模型运行由 `devcli.benchmark.saga` 显式启用；2026-07-16 的 `gpt-5.5` 单次有效结果为单 Agent 27/30、Planner/Worker/Reviewer 30/30，后者耗时为前者 3.76 倍；checkout 配对评测把两种模式放在同一 attempt，默认最多 2 次、范围 `[1, 5]`，只选择首个完整配对，所有尝试均保留审计；生产 Pre-Review 仍强制 Docker。原始报告位于 `target/benchmark-reports/` 和 `target/agent-benchmark/`，聚合报告写入 `Data/processed/` 与 `Data/manifest/`；详细方法见 `docs/benchmark-evaluation.md`。
 
 MCP 动态工具：`mcp__{server}__{tool}`（+ resources 虚拟工具）
 
@@ -128,7 +128,7 @@ src/main/java/com/devcli/
 └── render/      Renderer, InlineRenderer, PlainRenderer, RendererFactory
 ```
 
-Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔离；turn 执行池默认 2 线程 / 64 队列，过载返回 `429 runtime_busy`；`KeyedSerialExecutor` 保证同一 thread 串行。CLI、Runtime API 和后台任务通过 `RunCoordinator` 写入同一 `RunStore`，后台任务不再维护独立状态表；旧 `tasks.db` 只读导入 `runtime.db`。CLI `/session` 与 Runtime branch 共用持久事件树，切换分支只重建 Agent 历史，不恢复工作区；`/branch` 仅为兼容别名。检查点和会话投影是事件日志的可重建缓存。模型 reasoning/content delta、模型上下文、工具调用、工具结果和 turn/checkpoint 生命周期统一使用强类型 `RunEvent`；`AgentExecutionEngine` 是领域事件出口，Runtime API 使用 schema v2 JSON 投影。交互、后台任务和无头 turn 使用运行级 `RunContext` 隔离项目路径、取消令牌和资源生命周期。
+Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔离；turn 执行池默认 2 线程 / 64 队列，过载返回 `429 runtime_busy`；`KeyedSerialExecutor` 保证同一 thread 串行。`GET /v1/threads/{id}/events` 使用 chunked SSE，先 replay 当前活动分支可见事件，再按游标 tail 新事件；`after` 与 `Last-Event-ID` 取较大合法游标，单批最多 128 条，空闲发送 heartbeat 注释。每个连接占用一个 HTTP worker，本地并发受 `devcli.runtime.api.http.threads`（默认 16）约束。heartbeat 默认 15 秒，可通过 `devcli.runtime.api.sse.heartbeat.seconds` / `DEVCLI_RUNTIME_API_SSE_HEARTBEAT_SECONDS` 调整；断线和服务关闭清理订阅。CLI、Runtime API 和后台任务通过 `RunCoordinator` 写入同一 `RunStore`，后台任务不再维护独立状态表；旧 `tasks.db` 只读导入 `runtime.db`。CLI `/session` 与 Runtime branch 共用持久事件树，切换分支只重建 Agent 历史，不恢复工作区；`/branch` 仅为兼容别名。检查点和会话投影是事件日志的可重建缓存。`runtime_recovery_evidence` 只登记 `CHECKPOINT`、`PATCH_JOURNAL`、`SIDE_GIT` 的元数据引用，不复制本地产物；CLI 执行前生成的稳定 `runId` 由 `SessionTree` 复用，`RunContext` 注入 evidence sink，写入失败只告警。模型 reasoning/content delta、模型上下文、工具调用、工具结果和 turn/checkpoint 生命周期统一使用强类型 `RunEvent`；`AgentExecutionEngine` 是领域事件出口，Runtime API 使用 schema v2 JSON 投影。交互、后台任务和无头 turn 使用运行级 `RunContext` 隔离项目路径、取消令牌和资源生命周期。
 
 执行状态同样使用强类型 `RunEvent`，由执行内核输出 `THINKING`、`TOOL_EXECUTING`、`TOOL_RESULTS_PAIRED` 以及完成、取消、预算退出、迭代上限和失败终态，供 CLI 与 Runtime 投影统一消费。
 

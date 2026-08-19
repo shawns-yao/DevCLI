@@ -129,6 +129,12 @@ Multi-Agent 在该场景提升 3 个检查、10 个百分点，并完成全部�
 
 2026-08-09 使用 `gpt-5.6-terra` 重新执行三轮。最近一轮多智能体完整结束并通过 30/30，单 Agent 产物通过 28/30，但单 Agent 模型链路未完整结束；前两轮也出现单侧网络中断。因此本次没有形成双方均完整结束的有效配对结果，不能替换上表历史数据，也不能计算新的模式收益。
 
+### Checkout whole-pair retry 与审计
+
+Checkout 协作评测把单 Agent 和 Planner/Worker/Reviewer 视为一个 attempt 单元。默认最多执行 2 个 attempt，`devcli.benchmark.checkout.maxAttempts` 取值限制为 `[1, 5]`；旧的 `devcli.benchmark.llm.maxAttempts` 仍可作为兼容配置。每个 attempt 使用独立目录，任一侧 LLM 流程未完整结束都会让整轮配对无效，并重跑两侧，不单独重跑或按隐藏检查分数挑选结果。执行在首个同轮完整配对后停止。
+
+`checkout-collaboration-benchmark.json` 保留公平性和审计字段：`same_task_prompt_sha256`、`same_initial_workspace`、`same_hidden_validator`、`tool_policy`、`max_attempts`、`attempt_count`、`valid_paired_run`、`selected_attempt`；`attempts` 数组逐轮记录 `attempt`、独立 `workspace`、`complete_pair`、失败原因及两侧结果。只有 `valid_paired_run=true` 时才计算 `comparison`，否则比较指标置空，不计算模式差值；所有 attempt 仍保留，便于审计基础设施失败和断线原因。
+
 ## 2026-07-16 公开集合首轮样本
 
 首轮用于验证下载、适配、真实模型调用和官方指标对接，不代表完整集合成绩。模型与当前 `.env` 中的 Anthropic Messages 兼容配置一致。
@@ -194,6 +200,15 @@ mvn -q "-Dtest=AgentCollaborationBenchmarkIT#compareSingleAgentWithMultiAgentOnO
   "-Ddevcli.llm.max.output.tokens=2048" test
 ```
 
+Checkout 协作配对：
+
+```powershell
+mvn -q "-Dtest=CheckoutCollaborationBenchmarkIT#compareSingleAndMultiAgentOnCheckoutSaga" `
+  -DskipTests=false `
+  "-Ddevcli.benchmark.checkout=true" `
+  "-Ddevcli.benchmark.checkout.maxAttempts=2" test
+```
+
 公开数据完整性与适配：
 
 ```powershell
@@ -254,7 +269,7 @@ mvn -q "-Dtest=BenchmarkReportAggregatorIT" -DskipTests=false `
 
 - 真实 LLM、Embedding 和 Reranker 会产生费用，并受模型版本、端点负载和随机性影响。
 - CodeSearchNet 当前只采样 50 条 Java test split 数据，适合项目阶段对比，不代表完整数据集成绩。
-- Agent 当前只有 5 个受控任务，每种模式执行 1 次；结果适合工程验证，不应描述为统计稳定结论。
+- Agent 当前只有 5 个受控任务；checkout 模式以单 Agent + Planner/Worker/Reviewer 为一个 whole-pair attempt，默认最多 2 次并选择首个完整配对，全部 attempt 失败时报告无效且不计算比较指标。结果适合工程验证，不应描述为统计稳定结论。
 - LongMemEval 的 normalized answer hit 只是代理指标；只有官方 `evaluate_qa.py` judge 结果才能称为 LongMemEval accuracy。
 - LongBench 和 RULER 必须同时写明实际子任务、上下文长度和样本量，不能外推到完整集合。
 - SWE-bench 必须使用官方 Docker harness 的 resolved 结果，不能根据补丁非空、编译成功或模型自述判断成功。
