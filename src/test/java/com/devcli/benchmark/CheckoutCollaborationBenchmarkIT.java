@@ -11,6 +11,7 @@ import com.devcli.memory.LongTermMemory;
 import com.devcli.memory.MemoryManager;
 import com.devcli.render.PlainRenderer;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
@@ -88,14 +89,19 @@ class CheckoutCollaborationBenchmarkIT {
 
         Path root = Path.of("target", "agent-benchmark", "checkout-run-" + System.currentTimeMillis())
                 .toAbsolutePath().normalize();
-        Files.createDirectories(root);
-        RunResult single = runSingle(new CountingLlmClient(source), root.resolve("single"));
-        RunResult team = runTeam(new CountingLlmClient(source), root.resolve("team"));
-        Path report = writeReport(root, source, single, team);
+        PairedBenchmarkRunner<RunResult, RunResult> runner = new PairedBenchmarkRunner<>(
+                PairedBenchmarkRunner.configuredMaxAttempts(),
+                (attempt, attemptRoot) -> {
+                    RunResult single = runSingle(new CountingLlmClient(source), attemptRoot.resolve("single"));
+                    RunResult team = runTeam(new CountingLlmClient(source), attemptRoot.resolve("team"));
+                    return new PairedBenchmarkRunner.Attempt<>(single, team,
+                            single.llmRunCompleted(), team.llmRunCompleted());
+                });
+        PairedBenchmarkRunner.Result<RunResult, RunResult> paired = runner.run(root);
+        Path report = writeReport(root, source, paired);
         System.out.println("Checkout collaboration benchmark report: " + report);
         System.out.println(Files.readString(report));
-        assertTrue(single.llmRunCompleted(), "single Agent LLM run was incomplete; report=" + report);
-        assertTrue(team.llmRunCompleted(), "multi-Agent LLM run was incomplete; report=" + report);
+        assertTrue(paired.valid(), "no complete single/Plan pair; report=" + report);
     }
 
     @Test
@@ -286,7 +292,8 @@ class CheckoutCollaborationBenchmarkIT {
         return count;
     }
 
-    private static Path writeReport(Path root, LlmClient llm, RunResult single, RunResult team) throws IOException {
+    private static Path writeReport(Path root, LlmClient llm,
+                                    PairedBenchmarkRunner.Result<RunResult, RunResult> paired) throws IOException {
         ObjectNode report = JSON.createObjectNode();
         report.put("benchmark", "checkout-collaboration");
         report.put("generated_at", Instant.now().toString());
@@ -297,17 +304,58 @@ class CheckoutCollaborationBenchmarkIT {
         report.put("same_task_prompt_sha256", sha256(TASK_PROMPT));
         report.put("same_initial_workspace", true);
         report.put("same_hidden_validator", true);
-        report.set("single_agent", toJson(single));
-        report.set("planner_worker_reviewer", toJson(team));
+        report.put("max_attempts", paired.maxAttempts());
+        report.put("attempt_count", paired.attempts().size());
+        report.put("valid_paired_run", paired.valid());
+        report.put("selected_attempt", paired.validPair().map(PairedBenchmarkRunner.AttemptRecord::number).orElse(0));
+        PairedBenchmarkRunner.AttemptRecord<RunResult, RunResult> selected = paired.validPair()
+                .orElse(paired.attempts().isEmpty() ? null : paired.attempts().get(paired.attempts().size() - 1));
+        if (selected == null || selected.outcome() == null) {
+            report.putNull("single_agent");
+            report.putNull("planner_worker_reviewer");
+        } else {
+            putRunResult(report, "single_agent", selected.outcome().single());
+            putRunResult(report, "planner_worker_reviewer", selected.outcome().plannerWorkerReviewer());
+        }
+        ArrayNode attempts = report.putArray("attempts");
+        for (PairedBenchmarkRunner.AttemptRecord<RunResult, RunResult> attempt : paired.attempts()) {
+            ObjectNode attemptNode = attempts.addObject();
+            attemptNode.put("attempt", attempt.number());
+            attemptNode.put("workspace", attempt.workspace().toString());
+            attemptNode.put("complete_pair", attempt.complete());
+            if (attempt.failure() != null) {
+                attemptNode.put("failure", attempt.failure());
+            }
+            if (attempt.outcome() == null) {
+                attemptNode.putNull("single_agent");
+                attemptNode.putNull("planner_worker_reviewer");
+            } else {
+                putRunResult(attemptNode, "single_agent", attempt.outcome().single());
+                putRunResult(attemptNode, "planner_worker_reviewer",
+                        attempt.outcome().plannerWorkerReviewer());
+            }
+        }
+        RunResult single = selected == null || selected.outcome() == null
+                ? null : selected.outcome().single();
+        RunResult team = selected == null || selected.outcome() == null
+                ? null : selected.outcome().plannerWorkerReviewer();
         ObjectNode comparison = report.putObject("comparison");
-        comparison.put("completion_rate_delta", round(team.evaluation().completionRate()
-                - single.evaluation().completionRate()));
-        comparison.put("elapsed_ms_delta", team.elapsedMs() - single.elapsedMs());
-        comparison.put("team_elapsed_ratio", single.elapsedMs() == 0 ? 0.0
-                : round((double) team.elapsedMs() / single.elapsedMs()));
-        comparison.put("llm_call_delta", team.metrics().calls() - single.metrics().calls());
-        comparison.put("reported_token_delta", team.metrics().totalTokens() - single.metrics().totalTokens());
-        comparison.put("valid_paired_run", single.llmRunCompleted() && team.llmRunCompleted());
+        if (single == null || team == null || !paired.valid()) {
+            comparison.putNull("completion_rate_delta");
+            comparison.putNull("elapsed_ms_delta");
+            comparison.putNull("team_elapsed_ratio");
+            comparison.putNull("llm_call_delta");
+            comparison.putNull("reported_token_delta");
+        } else {
+            comparison.put("completion_rate_delta", round(team.evaluation().completionRate()
+                    - single.evaluation().completionRate()));
+            comparison.put("elapsed_ms_delta", team.elapsedMs() - single.elapsedMs());
+            comparison.put("team_elapsed_ratio", single.elapsedMs() == 0 ? 0.0
+                    : round((double) team.elapsedMs() / single.elapsedMs()));
+            comparison.put("llm_call_delta", team.metrics().calls() - single.metrics().calls());
+            comparison.put("reported_token_delta", team.metrics().totalTokens() - single.metrics().totalTokens());
+        }
+        comparison.put("valid_paired_run", paired.valid());
         Path path = root.resolve("checkout-collaboration-benchmark.json");
         JSON.writerWithDefaultPrettyPrinter().writeValue(path.toFile(), report);
         return path;
@@ -347,6 +395,14 @@ class CheckoutCollaborationBenchmarkIT {
         node.set("llm_metrics", result.metrics().toJson());
         node.put("output_preview", preview(result.output()));
         return node;
+    }
+
+    private static void putRunResult(ObjectNode target, String field, RunResult result) {
+        if (result == null) {
+            target.putNull(field);
+        } else {
+            target.set(field, toJson(result));
+        }
     }
 
     private static ControlledBenchmarkToolRegistry registryFor(Path workspace) {
