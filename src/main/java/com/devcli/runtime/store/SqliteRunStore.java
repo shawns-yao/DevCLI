@@ -226,6 +226,108 @@ public final class SqliteRunStore implements RunStore {
         }
     }
 
+    @Override
+    public synchronized RecoveryEvidenceRef upsertRecoveryEvidence(RecoveryEvidenceRef ref) {
+        if (ref == null) {
+            throw new IllegalArgumentException("恢复证据不能为空");
+        }
+        Optional<RecoveryEvidenceRef> currentOptional = findRecoveryEvidence(
+                ref.runId(), ref.kind(), ref.logicalKey());
+        if (currentOptional.isEmpty()) {
+            String now = Instant.now().toString();
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    INSERT INTO runtime_recovery_evidence(
+                        run_id, thread_id, branch_id, kind, logical_key, normalized_ref,
+                        sha256, state, created_at, updated_at, version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    """)) {
+                statement.setString(1, ref.runId());
+                statement.setString(2, ref.threadId());
+                statement.setString(3, ref.branchId());
+                statement.setString(4, ref.kind().name());
+                statement.setString(5, ref.logicalKey());
+                statement.setString(6, ref.normalizedRef());
+                statement.setString(7, ref.sha256());
+                statement.setString(8, ref.state().name());
+                statement.setString(9, now);
+                statement.setString(10, now);
+                statement.executeUpdate();
+                return findRecoveryEvidence(ref.runId(), ref.kind(), ref.logicalKey()).orElseThrow();
+            } catch (SQLException e) {
+                if (e.getMessage() != null && e.getMessage().toLowerCase(Locale.ROOT)
+                        .contains("constraint")) {
+                    return upsertRecoveryEvidence(ref);
+                }
+                throw new IllegalStateException("写入恢复证据失败: " + e.getMessage(), e);
+            }
+        }
+
+        RecoveryEvidenceRef current = currentOptional.get();
+        if (!current.threadId().equals(ref.threadId())
+                || !current.branchId().equals(ref.branchId())) {
+            throw new IllegalStateException("恢复证据身份不可变: " + ref.logicalKey());
+        }
+        if (current.state() != ref.state() && !allowedEvidenceTransition(current.state(), ref.state())) {
+            throw new IllegalStateException("恢复证据状态迁移非法: "
+                    + current.state() + " -> " + ref.state());
+        }
+        boolean changed = !current.normalizedRef().equals(ref.normalizedRef())
+                || !current.sha256().equals(ref.sha256())
+                || current.state() != ref.state();
+        if (!changed) {
+            return current;
+        }
+        String now = Instant.now().toString();
+        try (PreparedStatement statement = connection.prepareStatement("""
+                UPDATE runtime_recovery_evidence
+                SET normalized_ref = ?, sha256 = ?, state = ?, updated_at = ?, version = version + 1
+                WHERE run_id = ? AND kind = ? AND logical_key = ? AND version = ?
+                """)) {
+            statement.setString(1, ref.normalizedRef());
+            statement.setString(2, ref.sha256());
+            statement.setString(3, ref.state().name());
+            statement.setString(4, now);
+            statement.setString(5, ref.runId());
+            statement.setString(6, ref.kind().name());
+            statement.setString(7, ref.logicalKey());
+            statement.setLong(8, current.version());
+            if (statement.executeUpdate() != 1) {
+                return upsertRecoveryEvidence(ref);
+            }
+            return findRecoveryEvidence(ref.runId(), ref.kind(), ref.logicalKey()).orElseThrow();
+        } catch (SQLException e) {
+            throw new IllegalStateException("更新恢复证据失败: " + e.getMessage(), e);
+        }
+    }
+
+    @Override
+    public synchronized List<RecoveryEvidenceRef> listRecoveryEvidence(String runId, int limit) {
+        if (runId == null || runId.isBlank()) {
+            return List.of();
+        }
+        int bounded = Math.max(1, Math.min(limit, 1000));
+        List<RecoveryEvidenceRef> refs = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT run_id, thread_id, branch_id, kind, logical_key, normalized_ref,
+                       sha256, state, created_at, updated_at, version
+                FROM runtime_recovery_evidence
+                WHERE run_id = ?
+                ORDER BY updated_at DESC, kind ASC, logical_key ASC
+                LIMIT ?
+                """)) {
+            statement.setString(1, runId.trim());
+            statement.setInt(2, bounded);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    refs.add(fromEvidenceRow(result));
+                }
+            }
+            return List.copyOf(refs);
+        } catch (SQLException e) {
+            throw new IllegalStateException("读取恢复证据失败: " + e.getMessage(), e);
+        }
+    }
+
     /** 将旧 tasks.db 中的 runtime_tasks 只读导入 RunStore；重复 id 不覆盖。 */
     public synchronized int importLegacyTasks(Path legacyDbPath) throws SQLException {
         if (legacyDbPath == null || !Files.isRegularFile(legacyDbPath)) {
@@ -372,6 +474,68 @@ public final class SqliteRunStore implements RunStore {
                 result.getLong("version"));
     }
 
+    private Optional<RecoveryEvidenceRef> findRecoveryEvidence(
+            String runId, RecoveryEvidenceRef.Kind kind, String logicalKey) {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT run_id, thread_id, branch_id, kind, logical_key, normalized_ref,
+                       sha256, state, created_at, updated_at, version
+                FROM runtime_recovery_evidence
+                WHERE run_id = ? AND kind = ? AND logical_key = ?
+                """)) {
+            statement.setString(1, runId);
+            statement.setString(2, kind.name());
+            statement.setString(3, logicalKey);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? Optional.of(fromEvidenceRow(result)) : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("读取恢复证据失败: " + e.getMessage(), e);
+        }
+    }
+
+    private RecoveryEvidenceRef fromEvidenceRow(ResultSet result) throws SQLException {
+        return new RecoveryEvidenceRef(
+                result.getString("run_id"),
+                result.getString("thread_id"),
+                result.getString("branch_id"),
+                enumValue(RecoveryEvidenceRef.Kind.class, result.getString("kind"),
+                        RecoveryEvidenceRef.Kind.CHECKPOINT),
+                result.getString("logical_key"),
+                result.getString("normalized_ref"),
+                result.getString("sha256"),
+                enumValue(RecoveryEvidenceRef.State.class, result.getString("state"),
+                        RecoveryEvidenceRef.State.ACTIVE),
+                instant(result.getString("created_at")),
+                instant(result.getString("updated_at")),
+                result.getLong("version"));
+    }
+
+    private static boolean allowedEvidenceTransition(
+            RecoveryEvidenceRef.State current, RecoveryEvidenceRef.State target) {
+        if (current == target) {
+            return true;
+        }
+        if (current == RecoveryEvidenceRef.State.DELETED) {
+            return false;
+        }
+        if (target == RecoveryEvidenceRef.State.DELETED) {
+            return true;
+        }
+        return switch (current) {
+            case ACTIVE, PRESENT -> target == RecoveryEvidenceRef.State.PREPARED
+                    || target == RecoveryEvidenceRef.State.PRESENT
+                    || target == RecoveryEvidenceRef.State.COMPLETED
+                    || target == RecoveryEvidenceRef.State.FAILED;
+            case PREPARED -> target == RecoveryEvidenceRef.State.COMPLETED
+                    || target == RecoveryEvidenceRef.State.ROLLED_BACK
+                    || target == RecoveryEvidenceRef.State.FAILED;
+            case COMPLETED, ROLLED_BACK -> false;
+            case FAILED -> target == RecoveryEvidenceRef.State.COMPLETED
+                    || target == RecoveryEvidenceRef.State.ROLLED_BACK;
+            case DELETED -> false;
+        };
+    }
+
     private void initSchema() throws SQLException {
         try (Statement statement = connection.createStatement()) {
             statement.execute("PRAGMA busy_timeout = 5000");
@@ -400,6 +564,24 @@ public final class SqliteRunStore implements RunStore {
                     + "ON runtime_runs(source, status, created_at)");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_runtime_runs_thread "
                     + "ON runtime_runs(thread_id, status, created_at)");
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS runtime_recovery_evidence (
+                        run_id TEXT NOT NULL,
+                        thread_id TEXT NOT NULL DEFAULT '',
+                        branch_id TEXT NOT NULL DEFAULT 'main',
+                        kind TEXT NOT NULL,
+                        logical_key TEXT NOT NULL,
+                        normalized_ref TEXT NOT NULL,
+                        sha256 TEXT NOT NULL DEFAULT '',
+                        state TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        PRIMARY KEY(run_id, kind, logical_key)
+                    )
+                    """);
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_runtime_recovery_evidence_run "
+                    + "ON runtime_recovery_evidence(run_id, updated_at DESC, kind, logical_key)");
         }
     }
 

@@ -44,6 +44,7 @@ import com.devcli.runtime.CancellationToken;
 import com.devcli.runtime.AgentSessionRuntime;
 import com.devcli.runtime.RunContext;
 import com.devcli.runtime.api.RuntimeThreadStore;
+import com.devcli.runtime.store.RecoveryEvidenceSink;
 import com.devcli.runtime.task.DurableTaskManager;
 import com.devcli.runtime.task.TaskCommandFormatter;
 import com.devcli.session.SessionTreeService;
@@ -172,9 +173,10 @@ public class Main {
         }
     }
 
-    private record TurnRunResult(String response, String draft, boolean executionQuiesced) {
-        static TurnRunResult completed(String response) {
-            return new TurnRunResult(response, "", true);
+    static record TurnRunResult(String runId, String response, String draft,
+                                boolean executionQuiesced) {
+        static TurnRunResult completed(String runId, String response) {
+            return new TurnRunResult(runId, response, "", true);
         }
     }
 
@@ -851,6 +853,8 @@ public class Main {
                 SnapshotService snapshotService = reactAgent.getToolRegistry().getSnapshotService();
                 renderer.updateStatus(statusInfo(llmClient, hitlHandler, snapshotMode, mcpServerManager, skillRegistry));
                 boolean acceptActiveTurnInput = "react".equals(snapshotMode) && !hitlHandler.isEnabled();
+                String runId = RunContext.newRunId();
+                RecoveryEvidenceSink evidenceSink = sessionTree.recoveryEvidenceSink(runId);
                 TurnRunResult turnResult = runWithCancelSupport(terminal,
                         lineReader,
                         renderer,
@@ -858,6 +862,10 @@ public class Main {
                         Path.of(reactAgent.getToolRegistry().getProjectPath()),
                         turnInbox,
                         acceptActiveTurnInput,
+                        runId,
+                        sessionTree.threadId(),
+                        sessionTree.activeBranchId(),
+                        evidenceSink,
                         () -> snapshotService.runTurn(snapshotMode, taskInput, runTask::call));
                 String response = turnResult.response();
                 pendingDraft = turnResult.draft();
@@ -873,7 +881,8 @@ public class Main {
                         ? reactAgent.getConversationHistory()
                         : List.of();
                 sessionTree.recordTurn(
-                                snapshotMode, submittedInput, taskInput, response, persistedMessages)
+                                turnResult.runId(), snapshotMode, submittedInput,
+                                taskInput, response, persistedMessages)
                         .ifPresent(ui::println);
                 sessionArchive.recordTurn(
                         sessionTree.threadId(), sessionTree.activeBranchId(),
@@ -1041,15 +1050,21 @@ public class Main {
                         .toList());
     }
 
-    private static TurnRunResult runWithCancelSupport(Terminal terminal,
-                                                      LineReader lineReader,
-                                                      Renderer renderer,
-                                                      PrintStream out,
-                                                      Path projectPath,
-                                                      AgentTurnInbox inbox,
-                                                      boolean acceptActiveTurnInput,
-                                                      Callable<String> task) {
-        RunContext runContext = CancellationContext.startRunContext(projectPath);
+    static TurnRunResult runWithCancelSupport(Terminal terminal,
+                                              LineReader lineReader,
+                                              Renderer renderer,
+                                              PrintStream out,
+                                              Path projectPath,
+                                              AgentTurnInbox inbox,
+                                              boolean acceptActiveTurnInput,
+                                              String runId,
+                                              String threadId,
+                                              String branchId,
+                                              RecoveryEvidenceSink evidenceSink,
+                                              Callable<String> task) {
+        String stableRunId = runId == null || runId.isBlank() ? RunContext.newRunId() : runId.trim();
+        RunContext runContext = CancellationContext.startRunContext(
+                projectPath, stableRunId, threadId, branchId, evidenceSink);
         CancellationToken token = runContext.cancellationToken();
         ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
             Thread thread = new Thread(r, "devcli-agent-runner");
@@ -1082,15 +1097,15 @@ public class Main {
                 while (!future.isDone()) {
                     if (original != null && readEscCancel(terminal)) {
                         cancelCurrent.run();
-                        return cancelledTurn("⏹️ 已请求取消当前任务。", executionGuard);
+                        return cancelledTurn(stableRunId, "⏹️ 已请求取消当前任务。", executionGuard);
                     }
                     try {
-                        return TurnRunResult.completed(future.get(150, TimeUnit.MILLISECONDS));
+                        return TurnRunResult.completed(stableRunId, future.get(150, TimeUnit.MILLISECONDS));
                     } catch (java.util.concurrent.TimeoutException ignored) {
                         // 继续监听 ESC。
                     }
                 }
-                return TurnRunResult.completed(future.get());
+                return TurnRunResult.completed(stableRunId, future.get());
             }
 
             while (!future.isDone()) {
@@ -1105,10 +1120,10 @@ public class Main {
                         break;
                     }
                     cancelCurrent.run();
-                    return cancelledTurn("⏹️ 已请求取消当前任务。", executionGuard);
+                    return cancelledTurn(stableRunId, "⏹️ 已请求取消当前任务。", executionGuard);
                 } catch (EndOfFileException e) {
                     cancelCurrent.run();
-                    return cancelledTurn("⏹️ 已请求取消当前任务。", executionGuard);
+                    return cancelledTurn(stableRunId, "⏹️ 已请求取消当前任务。", executionGuard);
                 } finally {
                     renderer.afterInput();
                 }
@@ -1134,24 +1149,24 @@ public class Main {
                 }
                 if (parsed.action() == ActiveTurnInput.Action.INTERRUPT) {
                     cancelCurrent.run();
-                    return cancelledTurn("⏹️ 已取消当前任务，将立即执行新任务。", executionGuard);
+                    return cancelledTurn(stableRunId, "⏹️ 已取消当前任务，将立即执行新任务。", executionGuard);
                 }
                 if (parsed.action() == ActiveTurnInput.Action.CANCEL) {
                     cancelCurrent.run();
-                    return cancelledTurn("⏹️ 已请求取消当前任务。", executionGuard);
+                    return cancelledTurn(stableRunId, "⏹️ 已请求取消当前任务。", executionGuard);
                 }
             }
-            return new TurnRunResult(future.get(), draft, true);
+            return new TurnRunResult(stableRunId, future.get(), draft, true);
         } catch (CancellationException e) {
-            return cancelledTurn("⏹️ 已取消当前任务。", executionGuard);
+            return cancelledTurn(stableRunId, "⏹️ 已取消当前任务。", executionGuard);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             cancelCurrent.run();
-            return cancelledTurn("⏹️ 已取消当前任务。", executionGuard);
+            return cancelledTurn(stableRunId, "⏹️ 已取消当前任务。", executionGuard);
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
             String message = cause == null || cause.getMessage() == null ? "未知错误" : cause.getMessage();
-            return TurnRunResult.completed("❌ 执行失败: " + message);
+            return TurnRunResult.completed(stableRunId, "❌ 执行失败: " + message);
         } finally {
             if (terminal != null && original != null) {
                 try {
@@ -1164,9 +1179,10 @@ public class Main {
         }
     }
 
-    private static TurnRunResult cancelledTurn(String response, TurnExecutionGuard executionGuard) {
+    private static TurnRunResult cancelledTurn(String runId, String response,
+                                               TurnExecutionGuard executionGuard) {
         boolean stopped = executionGuard.awaitStopped(Duration.ofSeconds(CANCEL_QUIESCE_TIMEOUT_SECONDS));
-        return new TurnRunResult(response, "", stopped);
+        return new TurnRunResult(runId, response, "", stopped);
     }
 
     private static void wakeActiveTurnReader(Terminal terminal, LineReader lineReader) {

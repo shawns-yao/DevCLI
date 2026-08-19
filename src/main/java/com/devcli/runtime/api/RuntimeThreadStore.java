@@ -6,6 +6,7 @@ import com.devcli.llm.LlmClient;
 import com.devcli.memory.CompactBoundaryMetadata;
 import com.devcli.runtime.event.RunEvent;
 import com.devcli.runtime.store.RunStore;
+import com.devcli.runtime.store.RecoveryEvidenceRef;
 import com.devcli.runtime.store.SqliteRunStore;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -18,21 +19,25 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.*;
 import java.time.Instant;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 public class RuntimeThreadStore implements RunStore {
     private static final Logger log = LoggerFactory.getLogger(RuntimeThreadStore.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int SESSION_PROJECTION_VERSION = 1;
+    private static final int EVENT_FETCH_LIMIT = 128;
 
     private final Path dbPath;
     private final Connection connection;
     private final SqliteRunStore runStore;
+    private boolean closed;
 
     /** 一次完整 turn 的输入/输出对，供后续 turn 重放历史上下文。 */
     public record TurnRecord(String input, String output, long completedEventId) {
@@ -198,6 +203,16 @@ public class RuntimeThreadStore implements RunStore {
     @Override
     public int recoverRunning(Source source, Status target, String reason) {
         return runStore.recoverRunning(source, target, reason);
+    }
+
+    @Override
+    public RecoveryEvidenceRef upsertRecoveryEvidence(RecoveryEvidenceRef ref) {
+        return runStore.upsertRecoveryEvidence(ref);
+    }
+
+    @Override
+    public List<RecoveryEvidenceRef> listRecoveryEvidence(String runId, int limit) {
+        return runStore.listRecoveryEvidence(runId, limit);
     }
 
     @Override
@@ -397,6 +412,7 @@ public class RuntimeThreadStore implements RunStore {
     }
 
     public synchronized long appendEvent(String threadId, String type, String data) {
+        ensureOpen();
         String branchId = activeBranchId(threadId);
         try (PreparedStatement ps = connection.prepareStatement("""
                 INSERT INTO runtime_events (thread_id, branch_id, type, data, created_at)
@@ -409,7 +425,10 @@ public class RuntimeThreadStore implements RunStore {
             ps.setString(5, Instant.now().toString());
             ps.executeUpdate();
             try (ResultSet keys = ps.getGeneratedKeys()) {
-                return keys.next() ? keys.getLong(1) : 0;
+                long id = keys.next() ? keys.getLong(1) : 0;
+                // SQLite JDBC commits this statement in auto-commit mode before returning.
+                notifyAll();
+                return id;
             }
         } catch (SQLException e) {
             throw new IllegalStateException("写入 runtime event 失败: " + e.getMessage(), e);
@@ -417,30 +436,107 @@ public class RuntimeThreadStore implements RunStore {
     }
 
     public synchronized List<RuntimeEvent> events(String threadId, long afterId) {
-        List<RuntimeEvent> allEvents = new ArrayList<>();
-        try (PreparedStatement ps = connection.prepareStatement("""
-                SELECT id, thread_id, branch_id, type, data, created_at FROM runtime_events
-                WHERE thread_id = ? AND id > ?
-                ORDER BY id ASC
-                """)) {
-            ps.setString(1, threadId);
-            ps.setLong(2, afterId);
+        ensureOpen();
+        List<RuntimeEvent> result = new ArrayList<>();
+        long cursor = Math.max(0, afterId);
+        while (true) {
+            List<RuntimeEvent> batch = readVisibleEventsBatch(threadId, cursor, EVENT_FETCH_LIMIT);
+            if (batch.isEmpty()) {
+                break;
+            }
+            result.addAll(batch);
+            cursor = batch.getLast().id();
+            if (batch.size() < EVENT_FETCH_LIMIT) {
+                break;
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    /**
+     * 查询游标之后当前活动分支可见的有界事件批次。
+     * 每次 SQL 读取有上限，分支可见性在 SQL 条件中先于 LIMIT 生效。
+     */
+    public synchronized List<RuntimeEvent> events(String threadId, long afterId, int limit) {
+        ensureOpen();
+        return readVisibleEventsBatch(threadId, Math.max(0, afterId),
+                Math.max(1, Math.min(EVENT_FETCH_LIMIT, limit)));
+    }
+
+    /**
+     * 在查询与等待之间持有同一监视器，避免错过提交后的唤醒；伪唤醒会回到查询循环。
+     */
+    public synchronized List<RuntimeEvent> awaitEvents(
+            String threadId, long afterId, int limit, Duration timeout) throws InterruptedException {
+        long cursor = Math.max(0, afterId);
+        long timeoutNanos = timeout == null ? 0 : Math.max(0, timeout.toNanos());
+        long deadline = timeoutNanos > 0 ? System.nanoTime() + timeoutNanos : System.nanoTime();
+        while (!closed) {
+            List<RuntimeEvent> result = readVisibleEventsBatch(threadId, cursor,
+                    Math.max(1, Math.min(EVENT_FETCH_LIMIT, limit)));
+            if (!result.isEmpty()) {
+                return result;
+            }
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) {
+                return List.of();
+            }
+            TimeUnit.NANOSECONDS.timedWait(this, remaining);
+        }
+        return List.of();
+    }
+
+    public synchronized boolean isClosed() {
+        return closed;
+    }
+
+    private List<RuntimeEvent> readVisibleEventsBatch(String threadId, long afterId, int limit) {
+        List<BranchRecord> lineage = activeLineage(threadId);
+        if (lineage.isEmpty()) {
+            return List.of();
+        }
+        StringBuilder sql = new StringBuilder("""
+                SELECT id, thread_id, branch_id, type, data, created_at
+                FROM runtime_events
+                WHERE thread_id = ? AND id > ? AND (
+                """);
+        for (int index = 0; index < lineage.size(); index++) {
+            if (index > 0) {
+                sql.append(" OR ");
+            }
+            sql.append("(branch_id = ? AND id > ? AND id <= ?)");
+        }
+        sql.append(" ) ORDER BY id ASC LIMIT ?");
+
+        try (PreparedStatement ps = connection.prepareStatement(sql.toString())) {
+            int parameter = 1;
+            ps.setString(parameter++, threadId);
+            ps.setLong(parameter++, Math.max(0, afterId));
+            for (int index = 0; index < lineage.size(); index++) {
+                BranchRecord branch = lineage.get(index);
+                long upperInclusive = index + 1 < lineage.size()
+                        ? lineage.get(index + 1).forkEventId() : Long.MAX_VALUE;
+                ps.setString(parameter++, branch.id());
+                ps.setLong(parameter++, branch.forkEventId());
+                ps.setLong(parameter++, upperInclusive);
+            }
+            ps.setInt(parameter, Math.max(1, limit));
+            List<RuntimeEvent> result = new ArrayList<>();
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
-                    allEvents.add(new RuntimeEvent(
+                    result.add(new RuntimeEvent(
                             rs.getLong("id"),
                             rs.getString("thread_id"),
                             rs.getString("branch_id"),
                             rs.getString("type"),
                             rs.getString("data"),
-                            Instant.parse(rs.getString("created_at"))
-                    ));
+                            Instant.parse(rs.getString("created_at"))));
                 }
             }
+            return List.copyOf(result);
         } catch (SQLException e) {
             throw new IllegalStateException("读取 runtime events 失败: " + e.getMessage(), e);
         }
-        return filterVisibleEvents(threadId, allEvents);
     }
 
     /**
@@ -874,26 +970,6 @@ public class RuntimeThreadStore implements RunStore {
         }
     }
 
-    private List<RuntimeEvent> filterVisibleEvents(String threadId, List<RuntimeEvent> events) {
-        List<BranchRecord> lineage = activeLineage(threadId);
-        List<RuntimeEvent> visible = new ArrayList<>();
-        for (int index = 0; index < lineage.size(); index++) {
-            BranchRecord branch = lineage.get(index);
-            long lowerExclusive = branch.forkEventId();
-            long upperInclusive = index + 1 < lineage.size()
-                    ? lineage.get(index + 1).forkEventId() : Long.MAX_VALUE;
-            for (RuntimeEvent event : events) {
-                if (branch.id().equals(event.branchId())
-                        && event.id() > lowerExclusive
-                        && event.id() <= upperInclusive) {
-                    visible.add(event);
-                }
-            }
-        }
-        visible.sort(java.util.Comparator.comparingLong(RuntimeEvent::id));
-        return List.copyOf(visible);
-    }
-
     private boolean isVisibleBranchAtEvent(String threadId, String branchId, long eventId) {
         List<BranchRecord> lineage = activeLineage(threadId);
         for (int index = 0; index < lineage.size(); index++) {
@@ -1052,8 +1128,19 @@ public class RuntimeThreadStore implements RunStore {
         }
     }
 
+    private void ensureOpen() {
+        if (closed) {
+            throw new IllegalStateException("RuntimeThreadStore 已关闭");
+        }
+    }
+
     @Override
     public synchronized void close() {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        notifyAll();
         try {
             connection.close();
         } catch (SQLException ignored) {

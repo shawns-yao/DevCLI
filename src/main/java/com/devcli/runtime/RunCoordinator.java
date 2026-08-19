@@ -1,6 +1,7 @@
 package com.devcli.runtime;
 
 import com.devcli.runtime.store.RunStore;
+import com.devcli.runtime.store.RecoveryEvidenceSink;
 
 import java.util.List;
 import java.util.Optional;
@@ -28,6 +29,11 @@ public final class RunCoordinator {
             String runId, String threadId, String branchId, String executionPolicy, String prompt) {
         return store.create(new RunStore.Submission(
                 runId, threadId, branchId, RunStore.Source.INTERACTIVE, executionPolicy, prompt));
+    }
+
+    public RecoveryEvidenceSink recoveryEvidenceSink(
+            String runId, String threadId, String branchId) {
+        return RecoveryEvidenceSink.forRun(store, runId, threadId, branchId);
     }
 
     public Optional<RunStore.RunRecord> claimBackground() {

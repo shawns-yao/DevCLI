@@ -3,10 +3,13 @@ package com.devcli.session;
 import com.devcli.agent.Agent;
 import com.devcli.config.ConfigResolver;
 import com.devcli.llm.LlmClient;
+import com.devcli.runtime.CancellationContext;
 import com.devcli.runtime.RunCoordinator;
+import com.devcli.runtime.RunContext;
 import com.devcli.runtime.api.RunEventJsonCodec;
 import com.devcli.runtime.api.RuntimeThreadStore;
 import com.devcli.runtime.event.RunEvent;
+import com.devcli.runtime.store.RecoveryEvidenceSink;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -177,7 +180,18 @@ public final class SessionTreeService {
     public synchronized Optional<String> recordTurn(
             String mode, String submittedInput, String expandedInput,
             String response, List<LlmClient.Message> modelMessages) {
-        String turnId = "turn_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        RunContext context = CancellationContext.currentRun();
+        String turnId = context == null
+                ? "turn_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12)
+                : context.runId();
+        return recordTurn(turnId, mode, submittedInput, expandedInput, response, modelMessages);
+    }
+
+    /** 使用执行开始前分配的稳定 Run id 记录 CLI turn。 */
+    public synchronized Optional<String> recordTurn(
+            String runId, String mode, String submittedInput, String expandedInput,
+            String response, List<LlmClient.Message> modelMessages) {
+        String turnId = runId == null || runId.isBlank() ? RunContext.newRunId() : runId.trim();
         String branchId = activeBranchId();
         try {
             runCoordinator.submitInteractive(
@@ -210,6 +224,11 @@ public final class SessionTreeService {
                     threadId, branchId, turnId, e);
             return Optional.of("会话持久化失败: " + e.getMessage());
         }
+    }
+
+    public synchronized RecoveryEvidenceSink recoveryEvidenceSink(String runId) {
+        return runCoordinator.recoveryEvidenceSink(
+                runId, threadId, activeBranchId());
     }
 
     private List<LlmClient.Message> buildPersistedContext(

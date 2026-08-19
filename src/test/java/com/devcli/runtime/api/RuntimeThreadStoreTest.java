@@ -12,8 +12,10 @@ import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -281,6 +283,93 @@ class RuntimeThreadStoreTest {
             assertEquals(first.eventCursor(), rebuilt.eventCursor());
             assertEquals(first.estimatedCostCny(), rebuilt.estimatedCostCny());
         }
+    }
+
+    @Test
+    void awaitEventsRechecksAfterAppendAndReturnsCommittedEvent(@TempDir Path tempDir) throws Exception {
+        try (RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"))) {
+            String threadId = store.createThread();
+            long cursor = store.events(threadId, 0).getLast().id();
+            AtomicReference<List<RuntimeEvent>> result = new AtomicReference<>();
+            Thread waiter = new Thread(() -> {
+                try {
+                    result.set(store.awaitEvents(threadId, cursor, 8, Duration.ofSeconds(30)));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            waiter.start();
+            awaitWaiting(waiter);
+
+            long eventId = store.appendEvent(threadId, "after.wait", "{}");
+
+            waiter.join(1_000);
+            assertFalse(waiter.isAlive());
+            assertEquals(List.of(eventId), result.get().stream().map(RuntimeEvent::id).toList());
+        }
+    }
+
+    @Test
+    void closingStoreWakesIdleEventWaiterPromptly(@TempDir Path tempDir) throws Exception {
+        RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"));
+        String threadId = store.createThread();
+        long cursor = store.events(threadId, 0).getLast().id();
+        AtomicReference<List<RuntimeEvent>> result = new AtomicReference<>();
+        Thread waiter = new Thread(() -> {
+            try {
+                result.set(store.awaitEvents(threadId, cursor, 8, Duration.ofSeconds(30)));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        try {
+            waiter.start();
+            awaitWaiting(waiter);
+            store.close();
+            waiter.join(1_000);
+            assertFalse(waiter.isAlive());
+            assertEquals(List.of(), result.get());
+        } finally {
+            store.close();
+        }
+    }
+
+    @Test
+    void boundedVisibleEventsSkipInvisibleBranchRowsBeforeApplyingLimit(@TempDir Path tempDir)
+            throws Exception {
+        try (RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"))) {
+            String threadId = store.createThread();
+            long forkEventId = store.appendEvent(threadId, "shared", "{}");
+            RuntimeThreadStore.BranchRecord branch = store.createBranch(
+                    threadId, "alternative", forkEventId);
+
+            store.activateBranch(threadId, "main");
+            for (int index = 0; index < 256; index++) {
+                store.appendEvent(threadId, "main.hidden", "{\"index\":" + index + "}");
+            }
+            store.activateBranch(threadId, branch.id());
+            long visibleFirst = store.appendEvent(threadId, "branch.visible.first", "{}");
+            store.appendEvent(threadId, "branch.visible.second", "{}");
+
+            List<RuntimeEvent> events = store.events(threadId, forkEventId, 1);
+
+            assertEquals(1, events.size());
+            assertEquals(visibleFirst, events.getFirst().id());
+            assertEquals("branch.visible.first", events.getFirst().type());
+        }
+    }
+
+    private static void awaitWaiting(Thread thread) {
+        long deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos();
+        while (thread.isAlive()
+                && thread.getState() != Thread.State.WAITING
+                && thread.getState() != Thread.State.TIMED_WAITING
+                && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+        assertTrue(thread.getState() == Thread.State.WAITING
+                        || thread.getState() == Thread.State.TIMED_WAITING,
+                "waiter did not enter wait state: " + thread.getState());
     }
 
     private static long appendTurn(RuntimeThreadStore store, String threadId,

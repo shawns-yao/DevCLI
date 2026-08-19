@@ -11,14 +11,170 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.lang.reflect.Method;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class RuntimeApiServerTest {
+
+    @Test
+    void replaysEventsAfterCursor(@TempDir Path tempDir) throws Exception {
+        try (RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"));
+             RuntimeApiServer server = new RuntimeApiServer(store,
+                     (threadId, prompt, eventSink) -> TurnRunner.TurnResult.completed("unused"),
+                     0, "secret")) {
+            server.start();
+            HttpClient client = HttpClient.newHttpClient();
+            String base = "http://127.0.0.1:" + server.port();
+            String threadId = createThread(client, base);
+            long first = store.appendEvent(threadId, "first", "{\"value\":1}");
+            long second = store.appendEvent(threadId, "second", "{\"value\":2}");
+
+            try (SseReader events = openEvents(client, base, threadId, "after=" + first, null)) {
+                String body = events.readUntil("id: " + second);
+                assertFalse(body.contains("id: " + first + "\n"));
+                assertTrue(body.contains("event: second"));
+            }
+        }
+    }
+
+    @Test
+    void resumesFromTheGreaterOfQueryAndLastEventId(@TempDir Path tempDir) throws Exception {
+        try (RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"));
+             RuntimeApiServer server = new RuntimeApiServer(store,
+                     (threadId, prompt, eventSink) -> TurnRunner.TurnResult.completed("unused"),
+                     0, "secret")) {
+            server.start();
+            HttpClient client = HttpClient.newHttpClient();
+            String base = "http://127.0.0.1:" + server.port();
+            String threadId = createThread(client, base);
+            long first = store.appendEvent(threadId, "first", "{}");
+            long second = store.appendEvent(threadId, "second", "{}");
+            long third = store.appendEvent(threadId, "third", "{}");
+
+            try (SseReader events = openEvents(client, base, threadId,
+                    "after=" + first, Long.toString(second))) {
+                String body = events.readUntil("id: " + third);
+                assertFalse(body.contains("id: " + second + "\n"));
+                assertTrue(body.contains("event: third"));
+            }
+        }
+    }
+
+    @Test
+    void safelyFallsBackForMalformedAndNegativeResumeCursors(@TempDir Path tempDir) throws Exception {
+        try (RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"));
+             RuntimeApiServer server = new RuntimeApiServer(store,
+                     (threadId, prompt, eventSink) -> TurnRunner.TurnResult.completed("unused"),
+                     0, "secret")) {
+            server.start();
+            HttpClient client = HttpClient.newHttpClient();
+            String base = "http://127.0.0.1:" + server.port();
+            String threadId = createThread(client, base);
+
+            try (SseReader events = openEvents(client, base, threadId,
+                    "after=not-a-number", "-2")) {
+                assertTrue(events.readUntil("event: thread.created").contains("thread.created"));
+            }
+            try (SseReader events = openEvents(client, base, threadId,
+                    "after=-5", "not-a-number")) {
+                assertTrue(events.readUntil("event: thread.created").contains("thread.created"));
+            }
+        }
+    }
+
+    @Test
+    void deliversEventsAppendedAfterConnection(@TempDir Path tempDir) throws Exception {
+        try (RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"));
+             RuntimeApiServer server = new RuntimeApiServer(store,
+                     (threadId, prompt, eventSink) -> TurnRunner.TurnResult.completed("unused"),
+                     0, "secret")) {
+            server.start();
+            HttpClient client = HttpClient.newHttpClient();
+            String base = "http://127.0.0.1:" + server.port();
+            String threadId = createThread(client, base);
+            try (SseReader events = openEvents(client, base, threadId)) {
+                events.readUntil("event: thread.created");
+                long appended = store.appendEvent(threadId, "after.connect", "{\"value\":true}");
+                String body = events.readUntil("id: " + appended);
+                assertTrue(body.contains("event: after.connect"));
+            }
+        }
+    }
+
+    @Test
+    void sendsHeartbeatWhileIdleWithoutAdvancingCursor(@TempDir Path tempDir) throws Exception {
+        String previous = System.getProperty("devcli.runtime.api.sse.heartbeat.seconds");
+        System.setProperty("devcli.runtime.api.sse.heartbeat.seconds", "1");
+        try {
+            try (RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"));
+                 RuntimeApiServer server = new RuntimeApiServer(store,
+                         (threadId, prompt, eventSink) -> TurnRunner.TurnResult.completed("unused"),
+                         0, "secret")) {
+                server.start();
+                HttpClient client = HttpClient.newHttpClient();
+                String base = "http://127.0.0.1:" + server.port();
+                String threadId = createThread(client, base);
+                try (SseReader events = openEvents(client, base, threadId)) {
+                    events.readUntil("event: thread.created");
+                    String heartbeat = events.readLine(Duration.ofSeconds(3));
+                    assertTrue(heartbeat.startsWith(":"), heartbeat);
+                    assertEquals(1, store.events(threadId, 0).size());
+                }
+            }
+        } finally {
+            if (previous == null) {
+                System.clearProperty("devcli.runtime.api.sse.heartbeat.seconds");
+            } else {
+                System.setProperty("devcli.runtime.api.sse.heartbeat.seconds", previous);
+            }
+        }
+    }
+
+    @Test
+    void promptlyCleansUpClientDisconnectAndServerShutdown(@TempDir Path tempDir) throws Exception {
+        try (RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"))) {
+            RuntimeApiServer server = new RuntimeApiServer(store,
+                    (threadId, prompt, eventSink) -> TurnRunner.TurnResult.completed("unused"),
+                    0, "secret");
+            server.start();
+            HttpClient client = HttpClient.newHttpClient();
+            String base = "http://127.0.0.1:" + server.port();
+            String threadId = createThread(client, base);
+            SseReader events = openEvents(client, base, threadId);
+            events.readUntil("event: thread.created");
+            assertEquals(1, activeEventStreams(server));
+            events.close();
+            store.appendEvent(threadId, "disconnect.probe",
+                    "{\"payload\":\"" + "x".repeat(1_048_576) + "\"}");
+            awaitActiveStreams(server, 0);
+
+            long cursor = store.events(threadId, 0).getLast().id();
+            SseReader idle = openEvents(client, base, threadId, "after=" + cursor, null);
+            CompletableFuture<String> read = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return idle.readLine();
+                } catch (IOException e) {
+                    return null;
+                }
+            });
+            assertEquals(1, activeEventStreams(server));
+            server.close();
+            assertNull(read.get(3, java.util.concurrent.TimeUnit.SECONDS));
+            assertEquals(0, activeEventStreams(server));
+            idle.close();
+        }
+    }
 
     @Test
     void exposesThreadTurnAndSseEvents(@TempDir Path tempDir) throws Exception {
@@ -329,32 +485,16 @@ class RuntimeApiServerTest {
     }
 
     private static String waitForSecondTurn(HttpClient client, String base, String threadId) throws Exception {
-        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
-        while (System.nanoTime() < deadline) {
-            HttpResponse<String> response = client.send(request(base + "/v1/threads/" + threadId + "/events", "GET", "")
-                            .build(),
-                    HttpResponse.BodyHandlers.ofString());
-            if (response.body().contains("reply:second")) {
-                return response.body();
-            }
-            Thread.sleep(30);
+        try (SseReader events = openEvents(client, base, threadId)) {
+            return events.readUntil("reply:second");
         }
-        fail("second turn did not complete");
-        return "";
     }
 
     private static String waitForEvent(HttpClient client, String base, String threadId, String event)
             throws Exception {
-        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
-        while (System.nanoTime() < deadline) {
-            HttpResponse<String> response = client.send(request(
-                            base + "/v1/threads/" + threadId + "/events", "GET", "").build(),
-                    HttpResponse.BodyHandlers.ofString());
-            if (response.body().contains(event)) return response.body();
-            Thread.sleep(30);
+        try (SseReader events = openEvents(client, base, threadId)) {
+            return events.readUntil(event);
         }
-        fail("event did not appear: " + event);
-        return "";
     }
 
     private static HttpRequest.Builder request(String url, String method, String body) {
@@ -369,18 +509,113 @@ class RuntimeApiServerTest {
     }
 
     private static String waitForEvents(HttpClient client, String base, String threadId) throws Exception {
-        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
-        while (System.nanoTime() < deadline) {
-            HttpResponse<String> response = client.send(request(base + "/v1/threads/" + threadId + "/events", "GET", "")
-                            .build(),
-                    HttpResponse.BodyHandlers.ofString());
-            if (response.body().contains("turn.completed")) {
-                return response.body();
-            }
-            Thread.sleep(30);
+        try (SseReader events = openEvents(client, base, threadId)) {
+            return events.readUntil("turn.completed");
         }
-        fail("events did not complete");
-        return "";
+    }
+
+    private static String createThread(HttpClient client, String base) throws Exception {
+        HttpResponse<String> created = client.send(
+                request(base + "/v1/threads", "POST", "").build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, created.statusCode());
+        return extract(created.body(), "thread_");
+    }
+
+    private static SseReader openEvents(HttpClient client, String base, String path) throws Exception {
+        return openEvents(client, base, path, null, null);
+    }
+
+    private static SseReader openEvents(HttpClient client, String base, String path,
+                                        String lastEventId) throws Exception {
+        return openEvents(client, base, path, null, lastEventId);
+    }
+
+    private static SseReader openEvents(HttpClient client, String base, String threadId,
+                                        String query, String lastEventId) throws Exception {
+        String url = base + "/v1/threads/" + threadId + "/events"
+                + (query == null || query.isBlank() ? "" : "?" + query);
+        HttpRequest.Builder request = request(url, "GET", "");
+        if (lastEventId != null) {
+            request.header("Last-Event-ID", lastEventId);
+        }
+        HttpResponse<InputStream> response = client.send(request.build(),
+                HttpResponse.BodyHandlers.ofInputStream());
+        assertEquals(200, response.statusCode());
+        assertTrue(response.headers().firstValue("Content-Type").orElse("")
+                .startsWith("text/event-stream"));
+        return new SseReader(response.body());
+    }
+
+    private static void awaitActiveStreams(RuntimeApiServer server, int expected) throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(3).toNanos();
+        while (System.nanoTime() < deadline) {
+            if (activeEventStreams(server) == expected) return;
+            Thread.sleep(20);
+        }
+        assertEquals(expected, activeEventStreams(server));
+    }
+
+    private static int activeEventStreams(RuntimeApiServer server) {
+        try {
+            Method method = RuntimeApiServer.class.getDeclaredMethod("activeEventStreams");
+            method.setAccessible(true);
+            return ((Number) method.invoke(server)).intValue();
+        } catch (ReflectiveOperationException e) {
+            fail("RuntimeApiServer must expose active SSE cleanup state", e);
+            return -1;
+        }
+    }
+
+    private static final class SseReader implements AutoCloseable {
+        private final BufferedReader reader;
+
+        private SseReader(InputStream input) {
+            this.reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8));
+        }
+
+        private String readUntil(String marker) throws Exception {
+            StringBuilder body = new StringBuilder();
+            long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+            boolean found = false;
+            while (System.nanoTime() < deadline) {
+                String line = readLine(Duration.ofNanos(Math.max(1,
+                        deadline - System.nanoTime())));
+                if (line == null) break;
+                body.append(line).append('\n');
+                found |= body.toString().contains(marker);
+                if (found && line.isEmpty()) return body.toString();
+            }
+            fail("SSE event did not appear: " + marker + "\n" + body);
+            return body.toString();
+        }
+
+        private String readLine() throws IOException {
+            return reader.readLine();
+        }
+
+        private String readLine(Duration timeout) throws Exception {
+            CompletableFuture<String> future = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return reader.readLine();
+                } catch (IOException e) {
+                    throw new java.util.concurrent.CompletionException(e);
+                }
+            });
+            try {
+                return future.get(Math.max(1, timeout.toMillis()),
+                        java.util.concurrent.TimeUnit.MILLISECONDS);
+            } catch (java.util.concurrent.TimeoutException e) {
+                future.cancel(true);
+                close();
+                throw new AssertionError("SSE read timed out", e);
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            reader.close();
+        }
     }
 
     private static String extract(String body, String prefix) {

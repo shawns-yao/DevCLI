@@ -1,5 +1,7 @@
 package com.devcli.runtime;
 
+import com.devcli.runtime.store.RecoveryEvidenceSink;
+
 import java.nio.file.Path;
 
 /**
@@ -16,6 +18,15 @@ public final class CancellationContext {
 
     public static RunContext startRunContext(Path projectPath) {
         RunContext context = new RunContext(projectPath, LOCAL.get());
+        LOCAL.set(context);
+        return context;
+    }
+
+    public static RunContext startRunContext(Path projectPath, String runId,
+                                             String threadId, String branchId,
+                                             RecoveryEvidenceSink evidenceSink) {
+        RunContext context = new RunContext(
+                projectPath, runId, threadId, branchId, evidenceSink, LOCAL.get());
         LOCAL.set(context);
         return context;
     }

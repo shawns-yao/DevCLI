@@ -1,6 +1,7 @@
 package com.devcli.agent;
 
 import com.devcli.plan.ExecutionArtifact;
+import com.devcli.runtime.store.RecoveryEvidenceRef;
 import com.devcli.workspace.PatchSet;
 import com.devcli.workspace.ProjectCommitCoordinator;
 import com.devcli.workspace.WorkspaceExecutionSession;
@@ -13,6 +14,24 @@ import java.util.function.Consumer;
  * 协调隔离工作区补丁、checkpoint 写前日志和步骤终态持久化。
  */
 final class WorkspaceCommitCoordinator {
+
+    static RecoveryEvidenceRef.State evidenceState(PatchSet.ApplyResult applyResult) {
+        Objects.requireNonNull(applyResult, "applyResult");
+        if (applyResult.applied()) {
+            return RecoveryEvidenceRef.State.COMPLETED;
+        }
+        if (!applyResult.conflicts().isEmpty()) {
+            return RecoveryEvidenceRef.State.FAILED;
+        }
+        return applyResult.rollbackFailures().isEmpty()
+                ? RecoveryEvidenceRef.State.ROLLED_BACK
+                : RecoveryEvidenceRef.State.FAILED;
+    }
+
+    static boolean shouldFinalizeJournal(PatchSet.ApplyResult applyResult) {
+        Objects.requireNonNull(applyResult, "applyResult");
+        return applyResult.applied() || applyResult.rollbackComplete();
+    }
 
     AgentCheckpoint.PatchReconcileResult reconcile(AgentCheckpoint checkpoint,
                                                     Path projectRoot) throws Exception {
@@ -46,13 +65,16 @@ final class WorkspaceCommitCoordinator {
                     }
                 },
                 applyResult -> {
-                    boolean terminalJournal = applyResult.applied()
-                            || applyResult.rollbackComplete();
-                    if (checkpoint != null && terminalJournal) {
-                        checkpoint.markPatchCommitTerminal(stepId);
+                    RecoveryEvidenceRef.State state = evidenceState(applyResult);
+                    boolean finalizeJournal = shouldFinalizeJournal(applyResult);
+                    if (checkpoint != null) {
+                        checkpoint.recordPatchTerminal(stepId, state);
+                        if (finalizeJournal) {
+                            checkpoint.markPatchCommitTerminal(stepId);
+                        }
                     }
                     persistence.accept(applyResult);
-                    if (checkpoint != null && terminalJournal) {
+                    if (checkpoint != null && finalizeJournal) {
                         checkpoint.cleanupPatchJournal(stepId);
                     }
                 });

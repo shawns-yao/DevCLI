@@ -91,6 +91,21 @@ public interface RunStore extends AutoCloseable {
 
     int recoverRunning(Source source, Status target, String reason);
 
+    RecoveryEvidenceRef upsertRecoveryEvidence(RecoveryEvidenceRef ref);
+
+    default boolean transitionRecoveryEvidence(String runId,
+                                               RecoveryEvidenceRef.Kind kind,
+                                               String logicalKey,
+                                               RecoveryEvidenceRef.State state) {
+        RecoveryEvidenceRef current = listRecoveryEvidence(runId, 1000).stream()
+                .filter(ref -> ref.kind() == kind && ref.logicalKey().equals(logicalKey))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("恢复证据不存在: " + logicalKey));
+        return upsertRecoveryEvidence(current.withState(state)).version() > current.version();
+    }
+
+    List<RecoveryEvidenceRef> listRecoveryEvidence(String runId, int limit);
+
     Path dbPath();
 
     @Override

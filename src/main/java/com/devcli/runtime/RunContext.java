@@ -1,5 +1,7 @@
 package com.devcli.runtime;
 
+import com.devcli.runtime.store.RecoveryEvidenceSink;
+
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -15,21 +17,44 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public final class RunContext implements AutoCloseable {
     private final String runId;
+    private final String threadId;
+    private final String branchId;
     private final Path projectPath;
     private final CancellationToken cancellationToken;
+    private final RecoveryEvidenceSink evidenceSink;
     private final RunContext previous;
     private final Deque<AutoCloseable> ownedResources = new ArrayDeque<>();
     private final AtomicBoolean closed = new AtomicBoolean(false);
 
     RunContext(Path projectPath, RunContext previous) {
-        this.runId = "run_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        this(projectPath, newRunId(), "", "main", RecoveryEvidenceSink.NO_OP, previous);
+    }
+
+    RunContext(Path projectPath, String runId, String threadId, String branchId,
+               RecoveryEvidenceSink evidenceSink, RunContext previous) {
+        this.runId = runId == null || runId.isBlank() ? newRunId() : runId.trim();
+        this.threadId = threadId == null ? "" : threadId.trim();
+        this.branchId = branchId == null || branchId.isBlank() ? "main" : branchId.trim();
         this.projectPath = Objects.requireNonNull(projectPath, "projectPath").toAbsolutePath().normalize();
         this.cancellationToken = new CancellationToken();
+        this.evidenceSink = RecoveryEvidenceSink.safe(evidenceSink);
         this.previous = previous;
+    }
+
+    public static String newRunId() {
+        return "run_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
     }
 
     public String runId() {
         return runId;
+    }
+
+    public String threadId() {
+        return threadId;
+    }
+
+    public String branchId() {
+        return branchId;
     }
 
     public Path projectPath() {
@@ -38,6 +63,10 @@ public final class RunContext implements AutoCloseable {
 
     public CancellationToken cancellationToken() {
         return cancellationToken;
+    }
+
+    public RecoveryEvidenceSink evidenceSink() {
+        return evidenceSink;
     }
 
     public boolean isCancelled() {

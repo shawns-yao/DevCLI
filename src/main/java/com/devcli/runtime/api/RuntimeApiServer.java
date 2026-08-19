@@ -13,6 +13,8 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.Set;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
@@ -22,12 +24,15 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class RuntimeApiServer implements AutoCloseable {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int DEFAULT_HTTP_THREADS = 16;
     private static final int DEFAULT_TURN_THREADS = 2;
     private static final int DEFAULT_TURN_QUEUE_SIZE = 64;
+    private static final int DEFAULT_SSE_BATCH_SIZE = 128;
+    private static final int DEFAULT_SSE_HEARTBEAT_SECONDS = 15;
 
     private final RuntimeThreadStore store;
     private final RunCoordinator runCoordinator;
@@ -37,6 +42,8 @@ public class RuntimeApiServer implements AutoCloseable {
     private final ExecutorService httpExecutor;
     private final ThreadPoolExecutor turnExecutor;
     private final KeyedSerialExecutor serialTurnExecutor;
+    private final Set<SseSubscription> sseSubscriptions = ConcurrentHashMap.newKeySet();
+    private volatile boolean closed;
 
     public RuntimeApiServer(RuntimeThreadStore store, TurnRunner runner, int port, String apiKey) throws IOException {
         if (apiKey == null || apiKey.isBlank()) {
@@ -273,13 +280,54 @@ public class RuntimeApiServer implements AutoCloseable {
             writeJson(exchange, 404, "{\"error\":\"thread_not_found\"}");
             return;
         }
-        long after = parseAfter(exchange.getRequestURI().getQuery());
-        List<RuntimeEvent> events = store.events(threadId, after);
-        byte[] body = formatSse(events).getBytes(StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
-        exchange.sendResponseHeaders(200, body.length);
-        try (OutputStream os = exchange.getResponseBody()) {
-            os.write(body);
+        long after = Math.max(
+                parseAfter(exchange.getRequestURI().getQuery()),
+                parseCursor(exchange.getRequestHeaders().getFirst("Last-Event-ID")));
+        SseSubscription subscription = new SseSubscription();
+        sseSubscriptions.add(subscription);
+        try {
+            exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
+            exchange.getResponseHeaders().set("Cache-Control", "no-cache");
+            exchange.sendResponseHeaders(200, 0);
+            try (OutputStream os = exchange.getResponseBody()) {
+                subscription.output = os;
+                streamEvents(threadId, after, subscription);
+            }
+        } finally {
+            subscription.close();
+            sseSubscriptions.remove(subscription);
+        }
+    }
+
+    private void streamEvents(String threadId, long after, SseSubscription subscription) {
+        long cursor = Math.max(0, after);
+        Duration heartbeat = Duration.ofSeconds(configuredPositiveInt(
+                "devcli.runtime.api.sse.heartbeat.seconds", DEFAULT_SSE_HEARTBEAT_SECONDS));
+        while (!closed && !subscription.closed && !store.isClosed()) {
+            List<RuntimeEvent> events;
+            try {
+                events = store.awaitEvents(threadId, cursor, DEFAULT_SSE_BATCH_SIZE, heartbeat);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (RuntimeException e) {
+                break;
+            }
+            if (closed || subscription.closed || store.isClosed()) {
+                break;
+            }
+            try {
+                if (events.isEmpty()) {
+                    subscription.write(": heartbeat\n\n".getBytes(StandardCharsets.UTF_8));
+                    continue;
+                }
+                for (RuntimeEvent event : events) {
+                    subscription.write(formatSse(event).getBytes(StandardCharsets.UTF_8));
+                    cursor = event.id();
+                }
+            } catch (IOException e) {
+                break;
+            }
         }
     }
 
@@ -378,13 +426,25 @@ public class RuntimeApiServer implements AutoCloseable {
         for (String part : query.split("&")) {
             if (part.startsWith("after=")) {
                 try {
-                    return Long.parseLong(part.substring("after=".length()));
+                    return parseCursor(part.substring("after=".length()));
                 } catch (NumberFormatException ignored) {
                     return 0;
                 }
             }
         }
         return 0;
+    }
+
+    private static long parseCursor(String value) {
+        if (value == null || value.isBlank()) {
+            return 0;
+        }
+        try {
+            long parsed = Long.parseLong(value.trim());
+            return parsed < 0 ? 0 : parsed;
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
     }
 
     private static String formatSse(List<RuntimeEvent> events) {
@@ -395,6 +455,12 @@ public class RuntimeApiServer implements AutoCloseable {
             sb.append("data: ").append(event.data()).append("\n\n");
         }
         return sb.toString();
+    }
+
+    private static String formatSse(RuntimeEvent event) {
+        return "id: " + event.id() + "\n"
+                + "event: " + event.type() + "\n"
+                + "data: " + event.data() + "\n\n";
     }
 
     private static void writeJson(HttpExchange exchange, int status, String body) throws IOException {
@@ -433,8 +499,48 @@ public class RuntimeApiServer implements AutoCloseable {
 
     @Override
     public void close() {
+        closed = true;
+        for (SseSubscription subscription : sseSubscriptions) {
+            subscription.close();
+        }
         server.stop(0);
         turnExecutor.shutdownNow();
         httpExecutor.shutdownNow();
+    }
+
+    int activeEventStreams() {
+        return sseSubscriptions.size();
+    }
+
+    private static final class SseSubscription {
+        private volatile boolean closed;
+        private volatile OutputStream output;
+        private final Object lifecycle = new Object();
+
+        private void write(byte[] bytes) throws IOException {
+            OutputStream current;
+            synchronized (lifecycle) {
+                if (closed || output == null) {
+                    throw new IOException("SSE subscription closed");
+                }
+                current = output;
+            }
+            current.write(bytes);
+            current.flush();
+        }
+
+        private void close() {
+            OutputStream current;
+            synchronized (lifecycle) {
+                closed = true;
+                current = output;
+            }
+            if (current != null) {
+                try {
+                    current.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
     }
 }

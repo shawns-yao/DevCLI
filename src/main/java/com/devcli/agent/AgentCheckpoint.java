@@ -4,6 +4,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.devcli.plan.ExecutionArtifact;
 import com.devcli.plan.ExecutionGraph;
+import com.devcli.runtime.CancellationContext;
+import com.devcli.runtime.RunContext;
+import com.devcli.runtime.store.RecoveryEvidenceRef;
+import com.devcli.runtime.store.RecoveryEvidenceSink;
 import com.devcli.workspace.PatchSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -76,6 +80,7 @@ public class AgentCheckpoint {
     private long timestamp;
     private int failedSteps;
     private String lastError;
+    private transient RecoveryEvidenceSink evidenceSink;
 
     public record StepArtifact(String stepId, List<String> modifiedFiles, String summary,
                                ExecutionArtifact artifact) {
@@ -231,7 +236,12 @@ public class AgentCheckpoint {
     }
 
     public AgentCheckpoint() {
+        this(currentEvidenceSink());
+    }
+
+    private AgentCheckpoint(RecoveryEvidenceSink evidenceSink) {
         PatchJournalPolicy.maintain(getCheckpointDir());
+        this.evidenceSink = RecoveryEvidenceSink.safe(evidenceSink);
         this.completedSteps = new ArrayList<>();
         this.artifacts = new HashMap<>();
         this.failedArtifacts = new HashMap<>();
@@ -250,6 +260,13 @@ public class AgentCheckpoint {
 
     public AgentCheckpoint(String orchestrationId, String goal) {
         this();
+        this.orchestrationId = orchestrationId;
+        this.goal = goal;
+    }
+
+    public AgentCheckpoint(String orchestrationId, String goal,
+                           RecoveryEvidenceSink evidenceSink) {
+        this(evidenceSink);
         this.orchestrationId = orchestrationId;
         this.goal = goal;
     }
@@ -433,6 +450,7 @@ public class AgentCheckpoint {
                     new PendingPatchCommit(stepId, entries, intended));
             timestamp = System.currentTimeMillis();
             saveOrThrow();
+            recordPatchEvidence(stepId, RecoveryEvidenceRef.State.PREPARED);
         } catch (Exception e) {
             pendingPatchCommits().remove(stepId);
             deleteTree(journal);
@@ -478,6 +496,7 @@ public class AgentCheckpoint {
                 pendingPatchCommits().remove(pending.stepId());
                 completedJournals.add(pending.stepId());
                 actions.put(pending.stepId(), PatchReconcileAction.PROMOTED_COMPLETED);
+                recordPatchEvidence(pending.stepId(), RecoveryEvidenceRef.State.COMPLETED);
                 continue;
             }
             if (allBefore) {
@@ -492,9 +511,11 @@ public class AgentCheckpoint {
                 pendingPatchCommits().remove(pending.stepId());
                 completedJournals.add(pending.stepId());
                 actions.put(pending.stepId(), PatchReconcileAction.ROLLED_BACK);
+                recordPatchEvidence(pending.stepId(), RecoveryEvidenceRef.State.ROLLED_BACK);
             } else {
                 actions.put(pending.stepId(), PatchReconcileAction.ROLLBACK_FAILED);
                 failures.put(pending.stepId(), rollbackFailures);
+                recordPatchEvidence(pending.stepId(), RecoveryEvidenceRef.State.FAILED);
             }
         }
 
@@ -690,6 +711,7 @@ public class AgentCheckpoint {
         } catch (IOException atomicUnsupported) {
             Files.move(tempFile, checkpointFile, StandardCopyOption.REPLACE_EXISTING);
         }
+        recordCheckpointEvidence(checkpointFile, RecoveryEvidenceRef.State.PRESENT);
 
         log.info("Checkpoint 已保存: {} (已完成: {}/{} 步)",
                 orchestrationId, completedSteps.size(), planSteps.isEmpty()
@@ -712,6 +734,7 @@ public class AgentCheckpoint {
             }
 
             AgentCheckpoint checkpoint = mapper.readValue(checkpointFile.toFile(), AgentCheckpoint.class);
+            checkpoint.evidenceSink = currentEvidenceSink();
             int loadedVersion = checkpoint.protocolVersion <= 0 ? 1 : checkpoint.protocolVersion;
             if (loadedVersion > CURRENT_PROTOCOL_VERSION) {
                 String message = "checkpoint 协议版本不兼容：文件版本 " + loadedVersion
@@ -751,13 +774,14 @@ public class AgentCheckpoint {
      * 删除 Checkpoint（orchestration 成功完成后）
      */
     public void delete() {
+        Path checkpointFile = getCheckpointDir().resolve(orchestrationId + ".json");
         try {
-            Path checkpointFile = getCheckpointDir().resolve(orchestrationId + ".json");
             if (Files.exists(checkpointFile)) {
                 Files.delete(checkpointFile);
                 log.info("Checkpoint 已删除: {}", orchestrationId);
             }
             deleteTree(patchJournalRoot());
+            recordCheckpointEvidence(checkpointFile, RecoveryEvidenceRef.State.DELETED);
         } catch (Exception e) {
             log.warn("删除 Checkpoint 失败: {}", e.getMessage());
         }
@@ -779,6 +803,7 @@ public class AgentCheckpoint {
                     .forEach(p -> {
                         try {
                             AgentCheckpoint cp = mapper.readValue(p.toFile(), AgentCheckpoint.class);
+                            cp.evidenceSink = currentEvidenceSink();
                             checkpoints.add(new CheckpointInfo(
                                 cp.orchestrationId,
                                 cp.goal,
@@ -1008,6 +1033,69 @@ public class AgentCheckpoint {
 
     public void setPendingPatchCommits(Map<String, PendingPatchCommit> pendingPatchCommits) {
         this.pendingPatchCommits = pendingPatchCommits == null ? new HashMap<>() : pendingPatchCommits;
+    }
+
+    RecoveryEvidenceSink evidenceSink() {
+        return RecoveryEvidenceSink.safe(evidenceSink);
+    }
+
+    String patchJournalReference(String stepId) {
+        return patchJournalDir(stepId).toAbsolutePath().normalize().toString();
+    }
+
+    void recordPatchTerminal(String stepId, RecoveryEvidenceRef.State state) {
+        recordPatchEvidence(stepId, state);
+    }
+
+    private void recordCheckpointEvidence(Path checkpointFile, RecoveryEvidenceRef.State state) {
+        if (orchestrationId == null || orchestrationId.isBlank()) {
+            return;
+        }
+        try {
+            RunContext context = CancellationContext.currentRun();
+            String runId = context == null ? "checkpoint-local" : context.runId();
+            String threadId = context == null ? "" : context.threadId();
+            String branchId = context == null ? "main" : context.branchId();
+            String sha256 = Files.isRegularFile(checkpointFile)
+                    ? PatchSet.hash(checkpointFile) : "";
+            evidenceSink().record(new RecoveryEvidenceRef(
+                    runId, threadId, branchId, RecoveryEvidenceRef.Kind.CHECKPOINT,
+                    orchestrationId, checkpointFile.toAbsolutePath().normalize().toString(),
+                    sha256, state, Instant.now(), Instant.now(), 0));
+        } catch (Exception e) {
+            log.warn("恢复证据写入失败，Checkpoint 本地操作已完成: run={}, key={}, error={}",
+                    currentEvidenceRunId(), orchestrationId, e.getMessage());
+        }
+    }
+
+    private void recordPatchEvidence(String stepId, RecoveryEvidenceRef.State state) {
+        if (orchestrationId == null || orchestrationId.isBlank()
+                || stepId == null || stepId.isBlank()) {
+            return;
+        }
+        try {
+            RunContext context = CancellationContext.currentRun();
+            String runId = context == null ? "checkpoint-local" : context.runId();
+            String threadId = context == null ? "" : context.threadId();
+            String branchId = context == null ? "main" : context.branchId();
+            evidenceSink().record(new RecoveryEvidenceRef(
+                    runId, threadId, branchId, RecoveryEvidenceRef.Kind.PATCH_JOURNAL,
+                    orchestrationId + ":" + stepId, patchJournalReference(stepId),
+                    "", state, Instant.now(), Instant.now(), 0));
+        } catch (Exception e) {
+            log.warn("恢复证据写入失败，Patch Journal 本地操作已完成: run={}, key={}, error={}",
+                    currentEvidenceRunId(), orchestrationId + ":" + stepId, e.getMessage());
+        }
+    }
+
+    private static RecoveryEvidenceSink currentEvidenceSink() {
+        RunContext context = CancellationContext.currentRun();
+        return context == null ? RecoveryEvidenceSink.NO_OP : context.evidenceSink();
+    }
+
+    private static String currentEvidenceRunId() {
+        RunContext context = CancellationContext.currentRun();
+        return context == null ? "checkpoint-local" : context.runId();
     }
 
     public List<AgentIdentityRecord> getAgentIdentities() {
