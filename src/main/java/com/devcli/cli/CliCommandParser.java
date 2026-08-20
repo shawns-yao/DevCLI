@@ -23,6 +23,8 @@ final class CliCommandParser {
         MEMORY_SAVE,
         MEMORY_PIN,
         RULE_ADD,
+        RULE_LIST,
+        RULE_REMOVE,
         INDEX_CODE,
         SEARCH_CODE,
         GRAPH_QUERY,
@@ -200,6 +202,15 @@ final class CliCommandParser {
         }
         if (trimmed.regionMatches(true, 0, "/rule add ", 0, 10)) {
             return new ParsedCommand(CommandType.RULE_ADD, trimmed.substring(10).trim());
+        }
+        if (trimmed.equalsIgnoreCase("/rule") || trimmed.equalsIgnoreCase("/rule list")) {
+            return new ParsedCommand(CommandType.RULE_LIST, null);
+        }
+        if (trimmed.equalsIgnoreCase("/rule remove")) {
+            return new ParsedCommand(CommandType.RULE_REMOVE, null);
+        }
+        if (trimmed.regionMatches(true, 0, "/rule remove ", 0, 13)) {
+            return new ParsedCommand(CommandType.RULE_REMOVE, trimmed.substring(13).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/index")) {

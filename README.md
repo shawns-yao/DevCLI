@@ -112,8 +112,9 @@ Main
 
 - 所有内置 LLM Provider 使用统一 `LlmException` 错误模型，区分认证、限流、过载、超时、网络、参数、上下文超限、内容过滤、服务端、响应格式和主动取消。限流、过载、超时、网络和 5xx 按指数退避与 jitter 有界重试；已取消请求和已经输出流式内容的请求不重试，避免重复正文或工具调用。SubAgent 会把标准错误码和 `retryable` 标记保留到编排层，瞬时故障判断不依赖具体网络错误文案。
 - `ConversationHistoryCompactor（对话历史压缩器）` 是治理 LLM messages 窗口的唯一压缩点；压缩分两层：第 0 层 `microcompact` 先处理单条超大消息，普通 user/assistant 消息和旧 `tool_result` 都会保留头尾并落盘为可恢复的 `<microcompact_boundary>` 引用（工具结果按 `toolCallId` 成批处理，不调 LLM、不删消息、保 tool_call 配对），扛不住再走 LLM 摘要（Map-Reduce / 增量）。原文尾部按 token 预算从最新 user 边界反向填充；若边界所在单条消息仍使尾部超预算，则继续前移安全边界，最后才对无法再切分的单条消息做可恢复截断。摘要提交到 history 前会经过运行时语义守卫，抽取必须、禁止、默认值、命令、版本和配置赋值等关键约束；同一结构化声明只保留最新值，否定约束必须在同一语义分段中保留否定极性；默认每 5 次成功压缩执行一次摘要重建，避免增量误差无限累积；摘要缺失时直接从原始消息恢复，不再等后续任务失败后发现。压缩阈值还会扣除当前工具定义和输出预留，避免只统计 history 却使完整请求超出模型窗口。
-- `SessionMemory（会话记忆）` 是当前任务共享的短期记忆，通过统一事件入口维护覆盖更新的 WorkState 和按重要性、Token 预算治理的 EvidenceJournal；失败压缩为 AttemptDigest，可再生证据只保留摘要和引用。`RagEvidenceMemory` 仍记录 IndexEpoch、SymbolVersion 和 ClasspathEpoch。
-- `LongTermMemory（长期记忆）` 只保存跨会话稳定事实，默认不把临时任务请求写入长期层。每条记忆统一记录 schemaVersion、主题内 revision、expiresAt 和结构化 MemoryEvidence；证据包含置信度、来源引用、写入原因、审核状态和冲突条目。显式写入默认已审核，策略自动写入默认未审核；已拒绝记忆保留审计但不参与关键词、语义召回或 prompt 注入。新写入事实按类型应用 TTL，检索时自动清理过期项。同主题内容变化、配置赋值、默认值、当前值和正反使用声明发生冲突时自动记录 conflictsWith，旧事实进入 superseded 状态；相同主题同值的可确定改写不会重复保存。长期记忆注入时会抑制与 SessionMemory 关键事件语义重复的条目。
+- 本地 `@path` 和 MCP resource 在展开阶段按剩余 Token 预算选择内联或不可变快照引用；内容型请求由程序强制回读，后续“里面/该文件/附件”等跨轮追问复用最近引用。元数据问题不强制读取；错误路径、读取失败或快照哈希变化达到两次后失败关闭。
+- `SessionMemory（会话记忆）` 是当前任务共享的短期记忆，通过统一事件入口维护覆盖更新的 WorkState 和 EvidenceJournal；明确 Plan 任务通过 taskId 轮换投影，Prompt 使用单一硬 Token 预算并按重要性优先注入。Multi-Agent 证据保留真实 agentId、stepId 和 sequence；失败压缩为 AttemptDigest，可再生证据只保留摘要和引用。
+- `LongTermMemory（长期记忆）` 只保存跨会话稳定事实。等价同主题事实直接去重，只有值变化才建立 revision 和 superseded 审计链；工具可通过强类型当前状态观察推翻任意可确定主题，Maven/Gradle 文本识别仅作兼容回退。敏感保存使用十分钟有效、只能使用一次的 confirmation_id，用户确认后由 `confirm_memory` 继续或取消。
 - `PathGuard（路径围栏）` 负责限制文件访问不逃逸项目根。
 - `ToolEffect + ToolAccessScope（工具副作用能力）` 由执行管线强制：非隔离分析任务只获得只读能力，隔离任务才允许项目写入和主机命令；MCP 缺失只读注解或声明 destructive/openWorld 时按外部副作用处理。工具参数先转换为稳定语义指纹，字段顺序、查询大小写、Unicode 等价字符和冗余空白不再绕过停滞检测；正则 pattern 保持大小写敏感，避免错误缓存命中；成功的只读结果会短期缓存，任何副作用执行都会清空缓存。
 - `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 并行执行时拦截 `write_file`，同一文件只能被一个运行中步骤写入；并行工具线程会继承步骤租约归属，任务结束后释放租约。`ToolRegistry` 托管共享后台清理器，project fork 复用同一线程，最后一个注册表关闭后停止；周期可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
@@ -520,13 +521,13 @@ Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个
 
 DevCLI 只有两层记忆：
 
-- `SessionMemory（会话记忆）`：只服务当前任务，任务清理时释放。WorkState 保存目标、计划、步骤、用户约束、根因、修改文件、测试状态和下一步动作；EvidenceJournal 把工具证据分为 CRITICAL、FAILURE、MILESTONE、ORDINARY、REGENERABLE，按 Token 预算增量合并。Multi-Agent 共享同一实例，通过 agentId、stepId、sequence 合并事件，并按角色渲染不同视图；`ExecutionArtifact` 仍是任务终态来源。
+- `SessionMemory（会话记忆）`：只服务当前任务。明确 Plan 任务结束后保留最终投影，到下一个 taskId 开始时清理；ReAct 使用 `/clear` 划分边界。WorkState 保存目标、计划、步骤、用户约束、根因、修改文件、测试状态和下一步动作；EvidenceJournal 按重要性增量合并，并在统一 Token 预算内渲染。Multi-Agent 共享同一实例，通过真实 agentId、stepId、sequence 合并事件。
 - `LongTermMemory（长期记忆）`：跨会话稳定事实，SQLite 持久化并支持检索注入。写入前经过 `LongTermMemoryPolicy`，不会把临时指令、敏感载荷或低复用事实直接持久化。
 
 两个相邻系统不属于记忆层：
 
 - `ConversationHistoryCompactor + CompactionSummaryCache`：治理真实 LLM messages 和压缩预摘要；预摘要缓存默认 30 分钟过期。
-- `RuleContext`：加载 `DEVCLI.md` 和 `/rule add` 的强约束并每轮注入。稳定事实使用 `/save`；旧 `/save --pin` 已废弃。
+- `RuleContext`：加载 `DEVCLI.md` 和 `/rule add` 的强约束并每轮注入；`/rule list` 和 `/rule remove` 负责管理。旧 pinned facts 只显示为待分类项，避免把稳定事实误迁为规则。
 - RAG 检索默认把 keyword / semantic / graph、RRF、rerank、最终选择和降级状态写入本机 JSONL 审计记录，不保存代码正文。普通 CLI 会话归档默认关闭；启用后 ReAct 保存脱敏模型消息，Plan / Team 保存顶层输入输出，不保存图片正文与 reasoning，并按保留期限自动清理。
 
 保存长期事实：
@@ -547,7 +548,7 @@ DevCLI 只有两层记忆：
 - 个人偏好、项目约定、常用路径、长期身份属性通过 `reason_code` 记录可解释写入原因，不再依赖未校准的小数打分。
 - 个人属性类键值事实（如“我是医生”）可自动进入长期记忆；模糊的新个人状态事实（如“我刚刚搬到北京”）需要确认。
 - 当信息涉及 token、密码、手机号、地址等敏感内容时，默认要求确认或跳过。
-- “今天临时这样做”“这次先用某个文件名”等低复用信息只留在 WorkingMemory。
+- “今天临时这样做”“这次先用某个文件名”等低复用信息只留在当前任务的 `SessionMemory`。
 - 多次在短期上下文重复出现的稳定事实，会提高进入长期记忆的优先级。
 - 命中主题键（如 JSON 库选型）的新事实写入时，同主题旧事实自动失效、检索不再召回，避免被推翻的旧设定继续误导模型；抽不到主题则退回追加不覆盖。
 

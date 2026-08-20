@@ -126,6 +126,7 @@ final class AgentExecutionEngine<R> {
     private final HookLifecycle hookLifecycle;
     private final SamplingRequestCoordinator samplingRequests;
     private final RepeatToolAdvisor repeatToolAdvisor;
+    private final ContextReferenceGuard.ReferenceRegistry contextReferenceRegistry;
     private final String engineId = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
 
     AgentExecutionEngine(LlmClient llmClient, AgentBudget budget) {
@@ -138,10 +139,24 @@ final class AgentExecutionEngine<R> {
 
     AgentExecutionEngine(LlmClient llmClient, AgentBudget budget, HookLifecycle hookLifecycle,
                          SamplingRequestCoordinator samplingRequests) {
+        this(llmClient, budget, hookLifecycle, samplingRequests,
+                new ContextReferenceGuard.ReferenceRegistry());
+    }
+
+    AgentExecutionEngine(LlmClient llmClient, AgentBudget budget, HookLifecycle hookLifecycle,
+                         ContextReferenceGuard.ReferenceRegistry contextReferenceRegistry) {
+        this(llmClient, budget, hookLifecycle, SamplingRequestCoordinator.shared(), contextReferenceRegistry);
+    }
+
+    AgentExecutionEngine(LlmClient llmClient, AgentBudget budget, HookLifecycle hookLifecycle,
+                         SamplingRequestCoordinator samplingRequests,
+                         ContextReferenceGuard.ReferenceRegistry contextReferenceRegistry) {
         this.llmClient = Objects.requireNonNull(llmClient, "llmClient");
         this.budget = Objects.requireNonNull(budget, "budget");
         this.hookLifecycle = hookLifecycle;
         this.samplingRequests = Objects.requireNonNull(samplingRequests, "samplingRequests");
+        this.contextReferenceRegistry = Objects.requireNonNullElseGet(
+                contextReferenceRegistry, ContextReferenceGuard.ReferenceRegistry::new);
         this.repeatToolAdvisor = RepeatToolAdvisor.fromSystemProperties();
     }
 
@@ -186,7 +201,8 @@ final class AgentExecutionEngine<R> {
     }
 
     private R runLoop(Delegate<R> delegate) {
-        ContextReferenceGuard contextReferenceGuard = ContextReferenceGuard.fromHistory(delegate.history());
+        ContextReferenceGuard contextReferenceGuard = ContextReferenceGuard.fromHistory(
+                delegate.history(), contextReferenceRegistry);
         while (true) {
             RunEventSink eventSink = RunEventSink.composite(
                     delegate.eventSink(),

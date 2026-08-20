@@ -595,6 +595,8 @@ public class AgentOrchestrator {
      */
     public String run(String userInput) {
         log.info("Multi-Agent run started: inputLength={}", userInput == null ? 0 : userInput.length());
+        String sessionTaskId = "plan-run-" + UUID.randomUUID().toString().substring(0, 8);
+        memoryManager.beginTask(sessionTaskId);
         TraceContext traceContext = TraceContext.root("plan");
         traceRecorder.record(traceContext, "run.start", Map.of(
                 "inputChars", userInput == null ? 0 : userInput.length(),
@@ -687,6 +689,7 @@ public class AgentOrchestrator {
             finalResultForSummary = executeSteps(steps, traceContext);
             return finalResultForSummary;
         } finally {
+            memoryManager.endTask(sessionTaskId);
             scheduleSessionPreSummaryMaintenance(userInput, finalResultForSummary);
         }
     }
@@ -1907,12 +1910,13 @@ public class AgentOrchestrator {
             ToolRegistry registry = activeToolRegistry();
             String completionToolName = TeamWorkerProtocol.completionToolName(
                     step.type(), toolChoice);
-            AgentMessage result = registry.runWithResourceLease(step.id(), () -> workerForkContext == null
-                    ? worker.executeWithContext(taskMsg, context, out, toolChoice,
-                            completionToolName)
-                    : worker.executeForkedWithContext(
-                            taskMsg, context, workerForkContext, out, toolChoice,
-                            completionToolName));
+            AgentMessage result = memoryManager.runWithEvidenceOrigin(worker.getName(), step.id(),
+                    () -> registry.runWithResourceLease(step.id(), () -> workerForkContext == null
+                            ? worker.executeWithContext(taskMsg, context, out, toolChoice,
+                                    completionToolName)
+                            : worker.executeForkedWithContext(
+                                    taskMsg, context, workerForkContext, out, toolChoice,
+                                    completionToolName)));
             recordAgentMessage(worker.getName(), step.id(), "Worker 执行完成", result);
             return result;
         } finally {
@@ -1976,9 +1980,10 @@ public class AgentOrchestrator {
                 reviewToolCalls.add(result.name());
             }
         });
-        AgentMessage reviewResult = reviewerForkContext == null
-                ? reviewer.review(reviewTask, workerResult, out)
-                : reviewer.reviewForked(reviewTask, workerResult, reviewerForkContext, out);
+        AgentMessage reviewResult = memoryManager.runWithEvidenceOrigin(reviewer.getName(), step.id(),
+                () -> reviewerForkContext == null
+                        ? reviewer.review(reviewTask, workerResult, out)
+                        : reviewer.reviewForked(reviewTask, workerResult, reviewerForkContext, out));
         reviewer.clearHistory();
         recordAgentMessage(reviewer.getName(), step.id(), "Reviewer 审查完成", reviewResult);
 

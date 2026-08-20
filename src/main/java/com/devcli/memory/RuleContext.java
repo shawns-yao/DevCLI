@@ -1,5 +1,6 @@
 package com.devcli.memory;
 
+import com.devcli.policy.SensitiveDataRedactor;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -56,7 +57,9 @@ public class RuleContext {
     public static final int MAX_RULE_TOKENS = 8_000;
 
     private final Path rulesFile;
+    private final Path legacyPinnedFactsFile;
     private final List<Rule> rules;
+    private final List<LegacyPinnedCandidate> legacyPinnedCandidates = new ArrayList<>();
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
 
     private volatile String userMd = "";
@@ -65,9 +68,11 @@ public class RuleContext {
 
     public RuleContext(Path memoryDir) {
         this.rulesFile = memoryDir.resolve("rules.json");
+        this.legacyPinnedFactsFile = memoryDir.resolve("pinned_facts.json");
         this.rules = new ArrayList<>();
         ensureMemoryDir(memoryDir);
         loadRulesFromDisk();
+        loadLegacyPinnedCandidates();
     }
 
     /**
@@ -94,6 +99,9 @@ public class RuleContext {
             throw new IllegalArgumentException("rule content cannot be blank");
         }
         String normalized = content.trim();
+        if (SensitiveDataRedactor.inspect(normalized).changed()) {
+            throw new IllegalArgumentException("强约束不能保存敏感值；请删除凭据或个人敏感信息后重试");
+        }
         lock.writeLock().lock();
         try {
             // 去重：content 相同的更新 timestamp + source，不新增
@@ -141,6 +149,36 @@ public class RuleContext {
         }
     }
 
+    public List<LegacyPinnedCandidate> listLegacyPinnedCandidates() {
+        lock.readLock().lock();
+        try {
+            return List.copyOf(legacyPinnedCandidates);
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    /** CLI 管理视图。旧 pinned facts 只列为待分类候选，不自动升级成规则。 */
+    public String renderManagementReport() {
+        StringBuilder out = new StringBuilder();
+        List<Rule> activeRules = listRules();
+        out.append("显式规则: ").append(activeRules.size()).append(" 条\n");
+        for (Rule rule : activeRules) {
+            out.append("- ").append(rule.id).append(": ")
+                    .append(SensitiveDataRedactor.redact(rule.content)).append('\n');
+        }
+        List<LegacyPinnedCandidate> legacy = listLegacyPinnedCandidates();
+        if (!legacy.isEmpty()) {
+            out.append("\n旧 pinned facts 待分类: ").append(legacy.size()).append(" 条\n")
+                    .append("请将强约束改用 /rule add，将稳定事实改用 /save；系统不会自动误分类。\n");
+            for (LegacyPinnedCandidate candidate : legacy) {
+                out.append("- ").append(candidate.id()).append(": ")
+                        .append(SensitiveDataRedactor.redact(candidate.content())).append('\n');
+            }
+        }
+        return out.toString().trim();
+    }
+
     /**
      * 渲染规则上下文为一段可注入 system prompt 的 Markdown。
      * 空内容时返回空字符串（PromptAssembler 会跳过空段）。
@@ -149,21 +187,21 @@ public class RuleContext {
         StringBuilder sb = new StringBuilder();
         if (!userMd.isBlank()) {
             sb.append("### 用户全局约定（~/.devcli/DEVCLI.md）\n\n");
-            sb.append(userMd.trim()).append("\n\n");
+            sb.append(SensitiveDataRedactor.redact(userMd.trim())).append("\n\n");
         }
         if (!projectMd.isBlank()) {
             sb.append("### 项目约定（DEVCLI.md）\n\n");
-            sb.append(projectMd.trim()).append("\n\n");
+            sb.append(SensitiveDataRedactor.redact(projectMd.trim())).append("\n\n");
         }
         if (!localMd.isBlank()) {
             sb.append("### 项目本地补充（.devcli/DEVCLI.local.md）\n\n");
-            sb.append(localMd.trim()).append("\n\n");
+            sb.append(SensitiveDataRedactor.redact(localMd.trim())).append("\n\n");
         }
         List<Rule> snapshot = listRules();
         if (!snapshot.isEmpty()) {
             sb.append("### 用户显式强约束\n\n");
             for (Rule f : snapshot) {
-                sb.append("- ").append(f.content).append("\n");
+                sb.append("- ").append(SensitiveDataRedactor.redact(f.content)).append("\n");
             }
             sb.append("\n");
         }
@@ -188,8 +226,9 @@ public class RuleContext {
                 totalTokens, MAX_RULE_TOKENS)
                 : String.format("%d tokens / cap %d", totalTokens, MAX_RULE_TOKENS);
         return String.format(
-                "规则上下文: %d 条显式规则 | files: %s%s%s | %s",
+                "规则上下文: %d 条显式规则 / %d 条旧 pinned 待分类 | files: %s%s%s | %s",
                 snapshot.size(),
+                listLegacyPinnedCandidates().size(),
                 userMd.isBlank() ? "" : "U ",
                 projectMd.isBlank() ? "" : "P ",
                 localMd.isBlank() ? "" : "L",
@@ -240,6 +279,30 @@ public class RuleContext {
         }
     }
 
+    private void loadLegacyPinnedCandidates() {
+        if (!Files.exists(legacyPinnedFactsFile)) return;
+        try {
+            JsonNode root = MAPPER.readTree(Files.readString(legacyPinnedFactsFile, StandardCharsets.UTF_8));
+            if (!root.isArray()) return;
+            lock.writeLock().lock();
+            try {
+                legacyPinnedCandidates.clear();
+                for (JsonNode node : root) {
+                    String id = node.path("id").asText("");
+                    String content = node.path("content").asText("");
+                    String source = node.path("source").asText("legacy-pin");
+                    if (!id.isBlank() && !content.isBlank()) {
+                        legacyPinnedCandidates.add(new LegacyPinnedCandidate(id, content, source));
+                    }
+                }
+            } finally {
+                lock.writeLock().unlock();
+            }
+        } catch (IOException e) {
+            log.warn("Failed to inspect legacy pinned_facts.json: {}", e.getMessage());
+        }
+    }
+
     private void saveRulesToDisk() {
         try {
             ArrayNode arr = MAPPER.createArrayNode();
@@ -282,4 +345,6 @@ public class RuleContext {
             return m;
         }
     }
+
+    public record LegacyPinnedCandidate(String id, String content, String source) {}
 }

@@ -63,6 +63,8 @@ public interface ToolProvider {
 
         ToolRegistry.MemorySaver memorySaveHandler();
 
+        ToolRegistry.MemoryConfirmationHandler memoryConfirmationHandler();
+
         ToolRegistry.MemoryListHandler memoryListHandler();
 
         com.devcli.browser.BrowserConnector browserConnector();

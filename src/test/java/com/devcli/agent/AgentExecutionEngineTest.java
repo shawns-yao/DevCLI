@@ -295,6 +295,58 @@ class AgentExecutionEngineTest {
     }
 
     @Test
+    void contentFollowUpReusesMostRecentReferenceAcrossTurns() {
+        ContextReferenceGuard.ReferenceRegistry registry = new ContextReferenceGuard.ReferenceRegistry();
+        List<LlmClient.Message> history = List.of(
+                LlmClient.Message.user("""
+                        先保存这个附件
+                        <file_reference stored_path=".devcli/context-inputs/error.log"
+                                        sha256="abc" evidence_required="true">
+                        </file_reference>
+                        """),
+                LlmClient.Message.assistant("已记录附件引用"),
+                LlmClient.Message.user("里面具体是什么异常？"));
+
+        ContextReferenceGuard guard = ContextReferenceGuard.fromHistory(history, registry);
+
+        assertFalse(guard.isSatisfied());
+        assertEquals("read_file", guard.toolChoice(LlmClient.ToolChoice.AUTO).toolName());
+    }
+
+    @Test
+    void contentFollowUpReusesWholeMostRecentAttachmentBatch() {
+        ContextReferenceGuard.ReferenceRegistry registry = new ContextReferenceGuard.ReferenceRegistry();
+        List<LlmClient.Message> history = List.of(
+                LlmClient.Message.user("""
+                        <file_reference stored_path=".devcli/context-inputs/a.log" sha256="a" evidence_required="true"></file_reference>
+                        <file_reference stored_path=".devcli/context-inputs/b.log" sha256="b" evidence_required="true"></file_reference>
+                        """),
+                LlmClient.Message.user("比较这些文件的具体错误"));
+
+        ContextReferenceGuard guard = ContextReferenceGuard.fromHistory(history, registry);
+
+        assertFalse(guard.isSatisfied());
+        assertTrue(guard.retryInstruction().contains("a.log"));
+        assertTrue(guard.retryInstruction().contains("b.log"));
+    }
+
+    @Test
+    void metadataOnlyFollowUpDoesNotReuseEarlierReference() {
+        ContextReferenceGuard.ReferenceRegistry registry = new ContextReferenceGuard.ReferenceRegistry();
+        List<LlmClient.Message> history = List.of(
+                LlmClient.Message.user("""
+                        <file_reference stored_path=".devcli/context-inputs/error.log"
+                                        sha256="abc" evidence_required="true">
+                        </file_reference>
+                        """),
+                LlmClient.Message.user("这个文件大小是多少？"));
+
+        ContextReferenceGuard guard = ContextReferenceGuard.fromHistory(history, registry);
+
+        assertTrue(guard.isSatisfied());
+    }
+
+    @Test
     void failsClosedAfterReferencedFileCannotBeReadTwice() {
         String storedPath = ".devcli/context-inputs/missing.txt";
         ScriptedClient llm = new ScriptedClient(List.of(
@@ -315,6 +367,27 @@ class AgentExecutionEngineTest {
         assertEquals(2, budget.iteration());
         assertTrue(delegate.failure.getMessage().contains("附件证据不可用"));
         assertTrue(delegate.failure.getMessage().contains(storedPath));
+    }
+
+    @Test
+    void wrongReadPathsCountTowardReferencedFileFailure() {
+        ScriptedClient llm = new ScriptedClient(List.of(
+                toolCallResponse("read_file", "{\"path\":\"wrong-a.txt\"}"),
+                toolCallResponse("read_file", "{\"path\":\"wrong-b.txt\"}")));
+        AgentBudget budget = new AgentBudget(1_000, 5, 10);
+        RecordingDelegate delegate = new RecordingDelegate();
+        delegate.history.add(LlmClient.Message.user("""
+                请分析附件内容
+                <file_reference stored_path=".devcli/context-inputs/required.txt"
+                                evidence_required="true">
+                </file_reference>
+                """));
+
+        String result = new AgentExecutionEngine<String>(llm, budget).run(delegate);
+
+        assertEquals("failed", result);
+        assertEquals(2, budget.iteration());
+        assertTrue(delegate.failure.getMessage().contains("required.txt"));
     }
 
     @Test

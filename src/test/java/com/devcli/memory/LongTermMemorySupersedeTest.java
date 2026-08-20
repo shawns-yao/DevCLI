@@ -81,14 +81,13 @@ class LongTermMemorySupersedeTest {
     }
 
     @Test
-    void sameContentSupersedeStillKeepsNewActive() {
-        // 去重×supersede 边界：先 supersede 再 store，新条与旧条 content 相同也不应被去重跳过
+    void equivalentSameSubjectFactIsDeduplicatedWithoutNewRevision() {
         memory.storeWithSubject(fact("f1", "项目用 Jackson", "project.json_library"));
         memory.storeWithSubject(fact("f2", "项目用 Jackson", "project.json_library"));
 
-        assertFalse(memory.retrieve("f1").orElseThrow().isActive());
-        assertTrue(memory.retrieve("f2").orElseThrow().isActive(),
-                "同内容覆盖时新条必须保留为 active，不能被旧 inactive 条的 content hash 去重");
+        assertTrue(memory.retrieve("f1").orElseThrow().isActive());
+        assertTrue(memory.retrieve("f2").isEmpty(), "等价事实不应产生新的 revision");
+        assertEquals(1, memory.size());
         assertEquals(1, memory.search("Jackson", 10).size());
     }
 

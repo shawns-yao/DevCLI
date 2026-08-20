@@ -1,5 +1,17 @@
 # TODO
 
+## 2026-08-20 两层记忆运行闭环
+
+- 状态：已实现并通过限定验证
+- 设计文档：`docs/superpowers/plans/2026-08-20-memory-runtime-closure.md`
+- 已实现：`SessionMemory` 增加任务生命周期、覆盖式工作状态、带来源和序列的分级证据、失败摘要、里程碑压缩与统一 Token 预算；Multi-Agent 共享同一投影并按角色渲染
+- 已实现：大文件只注入元数据、摘要和引用时，内容型请求由程序强制 `read_file`；跨轮保留有界引用批次，元数据请求不强制回读，错误路径或连续失败后关闭推理链
+- 已实现：长期记忆同主题等价事实去重，类型化当前状态证据可以立即使旧事实失效；敏感保存使用一次性确认编号并只缓存脱敏文本；规则与稳定事实分离，旧 pinned facts 只进入待分类报告
+- 影响范围：SessionMemory、长期记忆冲突、文件引用回读、规则管理、敏感确认、Agent/Plan/Multi-Agent 运行装配、CLI 与相关文档
+- 验证：SessionMemory、执行内核、长期记忆、规则、CLI、工具注册、Prompt 和编排角色视图相关限定测试通过；`git diff --check` 通过
+- 未验证：未运行全量测试，未启动项目，未验证真实 LLM、真实终端交互和跨进程恢复
+- 剩余风险：本地 Token 估算与 Provider tokenizer 仍可能存在偏差；类型化当前状态失效需要更多工具逐步接入 `CurrentStateObservationSideChannel`
+
 ## 2026-08-18 Team 可判定验收与执行前评审
 
 - 状态：已实现并通过限定验证

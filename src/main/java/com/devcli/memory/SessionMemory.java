@@ -76,11 +76,15 @@ public class SessionMemory {
     private final int maxRagEvidence;
     private final LinkedList<ToolEvidence> recentToolResults = new LinkedList<>();
     private final LinkedList<RagEvidence> ragEvidenceMemory = new LinkedList<>();
-    private final LinkedList<String> volatileFacts = new LinkedList<>();
+    private final LinkedList<KeyFact> volatileFacts = new LinkedList<>();
     private final LinkedHashMap<String, String> taskState = new LinkedHashMap<>();
     private final LinkedHashMap<String, Long> stateSequences = new LinkedHashMap<>();
     private final LinkedHashSet<String> modifiedFiles = new LinkedHashSet<>();
     private final LinkedHashMap<String, String> attemptDigests = new LinkedHashMap<>();
+    private final LinkedHashMap<String, Long> stepSequences = new LinkedHashMap<>();
+    private String taskId = "";
+    private boolean taskEnded;
+    private long planSequence = Long.MIN_VALUE;
     private long localSequence;
     private final TaskLedger taskLedger = new TaskLedger();
 
@@ -118,22 +122,46 @@ public class SessionMemory {
             applyStateChange(changed.key(), changed.value(), sequence);
         } else if (event instanceof ToolResultObserved observed) {
             recordToolResultInternal(observed.toolName(), observed.argsJson(), observed.result(),
-                    observed.sideChannels(), observed.stepId(), sequence);
+                    observed.sideChannels(), observed.agentId(), observed.stepId(), sequence);
         } else if (event instanceof KeyEvent keyEvent) {
             int importance = keyEvent.importance() > 0
                     ? keyEvent.importance() : inferEventImportance(keyEvent.description());
-            addKeyEvent(keyEvent.description(), importance);
+            addKeyEvent(keyEvent.description(), importance, keyEvent.agentId(), keyEvent.stepId(), sequence);
         } else if (event instanceof PlanChanged plan) {
+            if (sequence < planSequence) return;
+            planSequence = sequence;
             taskLedger.setPlan(plan.planId(), plan.goal(), plan.steps());
             applyStateChange("goal", plan.goal(), sequence);
             applyStateChange("plan_version", plan.planId(), sequence);
         } else if (event instanceof StepChanged step) {
+            long previous = stepSequences.getOrDefault(step.stepId(), Long.MIN_VALUE);
+            if (sequence < previous) return;
+            stepSequences.put(step.stepId(), sequence);
             switch (step.status()) {
                 case RUNNING -> taskLedger.startStep(step.stepId());
                 case DONE -> taskLedger.completeStep(step.stepId());
                 case FAILED -> taskLedger.failStep(step.stepId(), step.detail());
                 case PENDING, SKIPPED -> taskLedger.transitionStep(step.stepId(), step.status(), step.detail());
             }
+        }
+    }
+
+    /** 开始一个明确任务。切换 taskId 时清理上一个任务的运行投影。 */
+    public synchronized void beginTask(String nextTaskId) {
+        String normalized = nextTaskId == null ? "" : nextTaskId.trim();
+        if (normalized.isBlank()) return;
+        if (!taskId.equals(normalized) && (!taskId.isBlank() || hasProjection())) {
+            clearProjection();
+        }
+        taskId = normalized;
+        taskEnded = false;
+    }
+
+    /** 标记任务结束；投影保留到下一个任务开始，供最终答复和审计读取。 */
+    public synchronized void endTask(String completedTaskId) {
+        String normalized = completedTaskId == null ? "" : completedTaskId.trim();
+        if (!normalized.isBlank() && normalized.equals(taskId)) {
+            taskEnded = true;
         }
     }
 
@@ -146,11 +174,12 @@ public class SessionMemory {
     public synchronized SessionSnapshot snapshot() {
         List<EvidenceSnapshot> evidence = recentToolResults.stream()
                 .map(item -> new EvidenceSnapshot(item.toolName, item.kind, item.importance,
-                        item.reference, item.scope, item.occurrences))
+                        item.reference, item.agentId, item.stepId, item.occurrences))
                 .toList();
         return new SessionSnapshot(Map.copyOf(taskState), List.copyOf(evidence),
                 List.copyOf(modifiedFiles), List.copyOf(attemptDigests.values()),
-                taskLedger.render(), localSequence);
+                taskLedger.render(), localSequence, taskId, taskEnded,
+                volatileFacts.stream().map(KeyFact::snapshot).toList());
     }
 
     // ─────────────────────────────────────────────────────────
@@ -188,7 +217,7 @@ public class SessionMemory {
     }
 
     private void recordToolResultInternal(String toolName, String argsJson, String result,
-                                          List<ToolSideChannel> sideChannels, String scope,
+                                          List<ToolSideChannel> sideChannels, String agentId, String stepId,
                                           long sequence) {
         if (toolName == null || result == null) return;
         String safeArgs = argsJson == null ? "" : argsJson;
@@ -197,10 +226,13 @@ public class SessionMemory {
         String reference = evidenceReference(toolName, safeArgs, result);
         String normalizedResult = normalizeEvidenceResult(kind, toolName, safeArgs, result, reference);
         ToolEvidence incoming = new ToolEvidence(toolName, safeArgs, normalizedResult, Instant.now(),
-                scope, kind, importance, reference, 1, sequence);
+                agentId, stepId, kind, importance, reference, 1, sequence);
         mergeOrAppend(incoming);
         if (kind == EvidenceKind.FAILURE) {
             attemptDigests.put(reference, normalizedResult);
+            while (attemptDigests.size() > maxVolatileFacts) {
+                attemptDigests.remove(attemptDigests.keySet().iterator().next());
+            }
         }
         if (kind == EvidenceKind.CRITICAL && "write_file".equals(toolName)) {
             String path = extractPath(safeArgs);
@@ -213,7 +245,8 @@ public class SessionMemory {
     private void mergeOrAppend(ToolEvidence incoming) {
         for (int i = recentToolResults.size() - 1; i >= 0; i--) {
             ToolEvidence existing = recentToolResults.get(i);
-            if (!existing.scope.equals(incoming.scope)
+            if (!existing.agentId.equals(incoming.agentId)
+                    || !existing.stepId.equals(incoming.stepId)
                     || !existing.toolName.equals(incoming.toolName)
                     || !existing.argsJson.equals(incoming.argsJson)) {
                 continue;
@@ -225,7 +258,7 @@ public class SessionMemory {
                     ? "已合并 " + occurrences + " 次同类调用：" + truncate(incoming.result, 500)
                     : incoming.result;
             recentToolResults.set(i, new ToolEvidence(incoming.toolName, incoming.argsJson,
-                    mergedResult, incoming.capturedAt, incoming.scope, mergedKind,
+                    mergedResult, incoming.capturedAt, incoming.agentId, incoming.stepId, mergedKind,
                     Math.max(existing.importance, baselineImportance(mergedKind, incoming.toolName, mergedResult)),
                     incoming.reference, occurrences, incoming.sequence));
             return;
@@ -246,8 +279,8 @@ public class SessionMemory {
                 recentToolResults.remove(victim);
                 continue;
             }
-            compactCriticalEvidence();
-            break;
+            if (compactCriticalEvidence()) continue;
+            foldOldestCriticalEvidence();
         }
     }
 
@@ -269,7 +302,7 @@ public class SessionMemory {
         Map<String, Integer> counts = new LinkedHashMap<>();
         for (ToolEvidence item : recentToolResults) {
             if (item.kind != EvidenceKind.CRITICAL && item.importance == lowest) {
-                counts.merge(item.scope, 1, Integer::sum);
+                counts.merge(item.stepId, 1, Integer::sum);
             }
         }
         String busiestScope = counts.entrySet().stream()
@@ -278,17 +311,27 @@ public class SessionMemory {
         for (int i = 0; i < recentToolResults.size(); i++) {
             ToolEvidence item = recentToolResults.get(i);
             if (item.kind != EvidenceKind.CRITICAL && item.importance == lowest
-                    && item.scope.equals(busiestScope)) return i;
+                    && item.stepId.equals(busiestScope)) return i;
         }
         return -1;
     }
 
-    private void compactCriticalEvidence() {
+    private boolean compactCriticalEvidence() {
+        boolean changed = false;
         for (int i = 0; i < recentToolResults.size(); i++) {
             ToolEvidence evidence = recentToolResults.get(i);
             if (evidence.kind != EvidenceKind.CRITICAL || evidence.result.length() <= 500) continue;
             recentToolResults.set(i, evidence.withResult(truncate(evidence.result, 500)));
+            changed = true;
         }
+        return changed;
+    }
+
+    private void foldOldestCriticalEvidence() {
+        if (recentToolResults.isEmpty()) return;
+        ToolEvidence evidence = recentToolResults.removeFirst();
+        addKeyEvent("关键工具证据已折叠: " + evidence.toolName + "，引用: " + evidence.reference,
+                evidence.importance, evidence.agentId, evidence.stepId, evidence.sequence);
     }
 
     private static EvidenceKind classifyEvidence(String toolName, String result) {
@@ -361,12 +404,13 @@ public class SessionMemory {
         else taskState.put(key, value.trim());
     }
 
-    private void addKeyEvent(String description, int importance) {
+    private void addKeyEvent(String description, int importance, String agentId, String stepId, long sequence) {
         if (description == null || description.isBlank()) return;
         String normalized = description.trim();
-        volatileFacts.remove(normalized);
-        if (importance >= 70) volatileFacts.addFirst(normalized);
-        else volatileFacts.addLast(normalized);
+        volatileFacts.removeIf(item -> item.description.equals(normalized));
+        KeyFact fact = new KeyFact(normalized, importance, agentId, stepId, sequence);
+        if (importance >= 70) volatileFacts.addFirst(fact);
+        else volatileFacts.addLast(fact);
         while (volatileFacts.size() > maxVolatileFacts) volatileFacts.removeLast();
     }
 
@@ -439,7 +483,7 @@ public class SessionMemory {
     }
 
     public synchronized List<String> getVolatileFacts() {
-        return Collections.unmodifiableList(new ArrayList<>(volatileFacts));
+        return volatileFacts.stream().map(item -> item.description).toList();
     }
 
     // ─────────────────────────────────────────────────────────
@@ -466,80 +510,142 @@ public class SessionMemory {
         StringBuilder sb = new StringBuilder();
         String ledger = taskLedger.render();
         if (!ledger.isEmpty()) {
-            sb.append(ledger).append("\n\n");
+            appendBudgeted(sb, ledger, effectiveBudget);
         }
         if (!taskState.isEmpty()) {
-            sb.append("### 当前任务状态\n\n");
-            for (Map.Entry<String, String> e : taskState.entrySet()) {
-                sb.append("- ").append(e.getKey()).append(": ").append(e.getValue()).append('\n');
+            StringBuilder section = new StringBuilder("### 当前任务状态\n\n");
+            if (!taskId.isBlank()) {
+                section.append("- task_id: ").append(taskId)
+                        .append(taskEnded ? " (已结束)" : " (进行中)").append('\n');
             }
-            sb.append('\n');
+            for (Map.Entry<String, String> e : taskState.entrySet()) {
+                section.append("- ").append(e.getKey()).append(": ").append(e.getValue()).append('\n');
+            }
+            appendBudgeted(sb, section.toString(), effectiveBudget);
         }
         if (!modifiedFiles.isEmpty()) {
-            sb.append("### 已修改文件集合\n\n");
-            for (String file : modifiedFiles) sb.append("- `").append(file).append("`\n");
-            sb.append('\n');
+            StringBuilder section = new StringBuilder("### 已修改文件集合\n\n");
+            for (String file : modifiedFiles) section.append("- `").append(file).append("`\n");
+            appendBudgeted(sb, section.toString(), effectiveBudget);
+        }
+        List<ToolEvidence> rankedToolEvidence = new ArrayList<>();
+        if (shouldRenderToolEvidence(effectiveView)) {
+            rankedToolEvidence.addAll(recentToolResults);
+            rankedToolEvidence.sort((left, right) -> {
+                int byImportance = Integer.compare(right.importance, left.importance);
+                return byImportance != 0 ? byImportance : Long.compare(right.sequence, left.sequence);
+            });
+            appendToolEvidence(sb, rankedToolEvidence.stream()
+                    .filter(evidence -> evidence.importance >= 70)
+                    .toList(), "### 关键工具证据（精确实体来源）", effectiveBudget);
         }
         if (shouldRenderToolEvidence(effectiveView) && !attemptDigests.isEmpty()) {
-            sb.append("### 已尝试但失败的方案\n\n");
+            StringBuilder section = new StringBuilder("### 已尝试但失败的方案\n\n");
             for (String digest : attemptDigests.values()) {
-                sb.append("- ").append(truncate(digest, 700).replace("\n", "; ")).append('\n');
+                section.append("- ").append(truncate(digest, 700).replace("\n", "; ")).append('\n');
             }
-            sb.append('\n');
+            appendBudgeted(sb, section.toString(), effectiveBudget);
         }
         if (shouldRenderVolatileFacts(effectiveView) && !volatileFacts.isEmpty()) {
-            sb.append("### 本会话已发生的关键事件（避免重复执行）\n\n");
-            // 倒序，最新事件在前
-            List<String> reversed = new ArrayList<>(volatileFacts);
-            Collections.reverse(reversed);
-            for (String f : reversed) {
-                sb.append("- ").append(f).append('\n');
+            StringBuilder section = new StringBuilder("### 本会话已发生的关键事件（避免重复执行）\n\n");
+            List<KeyFact> ranked = new ArrayList<>(volatileFacts);
+            ranked.sort((left, right) -> {
+                int byImportance = Integer.compare(right.importance, left.importance);
+                return byImportance != 0 ? byImportance : Long.compare(right.sequence, left.sequence);
+            });
+            for (KeyFact fact : ranked) {
+                section.append("- ").append(fact.description);
+                appendOrigin(section, fact.agentId, fact.stepId);
+                section.append('\n');
             }
-            sb.append('\n');
+            appendBudgeted(sb, section.toString(), effectiveBudget);
         }
         if (shouldRenderToolEvidence(effectiveView) && !ragEvidenceMemory.isEmpty()) {
-            sb.append("### RAG 证据记忆（绑定 SymbolVersion）\n\n");
+            StringBuilder section = new StringBuilder("### RAG 证据记忆（绑定 SymbolVersion）\n\n");
             List<RagEvidence> reversed = new ArrayList<>(ragEvidenceMemory);
             Collections.reverse(reversed);
             for (RagEvidence evidence : reversed) {
-                sb.append("- [").append(evidence.chunkType()).append(':').append(evidence.symbolName()).append("] ")
+                section.append("- [").append(evidence.chunkType()).append(':').append(evidence.symbolName()).append("] ")
                         .append(evidence.filePath())
                         .append(" | symbolVersion=").append(evidence.symbolVersion())
                         .append(" | indexEpoch=").append(evidence.indexEpoch())
                         .append(" | classpathEpoch=").append(evidence.classpathEpoch());
                 if (!evidence.query().isBlank()) {
-                    sb.append(" | query=").append(evidence.query());
+                    section.append(" | query=").append(evidence.query());
                 }
-                sb.append('\n');
+                section.append('\n');
             }
-            sb.append('\n');
+            appendBudgeted(sb, section.toString(), effectiveBudget);
         }
-        if (shouldRenderToolEvidence(effectiveView) && !recentToolResults.isEmpty()) {
-            sb.append("### 最近工具调用证据（精确实体来源）\n\n");
-            // 倒序，最新调用在前
-            List<ToolEvidence> reversed = new ArrayList<>(recentToolResults);
-            Collections.reverse(reversed);
-            for (ToolEvidence ev : reversed) {
-                if (MemoryEntry.estimateTokens(sb.toString()) >= effectiveBudget) {
-                    sb.append("- ...其余低优先级证据已按 Token 预算裁剪\n");
-                    break;
-                }
-                sb.append("- **").append(ev.toolName).append("**");
-                sb.append(" [").append(ev.kind).append("/").append(ev.importance).append("]");
-                // 出处标签：Multi-Agent 下多个步骤共享证据池，不标出处会让 Reviewer
-                // 把别的步骤的产物当作本步骤证据
-                if (!ev.scope.isBlank()) {
-                    sb.append(" [来自 ").append(ev.scope).append(']');
-                }
-                if (!ev.argsJson.isBlank()) {
-                    sb.append(" args: `").append(truncate(ev.argsJson, 120)).append('`');
-                }
-                sb.append('\n');
-                sb.append("  ```\n  ").append(truncate(ev.result, TOOL_RESULT_RENDER_CHARS)
-                        .replace("\n", "\n  ")).append("\n  ```\n");
-            }
+        if (!rankedToolEvidence.isEmpty()) {
+            appendToolEvidence(sb, rankedToolEvidence.stream()
+                    .filter(evidence -> evidence.importance < 70)
+                    .toList(), "### 普通工具证据（精确实体来源）", effectiveBudget);
         }
         return sb.toString().trim();
+    }
+
+    private static void appendToolEvidence(StringBuilder target, List<ToolEvidence> evidence,
+                                           String heading, int tokenBudget) {
+        if (evidence.isEmpty() || !appendBudgeted(target, heading, tokenBudget)) return;
+        for (ToolEvidence item : evidence) {
+            StringBuilder rendered = new StringBuilder("- **").append(item.toolName).append("**")
+                    .append(" [").append(item.kind).append('/').append(item.importance).append("]");
+            appendOrigin(rendered, item.agentId, item.stepId);
+            if (!item.argsJson.isBlank()) {
+                rendered.append(" args: `").append(truncate(item.argsJson, 120)).append('`');
+            }
+            rendered.append('\n');
+            rendered.append("  ```\n  ").append(truncate(item.result, TOOL_RESULT_RENDER_CHARS)
+                    .replace("\n", "\n  ")).append("\n  ```\n");
+            if (!appendBudgeted(target, rendered.toString(), tokenBudget)) break;
+        }
+    }
+
+    private static boolean appendBudgeted(StringBuilder target, String section, int tokenBudget) {
+        if (section == null || section.isBlank()) return true;
+        int used = MemoryEntry.estimateTokens(target.toString());
+        int remaining = tokenBudget - used;
+        if (remaining <= 0) return false;
+        String normalized = section.trim();
+        String addition = target.isEmpty() ? normalized : "\n\n" + normalized;
+        if (MemoryEntry.estimateTokens(addition) <= remaining) {
+            target.append(addition);
+            return true;
+        }
+        String prefix = target.isEmpty() ? "" : "\n\n";
+        String marker = "\n[本区其余内容已按 Token 预算压缩]";
+        int contentBudget = remaining
+                - MemoryEntry.estimateTokens(prefix)
+                - MemoryEntry.estimateTokens(marker);
+        String fitted = fitWithinTokens(normalized, contentBudget);
+        if (fitted.isBlank()) return false;
+        target.append(prefix).append(fitted).append(marker);
+        return false;
+    }
+
+    private static String fitWithinTokens(String value, int tokenBudget) {
+        if (value == null || value.isBlank() || tokenBudget <= 0) return "";
+        if (MemoryEntry.estimateTokens(value) <= tokenBudget) return value;
+        int low = 0;
+        int high = value.length();
+        while (low < high) {
+            int mid = (low + high + 1) >>> 1;
+            if (MemoryEntry.estimateTokens(value.substring(0, mid)) <= tokenBudget) low = mid;
+            else high = mid - 1;
+        }
+        return value.substring(0, low).trim();
+    }
+
+    private static void appendOrigin(StringBuilder target, String agentId, String stepId) {
+        if ((agentId == null || agentId.isBlank()) && (stepId == null || stepId.isBlank())) return;
+        target.append(" [来自 ");
+        if (agentId != null && !agentId.isBlank()) target.append(agentId);
+        if (stepId != null && !stepId.isBlank()) {
+            if (agentId != null && !agentId.isBlank()) target.append('/');
+            target.append(stepId);
+        }
+        target.append(']');
     }
 
     /**
@@ -764,15 +870,33 @@ public class SessionMemory {
 
     /** 清空当前任务的会话记忆。 */
     public synchronized void clear() {
+        clearProjection();
+        taskId = "";
+        taskEnded = false;
+    }
+
+    private void clearProjection() {
         recentToolResults.clear();
         ragEvidenceMemory.clear();
         volatileFacts.clear();
         taskState.clear();
         stateSequences.clear();
+        stepSequences.clear();
         modifiedFiles.clear();
         attemptDigests.clear();
         localSequence = 0;
+        planSequence = Long.MIN_VALUE;
         taskLedger.clear();
+    }
+
+    private boolean hasProjection() {
+        return !recentToolResults.isEmpty()
+                || !ragEvidenceMemory.isEmpty()
+                || !volatileFacts.isEmpty()
+                || !taskState.isEmpty()
+                || !modifiedFiles.isEmpty()
+                || !attemptDigests.isEmpty()
+                || !taskLedger.isEmpty();
     }
 
     private void recordRagEvidenceIfPresent(String toolName, String argsJson, String result,
@@ -945,6 +1069,10 @@ public class SessionMemory {
          * 产生该证据的执行范围（Multi-Agent 下为步骤 id）。单 Agent / Plan 路径为空串，
          * 表示"无步骤概念"，渲染时不加出处标签。
          */
+        public final String agentId;
+        public final String stepId;
+        /** @deprecated 使用 {@link #stepId}。 */
+        @Deprecated
         public final String scope;
         public final EvidenceKind kind;
         public final int importance;
@@ -952,13 +1080,16 @@ public class SessionMemory {
         public final int occurrences;
         public final long sequence;
 
-        ToolEvidence(String toolName, String argsJson, String result, Instant capturedAt, String scope,
-                     EvidenceKind kind, int importance, String reference, int occurrences, long sequence) {
+        ToolEvidence(String toolName, String argsJson, String result, Instant capturedAt,
+                     String agentId, String stepId, EvidenceKind kind, int importance,
+                     String reference, int occurrences, long sequence) {
             this.toolName = toolName;
             this.argsJson = argsJson;
             this.result = result;
             this.capturedAt = capturedAt;
-            this.scope = scope == null ? "" : scope;
+            this.agentId = agentId == null ? "" : agentId;
+            this.stepId = stepId == null ? "" : stepId;
+            this.scope = this.stepId;
             this.kind = kind == null ? EvidenceKind.ORDINARY : kind;
             this.importance = Math.max(0, Math.min(100, importance));
             this.reference = reference == null ? "" : reference;
@@ -967,8 +1098,28 @@ public class SessionMemory {
         }
 
         ToolEvidence withResult(String compactedResult) {
-            return new ToolEvidence(toolName, argsJson, compactedResult, capturedAt, scope,
+            return new ToolEvidence(toolName, argsJson, compactedResult, capturedAt, agentId, stepId,
                     kind, importance, reference, occurrences, sequence);
+        }
+    }
+
+    private static final class KeyFact {
+        private final String description;
+        private final int importance;
+        private final String agentId;
+        private final String stepId;
+        private final long sequence;
+
+        private KeyFact(String description, int importance, String agentId, String stepId, long sequence) {
+            this.description = description;
+            this.importance = Math.max(0, Math.min(100, importance));
+            this.agentId = agentId == null ? "" : agentId;
+            this.stepId = stepId == null ? "" : stepId;
+            this.sequence = sequence;
+        }
+
+        private KeyEventSnapshot snapshot() {
+            return new KeyEventSnapshot(description, importance, agentId, stepId, sequence);
         }
     }
 
@@ -1017,14 +1168,20 @@ public class SessionMemory {
     }
 
     public record EvidenceSnapshot(String toolName, EvidenceKind kind, int importance,
-                                   String reference, String stepId, int occurrences) {}
+                                   String reference, String agentId, String stepId, int occurrences) {}
+
+    public record KeyEventSnapshot(String description, int importance, String agentId,
+                                   String stepId, long sequence) {}
 
     public record SessionSnapshot(Map<String, String> workState,
                                   List<EvidenceSnapshot> evidenceJournal,
                                   List<String> modifiedFiles,
                                   List<String> attemptDigests,
                                   String taskLedger,
-                                  long sequence) {}
+                                  long sequence,
+                                  String taskId,
+                                  boolean taskEnded,
+                                  List<KeyEventSnapshot> keyEvents) {}
 
     public record RagEvidence(String filePath,
                               String symbolName,

@@ -133,8 +133,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
         if (entry == null) return;
         pruneExpired();
         List<MemoryEntry> existingEntries = new ArrayList<>(entries.values());
-        if (entry.getSubject().isBlank()
-                && MemoryConflictDetector.findEquivalent(entry, existingEntries).isPresent()) {
+        if (MemoryConflictDetector.findEquivalent(entry, existingEntries).isPresent()) {
             return;
         }
         Optional<MemoryConflictDetector.Conflict> conflict =

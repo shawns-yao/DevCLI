@@ -62,6 +62,21 @@ final class MemoryObservationConflictDetector {
                 }
                 continue;
             }
+            String entrySubject = entry.getSubject().isBlank()
+                    ? MemorySubjectExtractor.extract(entry.getContent(), entry.getMetadata())
+                    : entry.getSubject();
+            if (observation.subject().equals(entrySubject)) {
+                String recordedValue = recordedObservation.isBlank()
+                        ? StructuredClaim.parse(entry.getContent())
+                        .map(StructuredClaim.Claim::value).orElse("")
+                        : recordedObservation;
+                if (!recordedValue.isBlank()) {
+                    if (!normalizeValue(observation.value()).equals(normalizeValue(recordedValue))) {
+                        conflicts.add(entry);
+                    }
+                    continue;
+                }
+            }
             String lower = entry.getContent().toLowerCase(Locale.ROOT);
             boolean buildClaim = "project.build_system".equals(entry.getSubject())
                     || "project.default_test_command".equals(entry.getSubject())
@@ -80,6 +95,10 @@ final class MemoryObservationConflictDetector {
             }
         }
         return List.copyOf(conflicts);
+    }
+
+    static Observation fromSideChannel(CurrentStateObservationSideChannel sideChannel) {
+        return new Observation(sideChannel.subject(), sideChannel.value(), sideChannel.evidence());
     }
 
     static String subjectFor(MemoryEntry entry, Observation observation) {
@@ -128,6 +147,11 @@ final class MemoryObservationConflictDetector {
             }
         }
         return false;
+    }
+
+    private static String normalizeValue(String value) {
+        return value == null ? "" : value.toLowerCase(Locale.ROOT)
+                .replaceAll("[^\\p{L}\\p{N}._:/!-]+", "");
     }
 
     record Observation(String subject, String value, String evidence) {

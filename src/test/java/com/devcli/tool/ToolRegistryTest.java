@@ -569,6 +569,24 @@ class ToolRegistryTest {
     }
 
     @Test
+    void saveMemoryConfirmationRequiresExplicitContinuationTool() {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setMemorySaveHandler(fact -> new ToolRegistry.MemorySaveResult(
+                false, "检测到敏感字段，将保存脱敏后的内容", "memory-confirm-1234"));
+        registry.setMemoryConfirmationHandler((confirmationId, action, editedFact) ->
+                new ToolRegistry.MemorySaveResult(true, "已保存脱敏后的长期记忆"));
+
+        String pending = registry.executeTool("save_memory", "{\"fact\":\"token=secret\"}");
+        String confirmed = registry.executeTool("confirm_memory", """
+                {"confirmation_id":"memory-confirm-1234","action":"save_redacted"}
+                """);
+
+        assertTrue(pending.contains("confirmation_id=memory-confirm-1234"), pending);
+        assertTrue(pending.contains("禁止自行确认"), pending);
+        assertTrue(confirmed.contains("已保存脱敏后的长期记忆"), confirmed);
+    }
+
+    @Test
     void saveMemoryToolDoesNotEchoOriginalSensitiveFactAfterHandlerStoresIt() {
         ToolRegistry registry = new ToolRegistry();
         registry.setMemorySaveHandler(fact -> new ToolRegistry.MemorySaveResult(true,

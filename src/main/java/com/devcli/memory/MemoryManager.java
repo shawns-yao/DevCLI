@@ -55,6 +55,9 @@ public class MemoryManager implements AutoCloseable {
     private final Map<String, Integer> memoryCandidateOccurrences = new java.util.concurrent.ConcurrentHashMap<>();
     /** recurrence 候选计数器的容量上限，防止长会话下无界增长。 */
     private static final int MAX_MEMORY_CANDIDATE_ENTRIES = 512;
+    private static final long MEMORY_CONFIRMATION_TTL_SECONDS = 600;
+    private final Map<String, PendingMemoryConfirmation> pendingMemoryConfirmations =
+            new java.util.concurrent.ConcurrentHashMap<>();
     private LlmClient llmClient;
     private TokenBudget tokenBudget;
     private ContextProfile contextProfile;
@@ -154,16 +157,30 @@ public class MemoryManager implements AutoCloseable {
         sessionMemory.accept(new SessionMemory.ToolResultObserved(
                 toolName, argsJson, result, sideChannels, currentAgentId(), currentEvidenceScope(),
                 sessionEventSequence.incrementAndGet()));
-        recordCurrentStateInvalidations(toolName, argsJson, result);
+        recordCurrentStateInvalidations(toolName, argsJson, result, sideChannels);
     }
 
-    private void recordCurrentStateInvalidations(String toolName, String argsJson, String result) {
-        Optional<MemoryObservationConflictDetector.Observation> observed =
-                MemoryObservationConflictDetector.observe(toolName, argsJson, result);
-        if (observed.isEmpty()) {
-            return;
+    private void recordCurrentStateInvalidations(String toolName, String argsJson, String result,
+                                                 List<ToolSideChannel> sideChannels) {
+        Map<String, MemoryObservationConflictDetector.Observation> observations = new java.util.LinkedHashMap<>();
+        if (sideChannels != null) {
+            for (ToolSideChannel sideChannel : sideChannels) {
+                if (sideChannel instanceof CurrentStateObservationSideChannel current) {
+                    MemoryObservationConflictDetector.Observation observation =
+                            MemoryObservationConflictDetector.fromSideChannel(current);
+                    observations.put(observation.subject(), observation);
+                }
+            }
         }
-        MemoryObservationConflictDetector.Observation observation = observed.get();
+        MemoryObservationConflictDetector.observe(toolName, argsJson, result)
+                .ifPresent(observation -> observations.putIfAbsent(observation.subject(), observation));
+        for (MemoryObservationConflictDetector.Observation observation : observations.values()) {
+            recordCurrentStateInvalidation(toolName, observation);
+        }
+    }
+
+    private void recordCurrentStateInvalidation(
+            String toolName, MemoryObservationConflictDetector.Observation observation) {
         List<MemoryEntry> conflicts = MemoryObservationConflictDetector.conflictingEntries(
                 observation, longTermMemory.getAll());
         if (conflicts.isEmpty()) {
@@ -243,6 +260,7 @@ public class MemoryManager implements AutoCloseable {
      * 单 Agent / Plan 路径为空串。
      */
     private final ThreadLocal<String> evidenceScope = ThreadLocal.withInitial(() -> "");
+    private final ThreadLocal<String> evidenceAgentId = ThreadLocal.withInitial(() -> "react");
     private final ThreadLocal<List<String>> currentStateConflictNotices =
             ThreadLocal.withInitial(ArrayList::new);
 
@@ -252,15 +270,23 @@ public class MemoryManager implements AutoCloseable {
     }
 
     private String currentAgentId() {
-        return currentEvidenceScope().isBlank() ? "react" : "worker";
+        String agentId = evidenceAgentId.get();
+        return agentId == null || agentId.isBlank() ? "react" : agentId;
     }
 
     /**
      * 在给定证据出处范围内执行。范围只影响本线程，嵌套调用结束后恢复外层范围。
      */
     public <T> T runWithEvidenceScope(String scope, java.util.function.Supplier<T> action) {
+        return runWithEvidenceOrigin(scope == null || scope.isBlank() ? "react" : "worker", scope, action);
+    }
+
+    public <T> T runWithEvidenceOrigin(String agentId, String stepId,
+                                       java.util.function.Supplier<T> action) {
         String previous = currentEvidenceScope();
-        evidenceScope.set(scope == null ? "" : scope);
+        String previousAgent = currentAgentId();
+        evidenceScope.set(stepId == null ? "" : stepId);
+        evidenceAgentId.set(agentId == null || agentId.isBlank() ? "react" : agentId);
         try {
             return action.get();
         } finally {
@@ -269,6 +295,8 @@ public class MemoryManager implements AutoCloseable {
             } else {
                 evidenceScope.set(previous);
             }
+            if ("react".equals(previousAgent)) evidenceAgentId.remove();
+            else evidenceAgentId.set(previousAgent);
         }
     }
 
@@ -318,6 +346,16 @@ public class MemoryManager implements AutoCloseable {
                 sessionEventSequence.incrementAndGet()));
     }
 
+    /** 开始明确任务；新的 taskId 会轮换掉上一任务的短期运行投影。 */
+    public void beginTask(String taskId) {
+        sessionMemory.beginTask(taskId);
+    }
+
+    /** 标记明确任务结束；投影保留到下一任务开始，避免最终答复丢失证据。 */
+    public void endTask(String taskId) {
+        sessionMemory.endTask(taskId);
+    }
+
     // ─────────────────────────────────────────────────────────
     // 写入 LongTermMemory
     // ─────────────────────────────────────────────────────────
@@ -344,10 +382,14 @@ public class MemoryManager implements AutoCloseable {
         if (decision.action() != LongTermMemoryPolicy.Action.SAVE) {
             SensitiveDataRedactor.RedactionResult redaction = SensitiveDataRedactor.inspect(fact);
             if (decision.action() == LongTermMemoryPolicy.Action.CONFIRM && redaction.changed()) {
+                String confirmationId = "memory-confirm-" + UUID.randomUUID().toString().substring(0, 8);
+                pendingMemoryConfirmations.put(confirmationId, new PendingMemoryConfirmation(
+                        redaction.sanitizedText(), Instant.now().plusSeconds(MEMORY_CONFIRMATION_TTL_SECONDS)));
                 return new StoreResult(false, decision,
                         "检测到敏感字段，将保存脱敏后的内容：" + redaction.sanitizedText()
                                 + "；已剥离类型：" + redaction.removedTypesCsv()
-                                + "。请选择：保存脱敏版 / 取消 / 手动编辑");
+                                + "。请选择：保存脱敏版 / 取消 / 手动编辑",
+                        "", confirmationId);
             }
             return new StoreResult(false, decision, "长期记忆策略" + switch (decision.action()) {
                 case CONFIRM -> "需要确认: " + decision.reason();
@@ -392,6 +434,36 @@ public class MemoryManager implements AutoCloseable {
                 ? "已保存脱敏后的长期记忆"
                 : "已保存脱敏内容到本会话内存，但长期记忆存储不可用";
         return new StoreResult(true, confirmed, message, id);
+    }
+
+    /** 使用策略签发的一次性确认 id 完成敏感记忆保存，避免模型绕过确认边界。 */
+    public StoreResult confirmSensitiveMemory(String confirmationId, String editedFact) {
+        pruneExpiredMemoryConfirmations();
+        if (confirmationId == null || confirmationId.isBlank()) {
+            return invalidConfirmation("缺少 confirmation_id");
+        }
+        PendingMemoryConfirmation pending = pendingMemoryConfirmations.remove(confirmationId.trim());
+        if (pending == null) {
+            return invalidConfirmation("确认已过期、已使用或不存在");
+        }
+        String source = editedFact == null || editedFact.isBlank() ? pending.sanitizedFact() : editedFact;
+        return storeRedactedFact(source);
+    }
+
+    public boolean cancelSensitiveMemory(String confirmationId) {
+        pruneExpiredMemoryConfirmations();
+        return confirmationId != null && pendingMemoryConfirmations.remove(confirmationId.trim()) != null;
+    }
+
+    private StoreResult invalidConfirmation(String reason) {
+        LongTermMemoryPolicy.Decision rejected = LongTermMemoryPolicy.Decision.skip(
+                reason, "INVALID_MEMORY_CONFIRMATION", "fact", "low", "HIGH");
+        return new StoreResult(false, rejected, reason);
+    }
+
+    private void pruneExpiredMemoryConfirmations() {
+        Instant now = Instant.now();
+        pendingMemoryConfirmations.entrySet().removeIf(entry -> entry.getValue().expiresAt().isBefore(now));
     }
 
     private static boolean hasReusableRedactedKnowledge(String sanitized) {
@@ -497,11 +569,18 @@ public class MemoryManager implements AutoCloseable {
         return MemoryEntry.MemoryType.FACT;
     }
 
-    public record StoreResult(boolean stored, LongTermMemoryPolicy.Decision decision, String message, String id) {
+    public record StoreResult(boolean stored, LongTermMemoryPolicy.Decision decision, String message,
+                              String id, String confirmationId) {
         public StoreResult(boolean stored, LongTermMemoryPolicy.Decision decision, String message) {
-            this(stored, decision, message, "");
+            this(stored, decision, message, "", "");
+        }
+
+        public StoreResult(boolean stored, LongTermMemoryPolicy.Decision decision, String message, String id) {
+            this(stored, decision, message, id, "");
         }
     }
+
+    private record PendingMemoryConfirmation(String sanitizedFact, Instant expiresAt) {}
 
     /**
      * 一次长期记忆写入事件。自动写入与显式写入都走这条通道，让 CLI 能告诉用户
@@ -885,6 +964,7 @@ public class MemoryManager implements AutoCloseable {
     public void clearShortTerm() {
         sessionMemory.clear();
         compactionSummaryCache.clearPreSummary();
+        pendingMemoryConfirmations.clear();
         sessionEventSequence.set(0);
     }
 

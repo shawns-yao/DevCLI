@@ -1881,11 +1881,7 @@ class AgentOrchestratorTest {
         };
 
         RecordingDispatchingStubGLMClient llmClient = new RecordingDispatchingStubGLMClient(dispatcher);
-        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
-            mm.setTaskState("agent_scope", "multi-agent");
-            mm.addVolatileFact("planner-worker-visible-event");
-            mm.addToolResult("read_file", "{\"path\":\"Secret.java\"}", "reviewer-worker-visible-evidence");
-
+        try (RoleScopedMemoryManager mm = new RoleScopedMemoryManager(tempDir.toFile())) {
             AgentOrchestrator orchestrator = new AgentOrchestrator(
                     llmClient,
                     isolatedToolRegistry(tempDir),
@@ -2775,6 +2771,20 @@ class AgentOrchestratorTest {
     private static final class NoOpMemoryManager extends MemoryManager {
         private NoOpMemoryManager(File storageDir) {
             super(new GLMClient("test-key"), 32768, 200000, new LongTermMemory(storageDir));
+        }
+    }
+
+    private static final class RoleScopedMemoryManager extends MemoryManager {
+        private RoleScopedMemoryManager(File storageDir) {
+            super(new GLMClient("test-key"), 32768, 200000, new LongTermMemory(storageDir));
+        }
+
+        @Override
+        public void beginTask(String taskId) {
+            super.beginTask(taskId);
+            setTaskState("agent_scope", "multi-agent");
+            addVolatileFact("planner-worker-visible-event");
+            addToolResult("read_file", "{\"path\":\"Secret.java\"}", "reviewer-worker-visible-evidence");
         }
     }
 

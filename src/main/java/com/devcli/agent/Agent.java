@@ -54,6 +54,8 @@ public class Agent implements AutoCloseable {
     private final List<LlmClient.Message> conversationHistory;
     private final MemoryManager memoryManager;
     private final ConversationHistoryCompactor historyCompactor;
+    private final ContextReferenceGuard.ReferenceRegistry contextReferenceRegistry =
+            new ContextReferenceGuard.ReferenceRegistry();
     private Supplier<String> externalContextSupplier = () -> "";
     private Supplier<String> ruleContextSupplier = () -> "";
     private SkillRegistry skillRegistry;
@@ -253,7 +255,7 @@ public class Agent implements AutoCloseable {
         // 主退出条件 = LLM 自己决定（不再调用工具就返回）；
         // budget 仅在 token 用尽 / 检测到死循环 / 超出硬轮数时兜底。
         return new AgentExecutionEngine<String>(
-                llmClient, budget, HookLifecycle.load(toolRegistry)).run(
+                llmClient, budget, HookLifecycle.load(toolRegistry), contextReferenceRegistry).run(
                 new AgentExecutionEngine.Delegate<>() {
                     @Override
                     public List<LlmClient.Message> history() {

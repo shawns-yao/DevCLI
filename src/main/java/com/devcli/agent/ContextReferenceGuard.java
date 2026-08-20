@@ -62,6 +62,11 @@ final class ContextReferenceGuard {
             "定位|查找|搜索|找出|确认|告诉|是什么|有哪些|在哪里|哪一行|"
                     + "locate|find|search|identify|show|what|where",
             Pattern.CASE_INSENSITIVE);
+    private static final Pattern FOLLOW_UP_REFERENCE = Pattern.compile(
+            "里面|其中|该文件|这个文件|这些文件|上述文件|这些附件|它们|附件|文档|日志|源码|"
+                    + "inside|in\\s+(?:it|that|the\\s+file)|this\\s+file|that\\s+file|attachment|document|log",
+            Pattern.CASE_INSENSITIVE);
+    private static final int MAX_REGISTERED_REFERENCES = 16;
 
     private final LinkedHashSet<String> pendingStoredPaths;
     private final Map<String, String> expectedHashes;
@@ -71,22 +76,36 @@ final class ContextReferenceGuard {
     private ContextReferenceGuard(Map<String, String> references) {
         this.pendingStoredPaths = new LinkedHashSet<>(references.keySet());
         this.expectedHashes = new LinkedHashMap<>(references);
+        this.forceRead = !references.isEmpty();
     }
 
     static ContextReferenceGuard fromHistory(List<LlmClient.Message> history) {
+        ReferenceRegistry registry = new ReferenceRegistry();
+        registry.observe(history);
+        return fromHistory(history, registry);
+    }
+
+    static ContextReferenceGuard fromHistory(List<LlmClient.Message> history,
+                                             ReferenceRegistry registry) {
         if (history == null || history.isEmpty()) {
             return new ContextReferenceGuard(Map.of());
         }
+        ReferenceRegistry effectiveRegistry = registry == null ? new ReferenceRegistry() : registry;
+        effectiveRegistry.observe(history);
         for (int i = history.size() - 1; i >= 0; i--) {
             LlmClient.Message message = history.get(i);
             if (!"user".equals(message.role())
                     || message.source() == LlmClient.MessageSource.SYSTEM_INTERNAL) {
                 continue;
             }
-            Map<String, String> references = requiredReferences(message.content());
-            if (references.isEmpty() || !requiresContentEvidence(message.content())) {
+            if (!requiresContentEvidence(message.content())) {
                 return new ContextReferenceGuard(Map.of());
             }
+            Map<String, String> references = requiredReferences(message.content());
+            if (references.isEmpty() && FOLLOW_UP_REFERENCE.matcher(message.content()).find()) {
+                references = effectiveRegistry.latestReferences();
+            }
+            if (references.isEmpty()) return new ContextReferenceGuard(Map.of());
             return new ContextReferenceGuard(references);
         }
         return new ContextReferenceGuard(Map.of());
@@ -103,13 +122,16 @@ final class ContextReferenceGuard {
         if (pendingStoredPaths.isEmpty() || results == null) {
             return;
         }
+        boolean forcedReadAttempted = false;
         for (ToolRegistry.ToolExecutionResult result : results) {
             if (result == null
                     || !"read_file".equals(result.name())) {
                 continue;
             }
+            forcedReadAttempted = true;
             String path = argumentPath(result.argumentsJson());
             if (path.isBlank()) {
+                incrementAllPendingFailures();
                 continue;
             }
             String pendingPath = pendingStoredPaths.stream()
@@ -117,6 +139,7 @@ final class ContextReferenceGuard {
                     .findFirst()
                     .orElse("");
             if (pendingPath.isBlank()) {
+                incrementAllPendingFailures();
                 continue;
             }
             if (result.status() == ToolStatus.SUCCESS && snapshotMatches(pendingPath)) {
@@ -126,7 +149,16 @@ final class ContextReferenceGuard {
                 readFailures.merge(pendingPath, 1, Integer::sum);
             }
         }
+        if (forceRead && !forcedReadAttempted && !results.isEmpty()) {
+            incrementAllPendingFailures();
+        }
         forceRead = !pendingStoredPaths.isEmpty();
+    }
+
+    private void incrementAllPendingFailures() {
+        for (String pendingPath : pendingStoredPaths) {
+            readFailures.merge(pendingPath, 1, Integer::sum);
+        }
     }
 
     String terminalFailure() {
@@ -154,6 +186,39 @@ final class ContextReferenceGuard {
 
     boolean isSatisfied() {
         return pendingStoredPaths.isEmpty();
+    }
+
+    /** 跨 turn 保存最近附件引用；只保存路径与哈希，不保存文件正文。 */
+    static final class ReferenceRegistry {
+        private final LinkedHashMap<String, String> references = new LinkedHashMap<>();
+        private final LinkedHashMap<String, String> latestBatch = new LinkedHashMap<>();
+
+        synchronized void observe(List<LlmClient.Message> history) {
+            if (history == null) return;
+            for (LlmClient.Message message : history) {
+                if (message == null || !"user".equals(message.role())) continue;
+                Map<String, String> observed = requiredReferences(message.content());
+                if (!observed.isEmpty()) {
+                    latestBatch.clear();
+                    latestBatch.putAll(observed);
+                }
+                observed.forEach((path, hash) -> {
+                    references.remove(path);
+                    references.put(path, hash);
+                });
+            }
+            while (references.size() > MAX_REGISTERED_REFERENCES) {
+                references.remove(references.keySet().iterator().next());
+            }
+        }
+
+        synchronized Map<String, String> latestReferences() {
+            if (!latestBatch.isEmpty()) return Map.copyOf(latestBatch);
+            if (references.isEmpty()) return Map.of();
+            List<Map.Entry<String, String>> entries = references.entrySet().stream().toList();
+            Map.Entry<String, String> latest = entries.getLast();
+            return Map.of(latest.getKey(), latest.getValue());
+        }
     }
 
     private static boolean requiresContentEvidence(String content) {

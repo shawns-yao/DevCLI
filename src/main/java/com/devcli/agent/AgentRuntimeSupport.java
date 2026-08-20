@@ -24,6 +24,18 @@ final class AgentRuntimeSupport {
         toolRegistry.setMemorySaver(memoryManager::storeFact);
         toolRegistry.setMemorySaveHandler(fact -> {
             MemoryManager.StoreResult result = memoryManager.storeFactWithPolicy(fact, true);
+            return new ToolRegistry.MemorySaveResult(
+                    result.stored(), result.message(), result.confirmationId());
+        });
+        toolRegistry.setMemoryConfirmationHandler((confirmationId, action, editedFact) -> {
+            if ("cancel".equalsIgnoreCase(action)) {
+                boolean cancelled = memoryManager.cancelSensitiveMemory(confirmationId);
+                return new ToolRegistry.MemorySaveResult(false,
+                        cancelled ? "已取消敏感记忆保存" : "确认已过期、已使用或不存在");
+            }
+            MemoryManager.StoreResult result = memoryManager.confirmSensitiveMemory(
+                    confirmationId,
+                    "save_edited".equalsIgnoreCase(action) ? editedFact : "");
             return new ToolRegistry.MemorySaveResult(result.stored(), result.message());
         });
         toolRegistry.setMemoryListHandler(memoryManager::listLongTermMemory);

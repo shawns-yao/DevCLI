@@ -541,12 +541,15 @@ public class Main {
                                         "手动编辑"
                                 ));
                                 if (selected == 0) {
-                                    result = reactAgent.getMemoryManager().storeRedactedFact(fact);
+                                    result = reactAgent.getMemoryManager().confirmSensitiveMemory(
+                                            result.confirmationId(), "");
                                 } else if (selected == 2) {
                                     String edited = lineReader.readLine("编辑脱敏记忆> ");
-                                    result = reactAgent.getMemoryManager().storeRedactedFact(edited);
+                                    result = reactAgent.getMemoryManager().confirmSensitiveMemory(
+                                            result.confirmationId(), edited);
                                     fact = edited;
                                 } else {
+                                    reactAgent.getMemoryManager().cancelSensitiveMemory(result.confirmationId());
                                     ui.println("已取消保存长期记忆\n");
                                     continue;
                                 }
@@ -565,9 +568,29 @@ public class Main {
                         if (rule == null || rule.isEmpty()) {
                             ui.println("❌ 请提供强约束，例如 /rule add 禁止修改生成目录\n");
                         } else {
-                            com.devcli.memory.RuleContext.Rule added = ruleContext.addRule(rule, "user-cli");
-                            ui.println("已添加强约束: " + added.content);
-                            ui.println("   (id=" + added.id + " · 规则上下文每轮生效)\n");
+                            try {
+                                com.devcli.memory.RuleContext.Rule added = ruleContext.addRule(rule, "user-cli");
+                                ui.println("已添加强约束: " + added.content);
+                                ui.println("   (id=" + added.id + " · 规则上下文每轮生效)\n");
+                            } catch (IllegalArgumentException e) {
+                                ui.println("无法添加规则: " + e.getMessage() + "\n");
+                            }
+                        }
+                        continue;
+                    }
+                    case RULE_LIST -> {
+                        ui.println(ruleContext.renderManagementReport());
+                        ui.println();
+                        continue;
+                    }
+                    case RULE_REMOVE -> {
+                        String ruleId = command.payload();
+                        if (ruleId == null || ruleId.isBlank()) {
+                            ui.println("请提供规则 id，例如 /rule remove rule-1a2b3c4d\n");
+                        } else if (ruleContext.removeRule(ruleId)) {
+                            ui.println("已删除规则 " + ruleId + "\n");
+                        } else {
+                            ui.println("未找到规则 " + ruleId + "，可用 /rule list 查看\n");
                         }
                         continue;
                     }
@@ -1671,6 +1694,8 @@ public class Main {
                 new SlashCommandHint("/memory forget", "/memory forget <id>", "删除单条长期记忆"),
                 new SlashCommandHint("/save ", "/save <事实内容>", "手动保存关键事实到长期记忆"),
                 new SlashCommandHint("/rule add ", "/rule add <强约束>", "添加每轮强制执行的规则"),
+                new SlashCommandHint("/rule list", "/rule list", "查看规则和旧 pinned 待迁移项"),
+                new SlashCommandHint("/rule remove ", "/rule remove <id>", "删除显式规则"),
                 new SlashCommandHint("/skill", "/skill", "查看 skill 列表"),
                 new SlashCommandHint("/skill list", "/skill list", "查看 skill 列表"),
                 new SlashCommandHint("/skill show ", "/skill show <name>", "查看 SKILL.md 全文"),

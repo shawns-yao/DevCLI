@@ -230,6 +230,8 @@ public class PlanExecuteAgent {
      */
     public String run(String userInput) {
         log.info("Plan run started: inputLength={}", userInput == null ? 0 : userInput.length());
+        String sessionTaskId = "plan-run-" + java.util.UUID.randomUUID().toString().substring(0, 8);
+        memoryManager.beginTask(sessionTaskId);
         toolRegistry.prefetchToolDefinitionsForInput(userInput);
         memoryManager.addUserMessage(userInput);
         StreamState streamState = new StreamState();
@@ -256,6 +258,7 @@ public class PlanExecuteAgent {
             resultForSummary = errorMessage;
             return errorMessage;
         } finally {
+            memoryManager.endTask(sessionTaskId);
             scheduleSessionPreSummaryMaintenance(userInput, resultForSummary, streamState);
         }
     }

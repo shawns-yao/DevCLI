@@ -44,6 +44,7 @@ public record ToolPresentation(
             case "web_fetch" -> new ToolPresentation(Kind.LOCATIONS, "抓取网页", "url");
             case "create_project" -> new ToolPresentation(Kind.DIFF, "创建项目", "name");
             case "save_memory" -> new ToolPresentation(Kind.GENERIC, "保存长期记忆", "fact");
+            case "confirm_memory" -> new ToolPresentation(Kind.GENERIC, "确认敏感记忆", "confirmation_id");
             case "list_memory" -> new ToolPresentation(Kind.GENERIC, "查看长期记忆", "limit");
             default -> generic(toolName);
         };

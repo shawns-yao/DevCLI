@@ -85,6 +85,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private BrowserConnector browserConnector;
     private java.util.function.Consumer<String> memorySaver;
     private MemorySaver memorySaveHandler;
+    private MemoryConfirmationHandler memoryConfirmationHandler;
     private MemoryListHandler memoryListHandler;
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
@@ -247,6 +248,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         fork.browserConnector = browserConnector;
         fork.memorySaver = memorySaver;
         fork.memorySaveHandler = memorySaveHandler;
+        fork.memoryConfirmationHandler = memoryConfirmationHandler;
         fork.memoryListHandler = memoryListHandler;
         fork.skillRegistry = skillRegistry;
         fork.skillContextBuffer = skillContextBuffer == null ? null : skillContextBuffer.copy();
@@ -301,6 +303,10 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     public void setMemorySaveHandler(MemorySaver memorySaveHandler) {
         this.memorySaveHandler = memorySaveHandler;
+    }
+
+    public void setMemoryConfirmationHandler(MemoryConfirmationHandler memoryConfirmationHandler) {
+        this.memoryConfirmationHandler = memoryConfirmationHandler;
     }
 
     public void setMemoryListHandler(MemoryListHandler memoryListHandler) {
@@ -505,6 +511,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public java.util.function.Consumer<String> memorySaver() { return memorySaver; }
     @Override
     public MemorySaver memorySaveHandler() { return memorySaveHandler; }
+    @Override
+    public MemoryConfirmationHandler memoryConfirmationHandler() { return memoryConfirmationHandler; }
     @Override
     public MemoryListHandler memoryListHandler() { return memoryListHandler; }
     @Override
@@ -1454,7 +1462,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                 case "write_file", "create_project", "revert_turn" -> PROJECT_MUTATION;
                 case "browser_connect", "browser_disconnect" -> EXTERNAL_MUTATION;
                 case "execute_command" -> HOST_PROCESS;
-                case "save_memory" -> EXTERNAL_MUTATION;
+                case "save_memory", "confirm_memory" -> EXTERNAL_MUTATION;
                 default -> EXTERNAL_MUTATION;
             };
         }
@@ -1580,7 +1588,16 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         ToolOutput invoke(String argumentsJson, ToolExecutionContext executionContext);
     }
 
-    public record MemorySaveResult(boolean stored, String message) {}
+    public record MemorySaveResult(boolean stored, String message, String confirmationId) {
+        public MemorySaveResult(boolean stored, String message) {
+            this(stored, message, "");
+        }
+    }
+
+    @FunctionalInterface
+    public interface MemoryConfirmationHandler {
+        MemorySaveResult confirm(String confirmationId, String action, String editedFact);
+    }
 
     @FunctionalInterface
     public interface MemoryListHandler {

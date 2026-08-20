@@ -83,8 +83,10 @@ public final class MemorySubjectExtractor {
             return "profile.occupation";
         }
 
-        // 7. 无法确定主题：退回追加，不覆盖
-        return "";
+        // 7. 结构化键值声明使用解析器主题，供通用状态观察做确定性冲突比较。
+        return StructuredClaim.parse(fact)
+                .map(StructuredClaim.Claim::subject)
+                .orElse("");
     }
 
     private static boolean containsAny(String text, String... needles) {

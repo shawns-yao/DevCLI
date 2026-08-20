@@ -87,6 +87,27 @@ class MemoryManagerTest {
     }
 
     @Test
+    void typedCurrentStateObservationInvalidatesAnyStructuredSubject() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+            memoryManager.storeFact("java.version=17");
+            MemoryEntry old = longTermMemory.getAll().getFirst();
+
+            memoryManager.addToolResult("read_file", "{\"path\":\"pom.xml\"}",
+                    "文件内容: <maven.compiler.release>21</maven.compiler.release>",
+                    List.of(new CurrentStateObservationSideChannel(
+                            "key:java.version", "21", "pom.xml 声明 Java 21", "HIGH")));
+
+            assertFalse(longTermMemory.retrieve(old.getId()).orElseThrow().isActive());
+            MemoryEntry active = longTermMemory.getAll().stream()
+                    .filter(MemoryEntry::isActive).findFirst().orElseThrow();
+            assertEquals("21", active.getMetadata().get("observed_value"));
+            assertEquals(List.of(old.getId()), active.getEvidence().conflictsWith());
+        }
+    }
+
+    @Test
     void repeatedObservationDoesNotCreateDuplicateConflictAuditEntries() {
         try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
              MemoryManager memoryManager = new MemoryManager(
@@ -602,7 +623,47 @@ class MemoryManagerTest {
             assertTrue(result.message().contains("保存脱敏版"), result.message());
             assertTrue(result.message().contains("mvn test"), result.message());
             assertFalse(result.message().contains(rawToken), result.message());
+            assertTrue(result.confirmationId().startsWith("memory-confirm-"));
             assertEquals(0, longTermMemory.size());
+        }
+    }
+
+    @Test
+    void sensitiveConfirmationIdIsSingleUseAndCannotBeBypassed() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+            MemoryManager.StoreResult pending = memoryManager.storeFactWithPolicy(
+                    "记住调试过程：先运行 mvn test，再检查日志；token=tok-once", true);
+
+            MemoryManager.StoreResult confirmed = memoryManager.confirmSensitiveMemory(
+                    pending.confirmationId(), "");
+            MemoryManager.StoreResult replay = memoryManager.confirmSensitiveMemory(
+                    pending.confirmationId(), "");
+
+            assertTrue(confirmed.stored(), confirmed.message());
+            assertFalse(replay.stored());
+            assertEquals("INVALID_MEMORY_CONFIRMATION",
+                    replay.decision().metadata().get("reason_code"));
+            assertEquals(1, longTermMemory.size());
+        }
+    }
+
+    @Test
+    void clearShortTermInvalidatesPendingSensitiveConfirmation() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+            MemoryManager.StoreResult pending = memoryManager.storeFactWithPolicy(
+                    "记住调试过程；token=tok-clear", true);
+
+            memoryManager.clearShortTerm();
+            MemoryManager.StoreResult result = memoryManager.confirmSensitiveMemory(
+                    pending.confirmationId(), "");
+
+            assertFalse(result.stored());
+            assertEquals("INVALID_MEMORY_CONFIRMATION",
+                    result.decision().metadata().get("reason_code"));
         }
     }
 

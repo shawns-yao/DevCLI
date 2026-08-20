@@ -236,6 +236,15 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesRuleListAndRemoveCommands() {
+        assertEquals(CliCommandParser.CommandType.RULE_LIST,
+                CliCommandParser.parse("/rule list").type());
+        CliCommandParser.ParsedCommand remove = CliCommandParser.parse("/rule remove rule-1234");
+        assertEquals(CliCommandParser.CommandType.RULE_REMOVE, remove.type());
+        assertEquals("rule-1234", remove.payload());
+    }
+
+    @Test
     void plainSaveDoesNotMatchPin() {
         // 防止误判：/save 后跟以 - 起头的内容（但不是 --pin / -p）应仍走 MEMORY_SAVE
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/save -- 这是一个事实");

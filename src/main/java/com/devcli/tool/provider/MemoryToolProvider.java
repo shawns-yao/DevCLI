@@ -19,6 +19,17 @@ public final class MemoryToolProvider implements ToolProvider {
                 context.createToolParameters(new ToolParameter("limit", "integer", "最多返回多少条长期记忆，默认 20", false)),
                 args -> listMemory(context, args.get("limit"))
         ));
+        context.registerTool(ToolRegistry.Tool.structured(
+                "confirm_memory",
+                "仅在用户明确选择保存脱敏版、手动编辑或取消后调用；confirmation_id 必须来自 save_memory 的待确认结果。",
+                context.createToolParameters(
+                        new ToolParameter("confirmation_id", "string", "save_memory 返回的一次性确认 id", true),
+                        new ToolParameter("action", "string", "save_redacted、save_edited 或 cancel", true,
+                                java.util.List.of("save_redacted", "save_edited", "cancel")),
+                        new ToolParameter("edited_fact", "string", "action=save_edited 时用户确认后的脱敏文本", false)),
+                args -> confirmMemory(context, args.get("confirmation_id"),
+                        args.get("action"), args.get("edited_fact"))
+        ));
     }
 
     private ToolOutput saveMemory(ToolContext context, String fact) {
@@ -38,6 +49,10 @@ public final class MemoryToolProvider implements ToolProvider {
                 String message = saveResult.message() == null || saveResult.message().isBlank()
                         ? "长期记忆策略拒绝保存"
                         : saveResult.message();
+                if (saveResult.confirmationId() != null && !saveResult.confirmationId().isBlank()) {
+                    message += "；confirmation_id=" + saveResult.confirmationId()
+                            + "。必须先询问用户，再调用 confirm_memory，禁止自行确认";
+                }
                 return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED, message);
             }
             String message = saveResult.message() == null || saveResult.message().isBlank()
@@ -52,6 +67,27 @@ public final class MemoryToolProvider implements ToolProvider {
         }
         memorySaver.accept(normalized);
         return ToolOutput.success("已保存到长期记忆");
+    }
+
+    private ToolOutput confirmMemory(ToolContext context, String confirmationId,
+                                     String action, String editedFact) {
+        if ("save_edited".equalsIgnoreCase(action)
+                && (editedFact == null || editedFact.isBlank())) {
+            return ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS,
+                    "action=save_edited 时 edited_fact 不能为空", false);
+        }
+        ToolRegistry.MemoryConfirmationHandler handler = context.memoryConfirmationHandler();
+        if (handler == null) {
+            return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                    "敏感记忆确认器未初始化", false);
+        }
+        ToolRegistry.MemorySaveResult result = handler.confirm(confirmationId, action, editedFact);
+        if ("cancel".equalsIgnoreCase(action)) {
+            return ToolOutput.success(result.message());
+        }
+        return result.stored()
+                ? ToolOutput.success(result.message())
+                : ToolOutput.rejected(ToolErrorCode.POLICY_DENIED, result.message());
     }
 
     private ToolOutput listMemory(ToolContext context, String limitValue) {

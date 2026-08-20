@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -87,5 +88,68 @@ class SessionMemoryArchitectureTest {
         assertFalse(planner.contains("write_file"));
         assertTrue(reviewer.contains("write_file"));
         assertTrue(memory.snapshot().modifiedFiles().contains("src/A.java"));
+    }
+
+    @Test
+    void taskRotationClearsPreviousProjectionButKeepsCompletedTaskUntilNextBegin() {
+        SessionMemory memory = new SessionMemory();
+        memory.beginTask("task-1");
+        memory.accept(new SessionMemory.StateChanged("goal", "旧任务", "planner", "", 1));
+        memory.endTask("task-1");
+
+        assertTrue(memory.snapshot().taskEnded());
+        assertEquals("旧任务", memory.snapshot().workState().get("goal"));
+
+        memory.beginTask("task-2");
+        assertEquals("task-2", memory.snapshot().taskId());
+        assertFalse(memory.snapshot().workState().containsKey("goal"));
+    }
+
+    @Test
+    void firstExplicitTaskClearsLegacyProjectionWithoutTaskId() {
+        SessionMemory memory = new SessionMemory();
+        memory.accept(new SessionMemory.StateChanged("goal", "旧 ReAct 任务", "react", "", 1));
+
+        memory.beginTask("plan-task");
+
+        assertEquals("plan-task", memory.snapshot().taskId());
+        assertFalse(memory.snapshot().workState().containsKey("goal"));
+    }
+
+    @Test
+    void stalePlanEventsAndToolAttributionArePreservedDeterministically() {
+        SessionMemory memory = new SessionMemory();
+        memory.accept(new SessionMemory.PlanChanged("plan-new", "新目标", Map.of("new", "新步骤"),
+                "planner-1", "", 5));
+        memory.accept(new SessionMemory.PlanChanged("plan-old", "旧目标", Map.of("old", "旧步骤"),
+                "planner-2", "", 4));
+        memory.accept(new SessionMemory.ToolResultObserved(
+                "read_file", "{\"path\":\"README.md\"}", "内容", List.of(),
+                "worker-7", "step-9", 6));
+
+        SessionMemory.SessionSnapshot snapshot = memory.snapshot();
+        assertTrue(snapshot.taskLedger().contains("新目标"));
+        assertFalse(snapshot.taskLedger().contains("旧目标"));
+        assertEquals("worker-7", snapshot.evidenceJournal().getFirst().agentId());
+        assertEquals("step-9", snapshot.evidenceJournal().getFirst().stepId());
+    }
+
+    @Test
+    void renderUsesOneHardBudgetAndPrioritizesCriticalEvidence() {
+        SessionMemory memory = new SessionMemory();
+        memory.accept(new SessionMemory.StateChanged("goal", "分析项目", "planner", "", 1));
+        for (int i = 0; i < 20; i++) {
+            memory.accept(new SessionMemory.ToolResultObserved(
+                    "read_file", "{\"path\":\"src/F" + i + ".java\"}", "普通内容".repeat(80),
+                    List.of(), "worker", "step-" + i, i + 2));
+        }
+        memory.accept(new SessionMemory.ToolResultObserved(
+                "write_file", "{\"path\":\"src/Important.java\"}", "写入成功",
+                List.of(), "worker", "critical", 100));
+
+        String rendered = memory.render(SessionMemory.SessionView.WORKER, 600);
+
+        assertTrue(MemoryEntry.estimateTokens(rendered) <= 620, "预算估算应保持在小幅标记误差内");
+        assertTrue(rendered.contains("write_file"), "关键证据应先于普通读取证据进入 Prompt");
     }
 }

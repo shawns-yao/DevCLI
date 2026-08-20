@@ -91,9 +91,9 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 ### Memory System
 
 - 记忆只有两层：`SessionMemory` 保存当前任务共享的 WorkState 与 EvidenceJournal，`LongTermMemory` 保存跨会话稳定事实
-- `SessionMemory` 统一接收 SessionEvent；状态按键和步骤状态机更新，证据按重要性与 Token 预算治理，失败保留 AttemptDigest，可再生结果保留引用；Multi-Agent 共享同一实例并按角色渲染视图
+- `SessionMemory` 统一接收 SessionEvent；明确 Plan 使用 beginTask/endTask 轮换任务投影，状态按键和步骤状态机更新，全部 Prompt 区块共享一个硬 Token 预算；Multi-Agent 保存真实 agentId、stepId、sequence 并拒绝迟到计划/步骤事件
 - `ConversationHistoryCompactor` 是唯一消息窗口治理点；`CompactionSummaryCache` 只保存可复用预摘要，按消息指纹匹配并默认 30 分钟过期，不算记忆层
-- `RuleContext` 加载规则文件和 `/rule add` 强约束，每轮注入但不算记忆；稳定事实用 `/save`，旧 `/save --pin` 已废弃
+- `RuleContext` 加载规则文件和 `/rule add` 强约束，支持 `/rule list`、`/rule remove`；旧 pinned facts 仅列为待分类候选。敏感 `save_memory` 必须通过一次性 `confirmation_id` 和 `confirm_memory` 完成用户确认
 - 压缩边界 `<compact_boundary>` 记录已加载 Skill、RAG epoch、MCP 工具快照和压缩后恢复入口状态；RAG epoch 合并当前会话已命中证据与当前项目全局索引版本，MCP 工具快照包含 server 工具数量、schema 指纹和生命周期版本
 - 长期记忆主要通过 `/save` 或用户明确要求保存；中英文显式记忆意图、少量稳定个人属性和多次重复出现的稳定项目/偏好事实可由策略自动保存
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；显式保存请求如果内容仍然明显临时或低复用，需要确认而不是直接落库；与 SessionMemory 关键事件语义重复的长期记忆在 prompt 注入时会被抑制
@@ -186,17 +186,17 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 ### Post-Compact Restore
 
 - ConversationHistoryCompactor 压缩成功后会在摘要确认消息之后、保留尾部之前插入 `[压缩后恢复上下文]`
-- WorkingMemory 的恢复段不复用完整 system prompt 视图，而是按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 输出短结构化上下文
+- `SessionMemory` 的恢复段不复用完整 system prompt 视图，而是按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 输出短结构化上下文
 - Agent / PlanExecuteAgent / SubAgent 会在恢复段追加 MCP 工具状态和本地 SkillContextBuffer 的已加载 Skill、context、allowedTools 与内容摘要
 - 恢复段通过 `PostCompactRestoreContext` 做统一预算控制和行级去重；SubAgent 恢复区使用 Planner / Worker / Reviewer 角色视图裁剪，Planner 不携带工具证据，Reviewer 不携带会话临时事件
-- RAG 证据从 `search_code` 的工具结果强类型旁路载荷进入 WorkingMemory；尺寸治理、只读结果缓存和批量执行结果都会保留该载荷。展示文本不再嵌入结构化 JSON；旧 JSON 与旧展示文本只用于历史兼容，typed negativeFact 仍会即时清理旧 symbolVersion。
+- RAG 证据从 `search_code` 的工具结果强类型旁路载荷进入 `SessionMemory`；尺寸治理、只读结果缓存和批量执行结果都会保留该载荷。展示文本不再嵌入结构化 JSON；旧 JSON 与旧展示文本只用于历史兼容，typed negativeFact 仍会即时清理旧 symbolVersion。
 
 ### MicroCompact
 
 - Microcompact 在 LLM 摘要前执行，不删除消息，保持 assistant tool_call 与 tool result 配对。
 - 单条超大工具结果会落盘到 `.devcli/microcompact_tool_outputs/<session>/`，消息中保留 `<microcompact_boundary>`、toolCallId、originalChars 和 storedPath。
 - 最近 2 个 user round 之前的旧 tool_result 会按 toolCallId 成批折叠为 boundary 引用；最近轮次保留原文，避免影响当前任务。
-- WorkingMemory 压缩后恢复区遇到 microcompact 工具引用时，只输出 toolCallId / originalChars / storedPath，并按 storedPath 或 toolCallId 去重。
+- `SessionMemory` 压缩后恢复区遇到 microcompact 工具引用时，只输出 toolCallId / originalChars / storedPath，并按 storedPath 或 toolCallId 去重。
 
 ### Terminal Renderer
 
@@ -324,7 +324,7 @@ checkpoint 协议版本 7；通过 RecoveryState 恢复共享 ExecutionArtifact�
 Reviewer 前 Java 硬验证；封装 Maven/javac 命令、扫描、超时、输出解码和失败摘要，无 Maven 时使用 javac 参数文件避免命令行过长
 
 ### ToolRegistry.java
-12 个内置核心工具（含 `grep_code` 实时精确文本搜索）+ MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult；`ToolExecutionPipeline` 按阶段执行取消、存在性、能力范围、Skill 权限、参数校验、HITL、审计、策略和结果治理；`ToolOutput` / `ToolExecutionResult` 携带 status、errorCode、retryable、imageParts 和 modifiedResources；内置 Provider 通过结构化执行器直接保留参数错误、策略拒绝、命令退出、超时和取消状态；HITL 作为管线中间件，不再覆写 executeTool；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会返回 `search_tools` 引导和 query 示例
+13 个内置核心工具（含 `confirm_memory` 一次性敏感确认和 `grep_code` 实时精确文本搜索）+ MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult；`ToolExecutionPipeline` 按阶段执行取消、存在性、能力范围、Skill 权限、参数校验、HITL、审计、策略和结果治理；`ToolOutput` / `ToolExecutionResult` 携带 status、errorCode、retryable、imageParts 和 modifiedResources；内置 Provider 通过结构化执行器直接保留参数错误、策略拒绝、命令退出、超时和取消状态；HITL 作为管线中间件，不再覆写 executeTool；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会返回 `search_tools` 引导和 query 示例
 
 ### Workspace Package
 `WorkspaceBackend` 定义物化后端，`WorkspaceBackendFactory` 默认自动选择：项目根是 Git 仓库时使用原生 worktree，共享 Git 对象后叠加当前脏文件、删除文件、未跟踪及被忽略文件；非 Git 目录优先使用 `FileSystemCowWorkspaceBackend`。Linux 通过 GNU `cp --reflink=always` 强制文件系统 reflink；Windows 11 24H2 / Windows Server 2025 及以上版本只在 ReFS 上使用系统块克隆路径；其他平台、克隆失败、输出缺失或源目标哈希不一致时清理部分工作区并回退 `CopyWorkspaceBackend` 有界并行复制。实现不使用硬链接，避免直接写文件或外部命令修改共享 inode。worktree 和写时复制物化后删除排除目录与符号链接，worktree 关闭时调用 Git remove，创建前 prune 崩溃残留元数据；复制完成等待和线程终止都有明确超时，线程中断会向调用方传播；`WorkspaceCleanupPolicy` 通过 TTL 和跨进程文件租约清理孤儿目录；`WorkspaceExecutionSession` 管理隔离 ToolRegistry 生命周期；`ProjectCommitCoordinator` 使用 JVM 公平锁和基于项目真实路径哈希命名的 JDK `FileLock` 串行化同项目跨进程提交；PatchSet 逐文件流式哈希，未变化文件不读取完整内容，并负责哈希冲突预检、路径与链接边界、原子应用和可观测回滚。文件锁默认位于 `~/.devcli/locks/project-commit/`，网络文件系统的锁语义取决于底层实现
