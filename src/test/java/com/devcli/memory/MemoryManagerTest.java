@@ -55,6 +55,133 @@ class MemoryManagerTest {
     }
 
     @Test
+    void currentGradleObservationImmediatelySupersedesConflictingMavenMemory() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+            memoryManager.storeFact("项目构建工具使用 Maven");
+            MemoryEntry old = longTermMemory.getAll().getFirst();
+
+            memoryManager.addToolResult("list_dir", "{\"path\":\".\"}",
+                    "目录内容:\n[F] gradlew\n[F] build.gradle\n[D] src\n");
+
+            MemoryEntry superseded = longTermMemory.retrieve(old.getId()).orElseThrow();
+            assertFalse(superseded.isActive());
+            MemoryEntry negative = longTermMemory.getAll().stream()
+                    .filter(MemoryEntry::isActive)
+                    .findFirst()
+                    .orElseThrow();
+            assertEquals("true", negative.getMetadata().get("negative_fact"));
+            assertEquals("CURRENT_STATE_CONFLICT", negative.getMetadata().get("reason_code"));
+            assertEquals(old.getId(), negative.getMetadata().get("invalidates_memory_ids"));
+            assertEquals(List.of(old.getId()), negative.getEvidence().conflictsWith());
+            assertEquals(negative.getId(), superseded.getSupersededBy());
+            assertTrue(memoryManager.buildWorkingMemorySection().contains("NegativeFact（负向事实）"));
+            assertTrue(memoryManager.drainCurrentStateConflictInstruction()
+                    .contains("程序已确认当前状态推翻旧记忆"));
+            assertTrue(memoryManager.drainCurrentStateConflictInstruction().isBlank());
+            assertTrue(longTermMemory.getStatusSummary().contains("状态推翻: 1"));
+            assertFalse(memoryManager.buildContextForQuery("项目构建工具", 512)
+                    .contains("项目构建工具使用 Maven"));
+        }
+    }
+
+    @Test
+    void repeatedObservationDoesNotCreateDuplicateConflictAuditEntries() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+            memoryManager.storeFact("项目构建工具使用 Maven");
+
+            memoryManager.addToolResult("list_dir", "{\"path\":\".\"}",
+                    "目录内容:\n[F] gradlew\n[F] build.gradle\n");
+            memoryManager.addToolResult("list_dir", "{\"path\":\".\"}",
+                    "目录内容:\n[F] gradlew\n[F] build.gradle\n");
+
+            assertEquals(2, longTermMemory.size());
+        }
+    }
+
+    @Test
+    void documentationMentionOfGradleDoesNotInvalidateBuildSystemMemory() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+            memoryManager.storeFact("项目构建工具使用 Maven");
+            MemoryEntry old = longTermMemory.getAll().getFirst();
+
+            memoryManager.addToolResult("read_file", "{\"path\":\"README.md\"}",
+                    "文件内容:\n其他项目可以运行 ./gradlew test");
+
+            assertTrue(longTermMemory.retrieve(old.getId()).orElseThrow().isActive());
+            assertEquals(1, longTermMemory.size());
+        }
+    }
+
+    @Test
+    void mixedMavenAndGradleRootDoesNotProduceAFalseConflict() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+            memoryManager.storeFact("项目构建工具使用 Maven");
+            MemoryEntry old = longTermMemory.getAll().getFirst();
+
+            memoryManager.addToolResult("list_dir", "{\"path\":\".\"}",
+                    "目录内容:\n[F] pom.xml\n[F] gradlew\n[F] build.gradle\n");
+
+            assertTrue(longTermMemory.retrieve(old.getId()).orElseThrow().isActive());
+            assertEquals(1, longTermMemory.size());
+        }
+    }
+
+    @Test
+    void newerOppositeObservationSupersedesThePreviousNegativeFact() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+            memoryManager.storeFact("项目构建工具使用 Maven");
+            memoryManager.addToolResult("list_dir", "{\"path\":\".\"}",
+                    "目录内容:\n[F] gradlew\n[F] build.gradle\n");
+            MemoryEntry gradleNegative = longTermMemory.getAll().stream()
+                    .filter(MemoryEntry::isActive).findFirst().orElseThrow();
+
+            memoryManager.addToolResult("list_dir", "{\"path\":\".\"}",
+                    "目录内容:\n[F] pom.xml\n");
+
+            assertFalse(longTermMemory.retrieve(gradleNegative.getId()).orElseThrow().isActive());
+            MemoryEntry latest = longTermMemory.getAll().stream()
+                    .filter(MemoryEntry::isActive).findFirst().orElseThrow();
+            assertEquals("maven", latest.getMetadata().get("observed_value"));
+            assertEquals(List.of(gradleNegative.getId()), latest.getEvidence().conflictsWith());
+        }
+    }
+
+    @Test
+    void observationConflictAuditPersistsAcrossReload() {
+        Path storage = tempDir.resolve("observation-persistence");
+        String oldId;
+        String negativeId;
+        try (LongTermMemory longTermMemory = new LongTermMemory(storage.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+            memoryManager.storeFact("项目构建工具使用 Maven");
+            oldId = longTermMemory.getAll().getFirst().getId();
+            memoryManager.addToolResult("list_dir", "{\"path\":\".\"}",
+                    "目录内容:\n[F] gradlew\n[F] build.gradle\n");
+            negativeId = longTermMemory.getAll().stream()
+                    .filter(MemoryEntry::isActive).findFirst().orElseThrow().getId();
+        }
+
+        try (LongTermMemory reloaded = new LongTermMemory(storage.toFile())) {
+            assertFalse(reloaded.retrieve(oldId).orElseThrow().isActive());
+            MemoryEntry negative = reloaded.retrieve(negativeId).orElseThrow();
+            assertTrue(negative.isActive());
+            assertEquals(List.of(oldId), negative.getEvidence().conflictsWith());
+            assertEquals(oldId, negative.getMetadata().get("invalidates_memory_ids"));
+        }
+    }
+
+    @Test
     void addUserMessageShouldRecordVolatileFactSnippet() {
         try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
              MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {

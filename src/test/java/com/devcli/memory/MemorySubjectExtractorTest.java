@@ -31,6 +31,14 @@ class MemorySubjectExtractorTest {
     }
 
     @Test
+    void mavenAndGradleBuildClaimsMapToBuildSystemSubject() {
+        assertEquals("project.build_system",
+                MemorySubjectExtractor.extract("项目构建工具使用 Maven", Map.of()));
+        assertEquals("project.build_system",
+                MemorySubjectExtractor.extract("项目当前采用 Gradle", Map.of()));
+    }
+
+    @Test
     void responseStylePreferenceMapsToSubject() {
         assertEquals("preference.response_style",
                 MemorySubjectExtractor.extract("以后默认用中文、短句回答", Map.of()));

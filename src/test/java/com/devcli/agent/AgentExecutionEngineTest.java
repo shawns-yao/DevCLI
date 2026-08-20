@@ -73,6 +73,31 @@ class AgentExecutionEngineTest {
     }
 
     @Test
+    void injectsDeterministicConflictInstructionBeforeReasoningContinues() {
+        LlmClient.ToolCall call = new LlmClient.ToolCall(
+                "call_1", new LlmClient.ToolCall.Function("list_dir", "{\"path\":\".\"}"));
+        ScriptedClient llm = new ScriptedClient(List.of(
+                new LlmClient.ChatResponse("assistant", "", null, List.of(call), 10, 2),
+                new LlmClient.ChatResponse("assistant", "done", null, null, 4, 1)
+        ));
+        RecordingDelegate delegate = new RecordingDelegate();
+        delegate.postToolInstruction = "当前状态已推翻旧记忆，禁止继续依赖旧记忆。";
+
+        String result = new AgentExecutionEngine<String>(
+                llm, new AgentBudget(1_000, 3, 10)).run(delegate);
+
+        assertEquals("done", result);
+        List<RunEvent.ModelContext> contexts = delegate.runEvents.stream()
+                .filter(RunEvent.ModelContext.class::isInstance)
+                .map(RunEvent.ModelContext.class::cast)
+                .toList();
+        assertEquals(2, contexts.size());
+        assertTrue(contexts.get(1).messages().stream()
+                .anyMatch(message -> message.content().contains("禁止继续依赖旧记忆")
+                        && "SYSTEM_INTERNAL".equals(message.source())));
+    }
+
+    @Test
     void registersAndCleansSamplingRequestAroundEachModelCall() {
         SamplingRequestCoordinator coordinator = new SamplingRequestCoordinator();
         ScriptedClient llm = new ScriptedClient(List.of(

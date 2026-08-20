@@ -393,6 +393,15 @@ public class Agent implements AutoCloseable {
                     }
 
                     @Override
+                    public String instructionAfterToolResults(
+                            LlmClient.ChatResponse response,
+                            List<ToolExecutionResult> toolResults,
+                            int iteration,
+                            AgentBudget currentBudget) {
+                        return memoryManager.drainCurrentStateConflictInstruction();
+                    }
+
+                    @Override
                     public String completed(LlmClient.ChatResponse response,
                                             AgentBudget currentBudget) {
                         appendReasoning(reasoningTranscript, response.reasoningContent());

@@ -68,17 +68,22 @@ public final class MemorySubjectExtractor {
             return "project.default_test_command";
         }
 
-        // 4. 响应风格偏好
+        // 4. 项目构建系统。测试命令优先，避免把“mvn test”误归为宽泛构建系统主题。
+        if (containsAny(lower, "maven", "mvnw", "pom.xml", "gradle", "gradlew", "build.gradle")) {
+            return "project.build_system";
+        }
+
+        // 5. 响应风格偏好
         if (containsAny(fact, "用中文", "简洁", "短句", "输出风格", "回复风格")) {
             return "preference.response_style";
         }
 
-        // 5. 职业 / 身份
+        // 6. 职业 / 身份
         if (fact.matches(".*(我是|我的职业是|我从事|我负责).{0,24}(医生|老师|教师|律师|学生|工程师|程序员|开发|产品经理|设计师|运维|测试|研究员).*")) {
             return "profile.occupation";
         }
 
-        // 6. 无法确定主题：退回追加，不覆盖
+        // 7. 无法确定主题：退回追加，不覆盖
         return "";
     }
 

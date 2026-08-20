@@ -133,6 +133,7 @@ public class SubAgent {
     private Supplier<String> postCompactRestoreSupplier = () -> "";
     private TriConsumer<String, String, String> toolResultConsumer = (name, args, result) -> {};
     private Consumer<ToolExecutionResult> structuredToolResultConsumer = result -> {};
+    private Supplier<String> postToolInstructionSupplier = () -> "";
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private final ConversationHistoryCompactor historyCompactor;
@@ -193,6 +194,10 @@ public class SubAgent {
 
     public void setStructuredToolResultConsumer(Consumer<ToolExecutionResult> toolResultConsumer) {
         this.structuredToolResultConsumer = toolResultConsumer == null ? result -> {} : toolResultConsumer;
+    }
+
+    public void setPostToolInstructionSupplier(Supplier<String> supplier) {
+        this.postToolInstructionSupplier = supplier == null ? () -> "" : supplier;
     }
 
     public void setSkillRegistry(SkillRegistry skillRegistry) {
@@ -570,6 +575,15 @@ public class SubAgent {
                             structuredToolResultConsumer.accept(toolResult);
                         }
                         appendImageToolMessages(history, toolResults);
+                    }
+
+                    @Override
+                    public String instructionAfterToolResults(
+                            LlmClient.ChatResponse response,
+                            List<ToolExecutionResult> toolResults,
+                            int iteration,
+                            AgentBudget currentBudget) {
+                        return postToolInstructionSupplier.get();
                     }
 
                     @Override

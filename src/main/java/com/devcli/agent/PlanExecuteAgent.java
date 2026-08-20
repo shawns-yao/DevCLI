@@ -601,6 +601,15 @@ public class PlanExecuteAgent {
                     }
 
                     @Override
+                    public String instructionAfterToolResults(
+                            LlmClient.ChatResponse response,
+                            List<ToolExecutionResult> toolResults,
+                            int iteration,
+                            AgentBudget currentBudget) {
+                        return memoryManager.drainCurrentStateConflictInstruction();
+                    }
+
+                    @Override
                     public TaskRunResult completed(LlmClient.ChatResponse response,
                                                    AgentBudget currentBudget) {
                         memoryManager.recordTokenUsage(

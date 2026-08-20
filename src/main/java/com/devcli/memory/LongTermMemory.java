@@ -205,6 +205,56 @@ public class LongTermMemory implements Memory, AutoCloseable {
         }
     }
 
+    /**
+     * 用当前工具观察产生的负向事实显式取代指定旧记忆。
+     * 与普通主题写入不同，这里按 id 处理旧版无 subject 的条目，并保留完整软删除审计链。
+     */
+    public synchronized boolean storeObservationInvalidation(MemoryEntry entry, List<String> targetIds) {
+        if (entry == null || targetIds == null || targetIds.isEmpty()) {
+            return false;
+        }
+        pruneExpired();
+        List<MemoryEntry> targets = targetIds.stream()
+                .map(entries::get)
+                .filter(java.util.Objects::nonNull)
+                .filter(MemoryEntry::isRecallable)
+                .toList();
+        if (targets.isEmpty()) {
+            return false;
+        }
+
+        int nextRevision = targets.stream()
+                .mapToInt(MemoryEntry::getRevision)
+                .max()
+                .orElse(0) + 1;
+        Map<String, String> metadata = new HashMap<>(entry.getMetadata());
+        String conflictIds = targets.stream().map(MemoryEntry::getId)
+                .collect(java.util.stream.Collectors.joining(","));
+        metadata.put("conflict_detected", "true");
+        metadata.put("conflict_with", targets.getFirst().getId());
+        metadata.put("invalidates_memory_ids", conflictIds);
+        MemoryEvidence evidence = entry.getEvidence();
+        for (MemoryEntry target : targets) {
+            evidence = evidence.withConflict(target.getId());
+        }
+        Instant expiresAt = entry.getExpiresAt() != null
+                ? entry.getExpiresAt()
+                : MemoryLifecyclePolicy.expiresAt(entry.getType(), Instant.now());
+        MemoryEntry managedEntry = entry.copy(entry.getSubject(), true, "", nextRevision,
+                expiresAt, Map.copyOf(metadata), evidence);
+
+        for (MemoryEntry target : targets) {
+            MemoryEntry inactive = asSuperseded(target, managedEntry.getId());
+            boolean persisted = store.upsert(inactive);
+            if (!persisted && persistentStore) {
+                log.warn("Failed to persist observation supersede of {}; kept in-memory only", target.getId());
+            }
+            entries.put(inactive.getId(), inactive);
+        }
+        store(managedEntry);
+        return entries.containsKey(managedEntry.getId());
+    }
+
     /** 基于旧条派生一个被取代的失效副本：仅改 active=false 与 supersededBy，其余保持不变。 */
     private static MemoryEntry asSuperseded(MemoryEntry old, String newId) {
         return old.copy(old.getSubject(), false, newId, old.getRevision(),
@@ -477,12 +527,23 @@ public class LongTermMemory implements Memory, AutoCloseable {
     public String getStatusSummary() {
         Map<MemoryEntry.MemoryType, Long> typeCounts = entries.values().stream()
                 .collect(Collectors.groupingBy(MemoryEntry::getType, Collectors.counting()));
+        long activeCount = entries.values().stream().filter(MemoryEntry::isActive).count();
+        long supersededCount = entries.size() - activeCount;
+        long conflictAuditCount = entries.values().stream()
+                .filter(entry -> "true".equals(entry.getMetadata().get("conflict_detected")))
+                .count();
+        long currentStateConflictCount = entries.values().stream()
+                .filter(entry -> "CURRENT_STATE_CONFLICT".equals(
+                        entry.getMetadata().get("reason_code")))
+                .count();
 
-        return String.format("长期记忆: %d条 / %d tokens (事实: %d, 摘要: %d, 工具结果: %d)",
+        return String.format("长期记忆: %d条 / %d tokens "
+                        + "(事实: %d, 摘要: %d, 工具结果: %d, 有效: %d, 已取代: %d, 冲突审计: %d, 状态推翻: %d)",
                 entries.size(), tokenCounter.get(),
                 typeCounts.getOrDefault(MemoryEntry.MemoryType.FACT, 0L),
                 typeCounts.getOrDefault(MemoryEntry.MemoryType.SUMMARY, 0L),
-                typeCounts.getOrDefault(MemoryEntry.MemoryType.TOOL_RESULT, 0L));
+                typeCounts.getOrDefault(MemoryEntry.MemoryType.TOOL_RESULT, 0L),
+                activeCount, supersededCount, conflictAuditCount, currentStateConflictCount);
     }
 
     /**

@@ -157,6 +157,81 @@ public class MemoryManager implements AutoCloseable {
                               List<ToolSideChannel> sideChannels) {
         if (toolName == null || result == null) return;
         workingMemory.recordToolResult(toolName, argsJson, result, sideChannels, currentEvidenceScope());
+        recordCurrentStateInvalidations(toolName, argsJson, result);
+    }
+
+    private void recordCurrentStateInvalidations(String toolName, String argsJson, String result) {
+        Optional<MemoryObservationConflictDetector.Observation> observed =
+                MemoryObservationConflictDetector.observe(toolName, argsJson, result);
+        if (observed.isEmpty()) {
+            return;
+        }
+        MemoryObservationConflictDetector.Observation observation = observed.get();
+        List<MemoryEntry> conflicts = MemoryObservationConflictDetector.conflictingEntries(
+                observation, longTermMemory.getAll());
+        if (conflicts.isEmpty()) {
+            return;
+        }
+
+        Map<String, List<MemoryEntry>> bySubject = new HashMap<>();
+        for (MemoryEntry conflict : conflicts) {
+            String subject = MemoryObservationConflictDetector.subjectFor(conflict, observation);
+            bySubject.computeIfAbsent(subject, ignored -> new ArrayList<>()).add(conflict);
+        }
+        for (Map.Entry<String, List<MemoryEntry>> group : bySubject.entrySet()) {
+            List<String> conflictIds = group.getValue().stream().map(MemoryEntry::getId).toList();
+            String negativeFact = "NegativeFact（负向事实）: 当前状态已推翻长期记忆 "
+                    + String.join(",", conflictIds) + "；" + observation.evidence()
+                    + "。本次及后续检索不得继续依赖被推翻记忆。";
+            Map<String, String> metadata = new HashMap<>();
+            metadata.put("source", "tool_observation");
+            metadata.put("memory_type", "fact");
+            metadata.put("subject", group.getKey());
+            metadata.put("negative_fact", "true");
+            metadata.put("observed_value", observation.value());
+            metadata.put("observation_tool", toolName);
+            metadata.put("reason_code", "CURRENT_STATE_CONFLICT");
+            metadata.put("confidence", "HIGH");
+            metadata.put("review_state", "REVIEWED");
+            MemoryEvidence evidence = MemoryEvidence.fromPolicy(metadata, observation.evidence());
+            MemoryEntry entry = new MemoryEntry(
+                    "negative-" + UUID.randomUUID().toString().substring(0, 8),
+                    negativeFact,
+                    MemoryEntry.MemoryType.FACT,
+                    Instant.now(),
+                    metadata,
+                    MemoryEntry.estimateTokens(negativeFact),
+                    group.getKey(),
+                    true,
+                    "",
+                    MemoryEntry.CURRENT_SCHEMA_VERSION,
+                    1,
+                    null,
+                    evidence
+            );
+            if (longTermMemory.storeObservationInvalidation(entry, conflictIds)) {
+                workingMemory.addVolatileFact(negativeFact);
+                currentStateConflictNotices.get().add(negativeFact);
+                notifyAutoSaved(entry, metadata);
+            }
+        }
+    }
+
+    /**
+     * 取出本执行线程刚产生的状态冲突指令。执行内核把它追加到工具结果之后，
+     * 覆盖当轮早先注入但已被当前证据推翻的长期记忆快照。
+     */
+    public String drainCurrentStateConflictInstruction() {
+        List<String> notices = currentStateConflictNotices.get();
+        if (notices.isEmpty()) {
+            currentStateConflictNotices.remove();
+            return "";
+        }
+        String instruction = "程序已确认当前状态推翻旧记忆。以下 NegativeFact 为强制约束，"
+                + "本轮推理不得继续依赖被 supersede 的旧记忆：\n- "
+                + String.join("\n- ", notices);
+        currentStateConflictNotices.remove();
+        return instruction;
     }
 
     // ─────────────────────────────────────────────────────────
@@ -169,6 +244,8 @@ public class MemoryManager implements AutoCloseable {
      * 单 Agent / Plan 路径为空串。
      */
     private final ThreadLocal<String> evidenceScope = ThreadLocal.withInitial(() -> "");
+    private final ThreadLocal<List<String>> currentStateConflictNotices =
+            ThreadLocal.withInitial(ArrayList::new);
 
     private String currentEvidenceScope() {
         String scope = evidenceScope.get();
