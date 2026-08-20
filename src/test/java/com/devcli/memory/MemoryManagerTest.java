@@ -461,6 +461,72 @@ class MemoryManagerTest {
     }
 
     @Test
+    void sensitiveDebugMemoryShouldOfferASecretFreeSaveChoice() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+            String rawToken = "tok-sensitive-123";
+
+            MemoryManager.StoreResult result = memoryManager.storeFactWithPolicy(
+                    "记住刚刚的调试过程：先运行 mvn test，再检查日志；token=" + rawToken, true);
+
+            assertFalse(result.stored());
+            assertEquals(LongTermMemoryPolicy.Action.CONFIRM, result.decision().action());
+            assertTrue(result.message().contains("保存脱敏版"), result.message());
+            assertTrue(result.message().contains("mvn test"), result.message());
+            assertFalse(result.message().contains(rawToken), result.message());
+            assertEquals(0, longTermMemory.size());
+        }
+    }
+
+    @Test
+    void finalStoreBoundaryMustRedactPlaintextSecrets() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+
+            memoryManager.storeFact("调试配置 token=tok-should-never-persist");
+
+            assertEquals(1, longTermMemory.size());
+            MemoryEntry entry = longTermMemory.getAll().getFirst();
+            assertFalse(entry.getContent().contains("tok-should-never-persist"));
+            assertTrue(entry.getMetadata().containsKey("redacted_types"));
+        }
+    }
+
+    @Test
+    void confirmedSensitiveMemoryStoresOnlyReusableRedactedKnowledge() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+
+            MemoryManager.StoreResult result = memoryManager.storeRedactedFact(
+                    "记住调试过程：先运行 mvn test，再检查日志，token=tok-confirmed-secret");
+
+            assertTrue(result.stored(), result.message());
+            MemoryEntry stored = longTermMemory.getAll().getFirst();
+            assertTrue(stored.getContent().contains("先运行 mvn test，再检查日志"));
+            assertFalse(stored.getContent().contains("tok-confirmed-secret"));
+            assertEquals("SENSITIVE_REDACTED_CONFIRMED", stored.getMetadata().get("reason_code"));
+            assertEquals("credential", stored.getMetadata().get("redacted_types"));
+        }
+    }
+
+    @Test
+    void accountOnlyMemoryRequiresSecretsVaultInsteadOfNormalMemory() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+
+            MemoryManager.StoreResult result = memoryManager.storeRedactedFact("记住账号：admin@example.com");
+
+            assertFalse(result.stored());
+            assertTrue(result.message().contains("secrets vault"), result.message());
+            assertTrue(longTermMemory.getAll().isEmpty());
+        }
+    }
+
+    @Test
     void feedbackPolicyMemoryShouldBeStoredAsFeedbackType() {
         try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
              MemoryManager memoryManager = new MemoryManager(

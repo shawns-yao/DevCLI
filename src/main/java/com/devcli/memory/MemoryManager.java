@@ -2,6 +2,7 @@ package com.devcli.memory;
 
 import com.devcli.llm.LlmClient;
 import com.devcli.context.ContextProfile;
+import com.devcli.policy.SensitiveDataRedactor;
 import com.devcli.tool.ToolSideChannel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -249,6 +250,13 @@ public class MemoryManager implements AutoCloseable {
     public StoreResult storeFactWithPolicy(String fact, boolean explicitRequest) {
         LongTermMemoryPolicy.Decision decision = LongTermMemoryPolicy.evaluate(fact, 0, explicitRequest);
         if (decision.action() != LongTermMemoryPolicy.Action.SAVE) {
+            SensitiveDataRedactor.RedactionResult redaction = SensitiveDataRedactor.inspect(fact);
+            if (decision.action() == LongTermMemoryPolicy.Action.CONFIRM && redaction.changed()) {
+                return new StoreResult(false, decision,
+                        "检测到敏感字段，将保存脱敏后的内容：" + redaction.sanitizedText()
+                                + "；已剥离类型：" + redaction.removedTypesCsv()
+                                + "。请选择：保存脱敏版 / 取消 / 手动编辑");
+            }
             return new StoreResult(false, decision, "长期记忆策略" + switch (decision.action()) {
                 case CONFIRM -> "需要确认: " + decision.reason();
                 case SKIP -> "跳过: " + decision.reason();
@@ -261,6 +269,52 @@ public class MemoryManager implements AutoCloseable {
                     "已存入本会话内存，但未持久化（长期记忆存储不可用，重启后丢失）", id);
         }
         return new StoreResult(true, decision, "已保存到长期记忆", id);
+    }
+
+    /**
+     * 用户在敏感记忆确认界面选择“保存脱敏版”或提交手工编辑内容后的唯一写入入口。
+     * 本方法会重新检测并清理明文，不能用确认动作绕过最终落库边界。
+     */
+    public StoreResult storeRedactedFact(String fact) {
+        SensitiveDataRedactor.RedactionResult redaction = SensitiveDataRedactor.inspect(fact);
+        if (redaction.changed() && !hasReusableRedactedKnowledge(redaction.sanitizedText())) {
+            String message = redaction.removed("account")
+                    ? "普通长期记忆不保存账号；如确需持久化，请使用 secrets vault"
+                    : "临时凭据只保留在当前会话，不进入长期记忆";
+            LongTermMemoryPolicy.Decision rejected = LongTermMemoryPolicy.Decision.skip(
+                    message,
+                    redaction.removed("account") ? "SECRETS_VAULT_REQUIRED" : "TEMPORARY_CREDENTIAL_SESSION_ONLY",
+                    "fact", redaction.sensitivity(), "HIGH");
+            return new StoreResult(false, rejected, message);
+        }
+
+        LongTermMemoryPolicy.Decision original = LongTermMemoryPolicy.evaluate(fact, 0, true);
+        Map<String, String> metadata = new HashMap<>(original.metadata());
+        metadata.put("source", "explicit");
+        metadata.put("reason_code", "SENSITIVE_REDACTED_CONFIRMED");
+        metadata.put("confidence", "HIGH");
+        LongTermMemoryPolicy.Decision confirmed = new LongTermMemoryPolicy.Decision(
+                LongTermMemoryPolicy.Action.SAVE, "用户确认保存脱敏版", Map.copyOf(metadata));
+        String id = storeFact(redaction.sanitizedText(), confirmed.metadata());
+        String message = longTermMemory.isPersistent()
+                ? "已保存脱敏后的长期记忆"
+                : "已保存脱敏内容到本会话内存，但长期记忆存储不可用";
+        return new StoreResult(true, confirmed, message, id);
+    }
+
+    private static boolean hasReusableRedactedKnowledge(String sanitized) {
+        if (sanitized == null || sanitized.isBlank()) {
+            return false;
+        }
+        String remainder = sanitized
+                .replaceAll("(?i)(?:token|api[_-]?key|key|password|secret|authorization|账号|账户|用户名|account|username)"
+                        + "\\s*[:=：]\\s*\\*{3}", " ")
+                .replaceAll("\\[REDACTED_[A-Z_]+]", " ")
+                .replaceAll("(?i)\\b(?:remember|please|store|save)\\b", " ")
+                .replaceAll("记住|记一下|记下来|以后记得|保存", " ")
+                .replaceAll("[\\p{Punct}，。；：、\\s]+", "")
+                .trim();
+        return remainder.length() >= 6;
     }
 
     private void maybePersistUserFact(String content) {
@@ -295,17 +349,24 @@ public class MemoryManager implements AutoCloseable {
     }
 
     private String storeFact(String fact, Map<String, String> metadata) {
-        Map<String, String> effectiveMetadata =
-                metadata == null || metadata.isEmpty() ? Map.of("source", "fact") : metadata;
-        String subject = MemorySubjectExtractor.extract(fact, effectiveMetadata);
-        MemoryEvidence evidence = MemoryEvidence.fromPolicy(effectiveMetadata, fact);
+        SensitiveDataRedactor.RedactionResult redaction = SensitiveDataRedactor.inspect(fact);
+        String safeFact = redaction.sanitizedText();
+        Map<String, String> effectiveMetadata = new HashMap<>(
+                metadata == null || metadata.isEmpty() ? Map.of("source", "fact") : metadata);
+        if (redaction.changed()) {
+            effectiveMetadata.put("redacted", "true");
+            effectiveMetadata.put("redacted_types", redaction.removedTypesCsv());
+        }
+        effectiveMetadata = Map.copyOf(effectiveMetadata);
+        String subject = MemorySubjectExtractor.extract(safeFact, effectiveMetadata);
+        MemoryEvidence evidence = MemoryEvidence.fromPolicy(effectiveMetadata, safeFact);
         MemoryEntry entry = new MemoryEntry(
                 "fact-" + UUID.randomUUID().toString().substring(0, 8),
-                fact,
+                safeFact,
                 memoryEntryType(effectiveMetadata),
                 Instant.now(),
                 effectiveMetadata,
-                MemoryEntry.estimateTokens(fact),
+                MemoryEntry.estimateTokens(safeFact),
                 subject,
                 true,
                 "",
@@ -396,10 +457,10 @@ public class MemoryManager implements AutoCloseable {
                 sb.append(", active=false, superseded_by=").append(entry.getSupersededBy());
             }
             sb.append(", created_at=").append(entry.getTimestamp())
-                    .append("\n  content: ").append(entry.getContent());
+                    .append("\n  content: ").append(SensitiveDataRedactor.redact(entry.getContent()));
             if (!entry.getEvidence().sourceQuote().isBlank()) {
                 sb.append("\n  source_quote: ").append(truncateForPrompt(
-                        entry.getEvidence().sourceQuote(), 200));
+                        SensitiveDataRedactor.redact(entry.getEvidence().sourceQuote()), 200));
             }
             if (!entry.getEvidence().reasoning().isBlank()) {
                 sb.append("\n  reasoning: ").append(entry.getEvidence().reasoning());
@@ -488,7 +549,7 @@ public class MemoryManager implements AutoCloseable {
             String line = "- [" + entry.getType()
                     + "; confidence=" + entry.getEvidence().confidence()
                     + "; review=" + entry.getEvidence().reviewState()
-                    + "] " + truncateForPrompt(entry.getContent(), 120) + "\n";
+                    + "] " + truncateForPrompt(SensitiveDataRedactor.redact(entry.getContent()), 120) + "\n";
             int lineTokens = MemoryEntry.estimateTokens(line);
             if (usedTokens + lineTokens > maxTokens && usedTokens > 0) {
                 context.append("- ...\n");

@@ -1,5 +1,7 @@
 package com.devcli.memory;
 
+import com.devcli.policy.SensitiveDataRedactor;
+
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -13,9 +15,6 @@ import java.util.regex.Pattern;
  * reason_code，方便测试、审计和后续接入 LLM Judge。
  */
 public final class LongTermMemoryPolicy {
-    private static final Pattern ID_CARD = Pattern.compile("\\b\\d{17}[0-9Xx]\\b");
-    private static final Pattern BANK_CARD = Pattern.compile("\\b\\d{13,19}\\b");
-    private static final Pattern TOKEN = Pattern.compile("(?i)(api[_-]?key|token|secret|password|bearer)\\s*[:=]");
     private static final Pattern CHINESE_LINE_REFERENCE = Pattern.compile(".*(第\\s*\\d+\\s*行|\\d+\\s*行|行号).*");
     private static final Pattern ENGLISH_LINE_REFERENCE = Pattern.compile(".*\\b(line|line number)\\s*#?\\s*\\d+.*");
 
@@ -33,8 +32,15 @@ public final class LongTermMemoryPolicy {
         }
 
         boolean explicit = explicitOverride || hasExplicitRememberIntent(text);
-        String sensitivity = sensitivity(text);
+        SensitiveDataRedactor.RedactionResult redaction = SensitiveDataRedactor.inspect(text);
+        String sensitivity = redaction.sensitivity();
         String memoryType = memoryType(text);
+
+        if (explicit && redaction.removed("credential")
+                && isTemporary(text) && !hasReusableKnowledgeAfterRedaction(redaction.sanitizedText())) {
+            return Decision.skip("临时凭据只允许留在当前会话，不进入长期记忆",
+                    "TEMPORARY_CREDENTIAL_SESSION_ONLY", memoryType, sensitivity, "HIGH");
+        }
 
         if ("high".equals(sensitivity)) {
             return Decision.confirm("包含高敏感信息，必须用户确认",
@@ -135,32 +141,6 @@ public final class LongTermMemoryPolicy {
                 || lower.contains("next time remember");
     }
 
-    private static String sensitivity(String text) {
-        String lower = text.toLowerCase(Locale.ROOT);
-        if (ID_CARD.matcher(text).find() || TOKEN.matcher(text).find()) {
-            return "high";
-        }
-        if (BANK_CARD.matcher(text).find()
-                || text.contains("身份证")
-                || text.contains("银行卡")
-                || text.contains("密码")
-                || text.contains("住址")
-                || text.contains("收货地址")
-                || text.contains("手机号")
-                || text.contains("电话")
-                || text.contains("病历")
-                || text.contains("诊断")
-                || lower.contains("password")
-                || lower.contains("phone number")
-                || lower.contains("home address")
-                || lower.contains("shipping address")
-                || lower.contains("medical record")
-                || lower.contains("diagnosis")) {
-            return "medium";
-        }
-        return "low";
-    }
-
     private static String memoryType(String text) {
         String lower = text.toLowerCase(Locale.ROOT);
         // 反馈类记忆（cc 的 feedback 类型）：用户对行为的纠正或确认
@@ -200,6 +180,18 @@ public final class LongTermMemoryPolicy {
         return containsAny(text, "今天", "刚才", "刚刚", "这次", "临时", "暂时", "现在先", "先不用管")
                 || containsAny(lower, "today", "just now", "this time", "temporary", "temporarily",
                 "for now", "right now", "current task");
+    }
+
+    private static boolean hasReusableKnowledgeAfterRedaction(String sanitized) {
+        if (sanitized == null || sanitized.isBlank()) {
+            return false;
+        }
+        String remainder = sanitized
+                .replaceAll("(?i)\\b(?:token|api[_-]?key|key|password|secret|authorization)\\b"
+                        + "\\s*[:=]\\s*\\*{3}", " ")
+                .replaceAll("(?i)Bearer\\s+\\*{3}", " ")
+                .replaceAll("请|记住|记一下|记下来|临时|暂时|刚刚|刚才|这次|以后|长期|保存|：|:|，|,|。|\\s", "");
+        return remainder.length() >= 6;
     }
 
     private static boolean isPersonalAttribute(String text) {

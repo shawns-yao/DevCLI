@@ -54,6 +54,21 @@ class MemoryRetrieverTest {
     }
 
     @Test
+    void promptInjectionRedactsSecretsFromLegacyMemoryEntries() {
+        longTerm.store(new MemoryEntry(
+                "legacy-secret",
+                "调试命令 mvn test，token=tok-leaked-before-filter",
+                MemoryEntry.MemoryType.FACT,
+                null,
+                20));
+
+        String context = retriever.buildContextForQuery("调试命令", 200);
+
+        assertFalse(context.contains("tok-leaked-before-filter"), context);
+        assertTrue(context.contains("token="), context);
+    }
+
+    @Test
     void rejectedMemoryIsExcludedFromKeywordAndSemanticRecall() {
         MemoryEntry rejected = new MemoryEntry(
                 "rejected",

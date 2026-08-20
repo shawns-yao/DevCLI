@@ -118,13 +118,16 @@ class AuditLogTest {
         AuditLog log = new AuditLog(tempDir);
         log.record(AuditLog.AuditEntry.allow(
                 "mcp__remote__tool",
-                "{\"Authorization\":\"Bearer real-token\",\"api_key\":\"abc123\",\"password\":\"pw\"}",
+                "{\"Authorization\":\"Bearer real-token\",\"api_key\":\"abc123\",\"password\":\"pw\","
+                        + "\"account\":\"admin@example.com\",\"id\":\"110101199001011234\"}",
                 1));
 
         AuditLog.AuditEntry entry = log.readRecent(1).get(0);
         assertFalse(entry.args().contains("real-token"));
         assertFalse(entry.args().contains("abc123"));
         assertFalse(entry.args().contains("\"pw\""));
+        assertFalse(entry.args().contains("admin@example.com"));
+        assertFalse(entry.args().contains("110101199001011234"));
         assertTrue(entry.args().contains("***"));
     }
 

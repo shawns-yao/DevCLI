@@ -129,15 +129,7 @@ public class AuditLog {
     }
 
     static String sanitize(String s) {
-        if (s == null) return null;
-        String sanitized = s.replaceAll("(?i)Bearer\\s+[^\\s\"'}]+", "Bearer ***");
-        sanitized = sanitized.replaceAll(
-                "(?i)(\"?(?:token|key|password|secret|authorization)\"?\\s*[:=]\\s*\")([^\"]+)(\")",
-                "$1***$3");
-        sanitized = sanitized.replaceAll(
-                "(?i)(\\b(?:token|key|password|secret|authorization)\\b\\s*[:=]\\s*)([^\\s,}]+)",
-                "$1***");
-        return sanitized;
+        return SensitiveDataRedactor.redact(s);
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)

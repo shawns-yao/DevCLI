@@ -569,6 +569,18 @@ class ToolRegistryTest {
     }
 
     @Test
+    void saveMemoryToolDoesNotEchoOriginalSensitiveFactAfterHandlerStoresIt() {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setMemorySaveHandler(fact -> new ToolRegistry.MemorySaveResult(true,
+                "已保存脱敏后的长期记忆"));
+
+        String result = registry.executeTool("save_memory", "{\"fact\":\"token=tok-tool-secret\"}");
+
+        assertTrue(result.contains("已保存脱敏后的长期记忆"), result);
+        assertFalse(result.contains("tok-tool-secret"), result);
+    }
+
+    @Test
     void listMemoryToolUsesInjectedMemoryLister() {
         ToolRegistry registry = new ToolRegistry();
         registry.setMemoryListHandler(limit -> "memories limit=" + limit);

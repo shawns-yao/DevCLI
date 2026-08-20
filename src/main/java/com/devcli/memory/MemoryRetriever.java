@@ -1,5 +1,6 @@
 package com.devcli.memory;
 
+import com.devcli.policy.SensitiveDataRedactor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -160,14 +161,16 @@ public class MemoryRetriever {
             if (MemoryFactDeduper.duplicatesAny(entry.getContent(), suppressedFacts)) {
                 continue;
             }
-            if (usedTokens + entry.getTokenCount() > maxTokens) break;
+            String safeContent = SensitiveDataRedactor.redact(entry.getContent());
+            int safeTokens = MemoryEntry.estimateTokens(safeContent);
+            if (usedTokens + safeTokens > maxTokens) break;
 
             context.append("- [").append(entry.getType())
                     .append("; score=").append(String.format(Locale.ROOT, "%.3f", ranked.score()))
                     .append("; confidence=").append(entry.getEvidence().confidence())
                     .append("; review=").append(entry.getEvidence().reviewState())
-                    .append("] ").append(entry.getContent()).append("\n");
-            usedTokens += entry.getTokenCount();
+                    .append("] ").append(safeContent).append("\n");
+            usedTokens += safeTokens;
             appended++;
         }
 

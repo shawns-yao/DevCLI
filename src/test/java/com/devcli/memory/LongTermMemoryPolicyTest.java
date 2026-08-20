@@ -79,6 +79,15 @@ class LongTermMemoryPolicyTest {
     }
 
     @Test
+    void temporaryCredentialAloneMustStayOutOfLongTermMemory() {
+        LongTermMemoryPolicy.Decision decision =
+                LongTermMemoryPolicy.evaluate("请记住：临时 token=tok-123", 0, true);
+
+        assertEquals(LongTermMemoryPolicy.Action.SKIP, decision.action());
+        assertEquals("TEMPORARY_CREDENTIAL_SESSION_ONLY", decision.metadata().get("reason_code"));
+    }
+
+    @Test
     void repeatedStableProjectFactCanBeSavedWithoutExplicitRememberIntent() {
         LongTermMemoryPolicy.Decision decision =
                 LongTermMemoryPolicy.evaluate("项目默认测试命令是 mvn test -Pquick", 3);

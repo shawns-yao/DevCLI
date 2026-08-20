@@ -40,7 +40,10 @@ public final class MemoryToolProvider implements ToolProvider {
                         : saveResult.message();
                 return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED, message);
             }
-            return ToolOutput.success("已保存到长期记忆: " + normalized);
+            String message = saveResult.message() == null || saveResult.message().isBlank()
+                    ? "已保存到长期记忆"
+                    : saveResult.message();
+            return ToolOutput.success(message);
         }
         java.util.function.Consumer<String> memorySaver = context.memorySaver();
         if (memorySaver == null) {
@@ -48,7 +51,7 @@ public final class MemoryToolProvider implements ToolProvider {
                     "保存长期记忆失败: 记忆保存器未初始化", false);
         }
         memorySaver.accept(normalized);
-        return ToolOutput.success("已保存到长期记忆: " + normalized);
+        return ToolOutput.success("已保存到长期记忆");
     }
 
     private ToolOutput listMemory(ToolContext context, String limitValue) {

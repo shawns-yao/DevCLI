@@ -532,8 +532,30 @@ public class Main {
                         } else {
                             com.devcli.memory.MemoryManager.StoreResult result =
                                     reactAgent.getMemoryManager().storeFactWithPolicy(fact, true);
+                            if (!result.stored()
+                                    && result.decision().action()
+                                    == com.devcli.memory.LongTermMemoryPolicy.Action.CONFIRM
+                                    && "SENSITIVE_REQUIRES_CONFIRMATION".equals(
+                                    result.decision().metadata().get("reason_code"))) {
+                                int selected = renderer.openPalette("敏感记忆保存方式", java.util.List.of(
+                                        "保存脱敏版",
+                                        "取消",
+                                        "手动编辑"
+                                ));
+                                if (selected == 0) {
+                                    result = reactAgent.getMemoryManager().storeRedactedFact(fact);
+                                } else if (selected == 2) {
+                                    String edited = lineReader.readLine("编辑脱敏记忆> ");
+                                    result = reactAgent.getMemoryManager().storeRedactedFact(edited);
+                                    fact = edited;
+                                } else {
+                                    ui.println("已取消保存长期记忆\n");
+                                    continue;
+                                }
+                            }
                             if (result.stored()) {
-                                ui.println("💾 " + result.message() + ": " + fact + "\n");
+                                ui.println("💾 " + result.message() + ": "
+                                        + com.devcli.policy.SensitiveDataRedactor.redact(fact) + "\n");
                             } else {
                                 ui.println("⚠️ " + result.message() + "\n");
                             }
