@@ -261,7 +261,7 @@ public class ConversationHistoryCompactor {
     private final int retainRecentTokens;
     /** 九段摘要的程序化垃圾回收（capSummarySize 优先用它裁剪，不调 LLM）。 */
     private final SummaryGarbageCollector summaryGc = new SummaryGarbageCollector();
-    private SessionMemory sessionMemory;
+    private CompactionSummaryCache compactionSummaryCache;
     private Supplier<String> postCompactContextSupplier;
     private Supplier<CompactBoundaryRuntimeState> compactBoundaryRuntimeStateSupplier;
     private Path microcompactOutputRoot;
@@ -312,8 +312,8 @@ public class ConversationHistoryCompactor {
         this.fullRecompactInterval = Math.max(0, interval);
     }
 
-    public void setSessionMemory(SessionMemory sessionMemory) {
-        this.sessionMemory = sessionMemory;
+    public void setCompactionSummaryCache(CompactionSummaryCache compactionSummaryCache) {
+        this.compactionSummaryCache = compactionSummaryCache;
     }
 
     public void setPostCompactContextSupplier(Supplier<String> postCompactContextSupplier) {
@@ -415,14 +415,14 @@ public class ConversationHistoryCompactor {
 
         // 4) 摘要：优先复用会话预摘要，否则走增量 vs 全量 Map-Reduce。
         String summary = null;
-        if (summaryBase == null && !periodicFullRecompact && sessionMemory != null) {
-            var reusablePreSummary = sessionMemory.findReusablePreSummary(oldMsgs);
+        if (summaryBase == null && !periodicFullRecompact && compactionSummaryCache != null) {
+            var reusablePreSummary = compactionSummaryCache.findReusablePreSummary(oldMsgs);
             if (reusablePreSummary.isPresent()) {
                 summary = reusablePreSummary.get().summary();
                 log.info("reuse session memory pre-summary for {} old messages",
                         reusablePreSummary.get().messageCount());
             } else {
-                var extendablePreSummary = sessionMemory.findExtendablePreSummary(oldMsgs);
+                var extendablePreSummary = compactionSummaryCache.findExtendablePreSummary(oldMsgs);
                 if (extendablePreSummary.isPresent()) {
                     int absoluteEnd = systemEnd + extendablePreSummary.get().messageCount();
                     summaryBase = new PreviousSummary(

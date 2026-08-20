@@ -112,7 +112,7 @@ class AgentMemoryHintTest {
                     .reduce((first, second) -> second)
                     .map(LlmClient.Message::content)
                     .orElse("");
-            assertTrue(lastUser.contains("Working Memory"), lastUser);
+            assertTrue(lastUser.contains("Session Memory"), lastUser);
             assertTrue(lastUser.contains("react-working-memory-evidence"), lastUser);
         } finally {
             if (agent != null) {
@@ -140,9 +140,9 @@ class AgentMemoryHintTest {
 
             agent.run("请记住这段上下文：" + "x".repeat(10_000));
 
-            assertTrue(agent.getMemoryManager().getSessionMemory().currentPreSummary().isPresent());
+            assertTrue(agent.getMemoryManager().getCompactionSummaryCache().currentPreSummary().isPresent());
             assertEquals("自动维护的会话预摘要",
-                    agent.getMemoryManager().getSessionMemory().currentPreSummary().orElseThrow().summary());
+                    agent.getMemoryManager().getCompactionSummaryCache().currentPreSummary().orElseThrow().summary());
             assertEquals(2, llmClient.messagesByCall.size(), "一次任务响应后应追加一次预摘要维护调用");
         } finally {
             if (agent != null) {

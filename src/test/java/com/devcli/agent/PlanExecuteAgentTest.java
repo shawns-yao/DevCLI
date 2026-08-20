@@ -91,7 +91,7 @@ class PlanExecuteAgentTest {
                             .anyMatch(m -> "tool".equals(m.role()) && m.content() != null
                                     && m.content().contains("plan-memory-content")),
                     "工具结果应以 tool_result 原文进入下一轮 task LLM 调用");
-            assertTrue(memoryManager.getWorkingMemory().getVolatileFacts().stream()
+            assertTrue(memoryManager.getSessionMemory().getVolatileFacts().stream()
                     .anyMatch(f -> f.contains("请读取测试文件")),
                     "用户输入摘要应作为 volatile fact 记录");
             assertEquals(0, memoryManager.getLongTermMemory().size(),

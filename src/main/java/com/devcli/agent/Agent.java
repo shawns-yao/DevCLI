@@ -55,7 +55,7 @@ public class Agent implements AutoCloseable {
     private final MemoryManager memoryManager;
     private final ConversationHistoryCompactor historyCompactor;
     private Supplier<String> externalContextSupplier = () -> "";
-    private Supplier<String> stickyMemorySupplier = () -> "";
+    private Supplier<String> ruleContextSupplier = () -> "";
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private Renderer renderer;
@@ -130,9 +130,13 @@ public class Agent implements AutoCloseable {
      * 注入 Sticky Memory 渲染源（PR-B）：返回的 Markdown 整段会作为 system prompt 的
      * "Sticky Memory" 段注入。Main 启动时构造 StickyMemory 后通过此 setter 接进来。
      */
-    public void setStickyMemorySupplier(Supplier<String> stickyMemorySupplier) {
-        this.stickyMemorySupplier = stickyMemorySupplier == null ? () -> "" : stickyMemorySupplier;
+    public void setRuleContextSupplier(Supplier<String> ruleContextSupplier) {
+        this.ruleContextSupplier = ruleContextSupplier == null ? () -> "" : ruleContextSupplier;
     }
+
+    /** @deprecated 使用 {@link #setRuleContextSupplier(Supplier)}。 */
+    @Deprecated
+    public void setStickyMemorySupplier(Supplier<String> supplier) { setRuleContextSupplier(supplier); }
 
     public void setSkillRegistry(SkillRegistry skillRegistry) {
         this.skillRegistry = skillRegistry;
@@ -522,7 +526,7 @@ public class Agent implements AutoCloseable {
     private String buildSystemPrompt() {
         return promptAssembler.assemble(PromptMode.AGENT, PromptContext.builder()
                 .externalContext(buildExternalContext())
-                .stickyMemory(buildStickyMemory())
+                .ruleContext(buildRuleContext())
                 .build());
     }
 
@@ -533,7 +537,7 @@ public class Agent implements AutoCloseable {
     private String buildTurnContext(String memoryContext) {
         return promptAssembler.assembleTurnContext(PromptContext.builder()
                 .memoryContext(memoryContext)
-                .workingMemory(memoryManager.buildWorkingMemorySection())
+                .sessionMemory(memoryManager.buildSessionMemorySection())
                 .skillIndex(buildSkillIndex())
                 .build());
     }
@@ -545,12 +549,12 @@ public class Agent implements AutoCloseable {
         return turnContext + "\n\n" + content;
     }
 
-    private String buildStickyMemory() {
+    private String buildRuleContext() {
         try {
-            String sticky = stickyMemorySupplier.get();
-            return sticky == null ? "" : sticky.trim();
+            String rules = ruleContextSupplier.get();
+            return rules == null ? "" : rules.trim();
         } catch (Exception e) {
-            log.warn("Failed to render sticky memory", e);
+            log.warn("Failed to render rule context", e);
             return "";
         }
     }

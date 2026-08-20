@@ -11,14 +11,14 @@ import java.util.Map;
  *
  * <p>解决的问题：长 ReAct / Plan 循环里，"执行到哪一步" 如果只写在对话摘要的自然语言里，
  * 压缩时容易被改写或丢失，模型只能从文本里猜。TaskLedger 把进度结构化，挂在
- * {@link WorkingMemory}（不进 conversationHistory），因此 {@code ConversationHistoryCompactor}
+ * {@link SessionMemory}（不进 conversationHistory），因此 {@code ConversationHistoryCompactor}
  * 压缩对话历史时不会触碰它——第 15 轮压缩后第 20 轮仍能看到当前 step / 已完成 / 待执行 / 失败。
  *
  * <p>定位：projection（投影视图），不是 source of truth。真实执行状态仍由
  * {@code plan.ExecutionPlan} / {@code plan.Task} 拥有；{@code PlanExecuteAgent} 在 task 状态变化时
  * 把进度投影到这里。摘要只引用进度，不拥有任务状态。
  *
- * <p>线程安全：所有方法 synchronized（与 {@link WorkingMemory} 一致，防御 Multi-Agent 并发回写）。
+ * <p>线程安全：所有方法 synchronized（与 {@link SessionMemory} 一致，防御 Multi-Agent 并发回写）。
  */
 public class TaskLedger {
 
@@ -72,28 +72,42 @@ public class TaskLedger {
 
     /** 标记步骤开始（RUNNING）。step 不存在时按需创建（兼容动态新增 step）。 */
     public synchronized void startStep(String stepId) {
-        Entry entry = ensure(stepId);
-        if (entry != null) {
-            entry.status = StepStatus.RUNNING;
-        }
+        transitionStep(stepId, StepStatus.RUNNING, "");
     }
 
     /** 标记步骤完成（DONE），清空其错误。 */
     public synchronized void completeStep(String stepId) {
-        Entry entry = ensure(stepId);
-        if (entry != null) {
-            entry.status = StepStatus.DONE;
-            entry.lastError = "";
-        }
+        transitionStep(stepId, StepStatus.DONE, "");
     }
 
     /** 标记步骤失败（FAILED），保留错误信息。 */
     public synchronized void failStep(String stepId, String error) {
+        transitionStep(stepId, StepStatus.FAILED, error);
+    }
+
+    /**
+     * 按状态机推进步骤，拒绝并发迟到事件把终态覆盖回运行态。
+     * FAILED 允许重新进入 RUNNING，支持有界原位重做；DONE 和 SKIPPED 为终态。
+     */
+    public synchronized boolean transitionStep(String stepId, StepStatus target, String detail) {
         Entry entry = ensure(stepId);
-        if (entry != null) {
-            entry.status = StepStatus.FAILED;
-            entry.lastError = error == null ? "" : error;
-        }
+        if (entry == null || target == null || !canTransition(entry.status, target)) return false;
+        entry.status = target;
+        entry.lastError = target == StepStatus.FAILED && detail != null ? detail : "";
+        return true;
+    }
+
+    private static boolean canTransition(StepStatus current, StepStatus target) {
+        if (current == target) return true;
+        return switch (current) {
+            case PENDING -> target == StepStatus.RUNNING || target == StepStatus.DONE || target == StepStatus.SKIPPED
+                    || target == StepStatus.FAILED;
+            case RUNNING -> target == StepStatus.DONE || target == StepStatus.FAILED
+                    || target == StepStatus.SKIPPED;
+            case FAILED -> target == StepStatus.RUNNING || target == StepStatus.DONE
+                    || target == StepStatus.SKIPPED;
+            case DONE, SKIPPED -> false;
+        };
     }
 
     private Entry ensure(String stepId) {

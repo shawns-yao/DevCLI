@@ -236,17 +236,17 @@ class ConversationHistoryCompactorTest {
     }
 
     @Test
-    void compactionReusesSessionMemoryPreSummaryWhenItCoversOldMessages() {
-        SessionMemory sessionMemory = new SessionMemory();
+    void compactionReusesSummaryCacheWhenItCoversOldMessages() {
+        CompactionSummaryCache summaryCache = new CompactionSummaryCache();
         StubCompactor c = new StubCompactor("SHOULD NOT BE USED", 3_000, true);
-        c.setSessionMemory(sessionMemory);
+        c.setCompactionSummaryCache(summaryCache);
         List<LlmClient.Message> history = new ArrayList<>();
         history.add(LlmClient.Message.system("SYSTEM_PROMPT"));
         for (int i = 0; i < 6; i++) {
             history.add(LlmClient.Message.user("Q" + i + ": " + longText(5_000)));
             history.add(LlmClient.Message.assistant("A" + i + ": " + longText(5_000)));
         }
-        sessionMemory.recordPreSummary(history.subList(1, 11), "SESSION PRE SUMMARY");
+        summaryCache.recordPreSummary(history.subList(1, 11), "SESSION PRE SUMMARY");
 
         boolean compacted = c.compactIfNeeded(history, 100);
 
@@ -260,17 +260,17 @@ class ConversationHistoryCompactorTest {
     }
 
     @Test
-    void extendsSessionMemoryPreSummaryWhenStrictTailMovesSplitBoundary() {
-        SessionMemory sessionMemory = new SessionMemory();
+    void extendsSummaryCacheWhenStrictTailMovesSplitBoundary() {
+        CompactionSummaryCache summaryCache = new CompactionSummaryCache();
         StubCompactor c = new StubCompactor("EXTENDED SUMMARY", 3_000, true);
-        c.setSessionMemory(sessionMemory);
+        c.setCompactionSummaryCache(summaryCache);
         List<LlmClient.Message> history = new ArrayList<>();
         history.add(LlmClient.Message.system("SYSTEM_PROMPT"));
         for (int i = 0; i < 6; i++) {
             history.add(LlmClient.Message.user("Q" + i + ": " + longText(5_000)));
             history.add(LlmClient.Message.assistant("A" + i + ": " + longText(5_000)));
         }
-        sessionMemory.recordPreSummary(history.subList(1, 9), "SESSION PREFIX SUMMARY");
+        summaryCache.recordPreSummary(history.subList(1, 9), "SESSION PREFIX SUMMARY");
 
         assertTrue(c.compactIfNeeded(history, 100));
         assertEquals(1, c.incrementalCalls.get(),

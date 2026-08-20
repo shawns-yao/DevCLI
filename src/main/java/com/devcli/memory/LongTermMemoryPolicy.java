@@ -11,7 +11,7 @@ import java.util.regex.Pattern;
  * 长期记忆写入决策器。
  *
  * <p>目标是高精度拦截：显式、稳定、低敏的信息才自动保存；敏感或模糊的新事实交给上层确认；
- * 低价值临时信息只留在 WorkingMemory。这里故意不用未校准的加权分数，所有决策都落到可解释的
+ * 低价值临时信息只留在 SessionMemory。这里故意不用未校准的加权分数，所有决策都落到可解释的
  * reason_code，方便测试、审计和后续接入 LLM Judge。
  */
 public final class LongTermMemoryPolicy {

@@ -36,7 +36,7 @@ public class PromptAssembler {
      * <p>因此按轮次变化的内容（长期记忆检索结果 / skill 索引 / 工作记忆）不在这里，
      * 改由 {@link #assembleTurnContext(PromptContext)} 渲染并以 append-only 方式进入消息尾部。
      *
-     * <p>留在这里的动态段仅限会话级稳定项：{@code stickyMemory}（启动加载，会话内极少变化）与
+     * <p>留在这里的动态段仅限会话级稳定项：{@code ruleContext}（启动加载，会话内极少变化）与
      * {@code externalContext}（MCP resource 索引）。它们变化时前缀失配是正确且必要的。
      */
     public String assemble(PromptMode mode, PromptContext context) {
@@ -51,7 +51,7 @@ public class PromptAssembler {
         append(prompt, repository.loadRequired("personalities/calm.md"));
         append(prompt, applyVariables(repository.loadRequired(mode.resourcePath()), ctx));
         append(prompt, repository.loadRequired("approvals/" + approvalMode(ctx) + ".md"));
-        append(prompt, dynamicSection("Sticky Memory", ctx.stickyMemory()));
+        append(prompt, dynamicSection("Rule Context", ctx.ruleContext()));
         append(prompt, dynamicSection("Project Context", ctx.externalContext()));
         append(prompt, repository.loadRequired("context/context-management.md"));
         append(prompt, repository.loadRequired("handoff.md"));
@@ -72,7 +72,7 @@ public class PromptAssembler {
         StringBuilder body = new StringBuilder();
         append(body, dynamicSection("Retrieved Memory", ctx.memoryContext()));
         append(body, dynamicSection("Skills", ctx.skillIndex()));
-        append(body, dynamicSection("Working Memory", ctx.workingMemory()));
+        append(body, dynamicSection("Session Memory", ctx.sessionMemory()));
         if (body.isEmpty()) {
             return "";
         }

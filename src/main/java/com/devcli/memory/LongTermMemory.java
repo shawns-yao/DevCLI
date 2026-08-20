@@ -428,7 +428,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
     }
 
     /**
-     * 解析 DevCLI 记忆目录（共享给 StickyMemory / SqliteLongTermMemoryStore 等同生态组件，
+     * 解析 DevCLI 记忆目录（共享给 RuleContext / SqliteLongTermMemoryStore 等相邻 Module，
      * 保持目录约定一致）。
      * 优先级：{@code -Ddevcli.memory.dir} > {@code DEVCLI_MEMORY_DIR} 环境变量 > {@code ~/.devcli/memory}
      */

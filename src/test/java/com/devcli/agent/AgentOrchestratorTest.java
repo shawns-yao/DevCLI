@@ -2300,7 +2300,7 @@ class AgentOrchestratorTest {
 
             orchestrator.run("列目录并验收");
 
-            List<String> scopes = mm.getWorkingMemory().getRecentToolResults().stream()
+            List<String> scopes = mm.getSessionMemory().getRecentToolResults().stream()
                     .map(evidence -> evidence.scope)
                     .toList();
             assertTrue(scopes.stream().anyMatch(scope -> !scope.isBlank()),

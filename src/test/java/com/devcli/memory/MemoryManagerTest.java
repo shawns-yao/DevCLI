@@ -50,7 +50,7 @@ class MemoryManagerTest {
             String section = memoryManager.buildWorkingMemorySection();
             assertTrue(section.contains("read_file"));
             assertTrue(section.contains("pom.xml"));
-            assertEquals(1, memoryManager.getWorkingMemory().getRecentToolResults().size());
+            assertEquals(1, memoryManager.getSessionMemory().getRecentToolResults().size());
         }
     }
 
@@ -189,7 +189,7 @@ class MemoryManagerTest {
 
             String section = memoryManager.buildWorkingMemorySection();
             assertTrue(section.contains("用户最新输入"));
-            assertTrue(memoryManager.getWorkingMemory().getVolatileFacts().stream()
+            assertTrue(memoryManager.getSessionMemory().getVolatileFacts().stream()
                     .anyMatch(f -> f.contains("pom.xml")));
         }
     }
@@ -201,53 +201,53 @@ class MemoryManagerTest {
              MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {
             memoryManager.addAssistantMessage("已分析完毕，结果如下...");
 
-            assertTrue(memoryManager.getWorkingMemory().getVolatileFacts().isEmpty());
-            assertTrue(memoryManager.getWorkingMemory().getRecentToolResults().isEmpty());
+            assertTrue(memoryManager.getSessionMemory().getVolatileFacts().isEmpty());
+            assertTrue(memoryManager.getSessionMemory().getRecentToolResults().isEmpty());
         }
     }
 
     @Test
-    void exposesStableSessionMemoryForConversationCompactor() {
+    void exposesStableCompactionSummaryCache() {
         try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
              MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {
-            assertSame(memoryManager.getSessionMemory(), memoryManager.getSessionMemory());
+            assertSame(memoryManager.getCompactionSummaryCache(), memoryManager.getCompactionSummaryCache());
         }
     }
 
     @Test
     void sessionPreSummaryExpiresAfterConfiguredTtl() {
         MutableClock clock = new MutableClock(Instant.parse("2026-06-19T00:00:00Z"));
-        SessionMemory sessionMemory = new SessionMemory(clock, Duration.ofMinutes(5));
+        CompactionSummaryCache summaryCache = new CompactionSummaryCache(clock, Duration.ofMinutes(5));
         List<LlmClient.Message> messages = List.of(
                 LlmClient.Message.user("需求"),
                 LlmClient.Message.assistant("结果")
         );
 
-        sessionMemory.recordPreSummary(messages, "旧摘要");
-        assertTrue(sessionMemory.findReusablePreSummary(messages).isPresent());
+        summaryCache.recordPreSummary(messages, "旧摘要");
+        assertTrue(summaryCache.findReusablePreSummary(messages).isPresent());
 
         clock.advance(Duration.ofMinutes(6));
 
-        assertTrue(sessionMemory.findReusablePreSummary(messages).isEmpty());
-        assertTrue(sessionMemory.currentPreSummary().isEmpty());
+        assertTrue(summaryCache.findReusablePreSummary(messages).isEmpty());
+        assertTrue(summaryCache.currentPreSummary().isEmpty());
     }
 
     @Test
     void sessionPreSummaryShouldExtendOnlyWhenCoveredMessagesRemainPrefix() {
-        SessionMemory sessionMemory = new SessionMemory();
+        CompactionSummaryCache summaryCache = new CompactionSummaryCache();
         List<LlmClient.Message> original = List.of(
                 LlmClient.Message.user("需求"),
                 LlmClient.Message.assistant("结果")
         );
-        sessionMemory.recordPreSummary(original, "旧摘要");
+        summaryCache.recordPreSummary(original, "旧摘要");
 
         List<LlmClient.Message> extended = new ArrayList<>(original);
         extended.add(LlmClient.Message.user("新增需求"));
-        assertTrue(sessionMemory.findExtendablePreSummary(extended).isPresent());
+        assertTrue(summaryCache.findExtendablePreSummary(extended).isPresent());
 
         List<LlmClient.Message> changedPrefix = new ArrayList<>(extended);
         changedPrefix.set(0, LlmClient.Message.user("被修改的需求"));
-        assertTrue(sessionMemory.findExtendablePreSummary(changedPrefix).isEmpty());
+        assertTrue(summaryCache.findExtendablePreSummary(changedPrefix).isEmpty());
     }
 
     @Test
@@ -267,7 +267,7 @@ class MemoryManagerTest {
                     memoryManager.maintainSessionPreSummaryAfterTurn(history, 0, 0);
 
             assertEquals(MemoryManager.SessionPreSummaryMaintenanceResult.MAINTAINED, result);
-            SessionMemory.PreSummary preSummary = memoryManager.getSessionMemory()
+            CompactionSummaryCache.PreSummary preSummary = memoryManager.getCompactionSummaryCache()
                     .findReusablePreSummary(history.subList(1, history.size()))
                     .orElseThrow();
             assertEquals("AUTO PRE SUMMARY", preSummary.summary());
@@ -295,7 +295,7 @@ class MemoryManagerTest {
             assertEquals(MemoryManager.SessionPreSummaryMaintenanceResult.MAINTAINED,
                     future.get(2, TimeUnit.SECONDS));
             assertEquals("ASYNC PRE SUMMARY",
-                    memoryManager.getSessionMemory().currentPreSummary().orElseThrow().summary());
+                    memoryManager.getCompactionSummaryCache().currentPreSummary().orElseThrow().summary());
         }
     }
 
@@ -316,7 +316,7 @@ class MemoryManagerTest {
                     memoryManager.maintainSessionPreSummaryAfterTurn(history, 4, 0);
 
             assertEquals(MemoryManager.SessionPreSummaryMaintenanceResult.MAINTAINED, result);
-            assertTrue(memoryManager.getSessionMemory()
+            assertTrue(memoryManager.getCompactionSummaryCache()
                     .findReusablePreSummary(history.subList(1, history.size()))
                     .orElseThrow()
                     .summary()
@@ -351,7 +351,7 @@ class MemoryManagerTest {
             assertTrue(incrementalPrompt.contains("NEW_DELTA_MARKER"));
             assertFalse(incrementalPrompt.contains("OLD_RAW_MARKER"));
             assertEquals("SECOND SUMMARY",
-                    memoryManager.getSessionMemory().currentPreSummary().orElseThrow().summary());
+                    memoryManager.getCompactionSummaryCache().currentPreSummary().orElseThrow().summary());
             MemoryManager.SessionPreSummaryMetrics metrics = memoryManager.getSessionPreSummaryMetrics();
             assertEquals("incremental", metrics.mode());
             assertEquals(2, metrics.deltaMessages());
@@ -372,8 +372,8 @@ class MemoryManagerTest {
 
             memoryManager.clearShortTerm();
 
-            assertTrue(memoryManager.getWorkingMemory().getRecentToolResults().isEmpty());
-            assertTrue(memoryManager.getWorkingMemory().getVolatileFacts().isEmpty());
+            assertTrue(memoryManager.getSessionMemory().getRecentToolResults().isEmpty());
+            assertTrue(memoryManager.getSessionMemory().getVolatileFacts().isEmpty());
             assertEquals(1, longTermMemory.size(), "/clear 不应清空长期记忆");
         }
     }
@@ -486,7 +486,7 @@ class MemoryManagerTest {
             memoryManager.addToolResult("search_code", "{\"query\":\"CodeRetriever search\"}", result);
 
             String section = memoryManager.buildWorkingMemorySection();
-            assertEquals(1, memoryManager.getWorkingMemory().getRagEvidenceMemory().size());
+            assertEquals(1, memoryManager.getSessionMemory().getRagEvidenceMemory().size());
             assertTrue(section.contains("RAG 证据记忆"));
             assertTrue(section.contains("symbolVersion=sv_test123"));
             assertTrue(section.contains("indexEpoch=idx-1"));
@@ -527,7 +527,7 @@ class MemoryManagerTest {
             memoryManager.addToolResult("search_code", "{\"query\":\"ignored legacy query\"}", result);
 
             String section = memoryManager.buildWorkingMemorySection();
-            assertEquals(1, memoryManager.getWorkingMemory().getRagEvidenceMemory().size());
+            assertEquals(1, memoryManager.getSessionMemory().getRagEvidenceMemory().size());
             assertTrue(section.contains("symbolVersion=sv_new"));
             assertTrue(section.contains("indexEpoch=idx_new"));
             assertTrue(section.contains("query=CodeRetriever search"));
@@ -943,10 +943,10 @@ class MemoryManagerTest {
             pool.shutdown();
             assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS));
 
-            assertEquals(WorkingMemory.DEFAULT_MAX_TOOL_RESULTS,
-                    memoryManager.getWorkingMemory().getRecentToolResults().size());
-            assertEquals(WorkingMemory.DEFAULT_MAX_VOLATILE_FACTS,
-                    memoryManager.getWorkingMemory().getVolatileFacts().size());
+            assertEquals(SessionMemory.DEFAULT_MAX_TOOL_RESULTS,
+                    memoryManager.getSessionMemory().getRecentToolResults().size());
+            assertEquals(SessionMemory.DEFAULT_MAX_VOLATILE_FACTS,
+                    memoryManager.getSessionMemory().getVolatileFacts().size());
             assertFalse(memoryManager.buildWorkingMemorySection().isBlank());
         }
     }

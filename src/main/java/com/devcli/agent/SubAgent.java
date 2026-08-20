@@ -127,9 +127,9 @@ public class SubAgent {
     private final ToolRegistry toolRegistry;
     private final List<LlmClient.Message> conversationHistory;
     private Supplier<String> externalContextSupplier = () -> "";
-    private Supplier<String> stickyMemorySupplier = () -> "";
+    private Supplier<String> ruleContextSupplier = () -> "";
     private Supplier<String> memoryContextSupplier = () -> "";
-    private Supplier<String> workingMemorySupplier = () -> "";
+    private Supplier<String> sessionMemorySupplier = () -> "";
     private Supplier<String> postCompactRestoreSupplier = () -> "";
     private TriConsumer<String, String, String> toolResultConsumer = (name, args, result) -> {};
     private Consumer<ToolExecutionResult> structuredToolResultConsumer = result -> {};
@@ -171,18 +171,26 @@ public class SubAgent {
      * SubAgent 在 setStickyMemorySupplier 后不立即重建 system prompt——下次调 LLM 时
      * 由 getSystemPrompt 拿到最新 sticky 内容。
      */
-    public void setStickyMemorySupplier(Supplier<String> stickyMemorySupplier) {
-        this.stickyMemorySupplier = stickyMemorySupplier == null ? () -> "" : stickyMemorySupplier;
+    public void setRuleContextSupplier(Supplier<String> ruleContextSupplier) {
+        this.ruleContextSupplier = ruleContextSupplier == null ? () -> "" : ruleContextSupplier;
         refreshSystemPrompt();
     }
+
+    /** @deprecated 使用 {@link #setRuleContextSupplier(Supplier)}。 */
+    @Deprecated
+    public void setStickyMemorySupplier(Supplier<String> supplier) { setRuleContextSupplier(supplier); }
 
     public void setMemoryContextSupplier(Supplier<String> memoryContextSupplier) {
         this.memoryContextSupplier = memoryContextSupplier == null ? () -> "" : memoryContextSupplier;
     }
 
-    public void setWorkingMemorySupplier(Supplier<String> workingMemorySupplier) {
-        this.workingMemorySupplier = workingMemorySupplier == null ? () -> "" : workingMemorySupplier;
+    public void setSessionMemorySupplier(Supplier<String> sessionMemorySupplier) {
+        this.sessionMemorySupplier = sessionMemorySupplier == null ? () -> "" : sessionMemorySupplier;
     }
+
+    /** @deprecated 使用 {@link #setSessionMemorySupplier(Supplier)}。 */
+    @Deprecated
+    public void setWorkingMemorySupplier(Supplier<String> supplier) { setSessionMemorySupplier(supplier); }
 
     public void setPostCompactRestoreSupplier(Supplier<String> postCompactRestoreSupplier) {
         this.postCompactRestoreSupplier = postCompactRestoreSupplier == null ? () -> "" : postCompactRestoreSupplier;
@@ -221,7 +229,7 @@ public class SubAgent {
     private String getSystemPrompt(PromptMode mode) {
         return promptAssembler.assemble(mode, PromptContext.builder()
                 .externalContext(buildExternalContext())
-                .stickyMemory(buildStickyMemory())
+                .ruleContext(buildRuleContext())
                 .build());
     }
 
@@ -232,7 +240,7 @@ public class SubAgent {
     private String buildTurnContext() {
         return promptAssembler.assembleTurnContext(PromptContext.builder()
                 .memoryContext(buildMemoryContext())
-                .workingMemory(buildWorkingMemory())
+                .sessionMemory(buildSessionMemory())
                 .skillIndex(buildSkillIndex())
                 .build());
     }
@@ -247,9 +255,9 @@ public class SubAgent {
         }
     }
 
-    private String buildWorkingMemory() {
+    private String buildSessionMemory() {
         try {
-            String memory = workingMemorySupplier.get();
+            String memory = sessionMemorySupplier.get();
             String normalized = memory == null ? "" : memory.trim();
             if (recoveryContext.isBlank()) {
                 return normalized;
@@ -257,7 +265,7 @@ public class SubAgent {
             String recovered = "## 子代理恢复状态\n" + recoveryContext;
             return normalized.isBlank() ? recovered : normalized + "\n\n" + recovered;
         } catch (Exception e) {
-            log.warn("Failed to render working memory in SubAgent {}", name, e);
+            log.warn("Failed to render session memory in SubAgent {}", name, e);
             return "";
         }
     }
@@ -281,18 +289,18 @@ public class SubAgent {
         return new CompactBoundaryRuntimeState(
                 skillContextBuffer == null ? List.of() : skillContextBuffer.activeSkillNames(),
                 CompactBoundaryRuntimeState.mergeRagEpochSnapshots(
-                        extractRagEpochSnapshot(buildWorkingMemory()),
+                        extractRagEpochSnapshot(buildSessionMemory()),
                         toolRegistry.currentRagIndexEpochSnapshot()),
                 toolRegistry.mcpToolSnapshot(),
                 false);
     }
 
-    private static String extractRagEpochSnapshot(String workingMemory) {
-        if (workingMemory == null || workingMemory.isBlank()) {
+    private static String extractRagEpochSnapshot(String sessionMemory) {
+        if (sessionMemory == null || sessionMemory.isBlank()) {
             return "none";
         }
         LinkedHashSet<String> epochs = new LinkedHashSet<>();
-        for (String line : workingMemory.split("\\R")) {
+        for (String line : sessionMemory.split("\\R")) {
             int idx = line.indexOf("indexEpoch=");
             if (idx < 0) {
                 continue;
@@ -307,12 +315,12 @@ public class SubAgent {
         return epochs.isEmpty() ? "none" : String.join(", ", epochs);
     }
 
-    private String buildStickyMemory() {
+    private String buildRuleContext() {
         try {
-            String sticky = stickyMemorySupplier.get();
-            return sticky == null ? "" : sticky.trim();
+            String rules = ruleContextSupplier.get();
+            return rules == null ? "" : rules.trim();
         } catch (Exception e) {
-            log.warn("Failed to render sticky memory in SubAgent {}", name, e);
+            log.warn("Failed to render rule context in SubAgent {}", name, e);
             return "";
         }
     }

@@ -75,7 +75,7 @@ public class AgentOrchestrator {
     private final PrintStream out;
     private String currentUserTask = "";
     private Supplier<String> externalContextSupplier = () -> "";
-    private Supplier<String> stickyMemorySupplier = () -> "";
+    private Supplier<String> ruleContextSupplier = () -> "";
     private com.devcli.skill.SkillRegistry skillRegistry;
     private com.devcli.skill.SkillContextBuffer skillContextBuffer;
     private final TraceRecorder traceRecorder = new TraceRecorder();
@@ -436,12 +436,16 @@ public class AgentOrchestrator {
      * 注入 Sticky Memory（PR-B）：把 supplier 同时下发到 planner / workers / reviewer，
      * 让团队三角色都看到统一的稳定事实层。
      */
-    public void setStickyMemorySupplier(Supplier<String> stickyMemorySupplier) {
-        this.stickyMemorySupplier = stickyMemorySupplier == null ? () -> "" : stickyMemorySupplier;
-        planner.setStickyMemorySupplier(this.stickyMemorySupplier);
-        workers.forEach(worker -> worker.setStickyMemorySupplier(this.stickyMemorySupplier));
-        reviewer.setStickyMemorySupplier(this.stickyMemorySupplier);
+    public void setRuleContextSupplier(Supplier<String> ruleContextSupplier) {
+        this.ruleContextSupplier = ruleContextSupplier == null ? () -> "" : ruleContextSupplier;
+        planner.setRuleContextSupplier(this.ruleContextSupplier);
+        workers.forEach(worker -> worker.setRuleContextSupplier(this.ruleContextSupplier));
+        reviewer.setRuleContextSupplier(this.ruleContextSupplier);
     }
+
+    /** @deprecated 使用 {@link #setRuleContextSupplier(Supplier)}。 */
+    @Deprecated
+    public void setStickyMemorySupplier(Supplier<String> supplier) { setRuleContextSupplier(supplier); }
 
     /**
      * 把 Skill 系统下发给所有 SubAgent。Multi-Agent 三个角色共享同一 SkillRegistry（索引一致），
@@ -468,11 +472,11 @@ public class AgentOrchestrator {
 
     private void configureSubAgent(SubAgent agent) {
         agent.setExternalContextSupplier(externalContextSupplier);
-        agent.setStickyMemorySupplier(stickyMemorySupplier);
+        agent.setRuleContextSupplier(ruleContextSupplier);
         agent.setMemoryContextSupplier(() -> memoryManager.buildContextForQuery(
                 "multi-agent " + agent.getRole().name().toLowerCase(Locale.ROOT),
                 memoryManager.getContextProfile().memoryContextTokens()));
-        agent.setWorkingMemorySupplier(() -> memoryManager.buildWorkingMemorySectionForAgent(
+        agent.setSessionMemorySupplier(() -> memoryManager.buildSessionMemorySectionForAgent(
                 agent.getRole().name().toLowerCase(Locale.ROOT)));
         agent.setPostCompactRestoreSupplier(() -> memoryManager.buildPostCompactRestoreSectionForAgent(
                 agent.getRole().name().toLowerCase(Locale.ROOT)));
@@ -838,7 +842,7 @@ public class AgentOrchestrator {
                 }
             }
         }
-        restoreCheckpointArtifactsIntoWorkingMemory(recovery);
+        restoreCheckpointArtifactsIntoSessionMemory(recovery);
 
         out.println(AnsiStyle.heading("🔁 恢复执行 checkpoint [" + loaded.getOrchestrationId() + "]"
                 + "（已完成 " + completedCount + "/" + steps.size() + " 步）"));
@@ -870,7 +874,7 @@ public class AgentOrchestrator {
         return steps;
     }
 
-    private void restoreCheckpointArtifactsIntoWorkingMemory(AgentCheckpoint.RecoveryState recovery) {
+    private void restoreCheckpointArtifactsIntoSessionMemory(AgentCheckpoint.RecoveryState recovery) {
         for (Map.Entry<String, ExecutionArtifact> entry : recovery.artifacts().entrySet()) {
             String source = entry.getValue().successful()
                     ? "checkpoint 已完成步骤"

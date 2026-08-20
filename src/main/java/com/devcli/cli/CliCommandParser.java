@@ -22,6 +22,7 @@ final class CliCommandParser {
         MEMORY_FORGET,
         MEMORY_SAVE,
         MEMORY_PIN,
+        RULE_ADD,
         INDEX_CODE,
         SEARCH_CODE,
         GRAPH_QUERY,
@@ -192,6 +193,13 @@ final class CliCommandParser {
 
         if (trimmed.regionMatches(true, 0, "/save ", 0, 6)) {
             return new ParsedCommand(CommandType.MEMORY_SAVE, trimmed.substring(6).trim());
+        }
+
+        if (trimmed.equalsIgnoreCase("/rule add")) {
+            return new ParsedCommand(CommandType.RULE_ADD, null);
+        }
+        if (trimmed.regionMatches(true, 0, "/rule add ", 0, 10)) {
+            return new ParsedCommand(CommandType.RULE_ADD, trimmed.substring(10).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/index")) {

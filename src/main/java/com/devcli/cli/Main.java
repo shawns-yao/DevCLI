@@ -52,7 +52,7 @@ import com.devcli.snapshot.SnapshotService;
 import com.devcli.snapshot.TurnSnapshot;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.skill.SkillContextBuffer;
-import com.devcli.memory.StickyMemory;
+import com.devcli.memory.RuleContext;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.util.AnsiStyle;
 import org.jline.terminal.Terminal;
@@ -334,14 +334,12 @@ public class Main {
                             + "\n   规则: " + fact.reasonCode()
                             + " | 删除: /memory forget " + fact.id()));
 
-            // === Sticky Memory 初始化（PR-B）===
-            // 三层文件式记忆 + pinned facts JSON。
-            // 启动时加载文件层；运行时变化（/save --pin 等）写 pinned_facts.json。
-            // 注入给 reactAgent / planAgent / orchestrator 三条主路径，让 system prompt 都能看到。
-            com.devcli.memory.StickyMemory stickyMemory = new com.devcli.memory.StickyMemory(
+            // === Rule Context 初始化 ===
+            // 规则文件和显式强约束每轮注入，但不计入记忆层。
+            com.devcli.memory.RuleContext ruleContext = new com.devcli.memory.RuleContext(
                     com.devcli.memory.LongTermMemory.resolveMemoryDir());
-            stickyMemory.reloadFiles(java.nio.file.Path.of(".").toAbsolutePath().normalize());
-            reactAgent.setStickyMemorySupplier(stickyMemory::renderForPrompt);
+            ruleContext.reloadFiles(java.nio.file.Path.of(".").toAbsolutePath().normalize());
+            reactAgent.setRuleContextSupplier(ruleContext::renderForPrompt);
 
             // === Retrievable 区语义检索初始化（PR-C）===
             // 用同一个 EmbeddingClient（启动期不强制连 Ollama）+ 独立 SQLite vector store。
@@ -485,7 +483,7 @@ public class Main {
                     case MEMORY_STATUS -> {
                         ui.println("📋 记忆系统状态：");
                         ui.println(reactAgent.getMemoryManager().getSystemStatus());
-                        ui.println(stickyMemory.getStatusSummary());
+                        ui.println(ruleContext.getStatusSummary());
                         ui.println("   /memory organize - 生成长期记忆整理计划");
                         ui.println("   /memory organize apply - 应用低风险整理项");
                         ui.println("   /memory clear - 清空长期记忆");
@@ -562,15 +560,19 @@ public class Main {
                         }
                         continue;
                     }
-                    case MEMORY_PIN -> {
-                        String fact = command.payload();
-                        if (fact == null || fact.isEmpty()) {
-                            ui.println("❌ 请提供要 pin 的事实，例如 /save --pin 用户偏好简体中文\n");
+                    case RULE_ADD -> {
+                        String rule = command.payload();
+                        if (rule == null || rule.isEmpty()) {
+                            ui.println("❌ 请提供强约束，例如 /rule add 禁止修改生成目录\n");
                         } else {
-                            com.devcli.memory.StickyMemory.PinnedFact pinned = stickyMemory.pin(fact, "user-cli");
-                            ui.println("📌 已 pin 到 Sticky 区: " + pinned.content);
-                            ui.println("   (id=" + pinned.id + " · 永久注入 system prompt，跨 session 保留)\n");
+                            com.devcli.memory.RuleContext.Rule added = ruleContext.addRule(rule, "user-cli");
+                            ui.println("已添加强约束: " + added.content);
+                            ui.println("   (id=" + added.id + " · 规则上下文每轮生效)\n");
                         }
+                        continue;
+                    }
+                    case MEMORY_PIN -> {
+                        ui.println("/save --pin 已废弃：稳定事实请用 /save，强约束请用 /rule add\n");
                         continue;
                     }
                     case ORCHESTRATE -> {
@@ -876,7 +878,7 @@ public class Main {
                             lineReader,
                             ui,
                             mcpServerManager,
-                            stickyMemory,
+                            ruleContext,
                             skillRegistry,
                             skillContextBuffer,
                             taskInput);
@@ -1026,14 +1028,14 @@ public class Main {
                                               LineReader lineReader,
                                               PrintStream out,
                                               McpServerManager mcpServerManager,
-                                              StickyMemory stickyMemory,
+                                              RuleContext ruleContext,
                                               SkillRegistry skillRegistry,
                                               SkillContextBuffer skillContextBuffer,
                                               String taskInput) {
         AgentOrchestrator orchestrator = createUnifiedPlanAgent(
                 llmClient, reactAgent, lineReader, out);
         orchestrator.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
-        orchestrator.setStickyMemorySupplier(stickyMemory::renderForPrompt);
+        orchestrator.setRuleContextSupplier(ruleContext::renderForPrompt);
         orchestrator.setSkillSystem(skillRegistry, skillContextBuffer);
         String resumeId = parsePlanResumeId(taskInput);
         return resumeId == null
@@ -1668,6 +1670,7 @@ public class Main {
                 new SlashCommandHint("/memory clear", "/memory clear", "清空长期记忆"),
                 new SlashCommandHint("/memory forget", "/memory forget <id>", "删除单条长期记忆"),
                 new SlashCommandHint("/save ", "/save <事实内容>", "手动保存关键事实到长期记忆"),
+                new SlashCommandHint("/rule add ", "/rule add <强约束>", "添加每轮强制执行的规则"),
                 new SlashCommandHint("/skill", "/skill", "查看 skill 列表"),
                 new SlashCommandHint("/skill list", "/skill list", "查看 skill 列表"),
                 new SlashCommandHint("/skill show ", "/skill show <name>", "查看 SKILL.md 全文"),

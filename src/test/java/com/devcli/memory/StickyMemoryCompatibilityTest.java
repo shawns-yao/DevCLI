@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.*;
  *   <li>软上限超过时不阻断，状态摘要明确提示超限</li>
  * </ol>
  */
-class StickyMemoryTest {
+class StickyMemoryCompatibilityTest {
 
     @TempDir
     Path tempDir;

@@ -228,6 +228,14 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesRuleAddCommand() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/rule add 禁止修改生成目录");
+
+        assertEquals(CliCommandParser.CommandType.RULE_ADD, command.type());
+        assertEquals("禁止修改生成目录", command.payload());
+    }
+
+    @Test
     void plainSaveDoesNotMatchPin() {
         // 防止误判：/save 后跟以 - 起头的内容（但不是 --pin / -p）应仍走 MEMORY_SAVE
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/save -- 这是一个事实");

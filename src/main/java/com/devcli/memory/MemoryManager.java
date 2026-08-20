@@ -24,17 +24,9 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Memory 管理器 —— Memory 系统的门面类。
  *
- * <p>v2 重构（路径 B）：把旧版"短期记忆笔记本"重定位为 {@link WorkingMemory}（工作记忆）。
- *
- * <p>四层职责切片（不重叠）：
- * <ol>
- *   <li><b>Conversation History</b>（不在本类管理）：真实 LLM messages，
- *       {@code Agent.conversationHistory} 维护，{@code ConversationHistoryCompactor} 压缩</li>
- *   <li><b>Working Memory</b>（本类持有）：当前会话工作状态（最近工具证据 / 任务状态 / 临时事实），
- *       作为 system prompt <b>派生视图</b>注入，不进 messages。仅当前会话有效</li>
- *   <li><b>Long-Term Memory</b>（本类持有）：跨会话持久化事实，按 query 检索 top-k 注入</li>
- *   <li><b>Sticky Memory</b>（{@code StickyMemory} 单独管理）：跨会话持久化强约束，每轮全量注入</li>
- * </ol>
+ * <p>记忆只分两层：{@link SessionMemory} 保存当前任务的工作状态与工具证据，
+ * {@link LongTermMemory} 保存跨会话稳定事实。Conversation History / Summary 属于上下文治理，
+ * RuleContext 属于规则系统，不计入记忆层。
  *
  * <p>历史包袱已清理：
  * <ul>
@@ -49,14 +41,15 @@ public class MemoryManager implements AutoCloseable {
     private static final int SESSION_PRE_SUMMARY_TOKEN_DELTA = 2_000;
     private static final int SESSION_PRE_SUMMARY_TOOL_CALLS = 4;
     private static final int SESSION_PRE_SUMMARY_LARGE_TOOL_CHARS = 12_000;
-    private final WorkingMemory workingMemory;
     private final SessionMemory sessionMemory;
+    private final CompactionSummaryCache compactionSummaryCache;
     private final LongTermMemory longTermMemory;
     private final MemoryRetriever retriever;
     private final ExecutorService sessionPreSummaryExecutor;
     private final AtomicLong preSummaryFullCount = new AtomicLong();
     private final AtomicLong preSummaryIncrementalCount = new AtomicLong();
     private final AtomicLong preSummaryFailureCount = new AtomicLong();
+    private final AtomicLong sessionEventSequence = new AtomicLong();
     private volatile SessionPreSummaryMetrics lastPreSummaryMetrics = SessionPreSummaryMetrics.empty();
     // Bug #12 修复：使用 ConcurrentHashMap 支持 Multi-Agent 并发调用
     private final Map<String, Integer> memoryCandidateOccurrences = new java.util.concurrent.ConcurrentHashMap<>();
@@ -74,7 +67,7 @@ public class MemoryManager implements AutoCloseable {
 
     /**
      * @param llmClient      LLM 客户端（v2 不再需要——压缩走 ConversationHistoryCompactor，留参数兼容旧测试）
-     * @param shortTermBudget 历史参数名，v2 已迁移到 WorkingMemory，仅用于设置 ContextProfile.shortTermMemoryBudget
+     * @param shortTermBudget 会话记忆 Prompt 预算
      * @param contextWindow  模型上下文窗口大小
      */
     public MemoryManager(LlmClient llmClient, int shortTermBudget, int contextWindow) {
@@ -88,8 +81,8 @@ public class MemoryManager implements AutoCloseable {
     private MemoryManager(LlmClient llmClient, ContextProfile contextProfile, LongTermMemory longTermMemory) {
         this.llmClient = llmClient;
         this.contextProfile = contextProfile;
-        this.workingMemory = new WorkingMemory();
         this.sessionMemory = new SessionMemory();
+        this.compactionSummaryCache = new CompactionSummaryCache();
         this.longTermMemory = longTermMemory != null ? longTermMemory : new LongTermMemory();
         this.retriever = new MemoryRetriever(this.longTermMemory);
         this.tokenBudget = new TokenBudget(contextProfile.maxContextWindow());
@@ -111,7 +104,7 @@ public class MemoryManager implements AutoCloseable {
     }
 
     // ─────────────────────────────────────────────────────────
-    // 写入 WorkingMemory（不进 LLM messages，作为 system prompt 派生视图）
+    // 写入 SessionMemory（不进 LLM messages，作为 system prompt 派生视图）
     // ─────────────────────────────────────────────────────────
 
     /**
@@ -125,7 +118,9 @@ public class MemoryManager implements AutoCloseable {
         }
         // 取首 60 字符做 fact，避免 prompt 膨胀
         String preview = content.length() > 60 ? content.substring(0, 60) + "..." : content;
-        workingMemory.addVolatileFact("用户最新输入: " + preview);
+        sessionMemory.accept(new SessionMemory.KeyEvent(
+                "用户最新输入: " + preview, 90, "user", "",
+                sessionEventSequence.incrementAndGet()));
         maybePersistUserFact(content);
     }
 
@@ -134,11 +129,11 @@ public class MemoryManager implements AutoCloseable {
      * 保留方法签名是为了兼容 Agent / SubAgent 的调用约定。
      */
     public void addAssistantMessage(String content) {
-        // no-op：assistant 内容已在 conversationHistory 里，重复存到 working memory 没有用
+        // no-op：assistant 内容已在 conversationHistory 里，重复存到会话记忆没有用
     }
 
     /**
-     * 添加工具执行结果到 WorkingMemory.recentToolResults。
+     * 添加工具执行结果到 SessionMemory EvidenceJournal。
      * 注意：完整 result 不再截断到 500 字符；摘要不会保留的精确实体（路径/数字/错误码）
      * 在这里以原文形式保留，作为 system prompt "## 最近工具调用证据" 段注入 LLM。
      */
@@ -156,7 +151,9 @@ public class MemoryManager implements AutoCloseable {
     public void addToolResult(String toolName, String argsJson, String result,
                               List<ToolSideChannel> sideChannels) {
         if (toolName == null || result == null) return;
-        workingMemory.recordToolResult(toolName, argsJson, result, sideChannels, currentEvidenceScope());
+        sessionMemory.accept(new SessionMemory.ToolResultObserved(
+                toolName, argsJson, result, sideChannels, currentAgentId(), currentEvidenceScope(),
+                sessionEventSequence.incrementAndGet()));
         recordCurrentStateInvalidations(toolName, argsJson, result);
     }
 
@@ -210,7 +207,9 @@ public class MemoryManager implements AutoCloseable {
                     evidence
             );
             if (longTermMemory.storeObservationInvalidation(entry, conflictIds)) {
-                workingMemory.addVolatileFact(negativeFact);
+                sessionMemory.accept(new SessionMemory.KeyEvent(
+                        negativeFact, 100, "system", currentEvidenceScope(),
+                        sessionEventSequence.incrementAndGet()));
                 currentStateConflictNotices.get().add(negativeFact);
                 notifyAutoSaved(entry, metadata);
             }
@@ -252,6 +251,10 @@ public class MemoryManager implements AutoCloseable {
         return scope == null ? "" : scope;
     }
 
+    private String currentAgentId() {
+        return currentEvidenceScope().isBlank() ? "react" : "worker";
+    }
+
     /**
      * 在给定证据出处范围内执行。范围只影响本线程，嵌套调用结束后恢复外层范围。
      */
@@ -271,36 +274,48 @@ public class MemoryManager implements AutoCloseable {
 
     /** 设置任务状态（plan_task / react_iteration / last_error 等）。 */
     public void setTaskState(String key, String value) {
-        workingMemory.setTaskState(key, value);
+        sessionMemory.accept(new SessionMemory.StateChanged(
+                key, value, currentAgentId(), currentEvidenceScope(),
+                sessionEventSequence.incrementAndGet()));
     }
 
     // ─────────────────────────────────────────────────────────
-    // TaskLedger（计划执行进度投影，注入 working memory 段）
+    // TaskLedger（计划执行进度投影，注入 SessionMemory）
     // ─────────────────────────────────────────────────────────
 
     /** 设置当前计划及全部步骤（PlanExecuteAgent 在计划创建后调用，覆盖旧账本）。 */
     public void setTaskLedgerPlan(String planId, String goal, Map<String, String> stepIdToDesc) {
-        workingMemory.taskLedger().setPlan(planId, goal, stepIdToDesc);
+        sessionMemory.accept(new SessionMemory.PlanChanged(
+                planId, goal, stepIdToDesc, "planner", "",
+                sessionEventSequence.incrementAndGet()));
     }
 
     /** 标记步骤开始执行。 */
     public void startTaskStep(String stepId) {
-        workingMemory.taskLedger().startStep(stepId);
+        sessionMemory.accept(new SessionMemory.StepChanged(
+                stepId, TaskLedger.StepStatus.RUNNING, "", "worker",
+                sessionEventSequence.incrementAndGet()));
     }
 
     /** 标记步骤完成。 */
     public void completeTaskStep(String stepId) {
-        workingMemory.taskLedger().completeStep(stepId);
+        sessionMemory.accept(new SessionMemory.StepChanged(
+                stepId, TaskLedger.StepStatus.DONE, "", "worker",
+                sessionEventSequence.incrementAndGet()));
     }
 
     /** 标记步骤失败并记录错误。 */
     public void failTaskStep(String stepId, String error) {
-        workingMemory.taskLedger().failStep(stepId, error);
+        sessionMemory.accept(new SessionMemory.StepChanged(
+                stepId, TaskLedger.StepStatus.FAILED, error, "worker",
+                sessionEventSequence.incrementAndGet()));
     }
 
     /** 添加一条本会话临时事实。 */
     public void addVolatileFact(String fact) {
-        workingMemory.addVolatileFact(fact);
+        sessionMemory.accept(new SessionMemory.KeyEvent(
+                fact, 0, currentAgentId(), currentEvidenceScope(),
+                sessionEventSequence.incrementAndGet()));
     }
 
     // ─────────────────────────────────────────────────────────
@@ -566,7 +581,7 @@ public class MemoryManager implements AutoCloseable {
     // ─────────────────────────────────────────────────────────
 
     /**
-     * 检索与 query 最相关的长期记忆。短期记忆走 {@link WorkingMemory#renderForPrompt()}
+     * 检索与 query 最相关的长期记忆。短期记忆走 {@link SessionMemory#render(SessionMemory.SessionView, int)}
      * 直接注入，不参与 query-based 检索。
      */
     public List<MemoryEntry> retrieveRelevant(String query, int limit) {
@@ -590,7 +605,7 @@ public class MemoryManager implements AutoCloseable {
             return "";
         }
         int safeBudget = Math.max(64, maxTokens);
-        List<String> volatileFacts = workingMemory.getVolatileFacts();
+        List<String> volatileFacts = sessionMemory.getVolatileFacts();
         String inventory = MemoryIntentClassifier.classify(query) == MemoryIntentClassifier.Intent.INVENTORY
                 ? buildLongTermMemoryInventorySnapshot(5, Math.min(256, safeBudget), volatileFacts)
                 : "";
@@ -650,30 +665,35 @@ public class MemoryManager implements AutoCloseable {
     }
 
     /**
-     * 渲染 working memory 派生视图为 system prompt 段落。
+     * 渲染 SessionMemory 派生视图为 system prompt 段落。
      * Agent / PlanExecuteAgent / SubAgent 通过这条路径把工作记忆注入给 LLM。
      */
-    public String buildWorkingMemorySection() {
+    public String buildSessionMemorySection() {
         if (memoryIgnored) {
             return "";
         }
-        return workingMemory.renderForPrompt();
+        return sessionMemory.render(SessionMemory.SessionView.FULL,
+                contextProfile.shortTermMemoryBudget());
     }
+
+    /** @deprecated 使用 {@link #buildSessionMemorySection()}。 */
+    @Deprecated
+    public String buildWorkingMemorySection() { return buildSessionMemorySection(); }
 
     /**
      * 压缩成功后恢复给 messages 的结构化短上下文。
      */
     public String buildPostCompactRestoreSection() {
-        return workingMemory.renderForPostCompactRestore();
+        return sessionMemory.renderForPostCompactRestore();
     }
 
     public String buildPostCompactRestoreSectionForAgent(String agentType) {
-        return workingMemory.renderForPostCompactRestore(viewForAgent(agentType));
+        return sessionMemory.renderForPostCompactRestore(viewForAgent(agentType));
     }
 
     public String currentRagEpochSnapshot() {
         LinkedHashSet<String> epochs = new LinkedHashSet<>();
-        for (WorkingMemory.RagEvidence evidence : workingMemory.getRagEvidenceMemory()) {
+        for (SessionMemory.RagEvidence evidence : sessionMemory.getRagEvidenceMemory()) {
             String epoch = evidence.indexEpoch();
             if (epoch != null && !epoch.isBlank()) {
                 epochs.add(epoch);
@@ -700,12 +720,12 @@ public class MemoryManager implements AutoCloseable {
             return SessionPreSummaryMaintenanceResult.SKIPPED_EMPTY_HISTORY;
         }
         List<LlmClient.Message> coveredMessages = new ArrayList<>(history.subList(systemEnd, history.size()));
-        if (sessionMemory.findReusablePreSummary(coveredMessages).isPresent()) {
+        if (compactionSummaryCache.findReusablePreSummary(coveredMessages).isPresent()) {
             return SessionPreSummaryMaintenanceResult.SKIPPED_ALREADY_CURRENT;
         }
         int tokenEstimate = TokenBudget.estimateMessagesTokens(coveredMessages);
-        int previousTokenEstimate = sessionMemory.currentPreSummary()
-                .map(SessionMemory.PreSummary::tokenEstimate)
+        int previousTokenEstimate = compactionSummaryCache.currentPreSummary()
+                .map(CompactionSummaryCache.PreSummary::tokenEstimate)
                 .orElse(0);
         int tokenDelta = tokenEstimate - previousTokenEstimate;
         boolean triggered = tokenDelta >= SESSION_PRE_SUMMARY_TOKEN_DELTA
@@ -715,13 +735,13 @@ public class MemoryManager implements AutoCloseable {
             return SessionPreSummaryMaintenanceResult.SKIPPED_BELOW_THRESHOLD;
         }
         try {
-            Optional<SessionMemory.PreSummary> incrementalBase =
-                    sessionMemory.findExtendablePreSummary(coveredMessages);
+            Optional<CompactionSummaryCache.PreSummary> incrementalBase =
+                    compactionSummaryCache.findExtendablePreSummary(coveredMessages);
             List<LlmClient.Message> summaryRequest;
             String maintenanceMode;
             int deltaMessageCount;
             if (incrementalBase.isPresent()) {
-                SessionMemory.PreSummary base = incrementalBase.get();
+                CompactionSummaryCache.PreSummary base = incrementalBase.get();
                 List<LlmClient.Message> deltaMessages =
                         coveredMessages.subList(base.messageCount(), coveredMessages.size());
                 maintenanceMode = "incremental";
@@ -746,7 +766,7 @@ public class MemoryManager implements AutoCloseable {
                 preSummaryFailureCount.incrementAndGet();
                 return SessionPreSummaryMaintenanceResult.FAILED;
             }
-            sessionMemory.recordPreSummary(coveredMessages, summary);
+            compactionSummaryCache.recordPreSummary(coveredMessages, summary);
             if ("incremental".equals(maintenanceMode)) {
                 preSummaryIncrementalCount.incrementAndGet();
             } else {
@@ -811,32 +831,38 @@ public class MemoryManager implements AutoCloseable {
      * Worker 需要完整执行上下文；
      * Reviewer 聚焦任务状态和工具证据，避免把会话事件当成验收证据。
      */
-    public String buildWorkingMemorySectionForAgent(String agentType) {
+    public String buildSessionMemorySectionForAgent(String agentType) {
         if (memoryIgnored) {
             return "";
         }
-        return workingMemory.renderForPrompt(viewForAgent(agentType));
+        return sessionMemory.render(viewForAgent(agentType), contextProfile.shortTermMemoryBudget());
+    }
+
+    /** @deprecated 使用 {@link #buildSessionMemorySectionForAgent(String)}。 */
+    @Deprecated
+    public String buildWorkingMemorySectionForAgent(String agentType) {
+        return buildSessionMemorySectionForAgent(agentType);
     }
 
     private static boolean hasIgnoreMemoryIntent(String content) {
         return MemoryIntentClassifier.classify(content) == MemoryIntentClassifier.Intent.IGNORE;
     }
 
-    private static WorkingMemory.View viewForAgent(String agentType) {
+    private static SessionMemory.SessionView viewForAgent(String agentType) {
         if (agentType == null || agentType.isBlank()) {
-            return WorkingMemory.View.FULL;
+            return SessionMemory.SessionView.FULL;
         }
         String normalized = agentType.toLowerCase(java.util.Locale.ROOT);
         if (normalized.contains("planner")) {
-            return WorkingMemory.View.PLANNER;
+            return SessionMemory.SessionView.PLANNER;
         }
         if (normalized.contains("reviewer")) {
-            return WorkingMemory.View.REVIEWER;
+            return SessionMemory.SessionView.REVIEWER;
         }
         if (normalized.contains("worker")) {
-            return WorkingMemory.View.WORKER;
+            return SessionMemory.SessionView.WORKER;
         }
-        return WorkingMemory.View.FULL;
+        return SessionMemory.SessionView.FULL;
     }
 
     // ─────────────────────────────────────────────────────────
@@ -857,8 +883,9 @@ public class MemoryManager implements AutoCloseable {
 
     /** 清空工作记忆（用于 /clear 命令；长期记忆保持不变）。 */
     public void clearShortTerm() {
-        workingMemory.clear();
-        sessionMemory.clearPreSummary();
+        sessionMemory.clear();
+        compactionSummaryCache.clearPreSummary();
+        sessionEventSequence.set(0);
     }
 
     /** 清空长期记忆（用于 /memory clear 命令）。 */
@@ -872,7 +899,7 @@ public class MemoryManager implements AutoCloseable {
     public String getSystemStatus() {
         SessionPreSummaryMetrics metrics = lastPreSummaryMetrics;
         return "上下文策略: " + contextProfile.summary() + "\n" +
-                workingMemory.getStatusSummary() + "\n" +
+                sessionMemory.getStatusSummary() + "\n" +
                 longTermMemory.getStatusSummary() + "\n" +
                 "会话预摘要: mode=" + metrics.mode()
                 + ", covered=" + metrics.coveredMessages()
@@ -888,15 +915,14 @@ public class MemoryManager implements AutoCloseable {
     // Getter
     // ─────────────────────────────────────────────────────────
 
-    public WorkingMemory getWorkingMemory() { return workingMemory; }
     public SessionMemory getSessionMemory() { return sessionMemory; }
+    public CompactionSummaryCache getCompactionSummaryCache() { return compactionSummaryCache; }
 
     /**
-     * @deprecated v2 重构后短期记忆已升级为 {@link WorkingMemory}；保留旧方法名兼容老测试。
-     *             调用方应迁移到 {@link #getWorkingMemory()}。
+     * @deprecated 使用 {@link #getSessionMemory()}。
      */
     @Deprecated
-    public WorkingMemory getShortTermMemory() { return workingMemory; }
+    public SessionMemory getShortTermMemory() { return sessionMemory; }
 
     public LongTermMemory getLongTermMemory() { return longTermMemory; }
     public MemoryRetriever getRetriever() { return retriever; }

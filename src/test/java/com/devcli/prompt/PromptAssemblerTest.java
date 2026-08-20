@@ -24,7 +24,7 @@ class PromptAssemblerTest {
                 .memoryContext("## 相关记忆\n用户偏好中文。")
                 .externalContext("## MCP Resources\n- demo://resource")
                 .skillIndex("## 可用 Skills\n- web-access")
-                .workingMemory("## 证据\nWORKING_EVIDENCE")
+                .sessionMemory("## 证据\nWORKING_EVIDENCE")
                 .build());
 
         assertTrue(prompt.contains("## Language"));
@@ -44,7 +44,7 @@ class PromptAssemblerTest {
         String turnContext = assembler.assembleTurnContext(PromptContext.builder()
                 .memoryContext("## 相关记忆\n用户偏好中文。")
                 .skillIndex("## 可用 Skills\n- web-access")
-                .workingMemory("## 证据\nWORKING_EVIDENCE")
+                .sessionMemory("## 证据\nWORKING_EVIDENCE")
                 .build());
 
         assertTrue(turnContext.contains("## Turn Context"));
@@ -106,23 +106,21 @@ class PromptAssemblerTest {
     }
 
     @Test
-    void stickyMemoryGetsInjectedAsDedicatedSection() {
-        // PR-B：StickyMemory.renderForPrompt() 输出应被 PromptAssembler 包成 ## Sticky Memory 段
+    void ruleContextGetsInjectedAsDedicatedSection() {
         PromptAssembler assembler = PromptAssembler.createDefault();
 
         String prompt = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
-                .stickyMemory("### 用户偏好\n- 用简体中文\n- 不引入 SymbolSolver")
+                .ruleContext("### 强约束\n- 用简体中文\n- 不引入 SymbolSolver")
                 .externalContext("## MCP Resources\n- demo://resource")
                 .build());
 
-        // 必有 Sticky Memory 段
-        assertTrue(prompt.contains("## Sticky Memory"),
-                "stickyMemory 非空时应被包成 ## Sticky Memory 段");
+        assertTrue(prompt.contains("## Rule Context"),
+                "ruleContext 非空时应被包成 ## Rule Context 段");
         assertTrue(prompt.contains("用简体中文"));
         assertTrue(prompt.contains("不引入 SymbolSolver"));
 
-        // KV cache 顺序：Sticky Memory 应在 Project Context 之前（更稳定的层在前）
-        int stickyIdx = prompt.indexOf("## Sticky Memory");
+        // KV cache 顺序：Rule Context 应在 Project Context 之前（更稳定的层在前）
+        int stickyIdx = prompt.indexOf("## Rule Context");
         int projectIdx = prompt.indexOf("## Project Context");
         assertTrue(stickyIdx > 0 && projectIdx > 0);
         assertTrue(stickyIdx < projectIdx,
@@ -134,12 +132,12 @@ class PromptAssemblerTest {
         PromptAssembler assembler = PromptAssembler.createDefault();
 
         String prompt = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
-                .stickyMemory("")
+                .ruleContext("")
                 .externalContext("## MCP Resources\n- demo://resource")
                 .build());
 
-        assertTrue(!prompt.contains("## Sticky Memory"),
-                "stickyMemory 为空时不应产生空段污染 prompt");
+        assertTrue(!prompt.contains("## Rule Context"),
+                "ruleContext 为空时不应产生空段污染 prompt");
     }
 
     @Test
@@ -151,12 +149,12 @@ class PromptAssemblerTest {
 
         String withA = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
                 .memoryContext("MEMORY_TOKEN_AAA")
-                .workingMemory("WORKING_TOKEN_AAA")
+                .sessionMemory("WORKING_TOKEN_AAA")
                 .skillIndex("SKILL_TOKEN_AAA")
                 .build());
         String withB = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
                 .memoryContext("MEMORY_TOKEN_BBB_totally_different")
-                .workingMemory("WORKING_TOKEN_BBB_totally_different")
+                .sessionMemory("WORKING_TOKEN_BBB_totally_different")
                 .skillIndex("SKILL_TOKEN_BBB_totally_different")
                 .build());
 
@@ -169,15 +167,15 @@ class PromptAssemblerTest {
 
     @Test
     void sessionStableSectionChangeIsAllowedToInvalidatePrefix() {
-        // sticky memory 属会话级稳定层，它真变化时前缀失配是正确且必要的
+        // rule context 属会话级稳定层，它真变化时前缀失配是正确且必要的
         PromptAssembler assembler = PromptAssembler.createDefault();
 
         String withSticky = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
-                .stickyMemory("STICKY_AAA")
+                .ruleContext("RULE_AAA")
                 .build());
         String withoutSticky = assembler.assemble(PromptMode.AGENT, PromptContext.empty());
 
-        assertTrue(withSticky.contains("STICKY_AAA"));
-        assertFalse(withoutSticky.contains("STICKY_AAA"));
+        assertTrue(withSticky.contains("RULE_AAA"));
+        assertFalse(withoutSticky.contains("RULE_AAA"));
     }
 }

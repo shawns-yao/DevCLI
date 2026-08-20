@@ -98,7 +98,7 @@ public class PlanExecuteAgent {
     private final ConversationHistoryCompactor historyCompactor;
     private final PrintStream out;
     private Supplier<String> externalContextSupplier = () -> "";
-    private Supplier<String> stickyMemorySupplier = () -> "";
+    private Supplier<String> ruleContextSupplier = () -> "";
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
@@ -173,9 +173,13 @@ public class PlanExecuteAgent {
     /**
      * 注入 Sticky Memory 渲染源（PR-B）：与 Agent 一致语义，由 Main 启动时接进来。
      */
-    public void setStickyMemorySupplier(Supplier<String> stickyMemorySupplier) {
-        this.stickyMemorySupplier = stickyMemorySupplier == null ? () -> "" : stickyMemorySupplier;
+    public void setRuleContextSupplier(Supplier<String> ruleContextSupplier) {
+        this.ruleContextSupplier = ruleContextSupplier == null ? () -> "" : ruleContextSupplier;
     }
+
+    /** @deprecated 使用 {@link #setRuleContextSupplier(Supplier)}。 */
+    @Deprecated
+    public void setStickyMemorySupplier(Supplier<String> supplier) { setRuleContextSupplier(supplier); }
 
     public void setSkillRegistry(SkillRegistry skillRegistry) {
         this.skillRegistry = skillRegistry;
@@ -682,7 +686,7 @@ public class PlanExecuteAgent {
                 .variable("taskType", task.getType())
                 .variable("taskDescription", task.getDescription())
                 .externalContext(buildExternalContext())
-                .stickyMemory(buildStickyMemory())
+                .ruleContext(buildRuleContext())
                 .build());
     }
 
@@ -690,7 +694,7 @@ public class PlanExecuteAgent {
     private String buildTurnContext(String memoryContext, String activationText) {
         return promptAssembler.assembleTurnContext(PromptContext.builder()
                 .memoryContext(memoryContext)
-                .workingMemory(memoryManager.buildWorkingMemorySection())
+                .sessionMemory(memoryManager.buildSessionMemorySection())
                 .skillIndex(buildSkillIndex(activationText))
                 .build());
     }
@@ -708,12 +712,12 @@ public class PlanExecuteAgent {
         }
     }
 
-    private String buildStickyMemory() {
+    private String buildRuleContext() {
         try {
-            String sticky = stickyMemorySupplier.get();
-            return sticky == null ? "" : sticky.trim();
+            String rules = ruleContextSupplier.get();
+            return rules == null ? "" : rules.trim();
         } catch (Exception e) {
-            log.warn("Failed to render sticky memory for plan task", e);
+            log.warn("Failed to render rule context for plan task", e);
             return "";
         }
     }

@@ -18,7 +18,7 @@ import java.util.Locale;
  *
  * <p>v2 重构（路径 B）：
  * <ul>
- *   <li>不再处理短期记忆——工作记忆走 {@link WorkingMemory#renderForPrompt()} 直接注入，
+ *   <li>不再处理短期记忆——会话记忆走 {@link SessionMemory#render(SessionMemory.SessionView, int)} 直接注入，
  *       不参与 query-based 检索</li>
  *   <li>仅检索 {@link LongTermMemory}，由 {@code MemoryRetriever.retrieveLongTerm} 提供</li>
  *   <li>语义检索（PR-C）+ 关键词分词（PR 之前）合并打分</li>

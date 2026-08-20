@@ -58,7 +58,7 @@ public final class ToolResultSizeManager {
             "read_file",     // 自身就是文件读取，截断等于破坏功能
             "list_dir",      // 短结构化输出
             "revert_turn",    // 状态控制
-            "search_code"    // 尾部含 RAG 证据 JSON，截断会破坏 WorkingMemory 解析
+            "search_code"    // 尾部含 RAG 证据 JSON，截断会破坏 SessionMemory 解析
     );
 
     /** ≤ 此字符数的结果直接原文返回，不做任何处理。 */
