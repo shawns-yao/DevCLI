@@ -33,7 +33,7 @@ ReAct 主循环、Plan 多 Agent 编排、MCP 协议客户端、上下文压缩�
 
 - ReAct 主循环与统一 `/plan` 编排入口；Plan 固定使用 Planner、Worker、Reviewer 协作链路，串行或并行由 DAG 依赖与资源冲突决定。
 - RAG（检索增强生成）：JavaParser 切分、SQLite 向量存储、关键词召回、代码关系图谱、RRF（倒数排名融合）与 CrossEncoderReranker（交叉编码器重排）。
-- 四层记忆（对话历史 / 工作记忆 / 长期记忆 / 强约束记忆）与两层上下文压缩（microcompact 落盘引用 + Map-Reduce 与增量九段摘要），含语义守卫、prompt-too-long 重试与失败熔断。
+- 两层记忆（当前任务 `SessionMemory` / 跨会话 `LongTermMemory`）与两个相邻系统（上下文压缩 / `RuleContext`），含语义守卫、Token 预算证据治理、prompt-too-long 重试与失败熔断。
 - MCP（Model Context Protocol）：手写 JSON-RPC 2.0 客户端，支持 stdio 与 Streamable HTTP，动态注册工具与 resources。
 - Skill：jar 内置、用户级与项目级三层加载，`load_skill` 按需展开，allowedTools 白名单约束后续工具调用。
 - 安全模型：HITL（人工审批）、路径围栏、命令快速拒绝与 JSONL 审计链。
@@ -101,7 +101,7 @@ Main
 
 各路径共享：
 ├── ToolRegistry           # 内置工具 + MCP 工具 + resources
-├── MemoryManager          # WorkingMemory + LongTermMemory + StickyMemory
+├── MemoryManager          # SessionMemory + LongTermMemory
 ├── SnapshotService        # turn 前后快照
 ├── PromptAssembler        # 分层 prompt 组装
 ├── Renderer               # inline / plain / lanterna
@@ -112,8 +112,8 @@ Main
 
 - 所有内置 LLM Provider 使用统一 `LlmException` 错误模型，区分认证、限流、过载、超时、网络、参数、上下文超限、内容过滤、服务端、响应格式和主动取消。限流、过载、超时、网络和 5xx 按指数退避与 jitter 有界重试；已取消请求和已经输出流式内容的请求不重试，避免重复正文或工具调用。SubAgent 会把标准错误码和 `retryable` 标记保留到编排层，瞬时故障判断不依赖具体网络错误文案。
 - `ConversationHistoryCompactor（对话历史压缩器）` 是治理 LLM messages 窗口的唯一压缩点；压缩分两层：第 0 层 `microcompact` 先处理单条超大消息，普通 user/assistant 消息和旧 `tool_result` 都会保留头尾并落盘为可恢复的 `<microcompact_boundary>` 引用（工具结果按 `toolCallId` 成批处理，不调 LLM、不删消息、保 tool_call 配对），扛不住再走 LLM 摘要（Map-Reduce / 增量）。原文尾部按 token 预算从最新 user 边界反向填充；若边界所在单条消息仍使尾部超预算，则继续前移安全边界，最后才对无法再切分的单条消息做可恢复截断。摘要提交到 history 前会经过运行时语义守卫，抽取必须、禁止、默认值、命令、版本和配置赋值等关键约束；同一结构化声明只保留最新值，否定约束必须在同一语义分段中保留否定极性；默认每 5 次成功压缩执行一次摘要重建，避免增量误差无限累积；摘要缺失时直接从原始消息恢复，不再等后续任务失败后发现。压缩阈值还会扣除当前工具定义和输出预留，避免只统计 history 却使完整请求超出模型窗口。
-- `WorkingMemory（工作记忆）` 只保存当前会话派生状态，不承担压缩职责。`RagEvidenceMemory（RAG 证据记忆）` 会记录检索证据的 `IndexEpoch（索引版本）`、`SymbolVersion（符号版本）` 和 `ClasspathEpoch（类路径版本）`；`search_code` 通过工具结果强类型旁路载荷传递证据，展示文本只面向模型和终端。旧 JSON 载荷与旧展示文本仅用于历史兼容。
-- `LongTermMemory（长期记忆）` 只保存跨会话稳定事实，默认不把临时任务请求写入长期层。每条记忆统一记录 schemaVersion、主题内 revision、expiresAt 和结构化 MemoryEvidence；证据包含置信度、来源引用、写入原因、审核状态和冲突条目。显式写入默认已审核，策略自动写入默认未审核；已拒绝记忆保留审计但不参与关键词、语义召回或 prompt 注入。新写入事实按类型应用 TTL，检索时自动清理过期项。同主题内容变化、配置赋值、默认值、当前值和正反使用声明发生冲突时自动记录 conflictsWith，旧事实进入 superseded 状态；相同主题同值的可确定改写不会重复保存。长期记忆注入时会抑制与 WorkingMemory 临时事实语义重复的条目。
+- `SessionMemory（会话记忆）` 是当前任务共享的短期记忆，通过统一事件入口维护覆盖更新的 WorkState 和按重要性、Token 预算治理的 EvidenceJournal；失败压缩为 AttemptDigest，可再生证据只保留摘要和引用。`RagEvidenceMemory` 仍记录 IndexEpoch、SymbolVersion 和 ClasspathEpoch。
+- `LongTermMemory（长期记忆）` 只保存跨会话稳定事实，默认不把临时任务请求写入长期层。每条记忆统一记录 schemaVersion、主题内 revision、expiresAt 和结构化 MemoryEvidence；证据包含置信度、来源引用、写入原因、审核状态和冲突条目。显式写入默认已审核，策略自动写入默认未审核；已拒绝记忆保留审计但不参与关键词、语义召回或 prompt 注入。新写入事实按类型应用 TTL，检索时自动清理过期项。同主题内容变化、配置赋值、默认值、当前值和正反使用声明发生冲突时自动记录 conflictsWith，旧事实进入 superseded 状态；相同主题同值的可确定改写不会重复保存。长期记忆注入时会抑制与 SessionMemory 关键事件语义重复的条目。
 - `PathGuard（路径围栏）` 负责限制文件访问不逃逸项目根。
 - `ToolEffect + ToolAccessScope（工具副作用能力）` 由执行管线强制：非隔离分析任务只获得只读能力，隔离任务才允许项目写入和主机命令；MCP 缺失只读注解或声明 destructive/openWorld 时按外部副作用处理。工具参数先转换为稳定语义指纹，字段顺序、查询大小写、Unicode 等价字符和冗余空白不再绕过停滞检测；正则 pattern 保持大小写敏感，避免错误缓存命中；成功的只读结果会短期缓存，任何副作用执行都会清空缓存。
 - `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 并行执行时拦截 `write_file`，同一文件只能被一个运行中步骤写入；并行工具线程会继承步骤租约归属，任务结束后释放租约。`ToolRegistry` 托管共享后台清理器，project fork 复用同一线程，最后一个注册表关闭后停止；周期可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
@@ -518,14 +518,16 @@ Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个
 
 ## Memory
 
-DevCLI 的上下文分为四层：
+DevCLI 只有两层记忆：
 
-- `ConversationHistory（对话历史）`：真实 LLM messages，由压缩器治理窗口。
-- `WorkingMemory（工作记忆）`：当前会话工具证据、任务状态和临时事实，不跨会话持久化。用户显式要求“别管记忆”“忽略记忆”等时，本会话不注入长期记忆、通用 WorkingMemory 和角色裁剪后的 WorkingMemory。其中 `TaskLedger（任务账本）` 结构化记录计划执行进度，不进对话历史、压缩不触碰它；当前由 `/plan` 维护。Plan 与 Multi-Agent 的任务终态统一落在 `ExecutionArtifact`，只有主项目成功应用的 PatchSet 修改资源才写入运行态、checkpoint 和 WorkingMemory；checkpoint 版本 2 的 `RecoveryState` 负责跨进程恢复，旧 completed/failed 结构会先归一化。压缩后恢复上下文会按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 和 MCP 工具状态分节注入，并做预算控制与行级去重；microcompact 工具引用会按 storedPath / toolCallId 去重；Multi-Agent 会按 Planner / Worker / Reviewer 裁剪恢复内容，避免恢复段重复携带完整工具输出。压缩边界会同时记录全局 RAG 索引版本和当前会话 RAG 证据版本。
-- `SessionMemory（会话预摘要）`：当前进程内缓存压缩前置摘要，覆盖同一消息指纹且未过期时可被压缩器复用；已有摘要覆盖当前历史前缀时，维护请求只携带旧摘要和新增消息，前缀变化后才回退全量摘要；维护指标记录模式、覆盖和增量消息数、输入估算、摘要长度及失败计数；默认 30 分钟过期。Plan / Multi-Agent turn 结束后会后台维护预摘要，避免主流程等待摘要 LLM 调用。
-- `LongTermMemory（长期记忆）`：跨会话稳定事实，SQLite 持久化，支持检索注入；统一意图分类器识别保存、删除、忽略、目录查看和历史依赖；检索结果保留语义分数、关键词分数和合并分数，并按最低分数、第一名分差和最大数量限制注入。写入前经过 `LongTermMemoryPolicy` 规则化分流；与 WorkingMemory 临时事实语义重复的长期记忆不会重复注入 prompt；普通请求不再附带长期记忆目录快照，只有明确查看、列出或审计记忆时才注入目录。
+- `SessionMemory（会话记忆）`：只服务当前任务，任务清理时释放。WorkState 保存目标、计划、步骤、用户约束、根因、修改文件、测试状态和下一步动作；EvidenceJournal 把工具证据分为 CRITICAL、FAILURE、MILESTONE、ORDINARY、REGENERABLE，按 Token 预算增量合并。Multi-Agent 共享同一实例，通过 agentId、stepId、sequence 合并事件，并按角色渲染不同视图；`ExecutionArtifact` 仍是任务终态来源。
+- `LongTermMemory（长期记忆）`：跨会话稳定事实，SQLite 持久化并支持检索注入。写入前经过 `LongTermMemoryPolicy`，不会把临时指令、敏感载荷或低复用事实直接持久化。
+
+两个相邻系统不属于记忆层：
+
+- `ConversationHistoryCompactor + CompactionSummaryCache`：治理真实 LLM messages 和压缩预摘要；预摘要缓存默认 30 分钟过期。
+- `RuleContext`：加载 `DEVCLI.md` 和 `/rule add` 的强约束并每轮注入。稳定事实使用 `/save`；旧 `/save --pin` 已废弃。
 - RAG 检索默认把 keyword / semantic / graph、RRF、rerank、最终选择和降级状态写入本机 JSONL 审计记录，不保存代码正文。普通 CLI 会话归档默认关闭；启用后 ReAct 保存脱敏模型消息，Plan / Team 保存顶层输入输出，不保存图片正文与 reasoning，并按保留期限自动清理。
-- `StickyMemory（强约束记忆）`：通过 `/save --pin` 保存，每轮全量注入 system prompt。
 
 保存长期事实：
 
@@ -770,7 +772,7 @@ src/main/java/com/devcli/
 ├── agent/       Agent, PlanExecuteAgent, PlanTaskBatchExecutor, PlanTaskExecutionResult, SubAgent, AgentOrchestrator, MultiAgentBatchExecutor
 ├── cli/         Main, CliCommandParser
 ├── context/     ContextProfile, ContextMode, TokenUsageFormatter
-├── memory/      MemoryManager, WorkingMemory, LongTermMemory, StickyMemory
+├── memory/      MemoryManager, SessionMemory, LongTermMemory, CompactionSummaryCache, RuleContext
 ├── mcp/         McpServerManager, McpClient, resources, transport
 ├── plan/        Planner, ExecutionPlan, Task
 ├── policy/      PathGuard, CommandGuard, AuditLog

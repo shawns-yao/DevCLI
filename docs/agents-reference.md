@@ -90,17 +90,15 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 ### Memory System
 
-- 两道压缩：
-  1. `ContextCompressor` 压缩 shortTermMemory
-  2. `ConversationHistoryCompactor` 压缩 conversationHistory（真正发给 LLM 的消息）
-- 第二道压缩切割在 user message 边界，保留最近 3 个 user 起算的尾部
-- 三条路径(ReAct/Plan/SubAgent)都接入第二道压缩
-- `SessionMemory` 保存当前进程内会话预摘要，按消息指纹复用，默认 30 分钟过期；已有摘要覆盖当前历史前缀时，以旧摘要和新增消息增量生成完整替代摘要，前缀变化时回退全量维护；维护过程记录 full / incremental 模式、消息覆盖、输入估算、摘要长度和失败次数；Plan / Multi-Agent turn 结束后通过 `MemoryManager` 的单线程后台 executor 维护预摘要，避免主流程等待摘要 LLM 调用
+- 记忆只有两层：`SessionMemory` 保存当前任务共享的 WorkState 与 EvidenceJournal，`LongTermMemory` 保存跨会话稳定事实
+- `SessionMemory` 统一接收 SessionEvent；状态按键和步骤状态机更新，证据按重要性与 Token 预算治理，失败保留 AttemptDigest，可再生结果保留引用；Multi-Agent 共享同一实例并按角色渲染视图
+- `ConversationHistoryCompactor` 是唯一消息窗口治理点；`CompactionSummaryCache` 只保存可复用预摘要，按消息指纹匹配并默认 30 分钟过期，不算记忆层
+- `RuleContext` 加载规则文件和 `/rule add` 强约束，每轮注入但不算记忆；稳定事实用 `/save`，旧 `/save --pin` 已废弃
 - 压缩边界 `<compact_boundary>` 记录已加载 Skill、RAG epoch、MCP 工具快照和压缩后恢复入口状态；RAG epoch 合并当前会话已命中证据与当前项目全局索引版本，MCP 工具快照包含 server 工具数量、schema 指纹和生命周期版本
 - 长期记忆主要通过 `/save` 或用户明确要求保存；中英文显式记忆意图、少量稳定个人属性和多次重复出现的稳定项目/偏好事实可由策略自动保存
-- 长期记忆只保存跨会话稳定事实，不保存临时指令；显式保存请求如果内容仍然明显临时或低复用，需要确认而不是直接落库；中英文临时表达、敏感信息和模糊新个人状态必须确认或跳过；统一意图分类器识别保存、删除、忽略、目录查看和历史依赖；相关记忆按结构化分数、最低阈值、第一名分差和最大数量治理；与 WorkingMemory volatile fact 语义重复的长期记忆在 prompt 注入时会被抑制；普通请求不注入长期记忆目录快照，只有明确查看、列出或审计记忆时才注入目录
+- 长期记忆只保存跨会话稳定事实，不保存临时指令；显式保存请求如果内容仍然明显临时或低复用，需要确认而不是直接落库；与 SessionMemory 关键事件语义重复的长期记忆在 prompt 注入时会被抑制
 - RAG 检索审计按 JSONL 保存各召回通道、RRF、rerank、最终结果和降级状态，不保存代码正文；普通 CLI 会话归档默认关闭，启用后 ReAct 保存脱敏模型消息，Plan / Team 保存顶层输入输出，并按配置期限清理
-- 用户显式要求忽略记忆（如“别管记忆”“忽略记忆”）时，本会话不注入长期记忆、通用 WorkingMemory 和角色裁剪后的 WorkingMemory
+- 用户显式要求忽略记忆（如“别管记忆”“忽略记忆”）时，本会话不注入长期记忆、通用 SessionMemory 和角色裁剪后的 SessionMemory
 - 反馈类长期记忆按 `FEEDBACK` 类型落库，不混入普通 `FACT`
 
 ### Plan Multi-Agent

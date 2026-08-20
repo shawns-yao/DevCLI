@@ -160,14 +160,18 @@ Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔�
 
 ### Memory
 
+- 记忆只分两层：`SessionMemory` 是当前任务共享的短期记忆，`LongTermMemory` 是跨会话长期记忆。Conversation History / Summary 属于上下文治理，`RuleContext` 属于规则系统，均不算记忆层
+- `SessionMemory` 通过 `accept(SessionEvent)` 统一接收工具结果、用户确认和步骤变化；内部 `WorkState` 按键覆盖或按步骤状态机推进，`EvidenceJournal` 按 CRITICAL / FAILURE / MILESTONE / ORDINARY / REGENERABLE 分级并按 Token 预算治理。失败保留 AttemptDigest，可再生证据保留路径、哈希或引用，关键副作用只压缩正文、不在任务结束前删除规范化记录
+- Multi-Agent 共享单一 `SessionMemory`，事件携带 agentId、stepId 和单调 sequence；Planner / Worker / Reviewer 只渲染不同视图。`ExecutionArtifact` 仍是任务终态唯一来源，SessionMemory 只是运行投影
+- `CompactionSummaryCache` 只缓存压缩预摘要，不是记忆；`RuleContext` 只加载 `DEVCLI.md` 和 `/rule add` 强约束。稳定事实使用 `/save` 写入 `LongTermMemory`，旧 `/save --pin` 仅保留废弃提示
 - 长期记忆主要通过 `/save` 或用户明确要求保存；中英文显式记忆意图、少量稳定个人属性和多次重复出现的稳定项目/偏好事实可由策略自动保存
-- 长期记忆只保存跨会话稳定事实，不保存临时指令；显式保存请求如果内容仍然明显临时或低复用，需要确认而不是直接落库；中英文临时表达、敏感信息和模糊新个人状态必须确认或跳过；与 WorkingMemory volatile fact 语义重复的长期记忆在 prompt 注入时会被抑制；普通 turn 只注入达到最低分数、与第一名差距未超限且数量受限的查询相关记忆，长期记忆目录快照仅在统一意图分类器识别出查看、列出或审计意图时注入
-- 用户显式要求忽略记忆（如“别管记忆”“忽略记忆”）时，本会话不注入长期记忆、通用 WorkingMemory 和角色裁剪后的 WorkingMemory
+- 长期记忆只保存跨会话稳定事实，不保存临时指令；显式保存请求如果内容仍然明显临时或低复用，需要确认而不是直接落库；中英文临时表达、敏感信息和模糊新个人状态必须确认或跳过；与 SessionMemory 关键事件语义重复的长期记忆在 prompt 注入时会被抑制；普通 turn 只注入达到最低分数、与第一名差距未超限且数量受限的查询相关记忆，长期记忆目录快照仅在统一意图分类器识别出查看、列出或审计意图时注入
+- 用户显式要求忽略记忆（如“别管记忆”“忽略记忆”）时，本会话不注入长期记忆、通用 SessionMemory 和角色裁剪后的 SessionMemory
 - 反馈类长期记忆按 `FEEDBACK` 类型落库，不混入普通 `FACT`
 - 长期记忆统一记录 `schemaVersion`、主题内 `revision`、`expiresAt` 和结构化 `MemoryEvidence`；证据包含 confidence、sourceQuote、reasoning、reviewState、conflictsWith；HIGH 至少需要 5 字符来源引用，MEDIUM 需要非空引用，否则领域层自动降级。显式写入默认 REVIEWED，策略自动写入默认 UNREVIEWED，REJECTED 保留审计但不进入关键词、语义召回和 prompt。新条目按类型 TTL 写入，检索、计数和上下文构建前清理过期项。命中 `subject（主题键）` 的事实写入走 supersede；显式同主题内容变化或可解析的配置赋值、默认值、当前值和正反使用声明冲突会同时写入结构化 conflictsWith 和兼容 metadata，旧事实置为 inactive；相同主题同值的可确定改写自动去重。无法提取主题且无法识别声明键时才追加
 - `/memory organize` 只生成整理计划；`/memory organize apply` 仍由程序重新计算风险，只自动应用同主题、同类型、全部未审核、覆盖完整且计划置信度不低于 0.9 的合并。已审核条目、跨主题、跨类型、部分覆盖、REVIEW 和 REJECT 候选不得自动应用，只在本次报告中标记为需要人工复核；记忆正文按 JSON 数据载荷交给整理模型，不作为指令
-- `ConversationHistoryCompactor` 是唯一治理 LLM messages 窗口的压缩点；压缩前先走第 0 层 `microcompact`（单条超大消息头尾截断；旧轮次 tool_result 按 toolCallId 成批落盘并替换为 `<microcompact_boundary>` 引用；不删消息、保 tool_call 配对），扛不住再 LLM 摘要（九段结构化、超长走程序化 GC 按段裁剪、不够再 LLM 兜底）。摘要写回 history 前必须经过 `CompactionSemanticGuard`，从原消息提取必须、禁止、默认值、命令、版本和配置赋值等保护约束；同一结构化声明只保留最新值，否定约束必须在包含同一语义锚点的摘要分段中保留否定极性；缺失内容直接追加恢复段；`<compact_boundary>` 记录保护约束数、恢复数和 pass/repaired 状态。`WorkingMemory` 是当前会话派生视图，不是压缩器，恢复区会按 storedPath/toolCallId 去重 microcompact 工具引用
-- `SessionMemory` 维护当前进程内会话预摘要，自动压缩时优先复用覆盖同一消息指纹且未过期的预摘要；已有预摘要覆盖当前历史前缀时，只用旧摘要和新增消息生成完整替代摘要，前缀被修改或压缩后才回退全量维护；维护指标记录模式、覆盖消息、增量消息、输入估算、摘要长度和成功失败计数；预摘要默认 30 分钟过期，ReAct 可同步维护，Plan / Multi-Agent turn 结束后提交后台单线程维护任务，不写长期记忆
+- `ConversationHistoryCompactor` 是唯一治理 LLM messages 窗口的压缩点；压缩前先走第 0 层 `microcompact`（单条超大消息头尾截断；旧轮次 tool_result 按 toolCallId 成批落盘并替换为 `<microcompact_boundary>` 引用；不删消息、保 tool_call 配对），扛不住再 LLM 摘要（九段结构化、超长走程序化 GC 按段裁剪、不够再 LLM 兜底）。摘要写回 history 前必须经过 `CompactionSemanticGuard`；恢复区会按 storedPath/toolCallId 去重 microcompact 工具引用
+- `CompactionSummaryCache` 维护当前进程内会话预摘要，自动压缩时优先复用覆盖同一消息指纹且未过期的预摘要；已有预摘要覆盖当前历史前缀时，只用旧摘要和新增消息生成完整替代摘要；预摘要默认 30 分钟过期，不写长期记忆
 - RAG 每次检索保存不含代码正文的分阶段审计记录，覆盖 keyword / semantic / graph 候选、RRF 融合、rerank、最终选择和降级状态；普通 CLI 会话归档默认关闭，启用后 ReAct 保存脱敏模型消息，Plan / Team 保存顶层输入输出，`/history clear` 同时删除归档
 - 压缩成功后会插入 `[压缩后恢复上下文]` 消息：恢复段按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 和 MCP 工具状态分节；恢复内容经统一预算与行级去重后注入，Multi-Agent 会按 Planner / Worker / Reviewer 角色裁剪；SkillContextBuffer 追加已加载 Skill 与 allowedTools 状态
 - 压缩边界 `<compact_boundary>` 会记录已加载 Skill、RAG epoch、MCP 工具快照和压缩后恢复入口状态；RAG epoch 合并当前会话已命中证据与当前项目全局索引版本，MCP 工具快照按 server 记录工具数量、schema 指纹和生命周期版本
