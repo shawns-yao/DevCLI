@@ -6,11 +6,18 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class AtMentionExpanderTest {
+    private static final Pattern STORED_PATH = Pattern.compile("stored_path=\\\"([^\\\"]+)\\\"");
+
     @Test
     void replacesMentionWithResourceBlock(@TempDir Path tempDir) {
         AtMentionExpander expander = new AtMentionExpander(new FakeManager(tempDir, "hello", "text/plain"));
@@ -46,6 +53,48 @@ class AtMentionExpanderTest {
 
         assertTrue(expanded.contains("<resource_error"));
         assertTrue(expanded.contains("boom"));
+    }
+
+    @Test
+    void storesOversizeResourceAsEvidenceReferenceWhenBudgetIsSmall(@TempDir Path tempDir) throws Exception {
+        String content = "resource-head\n" + "resource-evidence\n".repeat(2_000) + "resource-tail\n";
+        Constructor<AtMentionExpander> constructor;
+        Method budgetAwareExpand;
+        try {
+            constructor = AtMentionExpander.class
+                    .getDeclaredConstructor(McpServerManager.class, Path.class);
+            budgetAwareExpand = AtMentionExpander.class
+                    .getDeclaredMethod("expand", String.class, int.class);
+        } catch (NoSuchMethodException e) {
+            fail("AtMentionExpander 必须支持项目级快照目录和剩余 Token 预算");
+            return;
+        }
+        AtMentionExpander expander = constructor.newInstance(
+                new FakeManager(tempDir, content, "text/plain"), tempDir);
+
+        String expanded = (String) budgetAwareExpand.invoke(
+                expander, "分析 @fs:file://large.txt", 160);
+
+        assertTrue(expanded.contains("<file_reference"));
+        assertTrue(expanded.contains("source_type=\"mcp_resource\""));
+        assertTrue(expanded.contains("evidence_required=\"true\""));
+        Matcher matcher = STORED_PATH.matcher(expanded);
+        assertTrue(matcher.find());
+        assertEquals(content, Files.readString(tempDir.resolve(matcher.group(1)).normalize()));
+    }
+
+    @Test
+    void allocatesBudgetToMcpMentionsInTextOrder(@TempDir Path tempDir) {
+        String content = "evidence ".repeat(50);
+        AtMentionExpander expander = new AtMentionExpander(
+                new FakeManager(tempDir, content, "text/plain"), tempDir);
+
+        String expanded = expander.expand(
+                "@fs:file://first.txt @fs:file://second.txt", 260);
+
+        assertTrue(expanded.contains("<resource server=\"fs\" uri=\"file://first.txt\""));
+        assertTrue(expanded.contains("<file_reference source_type=\"mcp_resource\" server=\"fs\""
+                + " uri=\"file://second.txt\""));
     }
 
     private static int count(String value, String needle) {

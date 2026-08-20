@@ -9,14 +9,18 @@ import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.tool.ToolStatus;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AgentExecutionEngineTest {
@@ -188,6 +192,137 @@ class AgentExecutionEngineTest {
                         && "3".equals(event.attributes().get("count"))));
     }
 
+    @Test
+    void blocksFinalAnswerUntilReferencedFileHasSuccessfulReadEvidence() {
+        String storedPath = ".devcli/context-inputs/large.txt";
+        ScriptedClient llm = new ScriptedClient(List.of(
+                new LlmClient.ChatResponse("assistant", "直接推理", null, null, 1, 1),
+                toolCallResponse("read_file", "{\"path\":\"" + storedPath + "\"}"),
+                new LlmClient.ChatResponse("assistant", "基于文件证据回答", null, null, 1, 1)
+        ));
+        AgentBudget budget = new AgentBudget(1_000, 5, 10);
+        RecordingDelegate delegate = new RecordingDelegate();
+        delegate.history.add(LlmClient.Message.user("""
+                分析附件
+                <file_reference original_path="large.txt"
+                                stored_path=".devcli/context-inputs/large.txt"
+                                sha256="abc" evidence_required="true">
+                </file_reference>
+                """));
+
+        String result = new AgentExecutionEngine<String>(llm, budget).run(delegate);
+
+        assertEquals("基于文件证据回答", result);
+        assertEquals(3, budget.iteration());
+        assertEquals(LlmClient.ToolChoice.required("read_file"), llm.toolChoices.get(1));
+        assertTrue(delegate.history.stream()
+                .filter(message -> message.source() == LlmClient.MessageSource.SYSTEM_INTERNAL)
+                .anyMatch(message -> message.content().contains("必须先读取")
+                        && message.content().contains(storedPath)));
+    }
+
+    @Test
+    void allowsAnswerWithoutReadForReferenceMetadataQuestions() {
+        List<String> metadataQuestions = List.of(
+                "这个附件的文件名是什么？",
+                "告诉我这个文件的路径和大小",
+                "这个文件内容大小是多少？",
+                "当前问题是什么？");
+
+        for (String question : metadataQuestions) {
+            ScriptedClient llm = new ScriptedClient(List.of(
+                    new LlmClient.ChatResponse("assistant", "metadata answer", null, null, 1, 1)));
+            AgentBudget budget = new AgentBudget(1_000, 5, 10);
+            RecordingDelegate delegate = new RecordingDelegate();
+            delegate.history.add(LlmClient.Message.user(question + """
+
+                    <file_reference original_path="large.txt"
+                                    stored_path=".devcli/context-inputs/large.txt"
+                                    sha256="abc" evidence_required="true">
+                    </file_reference>
+                    """));
+
+            String result = new AgentExecutionEngine<String>(llm, budget).run(delegate);
+
+            assertEquals("metadata answer", result, question);
+            assertEquals(1, budget.iteration(), question);
+            assertFalse("read_file".equals(llm.toolChoices.getFirst().toolName()), question);
+        }
+    }
+
+    @Test
+    void requiresReadForContentLocationAndExactErrorQuestions() {
+        List<String> evidenceQuestions = List.of(
+                "请定位这个文件内容中的报错位置",
+                "给出日志里精确的错误信息和行号");
+
+        for (String question : evidenceQuestions) {
+            ContextReferenceGuard guard = ContextReferenceGuard.fromHistory(List.of(
+                    LlmClient.Message.user(question + """
+
+                            <file_reference stored_path=".devcli/context-inputs/error.log"
+                                            sha256="abc" evidence_required="true">
+                            </file_reference>
+                            """)));
+
+            assertFalse(guard.isSatisfied(), question);
+        }
+    }
+
+    @Test
+    void failsClosedAfterReferencedFileCannotBeReadTwice() {
+        String storedPath = ".devcli/context-inputs/missing.txt";
+        ScriptedClient llm = new ScriptedClient(List.of(
+                toolCallResponse("read_file", "{\"path\":\"" + storedPath + "\"}"),
+                toolCallResponse("read_file", "{\"path\":\"" + storedPath + "\"}")));
+        AgentBudget budget = new AgentBudget(1_000, 5, 10);
+        RecordingDelegate delegate = new RecordingDelegate(ToolStatus.ERROR);
+        delegate.history.add(LlmClient.Message.user("""
+                请分析附件内容
+                <file_reference stored_path=".devcli/context-inputs/missing.txt"
+                                evidence_required="true">
+                </file_reference>
+                """));
+
+        String result = new AgentExecutionEngine<String>(llm, budget).run(delegate);
+
+        assertEquals("failed", result);
+        assertEquals(2, budget.iteration());
+        assertTrue(delegate.failure.getMessage().contains("附件证据不可用"));
+        assertTrue(delegate.failure.getMessage().contains(storedPath));
+    }
+
+    @Test
+    void failsClosedWhenReferencedSnapshotHashNoLongerMatches(@TempDir Path tempDir) throws Exception {
+        Path stored = tempDir.resolve(".devcli/context-inputs/changed.txt");
+        Files.createDirectories(stored.getParent());
+        Files.writeString(stored, "changed content");
+        String storedPath = ".devcli/context-inputs/changed.txt";
+        ScriptedClient llm = new ScriptedClient(List.of(
+                toolCallResponse("read_file", "{\"path\":\"" + storedPath + "\"}"),
+                toolCallResponse("read_file", "{\"path\":\"" + storedPath + "\"}")));
+        AgentBudget budget = new AgentBudget(1_000, 5, 10);
+        RecordingDelegate delegate = new RecordingDelegate();
+        delegate.history.add(LlmClient.Message.user("""
+                请分析附件内容
+                <file_reference stored_path=".devcli/context-inputs/changed.txt"
+                                sha256="0000000000000000000000000000000000000000000000000000000000000000"
+                                evidence_required="true">
+                </file_reference>
+                """));
+
+        String result;
+        try (com.devcli.runtime.RunContext ignored =
+                     com.devcli.runtime.CancellationContext.startRunContext(tempDir)) {
+            result = new AgentExecutionEngine<String>(llm, budget).run(delegate);
+        }
+
+        assertEquals("failed", result);
+        assertEquals(2, budget.iteration());
+        assertTrue(delegate.failure.getMessage().contains("附件证据不可用"));
+        assertTrue(delegate.failure.getMessage().contains(storedPath));
+    }
+
     private static LlmClient.ChatResponse toolCallResponse(String tool, String arguments) {
         LlmClient.ToolCall call = new LlmClient.ToolCall(
                 "call_1", new LlmClient.ToolCall.Function(tool, arguments));
@@ -265,13 +400,25 @@ class AgentExecutionEngineTest {
         private final List<String> events = new ArrayList<>();
         private final List<RunEvent> runEvents = new ArrayList<>();
         private final boolean completeAfterTools;
+        private final ToolStatus readStatus;
+        private String postToolInstruction = "";
+        private IOException failure;
 
         private RecordingDelegate() {
             this(false);
         }
 
         private RecordingDelegate(boolean completeAfterTools) {
+            this(completeAfterTools, ToolStatus.SUCCESS);
+        }
+
+        private RecordingDelegate(ToolStatus readStatus) {
+            this(false, readStatus);
+        }
+
+        private RecordingDelegate(boolean completeAfterTools, ToolStatus readStatus) {
             this.completeAfterTools = completeAfterTools;
+            this.readStatus = readStatus;
         }
 
         @Override
@@ -310,7 +457,20 @@ class AgentExecutionEngineTest {
             events.add("tools:" + iteration);
             return List.of(new ToolRegistry.ToolExecutionResult(
                     "call_1", "read_file", "{\"path\":\"a.txt\"}", "content",
-                    1, ToolStatus.SUCCESS, ToolErrorCode.NONE, false, List.of()));
+                    1, readStatus,
+                    readStatus == ToolStatus.SUCCESS ? ToolErrorCode.NONE : ToolErrorCode.EXECUTION_FAILED,
+                    readStatus != ToolStatus.SUCCESS, List.of()));
+        }
+
+        @Override
+        public String instructionAfterToolResults(
+                LlmClient.ChatResponse response,
+                List<ToolRegistry.ToolExecutionResult> toolResults,
+                int iteration,
+                AgentBudget budget) {
+            String instruction = postToolInstruction;
+            postToolInstruction = "";
+            return instruction;
         }
 
         @Override
@@ -349,6 +509,7 @@ class AgentExecutionEngineTest {
 
         @Override
         public String failed(IOException error, AgentBudget budget) {
+            failure = error;
             return "failed";
         }
     }

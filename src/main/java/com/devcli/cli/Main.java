@@ -283,7 +283,7 @@ public class Main {
             } catch (Exception e) {
                 startupNote = "MCP 初始化失败: " + e.getMessage();
             }
-            AtMentionExpander mentionExpander = new AtMentionExpander(mcpServerManager);
+            AtMentionExpander mentionExpander = new AtMentionExpander(mcpServerManager, Path.of("."));
             LocalPathMentionExpander localPathMentionExpander = new LocalPathMentionExpander(Path.of("."));
 
             // === Skill 系统初始化 ===
@@ -814,8 +814,22 @@ public class Main {
 
                 // 运行 Agent
                 String submittedInput = input;
-                input = mentionExpander.expand(input);
-                input = localPathMentionExpander.expand(input);
+                int toolDefinitionTokens = com.devcli.memory.TokenBudget.estimateToolDefinitionsTokens(
+                        reactAgent.getToolRegistry().getToolDefinitions());
+                int historyTriggerTokens = reactAgent.getMemoryManager().getContextProfile()
+                        .historyTriggerTokens(toolDefinitionTokens);
+                int historyTokens = com.devcli.memory.TokenBudget.estimateMessagesTokens(
+                        reactAgent.getConversationHistory());
+                int submittedTokens = com.devcli.memory.TokenBudget.estimateMessagesTokens(
+                        List.of(LlmClient.Message.user(input)));
+                int remainingAttachmentTokens = Math.max(
+                        0, historyTriggerTokens - historyTokens - submittedTokens);
+                input = mentionExpander.expand(input, remainingAttachmentTokens);
+                submittedTokens = com.devcli.memory.TokenBudget.estimateMessagesTokens(
+                        List.of(LlmClient.Message.user(input)));
+                remainingAttachmentTokens = Math.max(
+                        0, historyTriggerTokens - historyTokens - submittedTokens);
+                input = localPathMentionExpander.expand(input, remainingAttachmentTokens);
                 if (!(renderer instanceof InlineRenderer)) {
                     ui.println();
                 }

@@ -93,6 +93,15 @@ final class AgentExecutionEngine<R> {
                                       AgentBudget budget) {
         }
 
+        /** 返回工具证据触发的确定性内部纠偏指令；空串表示无需追加。 */
+        default String instructionAfterToolResults(
+                LlmClient.ChatResponse response,
+                List<ToolRegistry.ToolExecutionResult> toolResults,
+                int iteration,
+                AgentBudget budget) {
+            return "";
+        }
+
         default Optional<R> completedAfterToolResults(
                 LlmClient.ChatResponse response,
                 List<ToolRegistry.ToolExecutionResult> toolResults,
@@ -177,6 +186,7 @@ final class AgentExecutionEngine<R> {
     }
 
     private R runLoop(Delegate<R> delegate) {
+        ContextReferenceGuard contextReferenceGuard = ContextReferenceGuard.fromHistory(delegate.history());
         while (true) {
             RunEventSink eventSink = RunEventSink.composite(
                     delegate.eventSink(),
@@ -214,11 +224,12 @@ final class AgentExecutionEngine<R> {
                              samplingRequests.begin(samplingRequestId(iteration))) {
                     eventSink.emit(RunEvent.ModelContext.from(
                             iteration, List.copyOf(delegate.history())));
+                    LlmClient.ToolChoice requestedToolChoice = delegate.toolChoice(iteration);
                     response = llmClient.chat(
                             delegate.history(),
                             delegate.toolDefinitions(iteration),
                             new RunEventStreamListener(eventSink),
-                            delegate.toolChoice(iteration));
+                            contextReferenceGuard.toolChoice(requestedToolChoice));
                 }
                 if (delegate.isCancelled()) {
                     emitState(eventSink, RunEvent.ExecutionState.CANCELLED,
@@ -286,8 +297,23 @@ final class AgentExecutionEngine<R> {
                         hookLifecycle.toolResultsReceived(iteration, toolResults);
                     }
                     delegate.afterToolResults(response, toolResults, iteration, budget);
-                    Optional<R> completed = delegate.completedAfterToolResults(
+                    String toolResultInstruction = delegate.instructionAfterToolResults(
                             response, toolResults, iteration, budget);
+                    if (toolResultInstruction != null && !toolResultInstruction.isBlank()) {
+                        LlmClient.Message instructionMessage =
+                                LlmClient.Message.internalUser(toolResultInstruction.trim());
+                        delegate.history().add(instructionMessage);
+                        eventSink.emit(RunEvent.ModelMessage.from(instructionMessage));
+                    }
+                    contextReferenceGuard.observe(toolResults);
+                    String referenceFailure = contextReferenceGuard.terminalFailure();
+                    if (!referenceFailure.isBlank()) {
+                        emitState(eventSink, RunEvent.ExecutionState.FAILED, iteration, referenceFailure);
+                        return delegate.failed(new IOException(referenceFailure), budget);
+                    }
+                    Optional<R> completed = contextReferenceGuard.isSatisfied()
+                            ? delegate.completedAfterToolResults(response, toolResults, iteration, budget)
+                            : Optional.empty();
                     if (completed.isPresent()) {
                         emitState(eventSink, RunEvent.ExecutionState.COMPLETED,
                                 iteration, "工具结果满足当前执行入口的完成条件");
@@ -299,8 +325,9 @@ final class AgentExecutionEngine<R> {
                     continue;
                 }
 
-                String retryInstruction = delegate.retryInstructionAfterResponseWithoutTools(
-                        response, iteration, budget);
+                String retryInstruction = combineRetryInstructions(
+                        contextReferenceGuard.retryInstruction(),
+                        delegate.retryInstructionAfterResponseWithoutTools(response, iteration, budget));
                 if (retryInstruction != null && !retryInstruction.isBlank()) {
                     LlmClient.Message assistantMessage = LlmClient.Message.assistant(
                             response.reasoningContent(), response.content());
@@ -333,6 +360,18 @@ final class AgentExecutionEngine<R> {
                 return delegate.failed(e, budget);
             }
         }
+    }
+
+    private static String combineRetryInstructions(String first, String second) {
+        String left = first == null ? "" : first.trim();
+        String right = second == null ? "" : second.trim();
+        if (left.isEmpty()) {
+            return right;
+        }
+        if (right.isEmpty()) {
+            return left;
+        }
+        return left + "\n\n" + right;
     }
 
     private String samplingRequestId(int iteration) {
