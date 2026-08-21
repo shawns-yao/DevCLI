@@ -94,6 +94,15 @@
 - 影响范围：ConversationHistoryCompactor、ContextProfile、TokenBudget、ReAct、Plan、SubAgent 的请求前压缩阈值
 - 剩余风险：Provider 原生 tokenizer 与本地估算可能存在偏差；周期性重建无法恢复既没有摘要也没有落盘引用的历史内容
 
+## 2026-08-20 九段式生命周期滚动摘要
+
+- 状态：已实现并通过限定回归
+- 已实现：保留九段摘要分类；新增主题、生命周期、重要性、版本、压缩次数、覆盖关系和证据引用；增量模型只输出受限变更操作，程序负责校验、覆盖、完成迁移和删除；格式损坏时保留上一版摘要；周期性全量重压缩改为生命周期 GC，稳定决策和未解决事项不按次数删除
+- 验证：`RollingSummaryTest`、`SummaryLifecycleReducerTest`、`SummaryGarbageCollectorTest`、`CompactionSemanticGuardTest`、`ConversationHistoryCompactorTest` 定向测试通过
+- 未验证：未运行全量测试，未启动项目，未执行真实模型长会话评测
+- 影响范围：上下文压缩摘要模型、增量更新协议、周期治理、摘要文档
+- 剩余风险：模型提出的主题键质量会影响同主题合并；结构化摘要受保护事实过多时允许暂时超过字符上限并告警
+
 ## 2026-08-09 四项简历实验重测
 
 - 状态：四项均已进入真实模型执行；并发、压缩、长期记忆已形成有效报告，Saga 多智能体形成有效单侧结果，但同轮单 Agent 连续因模型链路未完整结束而无法形成有效配对

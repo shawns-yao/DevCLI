@@ -77,4 +77,19 @@ class CompactionSemanticGuardTest {
         assertTrue(result.repairedSummary().contains("Java 版本是 21"));
         assertFalse(result.repairedSummary().contains("Java 版本是 17"));
     }
+
+    @Test
+    void restoresConstraintsInsideExistingNineSections() {
+        RollingSummary summary = new RollingSummary();
+        summary.set("当前在做什么", "修改压缩器");
+
+        CompactionSemanticGuard.Validation result = CompactionSemanticGuard.validateAndRepair(
+                List.of(LlmClient.Message.user("必须保留九段摘要。")), summary.render(), 4_000);
+
+        RollingSummary repaired = RollingSummary.parse(result.repairedSummary());
+        assertTrue(repaired.get("主要请求与意图").contains("必须保留九段摘要"));
+        assertFalse(result.repairedSummary().contains("## 压缩语义守卫恢复的关键约束"));
+        assertTrue(RollingSummary.SECTIONS.stream()
+                .allMatch(section -> result.repairedSummary().contains("## " + section)));
+    }
 }

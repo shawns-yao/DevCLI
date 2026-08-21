@@ -2,7 +2,7 @@
 
 > 范围：本文是第 27 期改造设计，用于补齐 `ConversationHistoryCompactor` 的滚动摘要裁剪能力。本文只描述方案，不代表当前代码已完成实现。
 >
-> 落地状态（更新）：27-A/B/C 已实现——摘要改为结构化、`RollingSummary` 提供 parse/render、`SummaryGarbageCollector` 程序化裁剪。**段结构最终采用 Claude Code `/compact` 九段模板（非本文的六段）**：主要请求与意图 / 关键技术概念 / 文件和代码 / 踩过的坑和修复 / 问题解决过程 / 逐条用户消息 / 待办任务 / 当前在做什么 / 下一步。TaskLedger（27-D）已实现 MVP（见下方 27-D 落地状态：仅 `PlanExecuteAgent` 闭环）。Eval（27-E）部分落地：连续多轮压缩摘要有界已补测，其余结构性场景由现有测试覆盖；LLM 语义质量（A→B→C 覆盖、里程碑折叠）需真实模型 benchmark，不在确定性单测范围。
+> 落地状态（更新）：摘要固定保留九段；`RollingSummary` 已升级为带主题、版本、重要性、证据引用和生命周期的事实集合。模型只提出受限增量操作，`SummaryLifecycleReducer` 负责确定性更新，`SummaryGarbageCollector` 负责过期与覆盖审计回收；周期治理不再把旧摘要交给 LLM 二次压缩。TaskLedger（27-D）已实现 MVP（见下方 27-D 落地状态：仅 `PlanExecuteAgent` 闭环）。真实模型语义质量仍需独立 benchmark。
 
 ## 1. 目标
 

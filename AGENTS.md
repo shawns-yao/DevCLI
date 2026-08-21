@@ -172,7 +172,7 @@ Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔�
 - 长期记忆统一记录 `schemaVersion`、主题内 `revision`、`expiresAt` 和结构化 `MemoryEvidence`；证据包含 confidence、sourceQuote、reasoning、reviewState、conflictsWith；HIGH 至少需要 5 字符来源引用，MEDIUM 需要非空引用，否则领域层自动降级。显式写入默认 REVIEWED，策略自动写入默认 UNREVIEWED，REJECTED 保留审计但不进入召回。命中 subject 的等价事实直接去重，只有值变化才 supersede；工具可通过 `CurrentStateObservationSideChannel(subject,value,evidence)` 泛化当前状态推翻，Maven/Gradle 文本检测仅作兼容回退
 - 敏感 `save_memory` 返回一次性 `confirmation_id`；模型必须先询问用户，再调用 `confirm_memory(save_redacted|save_edited|cancel)`。确认 id 默认 10 分钟过期且只能使用一次，最终仍统一经过明文脱敏边界
 - `/memory organize` 只生成整理计划；`/memory organize apply` 仍由程序重新计算风险，只自动应用同主题、同类型、全部未审核、覆盖完整且计划置信度不低于 0.9 的合并。已审核条目、跨主题、跨类型、部分覆盖、REVIEW 和 REJECT 候选不得自动应用，只在本次报告中标记为需要人工复核；记忆正文按 JSON 数据载荷交给整理模型，不作为指令
-- `ConversationHistoryCompactor` 是唯一治理 LLM messages 窗口的压缩点；压缩前先走第 0 层 `microcompact`（单条超大消息头尾截断；旧轮次 tool_result 按 toolCallId 成批落盘并替换为 `<microcompact_boundary>` 引用；不删消息、保 tool_call 配对），扛不住再 LLM 摘要（九段结构化、超长走程序化 GC 按段裁剪、不够再 LLM 兜底）。摘要写回 history 前必须经过 `CompactionSemanticGuard`；恢复区会按 storedPath/toolCallId 去重 microcompact 工具引用
+- `ConversationHistoryCompactor` 是唯一治理 LLM messages 窗口的压缩点；压缩前先走第 0 层 `microcompact`（单条超大消息头尾截断；旧轮次 tool_result 按 toolCallId 成批落盘并替换为 `<microcompact_boundary>` 引用；不删消息、保 tool_call 配对），扛不住再摘要。首次摘要使用 Map-Reduce；后续固定保留九段，模型只提出受限生命周期操作，程序负责覆盖、完成迁移和删除；默认每 5 次成功压缩执行生命周期 GC，不再二次压缩旧摘要。摘要写回 history 前必须经过 `CompactionSemanticGuard`；恢复区会按 storedPath/toolCallId 去重 microcompact 工具引用
 - `CompactionSummaryCache` 维护当前进程内会话预摘要，自动压缩时优先复用覆盖同一消息指纹且未过期的预摘要；已有预摘要覆盖当前历史前缀时，只用旧摘要和新增消息生成完整替代摘要；预摘要默认 30 分钟过期，不写长期记忆
 - RAG 每次检索保存不含代码正文的分阶段审计记录，覆盖 keyword / semantic / graph 候选、RRF 融合、rerank、最终选择和降级状态；普通 CLI 会话归档默认关闭，启用后 ReAct 保存脱敏模型消息，Plan / Team 保存顶层输入输出，`/history clear` 同时删除归档
 - 压缩成功后会插入 `[压缩后恢复上下文]` 消息：恢复段按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 和 MCP 工具状态分节；恢复内容经统一预算与行级去重后注入，Multi-Agent 会按 Planner / Worker / Reviewer 角色裁剪；SkillContextBuffer 追加已加载 Skill 与 allowedTools 状态
@@ -181,7 +181,7 @@ Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔�
 - MCP 工具发现缓存记录 server、生命周期版本、工具数量、工具名、schema 指纹和发现时间；disable 不清除上一轮发现元数据
 - MCP `tools/call` 会携带 `_meta.progressToken`，同 token 的 `notifications/progress` 会汇总进工具结果文本
 - MCP 工具结果进入尺寸治理后会标记折叠分类：截断输出为 `INLINE_TRUNCATED`，落盘预览为 `PERSISTED_PREVIEW`
-- 滚动摘要超过字符上限时触发"摘要的摘要"再压缩，失败则保留超长摘要并打日志（宁可贵不丢事实）
+- 结构化滚动摘要超过字符上限时执行确定性生命周期 GC；稳定决策和未解决事项不因压缩次数删除，仍超限时保留并告警，不交给 LLM 二次改写
 - `search_code` 结果中的结构化 negativeFact 携带 `oldSymbolVersion` 时，`SessionMemory` 即时清理对应的失效 RAG 证据；旧文本格式保留兼容解析
 - `TaskLedger` 作为 `SessionMemory.WorkState` 的计划执行进度投影，不进 conversationHistory，压缩不触碰它；Plan 和 Multi-Agent 通过统一事件入口更新，让长 plan 压缩后仍能看到当前 step / 已完成 / 待执行 / 失败。任务完成或失败时记录结构化 `modifiedFiles` 和短 `resultSummary`，不依赖完整结果正文。
 - prompt cache（各模型自动前缀缓存）：system prompt 每轮刷新易变段（memory / workingMemory）以让 LLM 看最新状态，代价是自动前缀缓存只命中固定头部（base/personality/mode/approval）；`PromptAssembler` 把稳定段（Sticky）前置、易变段后置以尽量延长可缓存前缀，`PromptAssemblerTest` 锁定"固定头部不被动态内容污染"契约。进一步延长命中（动态段全后移 / 移出 system 到尾部 message）需 prompt 评估 + 真实 API 命中率 A/B，未做

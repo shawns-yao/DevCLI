@@ -114,11 +114,11 @@ public class ConversationHistoryCompactor {
 
     /**
      * 滚动摘要的字符上限。增量摘要"只追加不删除"会让摘要单调膨胀，
-     * 超过此上限时触发一次"摘要的摘要"再压缩（保留精确实体与最终决策）。
-     * 再压缩失败时保留原摘要并打日志，不阻断压缩主流程。
+     * 超过此上限时优先执行确定性生命周期 GC。结构化九段摘要不再交给 LLM 二次改写，
+     * 避免稳定决策在反复摘要中漂移。
      */
     static final int MAX_SUMMARY_CHARS = 16_000;
-    /** 每完成 K 次增量压缩，执行一次摘要重建，避免增量误差无限累积。 */
+    /** 每完成 K 次增量压缩，执行一次确定性生命周期 GC，不再二次压缩旧摘要。 */
     static final int DEFAULT_FULL_RECOMPACT_INTERVAL = 5;
 
     /**
@@ -220,21 +220,18 @@ public class ConversationHistoryCompactor {
             """;
 
     private static final String INCREMENTAL_PROMPT = """
-            你在维护一份九段式滚动摘要。下面是已有摘要（九段）和自上次以来的新对话，
-            请把新对话的关键信息按段整合进已有摘要，输出更新后的完整九段摘要（同样的 ## 段落结构）：
+            你在维护一份固定九段式滚动摘要。不要重写完整摘要，只输出 JSON 变更操作：
+            {"operations":[{"action":"ADD|UPDATE|RESOLVE|SUPERSEDE|EXPIRE|DELETE",
+            "section":"九段标题之一","target_section":"可选九段标题","subject":"稳定主题键",
+            "content":"新增或最终事实","lifecycle":"STABLE|ACTIVE|UNRESOLVED|RESOLVED",
+            "importance":0-100,"evidence_refs":["工具或消息引用"]}]}
 
-            ## 主要请求与意图
-            ## 关键技术概念
-            ## 文件和代码
-            ## 踩过的坑和修复
-            ## 问题解决过程
-            ## 逐条用户消息
-            ## 待办任务
-            ## 当前在做什么
-            ## 下一步
-
-            要求：新信息并入对应段；决策被覆盖时该段只保留最终值；精确实体（文件名/路径/数字/错误码）保留原文；
-            "逐条用户消息"段在末尾追加新出现的用户消息要点；丢弃过渡话术；不加段落外前缀。
+            规则：
+            1. 九段标题保持不变，生命周期只是事实元数据，不新增段落。
+            2. 新事实用 ADD；同主题最终值变化用 UPDATE，且必须原样复用已有元数据中的 subject；任务完成用 RESOLVE 并写入最终结果。
+            3. 已被覆盖用 SUPERSEDE，暂时失效用 EXPIRE，确定无审计价值才用 DELETE。
+            4. 保留仍有效的决策、未完成事项、当前阻塞、精确实体和证据引用。
+            5. 只输出一个 JSON 对象，不输出 Markdown、解释或代码围栏。
 
             === 已有摘要（九段） ===
             %s
@@ -272,7 +269,7 @@ public class ConversationHistoryCompactor {
      * {@link #compactIfNeeded} 直接返回 false，不再调 LLM。
      */
     private int consecutiveFailures = 0;
-    /** 已成功完成的历史压缩次数，用于周期性摘要重建。 */
+    /** 已成功完成的历史压缩次数，用于周期性生命周期 GC。 */
     private int successfulCompactions = 0;
     private int fullRecompactInterval = DEFAULT_FULL_RECOMPACT_INTERVAL;
 
@@ -307,7 +304,7 @@ public class ConversationHistoryCompactor {
         this.llmClient = llmClient;
     }
 
-    /** 配置周期性摘要重建间隔；传入 0 表示关闭周期性重建。 */
+    /** 配置周期性生命周期 GC 间隔；传入 0 表示关闭周期治理。兼容保留旧方法名。 */
     public void setFullRecompactInterval(int interval) {
         this.fullRecompactInterval = Math.max(0, interval);
     }
@@ -403,7 +400,7 @@ public class ConversationHistoryCompactor {
         // 2) 识别 history 头是否已有"上一轮摘要" + 它的位置
         PreviousSummary prev = detectPreviousSummary(history, systemEnd);
         PreviousSummary summaryBase = prev;
-        boolean periodicFullRecompact = summaryBase != null
+        boolean periodicLifecycleGc = summaryBase != null
                 && fullRecompactInterval > 0
                 && successfulCompactions > 0
                 && successfulCompactions % fullRecompactInterval == 0;
@@ -415,7 +412,7 @@ public class ConversationHistoryCompactor {
 
         // 4) 摘要：优先复用会话预摘要，否则走增量 vs 全量 Map-Reduce。
         String summary = null;
-        if (summaryBase == null && !periodicFullRecompact && compactionSummaryCache != null) {
+        if (summaryBase == null && compactionSummaryCache != null) {
             var reusablePreSummary = compactionSummaryCache.findReusablePreSummary(oldMsgs);
             if (reusablePreSummary.isPresent()) {
                 summary = reusablePreSummary.get().summary();
@@ -432,18 +429,24 @@ public class ConversationHistoryCompactor {
                 }
             }
         }
-        periodicFullRecompact = summaryBase != null
+        periodicLifecycleGc = summaryBase != null
                 && fullRecompactInterval > 0
                 && successfulCompactions > 0
                 && successfulCompactions % fullRecompactInterval == 0;
         if (summary == null) {
             SummaryAttempt attempt = summarizeWithPtlRetry(
-                    periodicFullRecompact ? null : summaryBase, history, splitIdx, oldMsgs);
+                    summaryBase, history, splitIdx, oldMsgs);
             if (attempt.terminated()) {
                 // attempt 内部已经 recordFailure
                 return false;
             }
             summary = attempt.summary();
+        }
+        RollingSummary lifecycleSummary = RollingSummary.parse(summary);
+        if (!lifecycleSummary.isEmpty()) {
+            ageLifecycleItems(lifecycleSummary);
+            summaryGc.gc(lifecycleSummary, MAX_SUMMARY_CHARS, periodicLifecycleGc);
+            summary = lifecycleSummary.render();
         }
         summary = capSummarySize(summary);
         CompactionSemanticGuard.Validation semanticValidation =
@@ -479,7 +482,7 @@ public class ConversationHistoryCompactor {
         CompactBoundaryMetadata metadata = new CompactBoundaryMetadata(
                 "history",
                 "token_threshold",
-                periodicFullRecompact ? "periodic-full" : (summaryBase != null ? "incremental" : "full"),
+                periodicLifecycleGc ? "lifecycle-gc" : (summaryBase != null ? "incremental" : "full"),
                 currentTokens,
                 afterTokens,
                 originalMessages,
@@ -506,9 +509,15 @@ public class ConversationHistoryCompactor {
         log.info(String.format(Locale.ROOT,
                 "compacted conversationHistory: tokens %d -> %d, messages %d -> %d, mode=%s, summary chars %d",
                 currentTokens, afterTokens, oldMsgs.size() + systemEnd, rebuilt.size(),
-                periodicFullRecompact ? "periodic-full" : (summaryBase != null ? "incremental" : "full"),
+                periodicLifecycleGc ? "lifecycle-gc" : (summaryBase != null ? "incremental" : "full"),
                 summary.length()));
         return true;
+    }
+
+    private static void ageLifecycleItems(RollingSummary summary) {
+        for (SummaryItem item : summary.allItems()) {
+            summary.replaceItem(item, item.withCompactionCount(item.compactionCount() + 1));
+        }
     }
 
     private CompactBoundaryRuntimeState buildCompactBoundaryRuntimeState(boolean hasPostCompactRestoreContext) {
@@ -1226,9 +1235,24 @@ public class ConversationHistoryCompactor {
             newDigest = String.join("\n\n", mapSummaries);
         }
         String prompt = String.format(INCREMENTAL_PROMPT, previousSummary, newDigest);
-        return chatOnce(
-                "你是一个滚动摘要维护助手。整合新对话进已有摘要，必须保留已有摘要里的所有事实。",
+        String proposedOperations = chatOnce(
+                "你是一个滚动摘要变更提取器，只提出受限 JSON 操作，不直接重写摘要。",
                 prompt);
+        SummaryLifecycleReducer.Result reduced =
+                new SummaryLifecycleReducer().apply(previousSummary, proposedOperations);
+        if (reduced.applied()) {
+            return reduced.summary();
+        }
+
+        // 兼容过渡期仍返回完整九段 Markdown 的模型；任意文本或损坏 JSON 均失败关闭，
+        // 保留上一版摘要，避免一次格式漂移清空核心推理状态。
+        RollingSummary legacy = RollingSummary.parse(proposedOperations);
+        if (!legacy.isEmpty()) {
+            log.warn("incremental summarizer returned legacy nine-section snapshot; normalized in compatibility mode");
+            return legacy.render();
+        }
+        log.warn("incremental summary operations rejected ({}); keep previous summary", reduced.reason());
+        return previousSummary;
     }
 
     /**
@@ -1271,8 +1295,8 @@ public class ConversationHistoryCompactor {
     }
 
     /**
-     * 滚动摘要超过 {@link #MAX_SUMMARY_CHARS} 时做一次"摘要的摘要"。
-     * 再压缩失败或结果无效时保留原摘要（显式降级，打日志），不阻断压缩主流程。
+     * 滚动摘要超过 {@link #MAX_SUMMARY_CHARS} 时先做确定性生命周期 GC。
+     * 九段摘要即使仍超预算也不再交给 LLM 二次改写；旧版非结构化摘要才保留 LLM 兼容兜底。
      */
     private String capSummarySize(String summary) {
         if (summary == null || summary.length() <= MAX_SUMMARY_CHARS) {
@@ -1288,10 +1312,15 @@ public class ConversationHistoryCompactor {
                 if (collected.length() <= MAX_SUMMARY_CHARS) {
                     return collected;
                 }
-                summary = collected; // GC 缩小但仍超，继续 LLM 兜底
+                summary = collected;
             }
+            if (summary.length() > MAX_SUMMARY_CHARS) {
+                log.warn("structured rolling summary remains above cap after lifecycle GC ({} chars); "
+                        + "protected stable or unresolved facts were retained", summary.length());
+            }
+            return summary;
         }
-        // 程序化 GC 不足（非九段格式无法解析，或裁后仍超）→ LLM recompress 兜底
+        // 旧版非九段格式无法解析时才使用 LLM 兼容兜底。
         if (llmClient == null) {
             return summary; // 无 LLM 可兜底，返回 GC 后结果（可能略超，宁可不崩）
         }

@@ -108,7 +108,7 @@ class ConversationHistoryCompactorTest {
     }
 
     @Test
-    void performsPeriodicFullRecompactAfterIncrementalCompactions() {
+    void performsPeriodicLifecycleGcWithoutRecompressingOldSummary() {
         StubCompactor c = new StubCompactor("SUMMARY", 3_000, true);
         c.setFullRecompactInterval(2);
         List<LlmClient.Message> history = buildBigHistory();
@@ -119,9 +119,11 @@ class ConversationHistoryCompactorTest {
         assertEquals(1, c.incrementalCalls.get());
         appendRound(history, 20);
         assertTrue(c.compactIfNeeded(history, 100));
-        assertEquals(2, c.summarizeCalls.get(),
-                "第三次压缩应按间隔执行周期性全量摘要重建");
-        assertTrue(history.get(1).content().contains("mode=periodic-full"));
+        assertEquals(1, c.summarizeCalls.get(),
+                "周期治理不能把旧摘要当原始历史再次压缩");
+        assertEquals(2, c.incrementalCalls.get(),
+                "第三次压缩仍应基于旧摘要执行增量更新");
+        assertTrue(history.get(1).content().contains("mode=lifecycle-gc"));
     }
 
     @Test

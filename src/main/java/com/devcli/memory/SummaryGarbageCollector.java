@@ -48,6 +48,20 @@ public class SummaryGarbageCollector {
      * 裁剪 summary 到 maxChars 内（原地修改并返回）。未超预算时不动。
      */
     public RollingSummary gc(RollingSummary summary, int maxChars) {
+        return gc(summary, maxChars, false);
+    }
+
+    /**
+     * 生命周期感知的垃圾回收。过期事实立即删除；已覆盖事实仅在达到审计保留阈值，
+     * 或显式 aggressive 时删除。稳定决策、未解决事项和最终结果不因摘要轮次而删除。
+     */
+    public RollingSummary gc(RollingSummary summary, int maxChars, boolean aggressive) {
+        if (summary == null) {
+            return null;
+        }
+        summary.removeItems(item -> item.lifecycle() == SummaryItem.Lifecycle.EXPIRED
+                || item.lifecycle() == SummaryItem.Lifecycle.SUPERSEDED
+                && (aggressive || item.compactionCount() >= 5));
         if (summary == null || summary.totalChars() <= maxChars) {
             return summary;
         }
@@ -80,21 +94,24 @@ public class SummaryGarbageCollector {
     }
 
     private void truncateSection(RollingSummary summary, String section, int maxChars) {
-        int overflow = summary.totalChars() - maxChars;
-        if (overflow <= 0) {
-            return;
+        for (SummaryItem item : summary.items(section)) {
+            int overflow = summary.totalChars() - maxChars;
+            if (overflow <= 0) {
+                return;
+            }
+            if (!item.isVisible()
+                    || item.lifecycle() == SummaryItem.Lifecycle.STABLE
+                    || item.lifecycle() == SummaryItem.Lifecycle.UNRESOLVED
+                    || item.content().length() <= MIN_SECTION_CHARS) {
+                continue;
+            }
+            int target = Math.max(MIN_SECTION_CHARS, item.content().length() - overflow - 40);
+            if (target >= item.content().length()) {
+                continue;
+            }
+            String truncated = item.content().substring(0, target).strip()
+                    + "\n[... 已折叠 " + (item.content().length() - target) + " 字符 ...]";
+            summary.replaceItem(item, item.withContent(truncated));
         }
-        String content = summary.get(section);
-        if (content.length() <= MIN_SECTION_CHARS) {
-            return;
-        }
-        // 留 40 字符给截断标记的余量
-        int target = Math.max(MIN_SECTION_CHARS, content.length() - overflow - 40);
-        if (target >= content.length()) {
-            return;
-        }
-        String truncated = content.substring(0, target).strip()
-                + "\n[... 已折叠 " + (content.length() - target) + " 字符 ...]";
-        summary.set(section, truncated);
     }
 }

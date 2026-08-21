@@ -2,6 +2,8 @@ package com.devcli.memory;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 class SummaryGarbageCollectorTest {
@@ -58,5 +60,43 @@ class SummaryGarbageCollectorTest {
         assertEquals("P1 九段", s.get("待办任务"), "高优先段不参与截断");
         assertEquals("集成 compactor", s.get("下一步"), "高优先段不参与截断");
         assertTrue(s.get("文件和代码").contains("已折叠"), "低优先段被截以腾预算");
+    }
+
+    @Test
+    void aggressiveGcNeverDeletesStableOrUnresolvedItemsOnlyBecauseTheyAreOld() {
+        RollingSummary summary = new RollingSummary();
+        summary.addItem(SummaryItem.create(
+                "主要请求与意图", "decision", "保留九段摘要",
+                SummaryItem.Lifecycle.STABLE, 100, List.of()).withCompactionCount(20));
+        summary.addItem(SummaryItem.create(
+                "待办任务", "open", "实现生命周期更新",
+                SummaryItem.Lifecycle.UNRESOLVED, 90, List.of()).withCompactionCount(20));
+
+        new SummaryGarbageCollector().gc(summary, 10_000, true);
+
+        assertTrue(summary.findItem("主要请求与意图", "decision").isPresent());
+        assertTrue(summary.findItem("待办任务", "open").isPresent());
+    }
+
+    @Test
+    void aggressiveGcRemovesExpiredAndOldSupersededAuditButKeepsResolvedOutcome() {
+        RollingSummary summary = new RollingSummary();
+        summary.addItem(SummaryItem.create(
+                "当前在做什么", "expired", "已经无用",
+                SummaryItem.Lifecycle.EXPIRED, 10, List.of()).withCompactionCount(1));
+        summary.addItem(SummaryItem.create(
+                "关键技术概念", "old", "旧值",
+                SummaryItem.Lifecycle.STABLE, 50, List.of()).supersede("new").withCompactionCount(5));
+        summary.addItem(SummaryItem.create(
+                "文件和代码", "file:A", "文件 A 已修改，测试通过",
+                SummaryItem.Lifecycle.RESOLVED, 90, List.of("test-1")).withCompactionCount(8));
+
+        new SummaryGarbageCollector().gc(summary, 10_000, true);
+
+        assertTrue(summary.findItem("当前在做什么", "expired").isEmpty());
+        assertTrue(summary.findItem("关键技术概念", "old").isEmpty());
+        SummaryItem resolved = summary.findItem("文件和代码", "file:A").orElseThrow();
+        assertEquals("文件 A 已修改，测试通过", resolved.content());
+        assertEquals(List.of("test-1"), resolved.evidenceRefs());
     }
 }

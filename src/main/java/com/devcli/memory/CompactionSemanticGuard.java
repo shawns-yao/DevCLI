@@ -36,6 +36,23 @@ final class CompactionSemanticGuard {
             return new Validation(true, safeSummary, List.of(), constraints.size());
         }
 
+        RollingSummary structured = RollingSummary.parse(safeSummary);
+        if (!structured.isEmpty()) {
+            String restored = "- " + String.join("\n- ", missing);
+            structured.findItem("主要请求与意图", "semantic-guard:protected-constraints")
+                    .ifPresentOrElse(
+                            item -> structured.replaceItem(item,
+                                    item.withContent(item.content() + "\n" + restored)),
+                            () -> structured.addItem(SummaryItem.create(
+                                    "主要请求与意图",
+                                    "semantic-guard:protected-constraints",
+                                    restored,
+                                    SummaryItem.Lifecycle.STABLE,
+                                    100,
+                                    List.of("compaction-semantic-guard"))));
+            return new Validation(false, structured.render(), List.copyOf(missing), constraints.size());
+        }
+
         String repair = "\n\n## 压缩语义守卫恢复的关键约束\n- " + String.join("\n- ", missing);
         int limit = Math.max(repair.length(), maxChars);
         int available = Math.max(0, limit - repair.length());
