@@ -25,7 +25,7 @@ import java.util.Locale;
  * 配置读取顺序（以 {@link #fromSystemProperties()} 为准）：
  * 1. 系统属性：{@code devcli.react.token.budget} / {@code devcli.react.stagnation.window} /
  *    {@code devcli.react.hard.max.iterations}
- * 2. 默认值：token 预算 = Integer.MAX_VALUE（实质不限）/ 连续 3 次相同工具调用 / 50 轮
+ * 2. 默认值：token 预算 = Integer.MAX_VALUE（实质不限）/ 连续 3 次相同工具调用 / 100 轮
  *
  * 设计取舍：长上下文模型（GLM-5.1 200k / DeepSeek V4 1M）配合套餐用户的"无限 token"诉求，
  * 默认不再以 80% × window 为硬限——让 LLM 自然停在它该停的地方。需要严格成本控制的
@@ -43,7 +43,7 @@ public class AgentBudget {
     }
 
     private static final int DEFAULT_STAGNATION_WINDOW = 3;
-    private static final int DEFAULT_HARD_MAX_ITERATIONS = 50;
+    private static final int DEFAULT_HARD_MAX_ITERATIONS = 100;
 
     private final int tokenBudget;
     private final int stagnationWindow;

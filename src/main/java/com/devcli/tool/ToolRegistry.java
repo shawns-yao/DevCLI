@@ -456,6 +456,13 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         staleWriteBarrier.recordRead(stepId, safePath, content);
     }
 
+    @Override
+    public void recordCodeEvidence(Path safePath, String chunkType, String symbolName,
+                                   String symbolVersion, String sourceContent) {
+        staleWriteBarrier.recordCodeEvidence(currentResourceLeaseStep(), safePath,
+                chunkType, symbolName, symbolVersion, sourceContent);
+    }
+
     /**
      * 步骤真正结束时清理其读取观察，避免长会话无界增长。
      *
@@ -472,13 +479,19 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     @Override
+    public com.devcli.workspace.WriteGateResult validateWrite(
+            String stepId, Path safePath, String currentContent) {
+        return staleWriteBarrier.validateWrite(stepId, safePath, currentContent);
+    }
+
+    @Override
     public void recordFileWrite(String displayPath, Path safePath, String before, String content, String stepId) {
         if (stepId != null && !stepId.isBlank()) {
             stepModifiedFiles
                     .computeIfAbsent(stepId, k -> java.util.concurrent.ConcurrentHashMap.newKeySet())
                     .add(safePath.toString());
         }
-        staleWriteBarrier.recordWrite(stepId, safePath, content);
+        staleWriteBarrier.recordWrite(stepId, safePath, before, content);
         try {
             writeFileObserver.accept(displayPath, new String[]{before, content});
         } catch (Exception ignored) {

@@ -4,6 +4,7 @@ import com.devcli.policy.PolicyException;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
+import com.devcli.workspace.WriteGateResult;
 
 import java.io.File;
 import java.nio.charset.StandardCharsets;
@@ -66,9 +67,9 @@ public final class FileToolProvider implements ToolProvider {
                     }
                     // 过期写入屏障：本步骤读过该文件、期间内容变了，说明要基于旧版本写回，
                     // 直接写会静默覆盖对方改动。抛策略异常让模型看到可执行的恢复动作（重读后重写）。
-                    String staleReason = context.staleWriteReason(activeStep, safe, before);
-                    if (staleReason != null) {
-                        throw new PolicyException(staleReason);
+                    WriteGateResult writeGate = context.validateWrite(activeStep, safe, before);
+                    if (!writeGate.isAllowed()) {
+                        throw new PolicyException(writeGate.reason());
                     }
                     try {
                         executionContext.throwIfCancelled();

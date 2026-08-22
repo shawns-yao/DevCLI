@@ -93,4 +93,89 @@ class StaleWriteBarrierTest {
         assertNotNull(reason, "磁盘内容与读到的不一致就说明过期，不必知道是谁改的");
         assertTrue(reason.contains("Order.java"), reason);
     }
+
+    @Test
+    void blocksWriteToAnotherFileWhenObservedJavaSymbolChanged() {
+        StaleWriteBarrier barrier = new StaleWriteBarrier();
+        Path service = Path.of("src", "main", "java", "OrderService.java").toAbsolutePath();
+        Path caller = Path.of("src", "main", "java", "OrderController.java").toAbsolutePath();
+        String original = """
+                class OrderService {
+                    String find(String id) { return id; }
+                }
+                """;
+        String changed = """
+                class OrderService {
+                    String find(long id) { return Long.toString(id); }
+                }
+                """;
+
+        barrier.recordRead("step_1", service, original);
+        barrier.recordWrite("step_2", service, original, changed);
+
+        String reason = barrier.staleReason("step_1", caller, "class OrderController {}");
+
+        assertNotNull(reason, "依赖的 Java 符号变化后，写调用方前必须刷新上下文");
+        assertTrue(reason.contains("OrderService.find"), reason);
+        assertTrue(reason.contains("step_2"), reason);
+    }
+
+    @Test
+    void doesNotMarkWriterStaleForItsOwnJavaSymbolChange() {
+        StaleWriteBarrier barrier = new StaleWriteBarrier();
+        Path service = Path.of("src", "main", "java", "OrderService.java").toAbsolutePath();
+        String original = "class OrderService { String find(String id) { return id; } }";
+        String changed = "class OrderService { String find(long id) { return Long.toString(id); } }";
+
+        barrier.recordRead("step_1", service, original);
+        barrier.recordWrite("step_1", service, original, changed);
+
+        assertNull(barrier.staleReason("step_1", file, "class Order {}"),
+                "写入者已拥有最新产物，不应被自己的变更阻断");
+    }
+
+    @Test
+    void blocksWriteWhenSearchCodeObservedSymbolChanged() {
+        StaleWriteBarrier barrier = new StaleWriteBarrier();
+        Path service = Path.of("src", "main", "java", "OrderService.java").toAbsolutePath();
+        Path caller = Path.of("src", "main", "java", "OrderController.java").toAbsolutePath();
+        String original = "class OrderService {\n"
+                + "    String find(String id) { return id; }\n"
+                + "}\n";
+        String changed = "class OrderService {\n"
+                + "    String find(long id) { return Long.toString(id); }\n"
+                + "}\n";
+
+        barrier.recordCodeEvidence("step_1", service, "method", "OrderService.find(String id)",
+                "sv-old", "String find(String id) { return id; }");
+        barrier.recordWrite("step_2", service, original, changed);
+
+        String reason = barrier.staleReason("step_1", caller, "class OrderController {}\n");
+
+        assertNotNull(reason, reason);
+        assertTrue(reason.contains("OrderService.find(String id)"), reason);
+        assertTrue(reason.contains("sv-old"), reason);
+    }
+
+    @Test
+    void rereadClearsSearchCodeObservationForThatFile() {
+        StaleWriteBarrier barrier = new StaleWriteBarrier();
+        Path service = Path.of("OrderService.java").toAbsolutePath();
+        Path caller = Path.of("Caller.java").toAbsolutePath();
+        String original = "class OrderService {\n"
+                + "    String find(String id) { return id; }\n"
+                + "}\n";
+        String changed = "class OrderService {\n"
+                + "    String find(long id) { return Long.toString(id); }\n"
+                + "}\n";
+
+        barrier.recordCodeEvidence("step_1", service, "method", "OrderService.find(String id)",
+                "sv-old", "String find(String id) { return id; }");
+        barrier.recordWrite("step_2", service, original, changed);
+        assertNotNull(barrier.staleReason("step_1", caller, "class Caller {}\n"));
+
+        barrier.recordRead("step_1", service, changed);
+
+        assertNull(barrier.staleReason("step_1", caller, "class Caller {}\n"));
+    }
 }

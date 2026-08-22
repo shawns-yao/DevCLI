@@ -1,5 +1,14 @@
 # TODO
 
+## 2026-08-22 符号证据写入门禁与普通对话轮数
+
+- 状态：已实现并通过限定验证
+- 已实现：`search_code` 记录 Worker 的 Java 符号依赖和源内容指纹；其他 Worker 修改依赖符号后，写入前确定性拦截；重新 `read_file` 后清理该文件的旧观察并恢复写入；普通 ReAct 默认硬轮数从 50 提高到 100，保留系统属性覆盖
+- 影响范围：`StaleWriteBarrier`、`ToolProvider`、`ToolRegistry`、`RagToolProvider`、`AgentBudget` 及相关测试
+- 验证：符号门禁、写入集成、AgentBudget、资源租约、工具注册、工作区执行和 RAG Provider 限定测试通过；`git diff --check` 通过
+- 未验证：未运行全量测试，未启动项目，未验证真实 LLM、真实索引重建和跨进程恢复
+- 剩余风险：当前符号依赖仍是保守的直接证据校验，尚未接入 `CodeIndex` 的原子 epoch 交换和完整调用图收窄
+
 ## 2026-08-20 两层记忆运行闭环
 
 - 状态：已实现并通过限定验证

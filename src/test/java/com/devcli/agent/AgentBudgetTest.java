@@ -175,6 +175,28 @@ class AgentBudgetTest {
     }
 
     @Test
+    void defaultHardIterationLimitIs100() {
+        String old = System.getProperty("devcli.react.hard.max.iterations");
+        try {
+            System.clearProperty("devcli.react.hard.max.iterations");
+            assertEquals(100, AgentBudget.fromSystemProperties().hardMaxIterations());
+        } finally {
+            restoreProperty("devcli.react.hard.max.iterations", old);
+        }
+    }
+
+    @Test
+    void systemPropertyCanOverrideHardIterationLimit() {
+        String old = System.getProperty("devcli.react.hard.max.iterations");
+        try {
+            System.setProperty("devcli.react.hard.max.iterations", "7");
+            assertEquals(7, AgentBudget.fromSystemProperties().hardMaxIterations());
+        } finally {
+            restoreProperty("devcli.react.hard.max.iterations", old);
+        }
+    }
+
+    @Test
     void systemPropertyCanStillOverrideDynamicTokenBudget() {
         String old = System.getProperty("devcli.react.token.budget");
         try {
@@ -194,5 +216,13 @@ class AgentBudgetTest {
     private LlmClient.ToolCall toolCall(String name, String args) {
         return new LlmClient.ToolCall("call_" + name + "_" + args.hashCode(),
                 new LlmClient.ToolCall.Function(name, args));
+    }
+
+    private static void restoreProperty(String key, String old) {
+        if (old == null) {
+            System.clearProperty(key);
+        } else {
+            System.setProperty(key, old);
+        }
     }
 }

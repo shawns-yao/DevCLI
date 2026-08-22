@@ -3,6 +3,7 @@ package com.devcli.tool.provider;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolExecutionContext;
 import com.devcli.tool.ToolRegistry;
+import com.devcli.workspace.WriteGateResult;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.nio.file.Path;
@@ -36,6 +37,11 @@ public interface ToolProvider {
         default void recordFileRead(Path safePath, String content, String stepId) {
         }
 
+        /** 记录 search_code 返回的符号依赖，供写入前的确定性版本校验使用。 */
+        default void recordCodeEvidence(Path safePath, String chunkType, String symbolName,
+                                        String symbolVersion, String sourceContent) {
+        }
+
         /**
          * 判断本次写入是否基于过期版本。
          *
@@ -44,6 +50,13 @@ public interface ToolProvider {
          */
         default String staleWriteReason(String stepId, Path safePath, String currentContent) {
             return null;
+        }
+
+        default WriteGateResult validateWrite(String stepId, Path safePath, String currentContent) {
+            String reason = staleWriteReason(stepId, safePath, currentContent);
+            return reason == null
+                    ? WriteGateResult.allowed()
+                    : WriteGateResult.stale(reason, List.of(safePath.toString()), "");
         }
 
         String projectPath();
