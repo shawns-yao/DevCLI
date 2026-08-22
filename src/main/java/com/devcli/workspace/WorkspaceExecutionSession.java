@@ -14,13 +14,16 @@ public final class WorkspaceExecutionSession implements AutoCloseable {
     private final Path projectRoot;
     private final IsolatedWorkspace workspace;
     private final ToolRegistry toolRegistry;
+    private final String stepId;
 
     private WorkspaceExecutionSession(Path projectRoot,
                                       IsolatedWorkspace workspace,
-                                      ToolRegistry toolRegistry) {
+                                      ToolRegistry toolRegistry,
+                                      String stepId) {
         this.projectRoot = projectRoot;
         this.workspace = workspace;
         this.toolRegistry = toolRegistry;
+        this.stepId = stepId;
     }
 
     public static WorkspaceExecutionSession open(ToolRegistry parent, String stepId) throws IOException {
@@ -29,7 +32,7 @@ public final class WorkspaceExecutionSession implements AutoCloseable {
         IsolatedWorkspace workspace = IsolatedWorkspace.create(projectRoot, stepId);
         try {
             ToolRegistry fork = parent.forkForProject(workspace.path());
-            return new WorkspaceExecutionSession(projectRoot, workspace, fork);
+            return new WorkspaceExecutionSession(projectRoot, workspace, fork, stepId);
         } catch (Exception e) {
             workspace.close();
             throw e;
@@ -50,7 +53,7 @@ public final class WorkspaceExecutionSession implements AutoCloseable {
 
     public PatchSet.ApplyResult apply(PatchSet patchSet) {
         try {
-            return commit(patchSet, () -> { }, result -> { });
+            return commit(patchSet, ignored -> { }, result -> { });
         } catch (Exception e) {
             return PatchSet.ApplyResult.failure("PatchSet 提交失败: " + e.getMessage());
         }
@@ -58,20 +61,32 @@ public final class WorkspaceExecutionSession implements AutoCloseable {
 
     public PatchSet.ApplyResult commit(PatchSet patchSet,
                                        Consumer<PatchSet.ApplyResult> terminalDecision) throws Exception {
-        return commit(patchSet, () -> { }, terminalDecision);
+        return commit(patchSet, ignored -> { }, terminalDecision);
     }
 
     public PatchSet.ApplyResult commit(PatchSet patchSet,
                                        CommitPreparation preparation,
                                        Consumer<PatchSet.ApplyResult> terminalDecision) throws Exception {
         Objects.requireNonNull(patchSet, "patchSet");
-        CommitPreparation beforeApply = preparation == null ? () -> { } : preparation;
+        CommitPreparation beforeApply = preparation == null ? ignored -> { } : preparation;
         Consumer<PatchSet.ApplyResult> decision = terminalDecision == null
                 ? result -> { }
                 : terminalDecision;
         return ProjectCommitCoordinator.withProjectLock(projectRoot, () -> {
-            beforeApply.prepare();
-            PatchSet.ApplyResult result = patchSet.apply(projectRoot);
+            WriteGateResult writeGate = toolRegistry.contextVersionLedger()
+                    .validatePatchSet(stepId, patchSet, projectRoot);
+            if (!writeGate.isAllowed()) {
+                PatchSet.ApplyResult result = PatchSet.ApplyResult.contextStale(writeGate.reason());
+                decision.accept(result);
+                return result;
+            }
+            PatchSet effectivePatchSet = toolRegistry.contextVersionLedger()
+                    .rebaseRefreshedChanges(stepId, patchSet, projectRoot);
+            beforeApply.prepare(effectivePatchSet);
+            PatchSet.ApplyResult result = effectivePatchSet.apply(projectRoot);
+            if (result.applied()) {
+                toolRegistry.contextVersionLedger().publishPatchSet(stepId, effectivePatchSet, projectRoot);
+            }
             decision.accept(result);
             return result;
         });
@@ -79,7 +94,7 @@ public final class WorkspaceExecutionSession implements AutoCloseable {
 
     @FunctionalInterface
     public interface CommitPreparation {
-        void prepare() throws Exception;
+        void prepare(PatchSet effectivePatchSet) throws Exception;
     }
 
     @Override

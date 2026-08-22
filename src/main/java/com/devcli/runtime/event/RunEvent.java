@@ -18,6 +18,7 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
         RunEvent.ModelMessage, RunEvent.ModelUsage, RunEvent.ExecutionStateChanged,
         RunEvent.QueueUpdated, RunEvent.ToolCalls,
         RunEvent.SessionStateChanged, RunEvent.CustomMessage,
+        RunEvent.ContextRefresh,
         RunEvent.ToolResults, RunEvent.HookInvocationStarted, RunEvent.HookInvocationCompleted,
         RunEvent.TurnCompleted, RunEvent.TurnFailed,
         RunEvent.TurnRejected, RunEvent.CheckpointCreated, RunEvent.CheckpointFailed {
@@ -129,11 +130,36 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
         THINKING,
         TOOL_EXECUTING,
         TOOL_RESULTS_PAIRED,
+        STALE_CONTEXT,
+        REFRESHING_CONTEXT,
+        FAILED_RETRYABLE,
         COMPLETED,
         CANCELLED,
         BUDGET_EXCEEDED,
         ITERATION_LIMIT_REACHED,
         FAILED
+    }
+
+    enum ContextRefreshState {
+        STALE_CONTEXT,
+        REFRESHING_CONTEXT,
+        RUNNING,
+        FAILED_RETRYABLE
+    }
+
+    record ContextRefresh(String scope, ContextRefreshState state,
+                          List<String> resources, String reason) implements RunEvent {
+        public ContextRefresh {
+            scope = text(scope);
+            state = state == null ? ContextRefreshState.FAILED_RETRYABLE : state;
+            resources = resources == null ? List.of() : List.copyOf(resources);
+            reason = text(reason);
+        }
+
+        @Override
+        public String type() {
+            return "context.refresh";
+        }
     }
 
     record ExecutionStateChanged(int iteration, ExecutionState state, String reason)

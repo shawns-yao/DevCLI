@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -95,6 +96,47 @@ class AgentExecutionEngineTest {
         assertTrue(contexts.get(1).messages().stream()
                 .anyMatch(message -> message.content().contains("禁止继续依赖旧记忆")
                         && "SYSTEM_INTERNAL".equals(message.source())));
+    }
+
+    @Test
+    void refreshesStaleContextAndEmitsTypedLifecycle() {
+        LlmClient.ToolCall call = new LlmClient.ToolCall(
+                "call_1", new LlmClient.ToolCall.Function("write_file", "{}"));
+        ScriptedClient llm = new ScriptedClient(List.of(
+                new LlmClient.ChatResponse("assistant", "", null, List.of(call), 1, 1),
+                new LlmClient.ChatResponse("assistant", "done", null, null, 1, 1)
+        ));
+        RecordingDelegate delegate = new RecordingDelegate() {
+            @Override
+            public List<ToolRegistry.ToolExecutionResult> executeTools(
+                    List<LlmClient.ToolCall> toolCalls, int iteration) {
+                return List.of(new ToolRegistry.ToolExecutionResult(
+                        "call_1", "write_file", "{}", "stale", 1,
+                        ToolStatus.REJECTED, ToolErrorCode.STALE_CONTEXT, true, List.of()));
+            }
+
+            @Override
+            public Map<String, String> refreshStaleContext() {
+                return Map.of("Service.java", "class Service {}\n");
+            }
+
+            @Override
+            public String contextScope() {
+                return "step-1";
+            }
+        };
+
+        assertEquals("done", new AgentExecutionEngine<String>(
+                llm, new AgentBudget(100, 3, 10)).run(delegate));
+        assertEquals(List.of(
+                        RunEvent.ContextRefreshState.STALE_CONTEXT,
+                        RunEvent.ContextRefreshState.REFRESHING_CONTEXT,
+                        RunEvent.ContextRefreshState.RUNNING),
+                delegate.runEvents.stream().filter(RunEvent.ContextRefresh.class::isInstance)
+                        .map(RunEvent.ContextRefresh.class::cast)
+                        .map(RunEvent.ContextRefresh::state).toList());
+        assertTrue(delegate.history.stream().anyMatch(message ->
+                message.content().contains("<refreshed_file path=\"Service.java\">")));
     }
 
     @Test
@@ -493,7 +535,7 @@ class AgentExecutionEngineTest {
         }
     }
 
-    private static final class RecordingDelegate implements AgentExecutionEngine.Delegate<String> {
+    private static class RecordingDelegate implements AgentExecutionEngine.Delegate<String> {
         private final List<LlmClient.Message> history = new ArrayList<>(List.of(LlmClient.Message.system("system")));
         private final List<String> events = new ArrayList<>();
         private final List<RunEvent> runEvents = new ArrayList<>();

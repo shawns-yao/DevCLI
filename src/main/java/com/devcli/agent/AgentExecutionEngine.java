@@ -102,6 +102,15 @@ final class AgentExecutionEngine<R> {
             return "";
         }
 
+        /** 自动刷新过期上下文；key 为项目相对路径，value 为当前真实内容。 */
+        default Map<String, String> refreshStaleContext() {
+            return Map.of();
+        }
+
+        default String contextScope() {
+            return "";
+        }
+
         default Optional<R> completedAfterToolResults(
                 LlmClient.ChatResponse response,
                 List<ToolRegistry.ToolExecutionResult> toolResults,
@@ -313,8 +322,11 @@ final class AgentExecutionEngine<R> {
                         hookLifecycle.toolResultsReceived(iteration, toolResults);
                     }
                     delegate.afterToolResults(response, toolResults, iteration, budget);
-                    String toolResultInstruction = delegate.instructionAfterToolResults(
-                            response, toolResults, iteration, budget);
+                    String refreshInstruction = refreshStaleContext(
+                            delegate, eventSink, toolResults, iteration);
+                    String toolResultInstruction = combineRetryInstructions(refreshInstruction,
+                            delegate.instructionAfterToolResults(
+                                    response, toolResults, iteration, budget));
                     if (toolResultInstruction != null && !toolResultInstruction.isBlank()) {
                         LlmClient.Message instructionMessage =
                                 LlmClient.Message.internalUser(toolResultInstruction.trim());
@@ -388,6 +400,44 @@ final class AgentExecutionEngine<R> {
             return left;
         }
         return left + "\n\n" + right;
+    }
+
+    private static <R> String refreshStaleContext(Delegate<R> delegate,
+                                                   RunEventSink eventSink,
+                                                   List<ToolRegistry.ToolExecutionResult> results,
+                                                   int iteration) {
+        boolean stale = results != null && results.stream().anyMatch(result ->
+                result != null && result.errorCode() == com.devcli.tool.ToolErrorCode.STALE_CONTEXT);
+        if (!stale) return "";
+        String scope = delegate.contextScope();
+        emitState(eventSink, RunEvent.ExecutionState.STALE_CONTEXT, iteration,
+                "检测到写入依赖的上下文版本已失效");
+        eventSink.emit(new RunEvent.ContextRefresh(scope,
+                RunEvent.ContextRefreshState.STALE_CONTEXT, List.of(), "写闸门拒绝过期上下文"));
+        emitState(eventSink, RunEvent.ExecutionState.REFRESHING_CONTEXT, iteration,
+                "正在读取受影响资源的当前版本");
+        eventSink.emit(new RunEvent.ContextRefresh(scope,
+                RunEvent.ContextRefreshState.REFRESHING_CONTEXT, List.of(), "开始确定性刷新"));
+        Map<String, String> refreshed = delegate.refreshStaleContext();
+        if (refreshed == null || refreshed.isEmpty()) {
+            emitState(eventSink, RunEvent.ExecutionState.FAILED_RETRYABLE, iteration,
+                    "上下文刷新未取得受影响资源");
+            eventSink.emit(new RunEvent.ContextRefresh(scope,
+                    RunEvent.ContextRefreshState.FAILED_RETRYABLE, List.of(), "没有可刷新的资源"));
+            return "上下文版本已失效，但自动刷新未取得资源。请重新调用 read_file 后再写入。";
+        }
+        List<String> resources = refreshed.keySet().stream().sorted().toList();
+        eventSink.emit(new RunEvent.ContextRefresh(scope,
+                RunEvent.ContextRefreshState.RUNNING, resources, "刷新完成，恢复执行"));
+        StringBuilder instruction = new StringBuilder(
+                "以下依赖资源已由执行管线自动刷新。必须丢弃基于旧版本生成的修改，"
+                        + "根据这些当前内容重新生成，再调用写入工具：\n");
+        for (String resource : resources) {
+            instruction.append("\n<refreshed_file path=\"").append(resource).append("\">\n")
+                    .append(refreshed.get(resource))
+                    .append("\n</refreshed_file>\n");
+        }
+        return instruction.toString();
     }
 
     private String samplingRequestId(int iteration) {

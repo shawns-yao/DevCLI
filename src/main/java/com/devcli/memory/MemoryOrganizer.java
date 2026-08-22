@@ -184,9 +184,9 @@ public final class MemoryOrganizer {
                         confidence,
                         sourceQuote,
                         proposal.reason(),
-                        MemoryEvidence.ReviewState.UNREVIEWED,
+                        MemoryEvidence.ReviewState.REVIEWED,
                         proposal.sourceIds()));
-        memory.storeWithSubject(merged);
+        memory.storeManaged(merged);
         MemoryEntry stored = memory.retrieve(merged.getId()).orElse(null);
         if (stored == null || !stored.isRecallable()) return false;
         return proposal.sourceIds().stream()

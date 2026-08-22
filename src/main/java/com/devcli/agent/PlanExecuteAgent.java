@@ -617,6 +617,17 @@ public class PlanExecuteAgent {
                     }
 
                     @Override
+                    public java.util.Map<String, String> refreshStaleContext() {
+                        ToolRegistry registry = activeTaskToolRegistry();
+                        return registry.refreshStaleContext(task.getId());
+                    }
+
+                    @Override
+                    public String contextScope() {
+                        return task.getId();
+                    }
+
+                    @Override
                     public TaskRunResult completed(LlmClient.ChatResponse response,
                                                    AgentBudget currentBudget) {
                         memoryManager.recordTokenUsage(

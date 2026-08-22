@@ -408,6 +408,17 @@ public class Agent implements AutoCloseable {
                     }
 
                     @Override
+                    public java.util.Map<String, String> refreshStaleContext() {
+                        return toolRegistry.refreshStaleContext(
+                                toolRegistry.currentResourceLeaseStep());
+                    }
+
+                    @Override
+                    public String contextScope() {
+                        return toolRegistry.currentResourceLeaseStep();
+                    }
+
+                    @Override
                     public String completed(LlmClient.ChatResponse response,
                                             AgentBudget currentBudget) {
                         appendReasoning(reasoningTranscript, response.reasoningContent());

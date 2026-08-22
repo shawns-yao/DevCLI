@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.Locale;
+import java.time.Instant;
 
 /**
  * 长期记忆检索器。
@@ -102,7 +103,8 @@ public class MemoryRetriever {
                 MemoryEntry entry = byId.get(hit.factId());
                 if (entry != null) {
                     double semanticScore = Math.max(0, hit.similarity())
-                            * entry.getEvidence().retrievalWeight();
+                            * entry.getEvidence().retrievalWeight()
+                            * MemoryFreshnessPolicy.weight(entry, Instant.now());
                     mergeScore(scoredById, entry, semanticScore, 0);
                 }
             }
@@ -115,7 +117,8 @@ public class MemoryRetriever {
         // 2. 关键词检索：与语义召回合并，避免语义命中覆盖精确关键词事实
         for (MemoryEntry entry : byId.values()) {
             double keywordScore = computeRelevanceScore(entry, query) * 1.2
-                    * entry.getEvidence().retrievalWeight();
+                    * entry.getEvidence().retrievalWeight()
+                    * MemoryFreshnessPolicy.weight(entry, Instant.now());
             if (keywordScore > 0) {
                 mergeScore(scoredById, entry, 0, keywordScore);
             }
@@ -206,12 +209,7 @@ public class MemoryRetriever {
 
         double keywordScore = (double) matchedWords / queryWords.size();
 
-        // 3. 时间衰减（越近分数越高）
-        long ageMs = System.currentTimeMillis() - entry.getTimestamp().toEpochMilli();
-        double ageHours = ageMs / (1000.0 * 60 * 60);
-        double timeDecay = Math.max(0.5, 1.0 - ageHours / 24.0); // 24小时内从1.0衰减到0.5
-
-        return keywordScore * timeDecay;
+        return keywordScore;
     }
 
     private void mergeScore(Map<String, ScoredEntry> scoredById, MemoryEntry entry,

@@ -30,6 +30,15 @@ public interface LongTermMemoryStore extends AutoCloseable {
     /** 按 id 写入或覆盖一条 entry。返回 false 表示底层 store 未确认持久化成功。 */
     boolean upsert(MemoryEntry entry);
 
+    /** 同一修订链的失效旧条与 ACTIVE 新条必须作为一个原子批次提交。 */
+    default boolean upsertAll(List<MemoryEntry> entries) {
+        if (entries == null || entries.isEmpty()) return true;
+        for (MemoryEntry entry : entries) {
+            if (!upsert(entry)) return false;
+        }
+        return true;
+    }
+
     /**
      * 当前 store 是否能确认跨进程持久化。
      * SQLite 初始化失败时会降级为 no-op store，此时返回 false，LongTermMemory 可选择

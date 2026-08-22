@@ -105,7 +105,18 @@ public class MemoryEntry {
     public MemoryEvidence getEvidence() { return evidence; }
 
     public boolean isRecallable() {
-        return active && evidence.isRecallable();
+        return active && evidence.isRecallable()
+                && MemoryWriteProtocol.structureState(this)
+                != MemoryWriteProtocol.StructureState.PENDING_CONFIRMATION;
+    }
+
+    public String getStableKey() {
+        MemoryWriteProtocol.StableKey key = MemoryWriteProtocol.stableKey(this);
+        return key == null ? "" : key.subject() + "|" + key.predicate() + "|" + key.scope();
+    }
+
+    public String getStructureState() {
+        return MemoryWriteProtocol.structureState(this).name();
     }
 
     public boolean isExpired(Instant now) {

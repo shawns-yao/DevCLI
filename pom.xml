@@ -265,5 +265,31 @@
                 </plugins>
             </build>
         </profile>
+        <profile>
+            <id>protocol-regression</id>
+            <properties>
+                <skipTests>false</skipTests>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <version>3.2.5</version>
+                        <configuration>
+                            <argLine>-Dfile.encoding=UTF-8</argLine>
+                            <includes>
+                                <include>**/workspace/ContextVersionLedgerContractTest.java</include>
+                                <include>**/agent/AgentExecutionEngineTest.java</include>
+                                <include>**/rag/VectorStoreTest.java</include>
+                                <include>**/memory/MemoryWriteProtocolTest.java</include>
+                                <include>**/runtime/RunEventExecutionStateTest.java</include>
+                                <include>**/benchmark/ProtocolBaselineGateTest.java</include>
+                            </includes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
     </profiles>
 </project>

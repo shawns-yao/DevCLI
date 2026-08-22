@@ -73,7 +73,7 @@ class MemoryOrganizerTest {
             assertFalse(memory.retrieve("m2").orElseThrow().isActive());
             MemoryEntry merged = memory.search("Java 17", 5).getFirst();
             assertTrue(merged.getId().startsWith("organized-"));
-            assertEquals(MemoryEvidence.ReviewState.UNREVIEWED, merged.getEvidence().reviewState());
+            assertEquals(MemoryEvidence.ReviewState.REVIEWED, merged.getEvidence().reviewState());
         }
     }
 

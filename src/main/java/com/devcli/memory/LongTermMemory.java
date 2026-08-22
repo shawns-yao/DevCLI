@@ -130,7 +130,13 @@ public class LongTermMemory implements Memory, AutoCloseable {
      * <p>{@code entry.subject} 为空时退化为普通 {@link #store}（不参与主题归并）。
      */
     public synchronized void storeWithSubject(MemoryEntry entry) {
+        storeManaged(entry);
+    }
+
+    private synchronized void storePrepared(MemoryEntry entry, List<String> explicitTargetIds) {
         if (entry == null) return;
+        MemoryWriteProtocol.Prepared prepared = MemoryWriteProtocol.prepare(entry);
+        entry = prepared.entry();
         pruneExpired();
         List<MemoryEntry> existingEntries = new ArrayList<>(entries.values());
         if (MemoryConflictDetector.findEquivalent(entry, existingEntries).isPresent()) {
@@ -141,6 +147,17 @@ public class LongTermMemory implements Memory, AutoCloseable {
         String subject = entry.getSubject();
         if ((subject == null || subject.isBlank()) && conflict.isPresent()) {
             subject = conflict.get().subject();
+        }
+        if ((subject == null || subject.isBlank())
+                && explicitTargetIds != null && !explicitTargetIds.isEmpty()) {
+            MemoryEntry target = entries.get(explicitTargetIds.getFirst());
+            subject = target == null || target.getSubject().isBlank()
+                    ? "memory:" + explicitTargetIds.getFirst()
+                    : target.getSubject();
+            entry = entry.copy(subject, entry.isActive(), entry.getSupersededBy(),
+                    entry.getRevision(), entry.getExpiresAt(), entry.getMetadata(), entry.getEvidence());
+            prepared = MemoryWriteProtocol.prepare(entry);
+            entry = prepared.entry();
         }
         if (subject == null || subject.isBlank()) {
             store(entry);
@@ -153,11 +170,16 @@ public class LongTermMemory implements Memory, AutoCloseable {
             String existingSubject = existing.getSubject().isBlank()
                     ? MemoryConflictDetector.inferSubject(existing.getContent())
                     : existing.getSubject();
-            if (subject.equals(existingSubject)) {
+            MemoryWriteProtocol.StableKey existingKey = MemoryWriteProtocol.stableKey(existing);
+            boolean sameStableKey = prepared.stableKey() != null
+                    && prepared.stableKey().equals(existingKey);
+            boolean explicitTarget = explicitTargetIds != null
+                    && explicitTargetIds.contains(existing.getId());
+            if (sameStableKey || explicitTarget) {
                 nextRevision = Math.max(nextRevision, existing.getRevision() + 1);
             }
-            if (existing.isRecallable()
-                    && subject.equals(existingSubject)
+            if (existing.isActive()
+                    && (sameStableKey || explicitTarget)
                     && !existing.getId().equals(entry.getId())) {
                 supersededTargets.add(existing);
             }
@@ -177,31 +199,63 @@ public class LongTermMemory implements Memory, AutoCloseable {
         MemoryEntry managedEntry = entry.copy(
                 subject, true, "", nextRevision, expiresAt, metadata, evidence);
 
+        List<MemoryEntry> revisionWrites = new ArrayList<>();
         for (MemoryEntry old : supersededTargets) {
-            MemoryEntry inactive = asSuperseded(old, managedEntry.getId());
-            boolean persisted = store.upsert(inactive);
-            if (!persisted && persistentStore) {
-                log.warn("Failed to persist supersede of {} (subject={}); kept in-memory only",
-                        old.getId(), subject);
-            }
-            entries.put(inactive.getId(), inactive);
+            revisionWrites.add(asSuperseded(old, managedEntry.getId()));
         }
-        store(managedEntry);
+        revisionWrites.add(managedEntry);
+        boolean persisted = store.upsertAll(revisionWrites);
+        if (!persisted && persistentStore) {
+            log.warn("Atomic memory revision rejected for stable key {}; no in-memory state changed",
+                    managedEntry.getStableKey());
+            return;
+        }
+        if (!persisted) {
+            log.warn("Memory store did not confirm atomic revision; using in-memory fallback for {}",
+                    managedEntry.getId());
+        }
+        for (MemoryEntry persistedEntry : revisionWrites) {
+            MemoryEntry previous = entries.put(persistedEntry.getId(), persistedEntry);
+            tokenCounter.addAndGet(persistedEntry.getTokenCount()
+                    - (previous == null ? 0 : previous.getTokenCount()));
+            if (previous != null) removeHashIfUnused(previous.getContent().hashCode());
+            contentHashes.add(persistedEntry.getContent().hashCode());
+        }
+        try {
+            onStoreHook.accept(managedEntry);
+        } catch (Exception e) {
+            log.warn("LongTermMemory onStoreHook failed for {}: {}",
+                    managedEntry.getId(), e.getMessage());
+        }
     }
 
     public synchronized void storeManaged(MemoryEntry entry) {
         if (entry == null) return;
-        List<MemoryEntry> existingEntries = new ArrayList<>(entries.values());
-        if (entry.getSubject().isBlank()
-                && MemoryConflictDetector.findEquivalent(entry, existingEntries).isPresent()) {
+        MemoryWriteProtocol.Prepared prepared = MemoryWriteProtocol.prepare(entry);
+        if (prepared.state() == MemoryWriteProtocol.StructureState.PENDING_CONFIRMATION
+                || prepared.entry().getEvidence().reviewState() == MemoryEvidence.ReviewState.REJECTED) {
+            storeInactiveCandidate(prepared.entry());
             return;
         }
-        if (!entry.getSubject().isBlank()
-                || MemoryConflictDetector.detect(entry, existingEntries).isPresent()) {
-            storeWithSubject(entry);
-        } else {
-            store(entry);
+        storePrepared(entry, List.of());
+    }
+
+    private void storeInactiveCandidate(MemoryEntry entry) {
+        Instant expiresAt = entry.getExpiresAt() != null
+                ? entry.getExpiresAt()
+                : MemoryLifecyclePolicy.expiresAt(entry.getType(), Instant.now());
+        MemoryEntry candidate = entry.copy(entry.getSubject(), false, "",
+                entry.getRevision(), expiresAt, entry.getMetadata(), entry.getEvidence());
+        boolean persisted = store.upsert(candidate);
+        if (!persisted && persistentStore) {
+            log.warn("Memory candidate persistence rejected for {}", candidate.getId());
+            return;
         }
+        MemoryEntry previous = entries.put(candidate.getId(), candidate);
+        tokenCounter.addAndGet(candidate.getTokenCount()
+                - (previous == null ? 0 : previous.getTokenCount()));
+        if (previous != null) removeHashIfUnused(previous.getContent().hashCode());
+        contentHashes.add(candidate.getContent().hashCode());
     }
 
     /**
@@ -222,10 +276,6 @@ public class LongTermMemory implements Memory, AutoCloseable {
             return false;
         }
 
-        int nextRevision = targets.stream()
-                .mapToInt(MemoryEntry::getRevision)
-                .max()
-                .orElse(0) + 1;
         Map<String, String> metadata = new HashMap<>(entry.getMetadata());
         String conflictIds = targets.stream().map(MemoryEntry::getId)
                 .collect(java.util.stream.Collectors.joining(","));
@@ -236,22 +286,10 @@ public class LongTermMemory implements Memory, AutoCloseable {
         for (MemoryEntry target : targets) {
             evidence = evidence.withConflict(target.getId());
         }
-        Instant expiresAt = entry.getExpiresAt() != null
-                ? entry.getExpiresAt()
-                : MemoryLifecyclePolicy.expiresAt(entry.getType(), Instant.now());
-        MemoryEntry managedEntry = entry.copy(entry.getSubject(), true, "", nextRevision,
-                expiresAt, Map.copyOf(metadata), evidence);
-
-        for (MemoryEntry target : targets) {
-            MemoryEntry inactive = asSuperseded(target, managedEntry.getId());
-            boolean persisted = store.upsert(inactive);
-            if (!persisted && persistentStore) {
-                log.warn("Failed to persist observation supersede of {}; kept in-memory only", target.getId());
-            }
-            entries.put(inactive.getId(), inactive);
-        }
-        store(managedEntry);
-        return entries.containsKey(managedEntry.getId());
+        MemoryEntry managedEntry = entry.copy(entry.getSubject(), true, "", entry.getRevision(),
+                entry.getExpiresAt(), Map.copyOf(metadata), evidence);
+        storePrepared(managedEntry, targetIds);
+        return entries.containsKey(entry.getId());
     }
 
     /** 基于旧条派生一个被取代的失效副本：仅改 active=false 与 supersededBy，其余保持不变。 */
@@ -295,7 +333,16 @@ public class LongTermMemory implements Memory, AutoCloseable {
         pruneExpired();
         MemoryEntry existing = entries.get(id);
         if (existing == null) return false;
+        if (existing.getEvidence().reviewState() == reviewState) return true;
         MemoryEntry updated = existing.withEvidence(existing.getEvidence().withReviewState(reviewState));
+        if (reviewState == MemoryEvidence.ReviewState.REVIEWED) {
+            storePrepared(updated, List.of());
+            MemoryEntry activated = entries.get(id);
+            return activated != null && activated.isActive() && activated.isRecallable();
+        }
+        updated = MemoryWriteProtocol.prepare(updated).entry();
+        updated = updated.copy(updated.getSubject(), false, "", updated.getRevision(),
+                updated.getExpiresAt(), updated.getMetadata(), updated.getEvidence());
         boolean persisted = store.upsert(updated);
         if (!persisted && persistentStore) {
             log.warn("Failed to persist review state {} for {}", reviewState, id);

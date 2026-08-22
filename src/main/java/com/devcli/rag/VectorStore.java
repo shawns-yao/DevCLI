@@ -119,6 +119,23 @@ public class VectorStore implements AutoCloseable {
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                     """);
+            stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS code_index_state (
+                        project_path TEXT PRIMARY KEY,
+                        active_epoch TEXT NOT NULL DEFAULT 'none',
+                        status TEXT NOT NULL DEFAULT 'CURRENT',
+                        generation INTEGER NOT NULL DEFAULT 0,
+                        updated_at_ms INTEGER NOT NULL DEFAULT 0
+                    )
+                    """);
+            stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS code_index_dirty_files (
+                        project_path TEXT NOT NULL,
+                        file_path TEXT NOT NULL,
+                        marked_at_ms INTEGER NOT NULL,
+                        PRIMARY KEY(project_path, file_path)
+                    )
+                    """);
             stmt.execute(createIdxProject);
             stmt.execute(createIdxFile);
             stmt.execute(createIdxType);
@@ -147,15 +164,23 @@ public class VectorStore implements AutoCloseable {
         String deleteChunks = "DELETE FROM code_chunks WHERE project_path = ?";
         String deleteRelations = "DELETE FROM code_relations WHERE project_path = ?";
         String deleteInvalidations = "DELETE FROM symbol_invalidations WHERE project_path = ?";
+        String deleteState = "DELETE FROM code_index_state WHERE project_path = ?";
+        String deleteDirty = "DELETE FROM code_index_dirty_files WHERE project_path = ?";
         try (PreparedStatement ps1 = connection.prepareStatement(deleteChunks);
              PreparedStatement ps2 = connection.prepareStatement(deleteRelations);
-             PreparedStatement ps3 = connection.prepareStatement(deleteInvalidations)) {
+             PreparedStatement ps3 = connection.prepareStatement(deleteInvalidations);
+             PreparedStatement ps4 = connection.prepareStatement(deleteState);
+             PreparedStatement ps5 = connection.prepareStatement(deleteDirty)) {
             ps1.setString(1, projectPath);
             ps2.setString(1, projectPath);
             ps3.setString(1, projectPath);
+            ps4.setString(1, projectPath);
+            ps5.setString(1, projectPath);
             ps1.executeUpdate();
             ps2.executeUpdate();
             ps3.executeUpdate();
+            ps4.executeUpdate();
+            ps5.executeUpdate();
         }
     }
 
@@ -169,24 +194,110 @@ public class VectorStore implements AutoCloseable {
     public void replaceProjectIndex(List<CodeChunkEntry> entries,
                                     List<CodeRelation> relations,
                                     String indexEpoch) throws SQLException {
+        String baseEpoch = currentIndexEpoch();
+        if (!replaceProjectIndex(entries, relations, indexEpoch, baseEpoch)) {
+            throw new SQLException("index epoch CAS failed: expected=" + baseEpoch
+                    + ", actual=" + currentIndexEpoch());
+        }
+    }
+
+    /** 仅当 active epoch 仍等于构建起点时交换新索引，防止较旧并发构建覆盖新结果。 */
+    public boolean replaceProjectIndex(List<CodeChunkEntry> entries,
+                                       List<CodeRelation> relations,
+                                       String indexEpoch,
+                                       String baseEpoch) throws SQLException {
         Map<String, SymbolSnapshot> oldSnapshots = getSymbolSnapshots();
 
         // 原子操作：在同一个事务中 clear + insert，防止中途失败导致索引全部丢失
         boolean autoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
         try {
+            String currentEpoch = currentIndexEpoch();
+            if (!safeIndexEpoch(baseEpoch).equals(currentEpoch)) {
+                connection.rollback();
+                return false;
+            }
             clearChunksAndRelations();
             insertChunks(entries, indexEpoch);
             insertRelations(relations);
             List<SymbolInvalidation> invalidations = diffInvalidations(oldSnapshots, getSymbolSnapshots(), safeIndexEpoch(indexEpoch));
             insertInvalidations(invalidations);
+            upsertIndexState(indexEpoch, "CURRENT", true);
+            clearDirtyFiles();
             connection.commit();
+            return true;
         } catch (SQLException e) {
             connection.rollback();
             log.error("索引替换失败，已回滚到旧索引: {}", e.getMessage());
             throw e;
         } finally {
             connection.setAutoCommit(autoCommit);
+        }
+    }
+
+    public String beginIndexBuild(List<String> filePaths) throws SQLException {
+        String baseEpoch = currentIndexEpoch();
+        boolean autoCommit = connection.getAutoCommit();
+        connection.setAutoCommit(false);
+        try {
+            upsertIndexState(baseEpoch, "BUILDING", false);
+            String sql = """
+                    INSERT INTO code_index_dirty_files(project_path, file_path, marked_at_ms)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(project_path, file_path) DO UPDATE SET marked_at_ms=excluded.marked_at_ms
+                    """;
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                for (String filePath : filePaths == null ? List.<String>of() : filePaths) {
+                    statement.setString(1, projectPath);
+                    statement.setString(2, filePath);
+                    statement.setLong(3, System.currentTimeMillis());
+                    statement.addBatch();
+                }
+                statement.executeBatch();
+            }
+            connection.commit();
+            return baseEpoch;
+        } catch (SQLException e) {
+            connection.rollback();
+            throw e;
+        } finally {
+            connection.setAutoCommit(autoCommit);
+        }
+    }
+
+    public void markIndexBuildFailed(String baseEpoch) throws SQLException {
+        if (safeIndexEpoch(baseEpoch).equals(currentIndexEpoch())) {
+            upsertIndexState(baseEpoch, "STALE", false);
+        }
+    }
+
+    private void upsertIndexState(String epoch, String status, boolean incrementGeneration)
+            throws SQLException {
+        String sql = """
+                INSERT INTO code_index_state(project_path, active_epoch, status, generation, updated_at_ms)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(project_path) DO UPDATE SET
+                    active_epoch=excluded.active_epoch,
+                    status=excluded.status,
+                    generation=code_index_state.generation + ?,
+                    updated_at_ms=excluded.updated_at_ms
+                """;
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, projectPath);
+            statement.setString(2, safeIndexEpoch(epoch));
+            statement.setString(3, status);
+            statement.setInt(4, incrementGeneration ? 1 : 0);
+            statement.setLong(5, System.currentTimeMillis());
+            statement.setInt(6, incrementGeneration ? 1 : 0);
+            statement.executeUpdate();
+        }
+    }
+
+    private void clearDirtyFiles() throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "DELETE FROM code_index_dirty_files WHERE project_path = ?")) {
+            statement.setString(1, projectPath);
+            statement.executeUpdate();
         }
     }
 
@@ -695,6 +806,13 @@ public class VectorStore implements AutoCloseable {
     }
 
     public String currentIndexEpoch() throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT active_epoch FROM code_index_state WHERE project_path = ?")) {
+            ps.setString(1, projectPath);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return safeIndexEpoch(rs.getString(1));
+            }
+        }
         String sql = """
                 SELECT index_epoch
                 FROM code_chunks
@@ -752,11 +870,49 @@ public class VectorStore implements AutoCloseable {
         String effectiveSymbolVersion = blankToDefault(symbolVersion,
                 SymbolVersion.from(filePath, chunkType, name, content, effectiveClasspathEpoch).value());
         String effectiveIndexEpoch = blankToDefault(indexEpoch, IndexEpoch.none().value());
-        return new SearchResult(filePath, chunkType, name, content, similarity,
+        IndexFreshness freshness = indexFreshness(filePath, effectiveIndexEpoch);
+        String effectiveContent = freshness == IndexFreshness.DIRTY
+                ? liveChunkContent(filePath, chunkType, name, content)
+                : content;
+        return new SearchResult(filePath, chunkType, name, effectiveContent, similarity,
                 effectiveSymbolVersion,
                 effectiveClasspathEpoch,
                 effectiveIndexEpoch,
-                getInvalidationsForSymbol(SymbolSnapshot.symbolKey(filePath, chunkType, name), 3));
+                getInvalidationsForSymbol(SymbolSnapshot.symbolKey(filePath, chunkType, name), 3),
+                freshness);
+    }
+
+    private String liveChunkContent(String filePath, String chunkType, String name, String fallback) {
+        try {
+            Path root = Path.of(projectPath).toAbsolutePath().normalize();
+            Path candidate = Path.of(filePath);
+            Path file = (candidate.isAbsolute() ? candidate : root.resolve(candidate))
+                    .toAbsolutePath().normalize();
+            if (!file.startsWith(root) || !java.nio.file.Files.isRegularFile(file)) return fallback;
+            for (CodeChunk chunk : new CodeChunker().chunkFile(file)) {
+                if (chunk.chunkType().equals(chunkType) && chunk.name().equals(name)) {
+                    return chunk.content();
+                }
+            }
+            return java.nio.file.Files.readString(file);
+        } catch (Exception ignored) {
+            return fallback;
+        }
+    }
+
+    private IndexFreshness indexFreshness(String filePath, String resultEpoch) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT 1 FROM code_index_dirty_files
+                WHERE project_path = ? AND file_path = ? LIMIT 1
+                """)) {
+            statement.setString(1, projectPath);
+            statement.setString(2, filePath);
+            try (ResultSet rs = statement.executeQuery()) {
+                if (rs.next()) return IndexFreshness.DIRTY;
+            }
+        }
+        return safeIndexEpoch(resultEpoch).equals(currentIndexEpoch())
+                ? IndexFreshness.CURRENT : IndexFreshness.STALE;
     }
 
     private static String safeIndexEpoch(String indexEpoch) {
@@ -778,20 +934,37 @@ public class VectorStore implements AutoCloseable {
     public record SearchResult(String filePath, String chunkType,
                                String name, String content, double similarity,
                                String symbolVersion, String classpathEpoch,
-                               String indexEpoch, List<SymbolInvalidation> invalidations) {
+                               String indexEpoch, List<SymbolInvalidation> invalidations,
+                               IndexFreshness freshness) {
+        public SearchResult {
+            freshness = freshness == null ? IndexFreshness.STALE : freshness;
+        }
+
+        public SearchResult(String filePath, String chunkType, String name, String content,
+                            double similarity, String symbolVersion, String classpathEpoch,
+                            String indexEpoch, List<SymbolInvalidation> invalidations) {
+            this(filePath, chunkType, name, content, similarity, symbolVersion, classpathEpoch,
+                    indexEpoch, invalidations, IndexFreshness.STALE);
+        }
         public SearchResult(String filePath, String chunkType, String name, String content, double similarity) {
             this(filePath, chunkType, name, content, similarity,
                     SymbolVersion.from(filePath, chunkType, name, content, ClasspathEpoch.none().value()).value(),
                     ClasspathEpoch.none().value(),
                     IndexEpoch.none().value(),
-                    List.of());
+                    List.of(), IndexFreshness.STALE);
         }
 
         public SearchResult(String filePath, String chunkType, String name, String content, double similarity,
                             String symbolVersion, String classpathEpoch) {
             this(filePath, chunkType, name, content, similarity, symbolVersion, classpathEpoch,
-                    IndexEpoch.none().value(), List.of());
+                    IndexEpoch.none().value(), List.of(), IndexFreshness.STALE);
         }
+    }
+
+    public enum IndexFreshness {
+        CURRENT,
+        STALE,
+        DIRTY
     }
 
     /**

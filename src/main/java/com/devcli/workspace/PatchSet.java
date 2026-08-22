@@ -81,6 +81,11 @@ public final class PatchSet {
             return new ApplyResult(false, conflicts, List.of(), "patch conflict", List.of());
         }
 
+        static ApplyResult contextStale(String reason) {
+            return new ApplyResult(false, List.of(), List.of(),
+                    reason == null ? "context stale" : reason, List.of());
+        }
+
         static ApplyResult failure(String error) {
             return failure(error, List.of());
         }

@@ -595,6 +595,17 @@ public class SubAgent {
                     }
 
                     @Override
+                    public java.util.Map<String, String> refreshStaleContext() {
+                        return toolRegistry.refreshStaleContext(
+                                toolRegistry.currentResourceLeaseStep());
+                    }
+
+                    @Override
+                    public String contextScope() {
+                        return toolRegistry.currentResourceLeaseStep();
+                    }
+
+                    @Override
                     public Optional<AgentMessage> completedAfterToolResults(
                             LlmClient.ChatResponse response,
                             List<ToolExecutionResult> toolResults,

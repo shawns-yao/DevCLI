@@ -16,6 +16,7 @@ final class MemoryConflictDetector {
                 ? candidateClaim.map(StructuredClaim.Claim::subject).orElse("")
                 : subject;
         if (inferred.isBlank()) return Optional.empty();
+        MemoryWriteProtocol.StableKey candidateKey = MemoryWriteProtocol.stableKey(candidate);
 
         for (MemoryEntry existing : existingEntries) {
             if (existing == null || !existing.isRecallable() || existing.isExpired(null)
@@ -24,6 +25,8 @@ final class MemoryConflictDetector {
             String existingSubject = existing.getSubject().isBlank()
                     ? existingClaim.map(StructuredClaim.Claim::subject).orElse("")
                     : existing.getSubject();
+            MemoryWriteProtocol.StableKey existingKey = MemoryWriteProtocol.stableKey(existing);
+            if (candidateKey != null && existingKey != null && !candidateKey.equals(existingKey)) continue;
             if (!inferred.equals(existingSubject)) continue;
             if (!equivalent(candidate, candidateClaim, existing, existingClaim)) {
                 return Optional.of(new Conflict(inferred, existing.getId()));
@@ -39,6 +42,7 @@ final class MemoryConflictDetector {
                 ? candidateClaim.map(StructuredClaim.Claim::subject).orElse("")
                 : candidate.getSubject();
         if (subject.isBlank()) return Optional.empty();
+        MemoryWriteProtocol.StableKey candidateKey = MemoryWriteProtocol.stableKey(candidate);
         for (MemoryEntry existing : existingEntries) {
             if (existing == null || !existing.isRecallable() || existing.isExpired(null)
                     || existing.getId().equals(candidate.getId())) continue;
@@ -46,6 +50,8 @@ final class MemoryConflictDetector {
             String existingSubject = existing.getSubject().isBlank()
                     ? existingClaim.map(StructuredClaim.Claim::subject).orElse("")
                     : existing.getSubject();
+            MemoryWriteProtocol.StableKey existingKey = MemoryWriteProtocol.stableKey(existing);
+            if (candidateKey != null && existingKey != null && !candidateKey.equals(existingKey)) continue;
             if (subject.equals(existingSubject)
                     && equivalent(candidate, candidateClaim, existing, existingClaim)) {
                 return Optional.of(existing.getId());

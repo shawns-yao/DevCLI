@@ -1,5 +1,19 @@
 # TODO
 
+## 2026-08-22 多智能体版本化上下文与记忆协议
+
+- 状态：已实现并通过协议限定验证
+- 已实现：父 Registry 与隔离 fork 共享 `ContextVersionLedger`；Java 符号与普通 file 指纹统一进入写闸门；generation/mtime/size/dirty 缓存避免无变化文件重复解析
+- 已实现：`write_file` 前置校验与 PatchSet 应用前提交校验共同覆盖直接写入和命令间接写入；`STALE_CONTEXT -> REFRESHING_CONTEXT -> RUNNING/FAILED_RETRYABLE` 使用强类型 `RunEvent`，刷新后可安全重写同一依赖文件
+- 已实现：索引构建使用 dirty 标记、`base_epoch` CAS、事务内原子交换和 `CURRENT/STALE/DIRTY` 检索标记；DIRTY 结果回读实时文件
+- 已实现：长期记忆按 `subject + predicate + scope` 稳定键管理修订；未确认候选隔离为非 ACTIVE，确认后原子 supersede；有效性、新鲜度、相关性和证据权重分层，移除全局 `0.5` 衰减下限
+- 已实现：新增 `protocol-regression` Maven profile、确定性故障模拟器、仓库固定 JSON 基线和 `target/benchmark-reports/protocol-regression.json` 报告
+- 影响范围：Agent 执行内核、ToolRegistry、Workspace/PatchSet、Code RAG/VectorStore、LongTermMemory/MemoryRetriever、Runtime 事件、Maven profile 和协议测试
+- 验证：`mvn -q -Pprotocol-regression test`、主代码编译和跨模块限定回归通过；共享账本、PatchSet 门禁、刷新重写、索引 CAS、pending 确认、SQLite 重载和原子失败回滚均有确定性用例
+- 全局回归：`mvn -q -Pquick test` 执行 1594 项，2 项既有失败、4 项跳过；失败为 `ConversationHistoryCompactorStabilityTest` 固定摘要峰值 19285 超限，以及 `TraceRecorderTest` 脱敏断言，均已单独复现且对应模块不在本次改动范围
+- 未验证：真实 LLM、真实 Docker、跨 JVM 并发索引、常驻 WatchService dirty 监听和真实长期运行资源回收；未启动项目
+- 剩余风险：大文件 `file#N` 分段证据暂不进入写闸门；外部进程绕过 PatchSet 提交流程的直接主目录写入不在隔离 Worker 协议内
+
 ## 2026-08-22 符号证据写入门禁与普通对话轮数
 
 - 状态：已实现并通过限定验证

@@ -138,6 +138,29 @@ class VectorStoreTest {
     }
 
     @Test
+    void rejectsStaleBuildWithBaseEpochCasAndMarksDirtyResults() throws Exception {
+        CodeChunk oldChunk = CodeChunk.fileChunk("README.md", "old");
+        CodeChunk newChunk = CodeChunk.fileChunk("README.md", "new");
+        store.replaceProjectIndex(List.of(
+                new VectorStore.CodeChunkEntry(oldChunk, new float[]{1.0f})), List.of(), "idx-1");
+
+        String baseEpoch = store.beginIndexBuild(List.of("README.md"));
+        assertEquals("idx-1", baseEpoch);
+        assertEquals(VectorStore.IndexFreshness.DIRTY,
+                store.searchByKeyword("old").getFirst().freshness());
+
+        store.replaceProjectIndex(List.of(
+                new VectorStore.CodeChunkEntry(newChunk, new float[]{1.0f})), List.of(), "idx-2", baseEpoch);
+        boolean staleSwap = store.replaceProjectIndex(List.of(
+                new VectorStore.CodeChunkEntry(oldChunk, new float[]{1.0f})), List.of(), "idx-old", baseEpoch);
+
+        assertFalse(staleSwap);
+        assertEquals("idx-2", store.currentIndexEpoch());
+        assertEquals(VectorStore.IndexFreshness.CURRENT,
+                store.searchByKeyword("new").getFirst().freshness());
+    }
+
+    @Test
     void testRelationStorage() throws Exception {
         CodeRelation rel = new CodeRelation("A.java", "A", "B.java", "B", "extends",
                 CodeRelation.SOURCE_RESOLVED, 0.8, "epoch-1");

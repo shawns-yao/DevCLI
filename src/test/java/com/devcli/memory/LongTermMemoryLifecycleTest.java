@@ -91,6 +91,31 @@ class LongTermMemoryLifecycleTest {
     }
 
     @Test
+    void confirmedCandidateAtomicallySupersedesCurrentFactAcrossReload() throws Exception {
+        MemoryEvidence pendingEvidence = new MemoryEvidence(
+                MemoryEvidence.Confidence.MEDIUM,
+                "server.port=8443",
+                "needs confirmation",
+                MemoryEvidence.ReviewState.UNREVIEWED,
+                java.util.List.of());
+        try (LongTermMemory memory = new LongTermMemory(tempDir.toFile())) {
+            memory.storeManaged(entry("old-port", "server.port=8080", "", null));
+            memory.storeManaged(entry("new-port", "server.port=8443", "", null)
+                    .withEvidence(pendingEvidence));
+
+            assertTrue(memory.retrieve("old-port").orElseThrow().isRecallable());
+            assertFalse(memory.retrieve("new-port").orElseThrow().isActive());
+            assertTrue(memory.updateReviewState("new-port", MemoryEvidence.ReviewState.REVIEWED));
+        }
+
+        try (LongTermMemory reloaded = new LongTermMemory(tempDir.toFile())) {
+            assertFalse(reloaded.retrieve("old-port").orElseThrow().isActive());
+            assertTrue(reloaded.retrieve("new-port").orElseThrow().isRecallable());
+            assertEquals(1, reloaded.getAll().stream().filter(MemoryEntry::isActive).count());
+        }
+    }
+
+    @Test
     void rejectedMemoryDoesNotBlockSameContentFromBeingSavedAgain() throws Exception {
         try (LongTermMemory memory = new LongTermMemory(tempDir.toFile())) {
             MemoryEntry rejected = entry("rejected", "用户偏好使用 Java", "user.language", null)

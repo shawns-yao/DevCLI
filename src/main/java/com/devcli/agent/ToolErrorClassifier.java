@@ -20,6 +20,7 @@ final class ToolErrorClassifier {
             case INVALID_ARGUMENTS -> "schema";
             case CAPABILITY_DENIED, SKILL_PERMISSION_DENIED, HITL_REJECTED, POLICY_DENIED -> "policy";
             case RESOURCE_CONFLICT -> "resource-conflict";
+            case STALE_CONTEXT -> "stale-context";
             case EXECUTION_FAILED -> "execution";
             case MCP_ERROR -> "mcp";
             case CANCELLED -> "cancelled";

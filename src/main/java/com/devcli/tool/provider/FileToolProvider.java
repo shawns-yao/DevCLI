@@ -69,7 +69,8 @@ public final class FileToolProvider implements ToolProvider {
                     // 直接写会静默覆盖对方改动。抛策略异常让模型看到可执行的恢复动作（重读后重写）。
                     WriteGateResult writeGate = context.validateWrite(activeStep, safe, before);
                     if (!writeGate.isAllowed()) {
-                        throw new PolicyException(writeGate.reason());
+                        return ToolOutput.rejected(ToolErrorCode.STALE_CONTEXT,
+                                writeGate.reason(), true);
                     }
                     try {
                         executionContext.throwIfCancelled();

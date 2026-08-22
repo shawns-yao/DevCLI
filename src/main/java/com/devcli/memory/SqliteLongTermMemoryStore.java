@@ -152,7 +152,7 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
     }
 
     @Override
-    public boolean upsert(MemoryEntry entry) {
+    public synchronized boolean upsert(MemoryEntry entry) {
         if (!usable || entry == null) return false;
         String sql = """
                 INSERT INTO memory_facts(id, content, type, timestamp_ms, metadata_json, token_count,
@@ -205,6 +205,35 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
             return true;
         } catch (SQLException | JsonProcessingException e) {
             log.warn("upsert failed for {}: {}", entry.getId(), e.getMessage());
+            return false;
+        }
+    }
+
+    @Override
+    public synchronized boolean upsertAll(List<MemoryEntry> entries) {
+        if (!usable || entries == null) return false;
+        if (entries.isEmpty()) return true;
+        try {
+            boolean autoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+            try {
+                for (MemoryEntry entry : entries) {
+                    if (!upsert(entry)) {
+                        connection.rollback();
+                        return false;
+                    }
+                }
+                connection.commit();
+                return true;
+            } catch (Exception e) {
+                connection.rollback();
+                log.warn("atomic memory revision upsert failed: {}", e.getMessage());
+                return false;
+            } finally {
+                connection.setAutoCommit(autoCommit);
+            }
+        } catch (SQLException e) {
+            log.warn("atomic memory revision transaction failed: {}", e.getMessage());
             return false;
         }
     }

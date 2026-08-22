@@ -49,6 +49,12 @@ public final class RunEventJsonCodec {
             payload.put("iteration", state.iteration());
             payload.put("state", state.state().name());
             payload.put("reason", state.reason());
+        } else if (event instanceof RunEvent.ContextRefresh refresh) {
+            payload.put("scope", refresh.scope());
+            payload.put("state", refresh.state().name());
+            payload.put("reason", refresh.reason());
+            ArrayNode resources = payload.putArray("resources");
+            refresh.resources().forEach(resources::add);
         } else if (event instanceof RunEvent.QueueUpdated queue) {
             payload.put("channel", queue.channel());
             payload.put("steering_pending", queue.steeringPending());

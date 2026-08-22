@@ -96,8 +96,10 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
      * 过期写入屏障：租约只在步骤执行期内防并发写，跨步骤的 read-modify-write 版本过期由它兜。
      * 只对非空步骤 id 生效，单 Agent 路径不启用。
      */
-    private final com.devcli.workspace.StaleWriteBarrier staleWriteBarrier =
-            new com.devcli.workspace.StaleWriteBarrier();
+    private com.devcli.workspace.ContextVersionLedger contextVersionLedger =
+            new com.devcli.workspace.ContextVersionLedger();
+    private Path contextProjectRoot = Path.of(projectPath).toAbsolutePath().normalize();
+    private boolean sharedContextVersionLedger;
     private final ResourceLeaseMaintenance resourceLeaseMaintenance;
     private final ResourceLeaseMaintenance.Registration resourceLeaseMaintenanceRegistration;
     private final ThreadLocal<String> resourceLeaseStep = new ThreadLocal<>();
@@ -173,6 +175,11 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         ragToolProvider.closeCachedCodeRetriever();
         toolResultCache.clear();
         this.projectPath = projectPath;
+        if (!sharedContextVersionLedger) {
+            this.contextVersionLedger.clear();
+            this.contextVersionLedger = new com.devcli.workspace.ContextVersionLedger();
+            this.contextProjectRoot = Path.of(projectPath).toAbsolutePath().normalize();
+        }
         this.pathGuard = new PathGuard(projectPath);
         this.lspManager.setProjectPath(projectPath);
         if (!customSnapshotService) {
@@ -211,6 +218,9 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                 failure.addSuppressed(e);
             }
         }
+        if (!sharedContextVersionLedger) {
+            contextVersionLedger.clear();
+        }
         if (failure != null) {
             throw failure;
         }
@@ -242,6 +252,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         Path root = Objects.requireNonNull(projectRoot, "projectRoot")
                 .toAbsolutePath().normalize();
         ToolRegistry fork = createProjectForkRegistry(resourceLeaseMaintenance);
+        fork.bindContextVersionLedger(contextVersionLedger, contextProjectRoot);
         fork.setProjectPath(root.toString());
         fork.contextProfile = contextProfile;
         fork.browserGuard = browserGuard;
@@ -264,6 +275,14 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     protected ToolRegistry createProjectForkRegistry(ResourceLeaseMaintenance maintenance) {
         return new ToolRegistry(commandTimeoutSeconds, toolBatchTimeoutSeconds, maintenance);
+    }
+
+    private void bindContextVersionLedger(
+            com.devcli.workspace.ContextVersionLedger ledger, Path logicalProjectRoot) {
+        this.contextVersionLedger = Objects.requireNonNull(ledger, "ledger");
+        this.contextProjectRoot = Objects.requireNonNull(logicalProjectRoot, "logicalProjectRoot")
+                .toAbsolutePath().normalize();
+        this.sharedContextVersionLedger = true;
     }
 
     ResourceLeaseMaintenance resourceLeaseMaintenance() {
@@ -453,14 +472,18 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     @Override
     public void recordFileRead(Path safePath, String content, String stepId) {
-        staleWriteBarrier.recordRead(stepId, safePath, content);
+        String resourceKey = contextResourceKey(safePath);
+        contextVersionLedger.recordRead(stepId, resourceKey,
+                contextProjectRoot.resolve(resourceKey), content);
     }
 
     @Override
     public void recordCodeEvidence(Path safePath, String chunkType, String symbolName,
                                    String symbolVersion, String sourceContent) {
-        staleWriteBarrier.recordCodeEvidence(currentResourceLeaseStep(), safePath,
-                chunkType, symbolName, symbolVersion, sourceContent);
+        String resourceKey = contextResourceKey(safePath);
+        contextVersionLedger.recordCodeEvidence(currentResourceLeaseStep(), resourceKey,
+                contextProjectRoot.resolve(resourceKey), chunkType, symbolName,
+                symbolVersion, sourceContent);
     }
 
     /**
@@ -470,18 +493,20 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
      * （一个步骤有初次 / 修复 / 重试多次调用），并入会让被拦后的重试失去屏障保护。
      */
     public void forgetStaleWriteScope(String stepId) {
-        staleWriteBarrier.forgetScope(stepId);
+        contextVersionLedger.forgetScope(stepId);
     }
 
     @Override
     public String staleWriteReason(String stepId, Path safePath, String currentContent) {
-        return staleWriteBarrier.staleReason(stepId, safePath, currentContent);
+        com.devcli.workspace.WriteGateResult result = validateWrite(stepId, safePath, currentContent);
+        return result.isAllowed() ? null : result.reason();
     }
 
     @Override
     public com.devcli.workspace.WriteGateResult validateWrite(
             String stepId, Path safePath, String currentContent) {
-        return staleWriteBarrier.validateWrite(stepId, safePath, currentContent);
+        return contextVersionLedger.validateWrite(stepId, contextResourceKey(safePath),
+                safePath, currentContent, contextProjectRoot, !sharedContextVersionLedger);
     }
 
     @Override
@@ -491,7 +516,12 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                     .computeIfAbsent(stepId, k -> java.util.concurrent.ConcurrentHashMap.newKeySet())
                     .add(safePath.toString());
         }
-        staleWriteBarrier.recordWrite(stepId, safePath, before, content);
+        String resourceKey = contextResourceKey(safePath);
+        if (sharedContextVersionLedger) {
+            contextVersionLedger.recordLocalWrite(stepId, resourceKey, safePath, before, content);
+        } else {
+            contextVersionLedger.publishWrite(stepId, resourceKey, safePath, content);
+        }
         try {
             writeFileObserver.accept(displayPath, new String[]{before, content});
         } catch (Exception ignored) {
@@ -502,6 +532,27 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     @Override
     public String projectPath() { return projectPath; }
+
+    public com.devcli.workspace.ContextVersionLedger contextVersionLedger() {
+        return contextVersionLedger;
+    }
+
+    public Path contextProjectRoot() {
+        return contextProjectRoot;
+    }
+
+    public String contextResourceKey(Path path) {
+        Path physicalRoot = Path.of(projectPath).toAbsolutePath().normalize();
+        Path normalized = path.toAbsolutePath().normalize();
+        if (!normalized.startsWith(physicalRoot)) {
+            throw new IllegalArgumentException("context resource escapes project root: " + path);
+        }
+        return physicalRoot.relativize(normalized).toString().replace('\\', '/');
+    }
+
+    public java.util.Map<String, String> refreshStaleContext(String stepId) {
+        return contextVersionLedger.refreshPending(stepId, contextProjectRoot);
+    }
     @Override
     public long commandTimeoutSeconds() { return commandTimeoutSeconds; }
     @Override
