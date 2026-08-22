@@ -27,30 +27,11 @@ class CliCommandParserTest {
     }
 
     @Test
-    void normalizesLegacyTeamFlagToUnifiedPlanPipeline() {
-        CliCommandParser.ParsedCommand next = CliCommandParser.parse("/plan --team");
-        CliCommandParser.ParsedCommand direct = CliCommandParser.parse(
-                "/plan --team 创建并验证一个 Java 项目");
-        CliCommandParser.ParsedCommand resume = CliCommandParser.parse(
-                "/plan --team resume orch-123");
+    void rejectsUnknownPlanOption() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/plan --unknown task");
 
-        assertEquals(CliCommandParser.CommandType.ORCHESTRATE, next.type());
-        assertEquals(OrchestrationProfile.TEAM, next.orchestrationProfile());
-        assertNull(next.payload());
-        assertEquals(CliCommandParser.CommandType.ORCHESTRATE, direct.type());
-        assertEquals(OrchestrationProfile.TEAM, direct.orchestrationProfile());
-        assertEquals("创建并验证一个 Java 项目", direct.payload());
-        assertEquals(OrchestrationProfile.TEAM, resume.orchestrationProfile());
-        assertEquals("resume orch-123", resume.payload());
-    }
-
-    @Test
-    void keepsTeamLikeTaskTextInUnifiedPlanPipeline() {
-        CliCommandParser.ParsedCommand command = CliCommandParser.parse(
-                "/plan --teamwork 作为普通任务文本");
-
-        assertEquals(OrchestrationProfile.TEAM, command.orchestrationProfile());
-        assertEquals("--teamwork 作为普通任务文本", command.payload());
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, command.type());
+        assertEquals("/plan --unknown task", command.payload());
     }
 
     @Test
@@ -284,24 +265,6 @@ class CliCommandParserTest {
 
         assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, command.type());
         assertEquals("/unknown", command.payload());
-    }
-
-    @Test
-    void normalizesLegacyTeamSlashCommandWithoutPayload() {
-        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/team");
-
-        assertEquals(CliCommandParser.CommandType.ORCHESTRATE, command.type());
-        assertEquals(OrchestrationProfile.TEAM, command.orchestrationProfile());
-        assertNull(command.payload());
-    }
-
-    @Test
-    void normalizesLegacyTeamSlashCommandWithPayload() {
-        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/team 创建并验证一个 Java 项目");
-
-        assertEquals(CliCommandParser.CommandType.ORCHESTRATE, command.type());
-        assertEquals(OrchestrationProfile.TEAM, command.orchestrationProfile());
-        assertEquals("创建并验证一个 Java 项目", command.payload());
     }
 
     @Test

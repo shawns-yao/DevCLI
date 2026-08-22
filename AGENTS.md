@@ -51,7 +51,7 @@ mvn test -DskipTests=false                  # 全量回归
 | 路径 | 入口 | 触发 |
 |------|------|------|
 | ReAct | `Agent.java` | 默认模式 |
-| Plan 编排 | `AgentOrchestrator.java` | `/plan`；旧 `/plan --team`、`/team` 仅保留解析兼容 |
+| Plan 编排 | `AgentOrchestrator.java` | `/plan` |
 
 Multi-Agent 中 Planner 负责拆解 DAG，Worker 负责实现子任务，Reviewer 先审计划语义闭环，再在硬检查通过后审查真实产物。
 

@@ -42,19 +42,6 @@ class DevCliCompleterTest {
     }
 
     @Test
-    void doesNotExposeLegacyTeamChoiceFromUnifiedPlanEntry() {
-        DevCliCompleter completer = new DevCliCompleter(List::of);
-        List<Candidate> candidates = new ArrayList<>();
-
-        completer.complete(null, parsed("/plan --t", "--t"), candidates);
-
-        assertTrue(candidates.stream().noneMatch(candidate ->
-                candidate.displ().contains("--team") || candidate.displ().startsWith("/team")));
-        assertTrue(Main.slashCommandHints().stream()
-                .anyMatch(hint -> hint.display().equals("/plan resume [id]")));
-    }
-
-    @Test
     void ignoresNormalWords() {
         DevCliCompleter completer = new DevCliCompleter(List::of);
         List<Candidate> candidates = new ArrayList<>();

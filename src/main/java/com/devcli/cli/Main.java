@@ -1067,7 +1067,7 @@ public class Main {
     }
 
     /**
-     * 解析 Plan 的 resume 子命令；旧 /plan --team 与 /team 入口由命令解析器兼容归一化：
+     * 解析 Plan 的 resume 子命令：
      * "resume" → ""（恢复最近 checkpoint）；"resume orch-xxxx" → "orch-xxxx"；
      * 其他输入 → null（按普通任务文本走 run）。
      */

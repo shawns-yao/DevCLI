@@ -1,5 +1,13 @@
 # TODO
 
+## 2026-08-22 Plan 入口归一
+
+- 状态：已完成
+- 已实现：删除 `/team` 与 `/plan --team` 兼容解析；TUI `/plan` 与默认 CLI 统一进入 `AgentOrchestrator` 的 Planner/Worker/Reviewer 链路
+- 影响范围：CLI 命令解析、TUI 编排入口、命令测试和公开说明
+- 验证：命令解析、补全与主代码编译限定验证
+- 未验证：未启动项目，未执行真实 TUI 和真实 LLM 编排
+
 ## 2026-08-22 多智能体版本化上下文与记忆协议
 
 - 状态：已实现并通过协议限定验证
@@ -94,7 +102,7 @@
 - 状态：分阶段实施中
 - 设计文档：`docs/superpowers/plans/2026-08-12-runtime-governance-terminal-ui-consolidation.md`
 - 目标：删除重复能力，合并 Plan/Team 的公共执行链，使用持久 Session Tree 取代 CLI 进程内分支，保留 Side-Git、PatchSet、Checkpoint 各自不可替代的恢复职责；终端只保留 Inline 与 Plain
-- 已实现（2026-08-18）：公开入口收敛为 ReAct 与 `/plan`；`/plan` 固定进入 Planner/Worker/Reviewer、Pre-Review、checkpoint 和隔离提交链路，串行或并行由 DAG 与资源冲突决定。`/plan --team` 与 `/team` 仅保留解析兼容并从帮助、补全中隐藏；STANDARD profile 与 `PlanExecuteAgent` 仅保留内部兼容
+- 已实现（2026-08-18）：公开入口收敛为 ReAct 与 `/plan`；`/plan` 固定进入 Planner/Worker/Reviewer、Pre-Review、checkpoint 和隔离提交链路，串行或并行由 DAG 与资源冲突决定。`/plan --team` 与 `/team` 曾短期保留解析兼容，已于 2026-08-22 删除；STANDARD profile 与 `PlanExecuteAgent` 仅保留内部兼容
 - 已实现（2026-08-14，第二批）：抽取 `AgentRuntimeSupport` 与 `AgentStreamPresenter`，统一四条 Agent 路径的运行装配和流式状态机；Plan `Task` 与 Team `ExecutionStep` 实现公共只读 `ExecutionNode`；关键启动配置统一使用 `ConfigResolver` 并拒绝显式非法值；新增 `RunStore` / `SqliteRunStore` / `RunCoordinator`，后台任务和 Runtime API 共用 `runtime.db` 与同一 Run 状态；旧 `tasks.db` 只读导入；持久 `SessionTreeService` 替换 CLI 进程内分支；CLI JSONL 归档降级为可选诊断导出；生产入口不再进入 Lanterna，旧配置映射到 Inline
 - 已验证（2026-08-14）：主代码与测试代码编译通过；配置、RunStore、旧库导入、后台任务、Runtime API、Session Tree、CLI、渲染器、执行图、ReAct/Plan/Team 公共内核等 21 个限定测试类共 329 项通过
 - 成本控制：新增统一 RunBudget、预算档位、并行原子账本和 PricingCatalog；Planner、Worker、Reviewer、压缩与重试全部计入同一 run，未知模型不得展示猜测价格

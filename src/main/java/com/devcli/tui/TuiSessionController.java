@@ -2,7 +2,6 @@ package com.devcli.tui;
 
 import com.devcli.agent.Agent;
 import com.devcli.agent.AgentOrchestrator;
-import com.devcli.agent.PlanExecuteAgent;
 import com.devcli.config.DevCliConfig;
 import com.devcli.hitl.HitlHandler;
 import com.devcli.llm.LlmClient;
@@ -178,18 +177,14 @@ public final class TuiSessionController implements AutoCloseable {
             ui(showConfigPanel);
             return true;
         }
-        if (lower.startsWith("/plan ") || lower.startsWith("/team ")) {
-            boolean teamProfile = lower.startsWith("/team ");
+        if (lower.startsWith("/plan ")) {
             String task = input.substring(6).trim();
-            if (!teamProfile && task.equalsIgnoreCase("--team")) {
-                teamProfile = true;
-                task = "";
-            } else if (!teamProfile && task.regionMatches(true, 0, "--team ", 0, 7)) {
-                teamProfile = true;
-                task = task.substring(7).trim();
+            if (task.startsWith("--")) {
+                appendSystem("未知 Plan 选项。请使用 /plan <任务>。");
+                return true;
             }
             if (task.isEmpty()) {
-                appendSystem("请提供编排任务，例如 /plan 重构这个类，或 /plan --team 检查并修复测试。");
+                appendSystem("请提供编排任务，例如 /plan 检查并修复测试。");
                 return true;
             }
             if (isTaskRunning()) {
@@ -198,8 +193,7 @@ public final class TuiSessionController implements AutoCloseable {
             }
             appendUser(input);
             String orchestrationTask = task;
-            RunMode mode = teamProfile ? RunMode.TEAM : RunMode.PLAN;
-            currentTask = executor.submit(() -> runAgentTask(orchestrationTask, mode));
+            currentTask = executor.submit(() -> runAgentTask(orchestrationTask, RunMode.PLAN));
             return true;
         }
         if (input.startsWith("/")) {
@@ -208,7 +202,7 @@ public final class TuiSessionController implements AutoCloseable {
                     /clear, /context, /memory, /memory clear, /save <事实>
                     /hitl, /hitl on, /hitl off
                     /snapshot, /snapshot status, /snapshot clean, /restore <N>
-                    /config, /plan <任务>, /plan --team <任务>, /team <任务>（兼容入口）, /cancel, /exit
+                    /config, /plan <任务>, /cancel, /exit
                     其余管理命令请暂时在默认 CLI 模式执行。
                     """);
             return true;
@@ -229,13 +223,7 @@ public final class TuiSessionController implements AutoCloseable {
             SnapshotService snapshots = reactAgent.getToolRegistry().getSnapshotService();
             output = captureStdout(() -> snapshots.runTurn(mode.name().toLowerCase(), input, () -> switch (mode) {
                     case REACT -> reactAgent.run(input);
-                    case PLAN -> new PlanExecuteAgent(
-                            llmClient,
-                            reactAgent.getToolRegistry(),
-                            reactAgent.getMemoryManager(),
-                            (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute()
-                    ).run(input);
-                    case TEAM -> createTeamOrchestrator().run(input);
+                    case PLAN -> createPlanOrchestrator().run(input);
                 }));
         } catch (Exception e) {
             output = "执行失败: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
@@ -250,7 +238,7 @@ public final class TuiSessionController implements AutoCloseable {
         appendAssistant(cleanOutput(output));
     }
 
-    private AgentOrchestrator createTeamOrchestrator() {
+    private AgentOrchestrator createPlanOrchestrator() {
         AgentOrchestrator orchestrator = new AgentOrchestrator(
                 llmClient,
                 reactAgent.getToolRegistry(),
@@ -385,8 +373,7 @@ public final class TuiSessionController implements AutoCloseable {
 
     private enum RunMode {
         REACT("ReAct"),
-        PLAN("Plan"),
-        TEAM("Team");
+        PLAN("Plan");
 
         private final String label;
 

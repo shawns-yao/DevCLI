@@ -124,23 +124,10 @@ final class CliCommandParser {
 
         if (trimmed.regionMatches(true, 0, "/plan ", 0, 6)) {
             String planInput = trimmed.substring(6).trim();
-            if (planInput.equalsIgnoreCase("--team")) {
-                return ParsedCommand.orchestrate(OrchestrationProfile.TEAM, null);
-            }
-            if (planInput.regionMatches(true, 0, "--team ", 0, 7)) {
-                return ParsedCommand.orchestrate(
-                        OrchestrationProfile.TEAM, planInput.substring(7).trim());
+            if (planInput.startsWith("--")) {
+                return new ParsedCommand(CommandType.UNKNOWN_COMMAND, trimmed);
             }
             return ParsedCommand.orchestrate(OrchestrationProfile.TEAM, planInput);
-        }
-
-        if (trimmed.equalsIgnoreCase("/team")) {
-            return ParsedCommand.orchestrate(OrchestrationProfile.TEAM, null);
-        }
-
-        if (trimmed.regionMatches(true, 0, "/team ", 0, 6)) {
-            return ParsedCommand.orchestrate(
-                    OrchestrationProfile.TEAM, trimmed.substring(6).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/hitl on")) {
