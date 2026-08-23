@@ -23,4 +23,22 @@ class SensitiveDataRedactorTest {
         assertTrue(redacted.contains("token="));
         assertTrue(redacted.contains("account="));
     }
+
+    @Test
+    void preservesBearerSchemeWhileRedactingAuthorizationToken() {
+        String redacted = SensitiveDataRedactor.redact(
+                "Authorization: Bearer secret-token");
+
+        assertTrue(redacted.contains("Authorization: Bearer ***"));
+        assertFalse(redacted.contains("secret-token"));
+    }
+
+    @Test
+    void redactsNonBearerAuthorizationValueCompletely() {
+        String redacted = SensitiveDataRedactor.redact(
+                "Authorization: Basic dXNlcjpwYXNz");
+
+        assertTrue(redacted.contains("Authorization: ***"));
+        assertFalse(redacted.contains("dXNlcjpwYXNz"));
+    }
 }

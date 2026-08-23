@@ -73,6 +73,76 @@ class TeamReviewerProtocolTest {
     }
 
     @Test
+    void numericScoresAreDiagnosticWhenDeterministicEvidencePasses() {
+        TeamReviewerProtocol.Evaluation evaluation = TeamReviewerProtocol.evaluate("""
+                {
+                  "approved": true,
+                  "scores": {
+                    "functional_correctness": 0.4,
+                    "integration_completeness": 0.3,
+                    "code_quality": 0.2
+                  },
+                  "criteria_results": [
+                    {"id":"AC-01","passed":true,"severity":"high","evidence":"测试通过"}
+                  ],
+                  "issues": []
+                }
+                """, List.of(new TeamReviewerProtocol.Criterion("AC-01", "high")));
+
+        assertTrue(evaluation.approved(), evaluation.issues());
+    }
+
+    @Test
+    void structuredHighIssueBlocksApprovalEvenWhenCriteriaPass() {
+        TeamReviewerProtocol.Evaluation evaluation = TeamReviewerProtocol.evaluate("""
+                {
+                  "approved": true,
+                  "scores": {
+                    "functional_correctness": 1.0,
+                    "integration_completeness": 1.0,
+                    "code_quality": 1.0
+                  },
+                  "criteria_results": [
+                    {"id":"AC-01","passed":true,"severity":"high","evidence":"测试通过"}
+                  ],
+                  "issues": [{
+                    "criterion_id":"AC-01",
+                    "type":"integration",
+                    "severity":"high",
+                    "file":"src/main/java/example/Cli.java",
+                    "description":"入口仍未连接实现",
+                    "expected":"入口调用新实现",
+                    "actual":"入口仍调用旧实现",
+                    "evidence":"read_file:Cli.java#main",
+                    "suggested_fix":"切换入口调用"
+                  }]
+                }
+                """, List.of(new TeamReviewerProtocol.Criterion("AC-01", "high")));
+
+        assertFalse(evaluation.approved());
+    }
+
+    @Test
+    void malformedBlockingIssueFailsClosed() {
+        TeamReviewerProtocol.Evaluation evaluation = TeamReviewerProtocol.evaluate("""
+                {
+                  "approved": true,
+                  "scores": {
+                    "functional_correctness": 1.0,
+                    "integration_completeness": 1.0,
+                    "code_quality": 1.0
+                  },
+                  "criteria_results": [
+                    {"id":"AC-01","passed":true,"severity":"high","evidence":"测试通过"}
+                  ],
+                  "issues": [{"severity":"high","description":"可能有问题"}]
+                }
+                """, List.of(new TeamReviewerProtocol.Criterion("AC-01", "high")));
+
+        assertFalse(evaluation.approved());
+    }
+
+    @Test
     void rejectsReviewerThatClaimsToolPassForHumanCriterion() {
         TeamReviewerProtocol.Evaluation evaluation = TeamReviewerProtocol.evaluate("""
                 {

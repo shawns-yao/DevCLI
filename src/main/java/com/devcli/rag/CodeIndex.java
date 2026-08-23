@@ -67,9 +67,10 @@ public class CodeIndex {
         List<Path> filesToIndex = new ArrayList<>();
         collectFiles(root, filesToIndex);
         emit("📁 发现 " + filesToIndex.size() + " 个文件待索引");
-        String baseEpoch;
+        VectorStore.IndexBuildSnapshot buildSnapshot;
         try (VectorStore store = new VectorStore(root.toString())) {
-            baseEpoch = store.beginIndexBuild(filesToIndex.stream().map(Path::toString).toList());
+            buildSnapshot = store.beginIndexBuildSnapshot(
+                    filesToIndex.stream().map(Path::toString).toList());
         } catch (Exception e) {
             String error = "无法建立索引构建快照: " + e.getMessage();
             emit("❌ " + error);
@@ -109,7 +110,7 @@ public class CodeIndex {
 
         // 4. 持久化到 SQLite
         try (VectorStore store = new VectorStore(root.toString())) {
-            if (!store.replaceProjectIndex(entries, allRelations, indexEpoch.value(), baseEpoch)) {
+            if (!store.replaceProjectIndex(entries, allRelations, indexEpoch.value(), buildSnapshot)) {
                 String error = "索引构建期间 active epoch 已变化，旧构建结果已拒绝交换";
                 emit("❌ " + error);
                 return new IndexResult(0, 0, error);
@@ -126,7 +127,7 @@ public class CodeIndex {
             return new IndexResult(stats.chunkCount(), stats.relationCount(), msg);
         } catch (Exception e) {
             try (VectorStore store = new VectorStore(root.toString())) {
-                store.markIndexBuildFailed(baseEpoch);
+                store.markIndexBuildFailed(buildSnapshot);
             } catch (Exception ignored) {
             }
             String error = "持久化失败: " + e.getMessage();

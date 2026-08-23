@@ -31,6 +31,31 @@ class MemoryWriteProtocolTest {
     }
 
     @Test
+    void stableKeyNormalizesSubjectPredicateAliasesAndScope() {
+        MemoryEntry first = new MemoryEntry("first", "runtime=jdk17",
+                MemoryEntry.MemoryType.FACT, Instant.now(),
+                Map.of("claim_predicate", "uses", "claim_scope", "Project-A\\"),
+                10, "Project.Runtime", true, "");
+        MemoryEntry second = new MemoryEntry("second", "runtime=jdk21",
+                MemoryEntry.MemoryType.FACT, Instant.now(),
+                Map.of("claim_predicate", "value", "claim_scope", "project-a"),
+                10, "project.runtime", true, "");
+
+        assertEquals(MemoryWriteProtocol.stableKey(first), MemoryWriteProtocol.stableKey(second));
+        assertEquals(MemoryWriteProtocol.stableKey(first),
+                MemoryWriteProtocol.stableKey(new MemoryEntry("third", "runtime=jdk22",
+                        MemoryEntry.MemoryType.FACT, Instant.now(),
+                        Map.of("claim_predicate", "is", "claim_scope", "project-a/"),
+                        10, "PROJECT.RUNTIME", true, "")));
+        try (LongTermMemory memory = new LongTermMemory(new InMemoryLongTermMemoryStore(), tempDir)) {
+            memory.storeManaged(first);
+            memory.storeManaged(second);
+            assertFalse(memory.retrieve("first").orElseThrow().isActive());
+            assertTrue(memory.retrieve("second").orElseThrow().isActive());
+        }
+    }
+
+    @Test
     void pendingConfirmationIsPersistedButNotRecallable() {
         MemoryEvidence pendingEvidence = new MemoryEvidence(MemoryEvidence.Confidence.LOW,
                 "", "needs confirmation", MemoryEvidence.ReviewState.UNREVIEWED, List.of());
@@ -63,6 +88,23 @@ class MemoryWriteProtocolTest {
             assertFalse(memory.retrieve("old").orElseThrow().isActive());
             assertTrue(memory.retrieve("candidate").orElseThrow().isRecallable());
             assertEquals(1, memory.getAll().stream().filter(MemoryEntry::isActive).count());
+        }
+    }
+
+    @Test
+    void unstructuredEntryCannotSupersedeStructuredFactBySubjectAlone() {
+        try (LongTermMemory memory = new LongTermMemory(new InMemoryLongTermMemoryStore(), tempDir)) {
+            memory.storeManaged(entry("structured", "server.port=8080", Map.of()));
+            MemoryEntry unstructured = new MemoryEntry("note", "端口配置可能需要重新讨论",
+                    MemoryEntry.MemoryType.FACT, Instant.now(), Map.of(), 10,
+                    "key:server.port", true, "");
+
+            memory.storeManaged(unstructured);
+
+            assertTrue(memory.retrieve("structured").orElseThrow().isActive());
+            assertTrue(memory.retrieve("note").orElseThrow().isActive());
+            assertEquals(2, memory.getAll().stream().filter(MemoryEntry::isActive).count());
+            assertEquals("UNSTRUCTURED", memory.retrieve("note").orElseThrow().getStructureState());
         }
     }
 

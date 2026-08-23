@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import com.devcli.browser.BrowserAuditMetadata;
 import com.devcli.browser.BrowserCheckResult;
 import com.devcli.browser.BrowserConnector;
@@ -54,6 +56,7 @@ import java.util.function.Function;
  * 工具注册表 - 管理所有可用工具
  */
 public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
+    private static final Logger log = LoggerFactory.getLogger(ToolRegistry.class);
     private static final ObjectMapper mapper = new ObjectMapper();
     private static final int DEFAULT_COMMAND_TIMEOUT_SECONDS = 60;
     private static final int DEFAULT_TOOL_BATCH_TIMEOUT_SECONDS = 90;
@@ -521,6 +524,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
             contextVersionLedger.recordLocalWrite(stepId, resourceKey, safePath, before, content);
         } else {
             contextVersionLedger.publishWrite(stepId, resourceKey, safePath, content);
+            markRagIndexDirty(List.of(resourceKey));
         }
         try {
             writeFileObserver.accept(displayPath, new String[]{before, content});
@@ -539,6 +543,16 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     public Path contextProjectRoot() {
         return contextProjectRoot;
+    }
+
+    /** 项目内容成功落盘后发布索引失效；索引不可用不回滚已经完成的文件写入。 */
+    public void markRagIndexDirty(Collection<String> relativePaths) {
+        if (relativePaths == null || relativePaths.isEmpty()) return;
+        try (VectorStore store = new VectorStore(contextProjectRoot.toString())) {
+            store.markDirtyFiles(relativePaths.stream().filter(Objects::nonNull).toList());
+        } catch (Exception e) {
+            log.warn("发布代码索引失效标记失败，检索时将回退实时候选校验: {}", e.getMessage());
+        }
     }
 
     public String contextResourceKey(Path path) {

@@ -10,9 +10,12 @@ import java.nio.file.Path;
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.LinkedHashSet;
+import java.util.Optional;
 
 /**
  * SQLite 向量存储 + 代码关系图谱持久化
@@ -194,18 +197,23 @@ public class VectorStore implements AutoCloseable {
     public void replaceProjectIndex(List<CodeChunkEntry> entries,
                                     List<CodeRelation> relations,
                                     String indexEpoch) throws SQLException {
-        String baseEpoch = currentIndexEpoch();
-        if (!replaceProjectIndex(entries, relations, indexEpoch, baseEpoch)) {
-            throw new SQLException("index epoch CAS failed: expected=" + baseEpoch
-                    + ", actual=" + currentIndexEpoch());
+        IndexBuildSnapshot snapshot = new IndexBuildSnapshot(
+                currentIndexEpoch(), currentIndexGeneration());
+        if (!replaceProjectIndex(entries, relations, indexEpoch, snapshot)) {
+            throw new SQLException("index snapshot CAS failed: expected=" + snapshot
+                    + ", actualEpoch=" + currentIndexEpoch()
+                    + ", actualGeneration=" + currentIndexGeneration());
         }
     }
 
-    /** 仅当 active epoch 仍等于构建起点时交换新索引，防止较旧并发构建覆盖新结果。 */
+    /** 仅当 epoch 与构建起点 generation 均未变化时交换新索引。 */
     public boolean replaceProjectIndex(List<CodeChunkEntry> entries,
                                        List<CodeRelation> relations,
                                        String indexEpoch,
-                                       String baseEpoch) throws SQLException {
+                                       IndexBuildSnapshot buildSnapshot) throws SQLException {
+        IndexBuildSnapshot expected = buildSnapshot == null
+                ? new IndexBuildSnapshot(IndexEpoch.none().value(), -1)
+                : buildSnapshot;
         Map<String, SymbolSnapshot> oldSnapshots = getSymbolSnapshots();
 
         // 原子操作：在同一个事务中 clear + insert，防止中途失败导致索引全部丢失
@@ -213,7 +221,10 @@ public class VectorStore implements AutoCloseable {
         connection.setAutoCommit(false);
         try {
             String currentEpoch = currentIndexEpoch();
-            if (!safeIndexEpoch(baseEpoch).equals(currentEpoch)) {
+            long currentGeneration = currentIndexGeneration();
+            if (!safeIndexEpoch(expected.baseEpoch()).equals(currentEpoch)
+                    || (expected.baseGeneration() >= 0
+                    && expected.baseGeneration() != currentGeneration)) {
                 connection.rollback();
                 return false;
             }
@@ -235,28 +246,16 @@ public class VectorStore implements AutoCloseable {
         }
     }
 
-    public String beginIndexBuild(List<String> filePaths) throws SQLException {
+    public IndexBuildSnapshot beginIndexBuildSnapshot(List<String> filePaths) throws SQLException {
         String baseEpoch = currentIndexEpoch();
+        long baseGeneration = currentIndexGeneration();
         boolean autoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
         try {
             upsertIndexState(baseEpoch, "BUILDING", false);
-            String sql = """
-                    INSERT INTO code_index_dirty_files(project_path, file_path, marked_at_ms)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(project_path, file_path) DO UPDATE SET marked_at_ms=excluded.marked_at_ms
-                    """;
-            try (PreparedStatement statement = connection.prepareStatement(sql)) {
-                for (String filePath : filePaths == null ? List.<String>of() : filePaths) {
-                    statement.setString(1, projectPath);
-                    statement.setString(2, filePath);
-                    statement.setLong(3, System.currentTimeMillis());
-                    statement.addBatch();
-                }
-                statement.executeBatch();
-            }
+            insertDirtyFiles(filePaths);
             connection.commit();
-            return baseEpoch;
+            return new IndexBuildSnapshot(baseEpoch, baseGeneration);
         } catch (SQLException e) {
             connection.rollback();
             throw e;
@@ -265,9 +264,59 @@ public class VectorStore implements AutoCloseable {
         }
     }
 
-    public void markIndexBuildFailed(String baseEpoch) throws SQLException {
-        if (safeIndexEpoch(baseEpoch).equals(currentIndexEpoch())) {
-            upsertIndexState(baseEpoch, "STALE", false);
+    /** 标记项目文件的现有索引内容已过期；调用方只在真实写入成功后发布。 */
+    public void markDirtyFiles(List<String> filePaths) throws SQLException {
+        if (filePaths == null || filePaths.isEmpty()) return;
+        boolean autoCommit = connection.getAutoCommit();
+        connection.setAutoCommit(false);
+        try {
+            insertDirtyFiles(filePaths);
+            upsertIndexState(currentIndexEpoch(), "STALE", true);
+            connection.commit();
+        } catch (SQLException e) {
+            connection.rollback();
+            throw e;
+        } finally {
+            connection.setAutoCommit(autoCommit);
+        }
+    }
+
+    private void insertDirtyFiles(List<String> filePaths) throws SQLException {
+        String sql = """
+                INSERT INTO code_index_dirty_files(project_path, file_path, marked_at_ms)
+                VALUES (?, ?, ?)
+                ON CONFLICT(project_path, file_path) DO UPDATE SET marked_at_ms=excluded.marked_at_ms
+                """;
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            long markedAt = System.currentTimeMillis();
+            for (String filePath : dirtyPathAliases(filePaths)) {
+                statement.setString(1, projectPath);
+                statement.setString(2, filePath);
+                statement.setLong(3, markedAt);
+                statement.addBatch();
+            }
+            statement.executeBatch();
+        }
+    }
+
+    private List<String> dirtyPathAliases(List<String> filePaths) {
+        LinkedHashSet<String> aliases = new LinkedHashSet<>();
+        Path root = Path.of(projectPath).toAbsolutePath().normalize();
+        for (String filePath : filePaths) {
+            if (filePath == null || filePath.isBlank()) continue;
+            Path candidate = Path.of(filePath);
+            aliases.add(filePath);
+            aliases.add((candidate.isAbsolute() ? candidate : root.resolve(candidate))
+                    .toAbsolutePath().normalize().toString());
+        }
+        return List.copyOf(aliases);
+    }
+
+    public void markIndexBuildFailed(IndexBuildSnapshot snapshot) throws SQLException {
+        if (snapshot != null
+                && safeIndexEpoch(snapshot.baseEpoch()).equals(currentIndexEpoch())
+                && snapshot.baseGeneration() == currentIndexGeneration()) {
+            upsertIndexState(snapshot.baseEpoch(), "STALE", false);
         }
     }
 
@@ -638,7 +687,9 @@ public class VectorStore implements AutoCloseable {
 
         // 按相似度降序排序，取 TopK
         candidates.sort((a, b) -> Double.compare(b.similarity(), a.similarity()));
-        return candidates.size() > topK ? new ArrayList<>(candidates.subList(0, topK)) : candidates;
+        List<SearchResult> topResults = candidates.size() > topK
+                ? new ArrayList<>(candidates.subList(0, topK)) : candidates;
+        return refreshExternalChanges(topResults);
     }
 
     /**
@@ -680,7 +731,7 @@ public class VectorStore implements AutoCloseable {
                 }
             }
         }
-        return results;
+        return mergeDirtyKeywordCandidates(keyword, refreshExternalChanges(results));
     }
 
     public List<SearchResult> findChunksByName(String name, int limit) throws SQLException {
@@ -717,7 +768,7 @@ public class VectorStore implements AutoCloseable {
                 }
             }
         }
-        return results;
+        return refreshExternalChanges(results);
     }
 
     /**
@@ -831,6 +882,16 @@ public class VectorStore implements AutoCloseable {
         return IndexEpoch.none().value();
     }
 
+    private long currentIndexGeneration() throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT generation FROM code_index_state WHERE project_path = ?")) {
+            ps.setString(1, projectPath);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Math.max(0, rs.getLong(1)) : 0;
+            }
+        }
+    }
+
     private double cosineSimilarity(float[] a, float[] b) {
         return VectorMath.cosineSimilarity(a, b);
     }
@@ -871,10 +932,7 @@ public class VectorStore implements AutoCloseable {
                 SymbolVersion.from(filePath, chunkType, name, content, effectiveClasspathEpoch).value());
         String effectiveIndexEpoch = blankToDefault(indexEpoch, IndexEpoch.none().value());
         IndexFreshness freshness = indexFreshness(filePath, effectiveIndexEpoch);
-        String effectiveContent = freshness == IndexFreshness.DIRTY
-                ? liveChunkContent(filePath, chunkType, name, content)
-                : content;
-        return new SearchResult(filePath, chunkType, name, effectiveContent, similarity,
+        return new SearchResult(filePath, chunkType, name, content, similarity,
                 effectiveSymbolVersion,
                 effectiveClasspathEpoch,
                 effectiveIndexEpoch,
@@ -882,22 +940,171 @@ public class VectorStore implements AutoCloseable {
                 freshness);
     }
 
-    private String liveChunkContent(String filePath, String chunkType, String name, String fallback) {
+    /**
+     * 只校验已经进入最终候选集的块，兜住 IDE/脚本直接修改主项目但未经过工具写入的情况。
+     */
+    private List<SearchResult> refreshExternalChanges(List<SearchResult> results) throws SQLException {
+        if (results == null || results.isEmpty()) return List.of();
+        List<SearchResult> refreshed = new ArrayList<>(results.size());
+        Map<String, LiveFile> liveFiles = new HashMap<>();
+        LinkedHashSet<String> newlyDirty = new LinkedHashSet<>();
+        for (SearchResult result : results) {
+            if (result.freshness() == IndexFreshness.STALE) {
+                refreshed.add(result);
+                continue;
+            }
+            LiveChunk live = readLiveChunk(result.filePath(), result.chunkType(), result.name(), liveFiles);
+            if (!live.verifiable()) {
+                refreshed.add(result);
+                continue;
+            }
+            boolean changed = live.content().filter(result.content()::equals).isEmpty();
+            if (result.freshness() == IndexFreshness.CURRENT && !changed) {
+                refreshed.add(result);
+                continue;
+            }
+            if (result.freshness() == IndexFreshness.CURRENT && changed) {
+                newlyDirty.add(result.filePath());
+            }
+            String currentContent = live.content().orElse(
+                    "索引命中的代码块已从当前文件中移除，请重新读取文件确认现状。");
+            refreshed.add(new SearchResult(result.filePath(), result.chunkType(), result.name(),
+                    currentContent, result.similarity(), result.symbolVersion(),
+                    result.classpathEpoch(), result.indexEpoch(), result.invalidations(),
+                    IndexFreshness.DIRTY));
+        }
+        if (!newlyDirty.isEmpty()) {
+            try {
+                markDirtyFiles(List.copyOf(newlyDirty));
+            } catch (SQLException e) {
+                log.warn("持久化外部文件索引失效标记失败: {}", e.getMessage());
+            }
+        }
+        return refreshed;
+    }
+
+    /**
+     * 旧索引只能提供已经存在的候选。文件进入 DIRTY 后，再从当前文件实时分块并合并关键词命中，
+     * 使新增方法和新增配置键无需等待下一轮索引也能被精确检索发现。
+     */
+    private List<SearchResult> mergeDirtyKeywordCandidates(String keyword,
+                                                            List<SearchResult> indexedResults)
+            throws SQLException {
+        Map<String, SearchResult> merged = new LinkedHashMap<>();
+        for (SearchResult result : indexedResults) {
+            merged.put(liveResultKey(result.filePath(), result.chunkType(), result.name()), result);
+        }
+
+        for (Path file : dirtyProjectFiles()) {
+            LiveFile liveFile = readLiveFile(file.toString());
+            if (!liveFile.verifiable() || liveFile.rawContent() == null) continue;
+            for (CodeChunk chunk : liveFile.chunks()) {
+                if (!containsKeyword(chunk, keyword)) continue;
+                SearchResult liveResult = liveDirtyResult(chunk);
+                merged.put(liveResultKey(liveResult.filePath(), liveResult.chunkType(), liveResult.name()),
+                        liveResult);
+            }
+        }
+        return List.copyOf(merged.values());
+    }
+
+    private List<Path> dirtyProjectFiles() throws SQLException {
+        String sql = """
+                SELECT file_path FROM code_index_dirty_files
+                WHERE project_path = ?
+                ORDER BY marked_at_ms, file_path
+                """;
+        LinkedHashSet<Path> files = new LinkedHashSet<>();
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, projectPath);
+            try (ResultSet rs = statement.executeQuery()) {
+                while (rs.next()) {
+                    resolveProjectPath(rs.getString(1)).ifPresent(files::add);
+                }
+            }
+        }
+        return List.copyOf(files);
+    }
+
+    private SearchResult liveDirtyResult(CodeChunk chunk) throws SQLException {
+        String symbolVersion = SymbolVersion.from(chunk.filePath(), chunk.chunkType(), chunk.name(),
+                chunk.content(), classpathEpoch).value();
+        return new SearchResult(chunk.filePath(), chunk.chunkType(), chunk.name(), chunk.content(),
+                0.3, symbolVersion, classpathEpoch, currentIndexEpoch(),
+                getInvalidationsForSymbol(SymbolSnapshot.symbolKey(
+                        chunk.filePath(), chunk.chunkType(), chunk.name()), 3),
+                IndexFreshness.DIRTY);
+    }
+
+    private static boolean containsKeyword(CodeChunk chunk, String keyword) {
+        String needle = keyword == null ? "" : keyword.toLowerCase(Locale.ROOT);
+        return chunk.name().toLowerCase(Locale.ROOT).contains(needle)
+                || chunk.filePath().toLowerCase(Locale.ROOT).contains(needle)
+                || chunk.content().toLowerCase(Locale.ROOT).contains(needle);
+    }
+
+    private String liveResultKey(String filePath, String chunkType, String name) {
+        String canonicalPath = resolveProjectPath(filePath)
+                .map(Path::toString)
+                .orElse(filePath == null ? "" : filePath);
+        String logicalName = name == null ? "" : name;
+        if ("file".equals(chunkType)) {
+            int segment = logicalName.lastIndexOf('#');
+            logicalName = segment >= 0 && logicalName.substring(segment + 1).matches("\\d+")
+                    ? "file" + logicalName.substring(segment)
+                    : "file";
+        }
+        return canonicalPath + "#" + chunkType + "#" + logicalName;
+    }
+
+    private LiveChunk readLiveChunk(String filePath, String chunkType, String name,
+                                    Map<String, LiveFile> liveFiles) {
+        LiveFile liveFile = liveFiles.computeIfAbsent(filePath, this::readLiveFile);
+        if (!liveFile.verifiable()) return LiveChunk.unverifiable();
+        if (liveFile.rawContent() == null) return LiveChunk.missing();
+        if ("file".equals(chunkType) && (name == null || !name.matches(".*#\\d+$"))) {
+            return LiveChunk.present(liveFile.rawContent());
+        }
+        for (CodeChunk chunk : liveFile.chunks()) {
+            if (chunk.chunkType().equals(chunkType) && sameChunkName(chunkType, chunk.name(), name)) {
+                return LiveChunk.present(chunk.content());
+            }
+        }
+        return LiveChunk.missing();
+    }
+
+    private LiveFile readLiveFile(String filePath) {
+        try {
+            Path file = resolveProjectPath(filePath).orElse(null);
+            if (file == null) return LiveFile.unverifiable();
+            if (!java.nio.file.Files.isRegularFile(file)) return LiveFile.missing();
+            String rawContent = java.nio.file.Files.readString(file);
+            return new LiveFile(true, rawContent, new CodeChunker().chunkFile(file));
+        } catch (Exception ignored) {
+            return LiveFile.unverifiable();
+        }
+    }
+
+    private Optional<Path> resolveProjectPath(String filePath) {
         try {
             Path root = Path.of(projectPath).toAbsolutePath().normalize();
+            if (!java.nio.file.Files.isDirectory(root) || filePath == null || filePath.isBlank()) {
+                return Optional.empty();
+            }
             Path candidate = Path.of(filePath);
             Path file = (candidate.isAbsolute() ? candidate : root.resolve(candidate))
                     .toAbsolutePath().normalize();
-            if (!file.startsWith(root) || !java.nio.file.Files.isRegularFile(file)) return fallback;
-            for (CodeChunk chunk : new CodeChunker().chunkFile(file)) {
-                if (chunk.chunkType().equals(chunkType) && chunk.name().equals(name)) {
-                    return chunk.content();
-                }
-            }
-            return java.nio.file.Files.readString(file);
+            return file.startsWith(root) ? Optional.of(file) : Optional.empty();
         } catch (Exception ignored) {
-            return fallback;
+            return Optional.empty();
         }
+    }
+
+    private static boolean sameChunkName(String chunkType, String currentName, String indexedName) {
+        if (java.util.Objects.equals(currentName, indexedName)) return true;
+        if (!"file".equals(chunkType) || indexedName == null) return false;
+        int segment = indexedName.lastIndexOf('#');
+        return segment >= 0 && currentName.endsWith(indexedName.substring(segment));
     }
 
     private IndexFreshness indexFreshness(String filePath, String resultEpoch) throws SQLException {
@@ -923,10 +1130,45 @@ public class VectorStore implements AutoCloseable {
         return value == null || value.isBlank() ? defaultValue : value;
     }
 
+    private record LiveChunk(boolean verifiable, Optional<String> content) {
+        static LiveChunk present(String content) {
+            return new LiveChunk(true, Optional.ofNullable(content));
+        }
+
+        static LiveChunk missing() {
+            return new LiveChunk(true, Optional.empty());
+        }
+
+        static LiveChunk unverifiable() {
+            return new LiveChunk(false, Optional.empty());
+        }
+    }
+
+    private record LiveFile(boolean verifiable, String rawContent, List<CodeChunk> chunks) {
+        LiveFile {
+            chunks = chunks == null ? List.of() : List.copyOf(chunks);
+        }
+
+        static LiveFile missing() {
+            return new LiveFile(true, null, List.of());
+        }
+
+        static LiveFile unverifiable() {
+            return new LiveFile(false, null, List.of());
+        }
+    }
+
     /**
      * 带向量的代码块条目
      */
     public record CodeChunkEntry(CodeChunk chunk, float[] embedding) {}
+
+    public record IndexBuildSnapshot(String baseEpoch, long baseGeneration) {
+        public IndexBuildSnapshot {
+            baseEpoch = safeIndexEpoch(baseEpoch);
+            baseGeneration = Math.max(-1, baseGeneration);
+        }
+    }
 
     /**
      * 检索结果

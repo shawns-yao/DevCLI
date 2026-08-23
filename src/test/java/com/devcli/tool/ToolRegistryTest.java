@@ -231,6 +231,35 @@ class ToolRegistryTest {
     }
 
     @Test
+    void directProjectWriteMarksIndexedFileDirty(@TempDir Path tempDir) throws Exception {
+        String oldRagDir = System.getProperty("devcli.rag.dir");
+        System.setProperty("devcli.rag.dir", tempDir.resolve("rag").toString());
+        Path project = Files.createDirectories(tempDir.resolve("project"));
+        Files.writeString(project.resolve("README.md"), "indexed content");
+        try {
+            try (VectorStore store = new VectorStore(project.toString())) {
+                store.clearProject();
+                store.replaceProjectIndex(List.of(new VectorStore.CodeChunkEntry(
+                        CodeChunk.fileChunk("README.md", "indexed content"),
+                        new float[]{1.0f})), List.of(), "idx-1");
+            }
+            try (ToolRegistry registry = new ToolRegistry()) {
+                registry.setProjectPath(project.toString());
+                assertTrue(registry.executeToolOutput("write_file",
+                        "{\"path\":\"README.md\",\"content\":\"changed content\"}")
+                        .isSuccess());
+            }
+            try (VectorStore store = new VectorStore(project.toString())) {
+                assertEquals(VectorStore.IndexFreshness.DIRTY,
+                        store.searchByKeyword("indexed content").getFirst().freshness());
+            }
+        } finally {
+            if (oldRagDir == null) System.clearProperty("devcli.rag.dir");
+            else System.setProperty("devcli.rag.dir", oldRagDir);
+        }
+    }
+
+    @Test
     void searchCodeIncludesInvalidationForDeletedSymbol(@TempDir Path tempDir) throws Exception {
         String oldRagDir = System.getProperty("devcli.rag.dir");
         System.setProperty("devcli.rag.dir", tempDir.resolve("rag").toString());

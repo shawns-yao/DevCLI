@@ -5,6 +5,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
+import java.nio.file.Files;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -144,20 +145,140 @@ class VectorStoreTest {
         store.replaceProjectIndex(List.of(
                 new VectorStore.CodeChunkEntry(oldChunk, new float[]{1.0f})), List.of(), "idx-1");
 
-        String baseEpoch = store.beginIndexBuild(List.of("README.md"));
-        assertEquals("idx-1", baseEpoch);
+        VectorStore.IndexBuildSnapshot buildSnapshot = store.beginIndexBuildSnapshot(List.of("README.md"));
+        assertEquals("idx-1", buildSnapshot.baseEpoch());
         assertEquals(VectorStore.IndexFreshness.DIRTY,
                 store.searchByKeyword("old").getFirst().freshness());
 
         store.replaceProjectIndex(List.of(
-                new VectorStore.CodeChunkEntry(newChunk, new float[]{1.0f})), List.of(), "idx-2", baseEpoch);
+                new VectorStore.CodeChunkEntry(newChunk, new float[]{1.0f})), List.of(), "idx-2", buildSnapshot);
         boolean staleSwap = store.replaceProjectIndex(List.of(
-                new VectorStore.CodeChunkEntry(oldChunk, new float[]{1.0f})), List.of(), "idx-old", baseEpoch);
+                new VectorStore.CodeChunkEntry(oldChunk, new float[]{1.0f})), List.of(), "idx-old", buildSnapshot);
 
         assertFalse(staleSwap);
         assertEquals("idx-2", store.currentIndexEpoch());
         assertEquals(VectorStore.IndexFreshness.CURRENT,
                 store.searchByKeyword("new").getFirst().freshness());
+    }
+
+    @Test
+    void projectWriteDuringBuildInvalidatesGenerationCas() throws Exception {
+        CodeChunk oldChunk = CodeChunk.fileChunk("README.md", "old");
+        CodeChunk staleBuildChunk = CodeChunk.fileChunk("README.md", "stale build");
+        store.replaceProjectIndex(List.of(
+                new VectorStore.CodeChunkEntry(oldChunk, new float[]{1.0f})), List.of(), "idx-1");
+        VectorStore.IndexBuildSnapshot buildSnapshot = store.beginIndexBuildSnapshot(List.of("README.md"));
+
+        store.markDirtyFiles(List.of("README.md"));
+        boolean swapped = store.replaceProjectIndex(List.of(
+                new VectorStore.CodeChunkEntry(staleBuildChunk, new float[]{1.0f})),
+                List.of(), "idx-stale", buildSnapshot);
+
+        assertFalse(swapped);
+        assertEquals("idx-1", store.currentIndexEpoch());
+        assertEquals(VectorStore.IndexFreshness.DIRTY,
+                store.searchByKeyword("old").getFirst().freshness());
+    }
+
+    @Test
+    void ordinaryProjectWriteCanMarkIndexedFileDirty() throws Exception {
+        CodeChunk indexed = CodeChunk.fileChunk("README.md", "indexed content");
+        store.replaceProjectIndex(List.of(
+                new VectorStore.CodeChunkEntry(indexed, new float[]{1.0f})), List.of(), "idx-1");
+
+        store.markDirtyFiles(List.of("README.md"));
+
+        assertEquals(VectorStore.IndexFreshness.DIRTY,
+                store.searchByKeyword("indexed content").getFirst().freshness());
+    }
+
+    @Test
+    void externalFileChangeIsDetectedWhenCandidateIsReturned(@org.junit.jupiter.api.io.TempDir Path project)
+            throws Exception {
+        Path source = project.resolve("README.md");
+        Files.writeString(source, "indexed content");
+        try (VectorStore projectStore = new VectorStore(project.toString())) {
+            projectStore.clearProject();
+            projectStore.replaceProjectIndex(List.of(new VectorStore.CodeChunkEntry(
+                    CodeChunk.fileChunk(source.toString(), "indexed content"),
+                    new float[]{1.0f})), List.of(), "idx-1");
+            Files.writeString(source, "live changed content");
+
+            VectorStore.SearchResult result = projectStore.searchByKeyword("indexed content").getFirst();
+
+            assertEquals(VectorStore.IndexFreshness.DIRTY, result.freshness());
+            assertEquals("live changed content", result.content());
+        }
+    }
+
+    @Test
+    void dirtyJavaFileContributesNewMethodToKeywordCandidates(
+            @org.junit.jupiter.api.io.TempDir Path project) throws Exception {
+        Path source = project.resolve("UserService.java");
+        Files.writeString(source, "public class UserService { void existing() {} }");
+        try (VectorStore projectStore = new VectorStore(project.toString())) {
+            projectStore.clearProject();
+            projectStore.replaceProjectIndex(new CodeChunker().chunkFile(source).stream()
+                    .map(chunk -> new VectorStore.CodeChunkEntry(chunk, new float[]{1.0f}))
+                    .toList(), List.of(), "idx-1");
+            Files.writeString(source, """
+                    public class UserService {
+                        void existing() {}
+                        void newlyAddedMethod() {}
+                    }
+                    """);
+            projectStore.markDirtyFiles(List.of("UserService.java"));
+
+            List<VectorStore.SearchResult> results = projectStore.searchByKeyword("newlyAddedMethod");
+
+            assertTrue(results.stream().anyMatch(result -> "method".equals(result.chunkType())
+                    && result.name().contains("newlyAddedMethod")));
+            assertTrue(results.stream().allMatch(
+                    result -> result.freshness() == VectorStore.IndexFreshness.DIRTY));
+        }
+    }
+
+    @Test
+    void dirtyTextFileContributesNewConfigurationKey(
+            @org.junit.jupiter.api.io.TempDir Path project) throws Exception {
+        Path source = project.resolve("application.properties");
+        Files.writeString(source, "server.port=8080");
+        try (VectorStore projectStore = new VectorStore(project.toString())) {
+            projectStore.clearProject();
+            projectStore.replaceProjectIndex(List.of(new VectorStore.CodeChunkEntry(
+                    CodeChunk.fileChunk(source.toString(), "server.port=8080"),
+                    new float[]{1.0f})), List.of(), "idx-1");
+            Files.writeString(source, "server.port=8080\nfeature.audit.enabled=true");
+            projectStore.markDirtyFiles(List.of("application.properties"));
+
+            List<VectorStore.SearchResult> results = projectStore.searchByKeyword("feature.audit.enabled");
+
+            assertEquals(1, results.size());
+            assertTrue(results.getFirst().content().contains("feature.audit.enabled=true"));
+            assertEquals(VectorStore.IndexFreshness.DIRTY, results.getFirst().freshness());
+        }
+    }
+
+    @Test
+    void dirtyFileMergesRelativeIndexAndAbsoluteLiveChunkWithoutDuplicates(
+            @org.junit.jupiter.api.io.TempDir Path project) throws Exception {
+        Path source = project.resolve("application.properties");
+        Files.writeString(source, "feature.audit.enabled=false");
+        try (VectorStore projectStore = new VectorStore(project.toString())) {
+            projectStore.clearProject();
+            projectStore.replaceProjectIndex(List.of(new VectorStore.CodeChunkEntry(
+                    CodeChunk.fileChunk("application.properties", "feature.audit.enabled=false"),
+                    new float[]{1.0f})), List.of(), "idx-1");
+            Files.writeString(source, "feature.audit.enabled=true");
+            projectStore.markDirtyFiles(List.of("application.properties"));
+
+            List<VectorStore.SearchResult> results =
+                    projectStore.searchByKeyword("feature.audit.enabled");
+
+            assertEquals(1, results.size());
+            assertEquals("feature.audit.enabled=true", results.getFirst().content());
+            assertEquals(VectorStore.IndexFreshness.DIRTY, results.getFirst().freshness());
+        }
     }
 
     @Test

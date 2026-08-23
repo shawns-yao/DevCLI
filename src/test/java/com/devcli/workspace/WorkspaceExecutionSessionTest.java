@@ -1,6 +1,8 @@
 package com.devcli.workspace;
 
 import com.devcli.tool.ToolRegistry;
+import com.devcli.rag.CodeChunk;
+import com.devcli.rag.VectorStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -11,6 +13,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -128,6 +131,38 @@ class WorkspaceExecutionSessionTest {
             }
         } finally {
             parent.close();
+        }
+    }
+
+    @Test
+    void successfulPatchCommitMarksParentIndexDirty(@TempDir Path tempDir) throws Exception {
+        String oldRagDir = System.getProperty("devcli.rag.dir");
+        System.setProperty("devcli.rag.dir", tempDir.resolve("rag").toString());
+        Path project = Files.createDirectories(tempDir.resolve("project"));
+        Files.writeString(project.resolve("README.md"), "indexed content");
+        ToolRegistry parent = new ToolRegistry();
+        parent.setProjectPath(project.toString());
+        try {
+            try (VectorStore store = new VectorStore(project.toString())) {
+                store.clearProject();
+                store.replaceProjectIndex(List.of(new VectorStore.CodeChunkEntry(
+                        CodeChunk.fileChunk("README.md", "indexed content"),
+                        new float[]{1.0f})), List.of(), "idx-1");
+            }
+            try (WorkspaceExecutionSession session = WorkspaceExecutionSession.open(parent, "worker")) {
+                assertTrue(session.toolRegistry().executeToolOutput("write_file",
+                        "{\"path\":\"README.md\",\"content\":\"changed content\"}")
+                        .isSuccess());
+                assertTrue(session.apply(session.patchSet()).applied());
+            }
+            try (VectorStore store = new VectorStore(project.toString())) {
+                assertEquals(VectorStore.IndexFreshness.DIRTY,
+                        store.searchByKeyword("indexed content").getFirst().freshness());
+            }
+        } finally {
+            parent.close();
+            if (oldRagDir == null) System.clearProperty("devcli.rag.dir");
+            else System.setProperty("devcli.rag.dir", oldRagDir);
         }
     }
 }

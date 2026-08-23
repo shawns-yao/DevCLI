@@ -521,8 +521,12 @@ public class MemoryManager implements AutoCloseable {
             effectiveMetadata.put("redacted", "true");
             effectiveMetadata.put("redacted_types", redaction.removedTypesCsv());
         }
-        effectiveMetadata = Map.copyOf(effectiveMetadata);
         String subject = MemorySubjectExtractor.extract(safeFact, effectiveMetadata);
+        if (!subject.isBlank()) {
+            effectiveMetadata.put(MemoryWriteProtocol.META_SUBJECT_SOURCE,
+                    MemoryWriteProtocol.SUBJECT_SOURCE_DETERMINISTIC);
+        }
+        effectiveMetadata = Map.copyOf(effectiveMetadata);
         MemoryEvidence evidence = MemoryEvidence.fromPolicy(effectiveMetadata, safeFact);
         MemoryEntry entry = new MemoryEntry(
                 "fact-" + UUID.randomUUID().toString().substring(0, 8),

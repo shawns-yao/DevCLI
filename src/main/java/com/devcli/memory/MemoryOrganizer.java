@@ -186,12 +186,7 @@ public final class MemoryOrganizer {
                         proposal.reason(),
                         MemoryEvidence.ReviewState.REVIEWED,
                         proposal.sourceIds()));
-        memory.storeManaged(merged);
-        MemoryEntry stored = memory.retrieve(merged.getId()).orElse(null);
-        if (stored == null || !stored.isRecallable()) return false;
-        return proposal.sourceIds().stream()
-                .map(memory::retrieve)
-                .allMatch(entry -> entry.isPresent() && !entry.get().isActive());
+        return memory.storeSuperseding(merged, proposal.sourceIds());
     }
 
     private String requestPlan(List<MemoryEntry> inventory, String invalidOutput, String error)

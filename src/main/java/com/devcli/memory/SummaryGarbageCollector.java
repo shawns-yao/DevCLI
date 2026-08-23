@@ -62,12 +62,12 @@ public class SummaryGarbageCollector {
         summary.removeItems(item -> item.lifecycle() == SummaryItem.Lifecycle.EXPIRED
                 || item.lifecycle() == SummaryItem.Lifecycle.SUPERSEDED
                 && (aggressive || item.compactionCount() >= 5));
-        if (summary == null || summary.totalChars() <= maxChars) {
+        if (renderedChars(summary) <= maxChars) {
             return summary;
         }
         collapseUserMessages(summary);
         for (String section : TRUNCATE_ORDER) {
-            if (summary.totalChars() <= maxChars) {
+            if (renderedChars(summary) <= maxChars) {
                 break;
             }
             truncateSection(summary, section, maxChars);
@@ -95,7 +95,7 @@ public class SummaryGarbageCollector {
 
     private void truncateSection(RollingSummary summary, String section, int maxChars) {
         for (SummaryItem item : summary.items(section)) {
-            int overflow = summary.totalChars() - maxChars;
+            int overflow = renderedChars(summary) - maxChars;
             if (overflow <= 0) {
                 return;
             }
@@ -113,5 +113,9 @@ public class SummaryGarbageCollector {
                     + "\n[... 已折叠 " + (item.content().length() - target) + " 字符 ...]";
             summary.replaceItem(item, item.withContent(truncated));
         }
+    }
+
+    private static int renderedChars(RollingSummary summary) {
+        return summary == null ? 0 : summary.render().length();
     }
 }

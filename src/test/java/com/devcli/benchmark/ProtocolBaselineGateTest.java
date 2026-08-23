@@ -97,15 +97,16 @@ class ProtocolBaselineGateTest {
             CodeChunk newChunk = CodeChunk.fileChunk("README.md", "new index content");
             store.replaceProjectIndex(List.of(
                     new VectorStore.CodeChunkEntry(oldChunk, new float[]{1.0f})), List.of(), "idx-1");
-            String baseEpoch = store.beginIndexBuild(List.of("README.md"));
+            VectorStore.IndexBuildSnapshot buildSnapshot =
+                    store.beginIndexBuildSnapshot(List.of("README.md"));
             boolean dirtyVisible = store.searchByKeyword("old").getFirst().freshness()
                     == VectorStore.IndexFreshness.DIRTY;
             store.replaceProjectIndex(List.of(
                     new VectorStore.CodeChunkEntry(newChunk, new float[]{1.0f})),
-                    List.of(), "idx-2", baseEpoch);
+                    List.of(), "idx-2", buildSnapshot);
             boolean staleRejected = !store.replaceProjectIndex(List.of(
                     new VectorStore.CodeChunkEntry(oldChunk, new float[]{1.0f})),
-                    List.of(), "idx-old", baseEpoch);
+                    List.of(), "idx-old", buildSnapshot);
             return Map.of(
                     "stale_cas_rejection_rate", staleRejected ? 1.0 : 0.0,
                     "freshness_visibility_rate", dirtyVisible ? 1.0 : 0.0);

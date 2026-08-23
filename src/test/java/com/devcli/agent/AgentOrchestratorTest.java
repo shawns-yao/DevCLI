@@ -1329,8 +1329,8 @@ class AgentOrchestratorTest {
         assertFalse(orchestrator.parseReviewApproval(
                 "{\"approved\": false, \"summary\": \"未通过\", \"issues\": [\"缺少错误处理\"]}"));
 
-        // 分数阈值会覆盖 approved=true
-        assertFalse(orchestrator.parseReviewApproval("""
+        // 数字评分只做诊断；没有阻塞验收点或高风险问题时不覆盖 approved=true
+        assertTrue(orchestrator.parseReviewApproval("""
                 {
                   "approved": true,
                   "scores": {
@@ -1341,7 +1341,7 @@ class AgentOrchestratorTest {
                   "issues": []
                 }
                 """));
-        assertFalse(orchestrator.parseReviewApproval("""
+        assertTrue(orchestrator.parseReviewApproval("""
                 {
                   "approved": true,
                   "scores": {
@@ -1368,7 +1368,7 @@ class AgentOrchestratorTest {
         assertFalse(orchestrator.parseReviewApproval("集成验证没有通过"));
         assertFalse(orchestrator.parseReviewApproval("编译检查未能通过"));
 
-        // 非 JSON 文本不能绕过 scores / criteria_results 硬约束
+        // 非 JSON 文本不能绕过结构化协议约束
         assertFalse(orchestrator.parseReviewApproval("审查通过，代码质量良好"));
 
         // 既无肯定关键词也无 JSON：保守判为不通过

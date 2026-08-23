@@ -86,6 +86,9 @@ public final class WorkspaceExecutionSession implements AutoCloseable {
             PatchSet.ApplyResult result = effectivePatchSet.apply(projectRoot);
             if (result.applied()) {
                 toolRegistry.contextVersionLedger().publishPatchSet(stepId, effectivePatchSet, projectRoot);
+                toolRegistry.markRagIndexDirty(effectivePatchSet.changes().stream()
+                        .map(PatchSet.FileChange::relativePath)
+                        .toList());
             }
             decision.accept(result);
             return result;

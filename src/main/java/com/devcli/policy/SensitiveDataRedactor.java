@@ -10,6 +10,8 @@ public final class SensitiveDataRedactor {
     private static final Pattern CREDENTIAL = Pattern.compile(
             "(?i)\\b(?:token|api[_-]?key|key|password|secret|authorization)\\b\\s*[:=]");
     private static final Pattern BEARER = Pattern.compile("(?i)Bearer\\s+[^\\s\"'}]+");
+    private static final Pattern AUTHORIZATION = Pattern.compile(
+            "(?i)(\\bauthorization\\b\\s*[:=]\\s*+)(?!Bearer\\b)([^\\r\\n,，;；}]+)");
     private static final Pattern ACCOUNT = Pattern.compile(
             "(?i)(\"?(?:账号|账户|用户名|\\baccount|\\busername)\"?"
                     + "\\s*[:=：是]\\s*\"?)([^\"\\s,，;；}]+)(\"?)");
@@ -45,12 +47,13 @@ public final class SensitiveDataRedactor {
         detect(removedTypes, "medical", MEDICAL, text);
 
         String sanitized = BEARER.matcher(text).replaceAll("Bearer ***");
+        sanitized = AUTHORIZATION.matcher(sanitized).replaceAll("$1***");
         sanitized = sanitized.replaceAll(
-                "(?i)(\"?(?:token|api[_-]?key|key|password|secret|authorization)\"?"
+                "(?i)(\"?(?:token|api[_-]?key|key|password|secret)\"?"
                         + "\\s*[:=]\\s*\")([^\"]+)(\")",
                 "$1***$3");
         sanitized = sanitized.replaceAll(
-                "(?i)(\\b(?:token|api[_-]?key|key|password|secret|authorization)\\b"
+                "(?i)(\\b(?:token|api[_-]?key|key|password|secret)\\b"
                         + "\\s*[:=]\\s*)([^\\s,，;；}]+)",
                 "$1***");
         sanitized = ACCOUNT.matcher(sanitized).replaceAll("$1***$3");

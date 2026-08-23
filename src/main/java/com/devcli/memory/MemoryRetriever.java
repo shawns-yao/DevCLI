@@ -37,6 +37,8 @@ public class MemoryRetriever {
     private static final double DEFAULT_MIN_SCORE = 0.25;
     private static final double DEFAULT_MAX_SCORE_GAP = 0.60;
     private static final int DEFAULT_MAX_INJECTED = 5;
+    private static final int SEMANTIC_CANDIDATE_MULTIPLIER = 5;
+    private static final int MIN_SEMANTIC_CANDIDATES = 20;
 
     private final LongTermMemory longTermMemory;
     /**
@@ -97,7 +99,11 @@ public class MemoryRetriever {
         Map<String, ScoredEntry> scoredById = new HashMap<>();
 
         // 1. 语义检索（PR-C）：按 fact_id 命中向量，再与关键词分数合并
-        List<SemanticHit> semanticHits = semanticSearch.search(query, limit);
+        int semanticCandidateLimit = Math.max(MIN_SEMANTIC_CANDIDATES,
+                limit > Integer.MAX_VALUE / SEMANTIC_CANDIDATE_MULTIPLIER
+                        ? Integer.MAX_VALUE
+                        : limit * SEMANTIC_CANDIDATE_MULTIPLIER);
+        List<SemanticHit> semanticHits = semanticSearch.search(query, semanticCandidateLimit);
         if (!semanticHits.isEmpty()) {
             for (SemanticHit hit : semanticHits) {
                 MemoryEntry entry = byId.get(hit.factId());

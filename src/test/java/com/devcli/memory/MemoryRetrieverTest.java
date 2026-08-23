@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -111,6 +112,22 @@ class MemoryRetrieverTest {
                 "关键词精确命中应参与合并排序，不能被语义命中覆盖");
         assertEquals("f2", results.get(1).getId(),
                 "语义命中仍应作为扩展召回返回");
+    }
+
+    @Test
+    void semanticSearchOverfetchesBeforeFreshnessAndEvidenceReranking() {
+        longTerm.store(new MemoryEntry("f1", "semantic-only candidate",
+                MemoryEntry.MemoryType.FACT, null, 10));
+        AtomicInteger requestedTopK = new AtomicInteger();
+        retriever.setSemanticSearch((query, topK) -> {
+            requestedTopK.set(topK);
+            return java.util.List.of(new MemoryRetriever.SemanticHit("f1", 0.8));
+        });
+
+        retriever.retrieveLongTerm("unrelated query", 5);
+
+        assertEquals(25, requestedTopK.get(),
+                "语义通道必须先扩大候选池，再按证据和新鲜度重排到最终 top-k");
     }
 
     @Test

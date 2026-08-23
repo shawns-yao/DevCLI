@@ -14,13 +14,11 @@ import java.util.Set;
 /**
  * Multi-Agent Reviewer 输出协议边界。
  *
- * <p>集中负责 JSON 解析、评分阈值、验收点覆盖和问题摘要，避免协议规则散落在编排器中。
+ * <p>集中负责 JSON 解析、验收点覆盖、证据约束和问题摘要，避免协议规则散落在编排器中。
  */
 final class TeamReviewerProtocol {
     private static final Logger log = LoggerFactory.getLogger(TeamReviewerProtocol.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final double MIN_REVIEW_SCORE = 0.6;
-    private static final double REQUIRED_FUNCTIONAL_SCORE = 1.0;
 
     record Criterion(String id, String severity, String verificationMethod, String verifier) {
         Criterion {
@@ -108,25 +106,41 @@ final class TeamReviewerProtocol {
             log.warn("Reviewer JSON missing acceptance criteria coverage, defaulting to rejected");
             return false;
         }
-        JsonNode scores = root.path("scores");
-        if (!scores.isObject()) {
-            log.warn("Reviewer JSON missing structured scores, defaulting to rejected");
+        if (!hasDiagnosticScores(root.path("scores"))) {
+            log.warn("Reviewer JSON missing structured diagnostic scores, defaulting to rejected");
             return false;
         }
-        double functional = scores.path("functional_correctness").asDouble(-1.0);
-        double integration = scores.path("integration_completeness").asDouble(-1.0);
-        double quality = scores.path("code_quality").asDouble(-1.0);
-        if (functional < REQUIRED_FUNCTIONAL_SCORE) {
-            log.warn("Reviewer functional_correctness score {} below required {}",
-                    functional, REQUIRED_FUNCTIONAL_SCORE);
-            return false;
-        }
-        if (integration < MIN_REVIEW_SCORE || quality < MIN_REVIEW_SCORE) {
-            log.warn("Reviewer scores below threshold: integration={}, quality={}, threshold={}",
-                    integration, quality, MIN_REVIEW_SCORE);
+        if (hasBlockingIssues(root.path("issues"))) {
+            log.warn("Reviewer approved despite a blocking structured issue, defaulting to rejected");
             return false;
         }
         return true;
+    }
+
+    private static boolean hasDiagnosticScores(JsonNode scores) {
+        return scores != null && scores.isObject()
+                && scores.path("functional_correctness").isNumber()
+                && scores.path("integration_completeness").isNumber()
+                && scores.path("code_quality").isNumber();
+    }
+
+    private static boolean hasBlockingIssues(JsonNode issues) {
+        if (issues == null || !issues.isArray()) return false;
+        for (JsonNode issue : issues) {
+            if (!issue.isObject()) return true;
+            String severity = issue.path("severity").asText("");
+            if (!isBlockingSeverity(severity)) continue;
+            if (issue.path("criterion_id").asText("").isBlank()
+                    || issue.path("type").asText("").isBlank()
+                    || issue.path("description").asText("").isBlank()
+                    || issue.path("expected").asText("").isBlank()
+                    || issue.path("actual").asText("").isBlank()
+                    || issue.path("evidence").asText("").isBlank()) {
+                return true;
+            }
+            return true;
+        }
+        return false;
     }
 
     private static boolean hasInvalidVerificationResults(
@@ -316,6 +330,7 @@ final class TeamReviewerProtocol {
         String description = issue.path("description").asText("");
         String expected = issue.path("expected").asText("");
         String actual = issue.path("actual").asText("");
+        String evidence = issue.path("evidence").asText("");
         String suggestedFix = issue.path("suggested_fix").asText("");
         if (!criterionId.isBlank()) {
             parts.add("criterion=" + criterionId);
@@ -337,6 +352,9 @@ final class TeamReviewerProtocol {
         }
         if (!actual.isBlank()) {
             parts.add("actual=" + actual);
+        }
+        if (!evidence.isBlank()) {
+            parts.add("evidence=" + evidence);
         }
         if (!suggestedFix.isBlank()) {
             parts.add("suggested_fix=" + suggestedFix);

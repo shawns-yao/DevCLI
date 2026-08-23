@@ -130,7 +130,12 @@ public class LongTermMemory implements Memory, AutoCloseable {
      * <p>{@code entry.subject} 为空时退化为普通 {@link #store}（不参与主题归并）。
      */
     public synchronized void storeWithSubject(MemoryEntry entry) {
-        storeManaged(entry);
+        if (entry == null) return;
+        Map<String, String> metadata = new HashMap<>(entry.getMetadata());
+        metadata.put(MemoryWriteProtocol.META_SUBJECT_SOURCE,
+                MemoryWriteProtocol.SUBJECT_SOURCE_EXPLICIT);
+        storeManaged(entry.copy(entry.getSubject(), entry.isActive(), entry.getSupersededBy(),
+                entry.getRevision(), entry.getExpiresAt(), metadata, entry.getEvidence()));
     }
 
     private synchronized void storePrepared(MemoryEntry entry, List<String> explicitTargetIds) {
@@ -139,7 +144,8 @@ public class LongTermMemory implements Memory, AutoCloseable {
         entry = prepared.entry();
         pruneExpired();
         List<MemoryEntry> existingEntries = new ArrayList<>(entries.values());
-        if (MemoryConflictDetector.findEquivalent(entry, existingEntries).isPresent()) {
+        boolean hasExplicitTargets = explicitTargetIds != null && !explicitTargetIds.isEmpty();
+        if (!hasExplicitTargets && MemoryConflictDetector.findEquivalent(entry, existingEntries).isPresent()) {
             return;
         }
         Optional<MemoryConflictDetector.Conflict> conflict =
@@ -288,8 +294,33 @@ public class LongTermMemory implements Memory, AutoCloseable {
         }
         MemoryEntry managedEntry = entry.copy(entry.getSubject(), true, "", entry.getRevision(),
                 entry.getExpiresAt(), Map.copyOf(metadata), evidence);
-        storePrepared(managedEntry, targetIds);
-        return entries.containsKey(entry.getId());
+        return storeSuperseding(managedEntry, targets.stream().map(MemoryEntry::getId).toList());
+    }
+
+    /**
+     * 将新条目作为指定旧条目的显式替代版本原子写入。调用方必须已经确定替代关系；
+     * 普通记忆写入仍只能依赖结构化稳定键自动 supersede。
+     */
+    public synchronized boolean storeSuperseding(MemoryEntry entry, List<String> targetIds) {
+        if (entry == null || targetIds == null || targetIds.isEmpty()) return false;
+        pruneExpired();
+        List<String> effectiveTargets = targetIds.stream()
+                .distinct()
+                .filter(id -> {
+                    MemoryEntry target = entries.get(id);
+                    return target != null && target.isRecallable()
+                            && !target.getId().equals(entry.getId());
+                })
+                .toList();
+        if (effectiveTargets.isEmpty()) return false;
+        storePrepared(entry, effectiveTargets);
+        MemoryEntry stored = entries.get(entry.getId());
+        if (stored == null || !stored.isRecallable()) return false;
+        return effectiveTargets.stream().allMatch(id -> {
+            MemoryEntry target = entries.get(id);
+            return target != null && !target.isActive()
+                    && entry.getId().equals(target.getSupersededBy());
+        });
     }
 
     /** 基于旧条派生一个被取代的失效副本：仅改 active=false 与 supersededBy，其余保持不变。 */

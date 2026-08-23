@@ -16,7 +16,7 @@ import java.util.Locale;
  * 设计目标是把"是否继续下一轮"的主导权交给 LLM 自己——只要它返回 content 不再调用工具，
  * 循环就退出。本类只承担三种"保险阀"职责，避免模型在异常情况下无限重复同一动作：
  *
- * 1. Token 预算：累计 input + output token 超过阈值后强制收尾（**默认无限**，仅显式配置时生效）
+ * 1. Token 预算：累计 input + output token 超过阈值后强制收尾
  * 2. 停滞检测：连续 N 次工具调用使用完全相同的工具名 + 参数，判定为死循环
  * 3. 硬轮数兜底：累计迭代轮数超过 hardMaxIterations，作为兜底防御
  *
@@ -25,12 +25,7 @@ import java.util.Locale;
  * 配置读取顺序（以 {@link #fromSystemProperties()} 为准）：
  * 1. 系统属性：{@code devcli.react.token.budget} / {@code devcli.react.stagnation.window} /
  *    {@code devcli.react.hard.max.iterations}
- * 2. 默认值：token 预算 = Integer.MAX_VALUE（实质不限）/ 连续 3 次相同工具调用 / 100 轮
- *
- * 设计取舍：长上下文模型（GLM-5.1 200k / DeepSeek V4 1M）配合套餐用户的"无限 token"诉求，
- * 默认不再以 80% × window 为硬限——让 LLM 自然停在它该停的地方。需要严格成本控制的
- * 场景（CI / 自动化批跑）通过 {@code -Ddevcli.react.token.budget=N} 显式启用。
- * 死循环防护交给 stagnation 检测和 hardMaxIterations 两道兜底。
+ * 2. 默认值：token 预算 = min(模型窗口 × 4, 1,000,000) / 连续 3 次相同工具调用 / 100 轮
  */
 public class AgentBudget {
 
@@ -44,6 +39,8 @@ public class AgentBudget {
 
     private static final int DEFAULT_STAGNATION_WINDOW = 3;
     private static final int DEFAULT_HARD_MAX_ITERATIONS = 100;
+    private static final int DEFAULT_WINDOW_MULTIPLIER = 4;
+    private static final int DEFAULT_MAX_TOKEN_BUDGET = 1_000_000;
 
     private final int tokenBudget;
     private final int stagnationWindow;
@@ -79,11 +76,11 @@ public class AgentBudget {
     }
 
     public static AgentBudget fromLlmClient(LlmClient llmClient) {
-        // ContextProfile 仍按 80% × window 计算 agentTokenBudget，用于 /context 与 token stats 的"软提示"显示；
-        // 但 AgentBudget 的硬限默认走 Integer.MAX_VALUE，避免长上下文 + 套餐用户被预算墙卡住。
-        // 显式 -Ddevcli.react.token.budget=N 仍可启用硬预算，覆盖默认。
+        int contextWindow = ContextProfile.from(llmClient).maxContextWindow();
+        int defaultTokenBudget = (int) Math.min(DEFAULT_MAX_TOKEN_BUDGET,
+                Math.max((long) contextWindow, (long) contextWindow * DEFAULT_WINDOW_MULTIPLIER));
         return new AgentBudget(
-                readIntProperty("devcli.react.token.budget", Integer.MAX_VALUE),
+                readIntProperty("devcli.react.token.budget", defaultTokenBudget),
                 readIntProperty("devcli.react.stagnation.window", DEFAULT_STAGNATION_WINDOW),
                 readIntProperty("devcli.react.hard.max.iterations", DEFAULT_HARD_MAX_ITERATIONS)
         );
