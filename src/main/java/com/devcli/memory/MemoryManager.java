@@ -2,6 +2,7 @@ package com.devcli.memory;
 
 import com.devcli.llm.LlmClient;
 import com.devcli.context.ContextProfile;
+import com.devcli.config.ConfigResolver;
 import com.devcli.policy.SensitiveDataRedactor;
 import com.devcli.tool.ToolSideChannel;
 import org.slf4j.Logger;
@@ -20,6 +21,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 
 /**
  * Memory 管理器 —— Memory 系统的门面类。
@@ -55,14 +57,16 @@ public class MemoryManager implements AutoCloseable {
     private final Map<String, Integer> memoryCandidateOccurrences = new java.util.concurrent.ConcurrentHashMap<>();
     /** recurrence 候选计数器的容量上限，防止长会话下无界增长。 */
     private static final int MAX_MEMORY_CANDIDATE_ENTRIES = 512;
-    private static final long MEMORY_CONFIRMATION_TTL_SECONDS = 600;
-    private final Map<String, PendingMemoryConfirmation> pendingMemoryConfirmations =
-            new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long MEMORY_CONFIRMATION_TTL_SECONDS = ConfigResolver.longValue(
+            "devcli.memory.confirmation.ttl.seconds", "DEVCLI_MEMORY_CONFIRMATION_TTL_SECONDS",
+            86_400, 600, 2_592_000);
+    private final MemoryConfirmationStore memoryConfirmationStore;
     private LlmClient llmClient;
     private TokenBudget tokenBudget;
     private ContextProfile contextProfile;
     /** 当前会话显式忽略记忆 flag。用户说"忘记记忆"/"别管记忆"时设为 true。 */
     private volatile boolean memoryIgnored = false;
+    private volatile Supplier<String> ruleContextSupplier = () -> "";
 
     public MemoryManager(LlmClient llmClient) {
         this(llmClient, ContextProfile.from(llmClient), null);
@@ -87,6 +91,7 @@ public class MemoryManager implements AutoCloseable {
         this.sessionMemory = new SessionMemory();
         this.compactionSummaryCache = new CompactionSummaryCache();
         this.longTermMemory = longTermMemory != null ? longTermMemory : new LongTermMemory();
+        this.memoryConfirmationStore = new MemoryConfirmationStore(this.longTermMemory.storageDir());
         this.retriever = new MemoryRetriever(this.longTermMemory);
         this.tokenBudget = new TokenBudget(contextProfile.maxContextWindow());
         this.sessionPreSummaryExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -104,6 +109,10 @@ public class MemoryManager implements AutoCloseable {
     public void applyContextProfile(ContextProfile contextProfile) {
         this.contextProfile = contextProfile;
         this.tokenBudget = new TokenBudget(contextProfile.maxContextWindow());
+    }
+
+    public void setRuleContextSupplier(Supplier<String> ruleContextSupplier) {
+        this.ruleContextSupplier = ruleContextSupplier == null ? () -> "" : ruleContextSupplier;
     }
 
     // ─────────────────────────────────────────────────────────
@@ -181,9 +190,17 @@ public class MemoryManager implements AutoCloseable {
 
     private void recordCurrentStateInvalidation(
             String toolName, MemoryObservationConflictDetector.Observation observation) {
+        RuleCurrentStateConflictDetector.detect(ruleContextSupplier.get(), observation)
+                .ifPresent(notice -> recordCurrentStateNotice(notice));
         List<MemoryEntry> conflicts = MemoryObservationConflictDetector.conflictingEntries(
                 observation, longTermMemory.getAll());
         if (conflicts.isEmpty()) {
+            return;
+        }
+
+        if (observation.strength() != CurrentStateObservationSideChannel.ObservationStrength.HIGH) {
+            recordCurrentStateNotice("低强度观察与长期记忆冲突，已降低本轮决策置信度但未覆盖长期记忆："
+                    + observation.evidence() + "（strength=" + observation.strength() + "）");
             return;
         }
 
@@ -205,7 +222,7 @@ public class MemoryManager implements AutoCloseable {
             metadata.put("observed_value", observation.value());
             metadata.put("observation_tool", toolName);
             metadata.put("reason_code", "CURRENT_STATE_CONFLICT");
-            metadata.put("confidence", "HIGH");
+            metadata.put("confidence", observation.strength().name());
             metadata.put("review_state", "REVIEWED");
             MemoryEvidence evidence = MemoryEvidence.fromPolicy(metadata, observation.evidence());
             MemoryEntry entry = new MemoryEntry(
@@ -224,13 +241,17 @@ public class MemoryManager implements AutoCloseable {
                     evidence
             );
             if (longTermMemory.storeObservationInvalidation(entry, conflictIds)) {
-                sessionMemory.accept(new SessionMemory.KeyEvent(
-                        negativeFact, 100, "system", currentEvidenceScope(),
-                        sessionEventSequence.incrementAndGet()));
-                currentStateConflictNotices.get().add(negativeFact);
+                recordCurrentStateNotice(negativeFact);
                 notifyAutoSaved(entry, metadata);
             }
         }
+    }
+
+    private void recordCurrentStateNotice(String notice) {
+        sessionMemory.accept(new SessionMemory.KeyEvent(
+                notice, 100, "system", currentEvidenceScope(),
+                sessionEventSequence.incrementAndGet()));
+        currentStateConflictNotices.get().add(notice);
     }
 
     /**
@@ -243,8 +264,8 @@ public class MemoryManager implements AutoCloseable {
             currentStateConflictNotices.remove();
             return "";
         }
-        String instruction = "程序已确认当前状态推翻旧记忆。以下 NegativeFact 为强制约束，"
-                + "本轮推理不得继续依赖被 supersede 的旧记忆：\n- "
+        String instruction = "程序已处理当前状态证据；程序已确认当前状态推翻旧记忆时，"
+                + "本轮推理不得继续依赖被 supersede 的旧记忆。低强度观察只作为冲突警告：\n- "
                 + String.join("\n- ", notices);
         currentStateConflictNotices.remove();
         return instruction;
@@ -383,8 +404,8 @@ public class MemoryManager implements AutoCloseable {
             SensitiveDataRedactor.RedactionResult redaction = SensitiveDataRedactor.inspect(fact);
             if (decision.action() == LongTermMemoryPolicy.Action.CONFIRM && redaction.changed()) {
                 String confirmationId = "memory-confirm-" + UUID.randomUUID().toString().substring(0, 8);
-                pendingMemoryConfirmations.put(confirmationId, new PendingMemoryConfirmation(
-                        redaction.sanitizedText(), Instant.now().plusSeconds(MEMORY_CONFIRMATION_TTL_SECONDS)));
+                memoryConfirmationStore.create(confirmationId, redaction.sanitizedText(),
+                        Instant.now().plusSeconds(MEMORY_CONFIRMATION_TTL_SECONDS));
                 return new StoreResult(false, decision,
                         "检测到敏感字段，将保存脱敏后的内容：" + redaction.sanitizedText()
                                 + "；已剥离类型：" + redaction.removedTypesCsv()
@@ -429,7 +450,13 @@ public class MemoryManager implements AutoCloseable {
         metadata.put("confidence", "HIGH");
         LongTermMemoryPolicy.Decision confirmed = new LongTermMemoryPolicy.Decision(
                 LongTermMemoryPolicy.Action.SAVE, "用户确认保存脱敏版", Map.copyOf(metadata));
-        String id = storeFact(redaction.sanitizedText(), confirmed.metadata());
+        String safeFact = redaction.sanitizedText();
+        String id = longTermMemory.getAll().stream()
+                .filter(MemoryEntry::isActive)
+                .filter(entry -> entry.getContent().equals(safeFact))
+                .map(MemoryEntry::getId)
+                .findFirst()
+                .orElseGet(() -> storeFact(safeFact, confirmed.metadata()));
         String message = longTermMemory.isPersistent()
                 ? "已保存脱敏后的长期记忆"
                 : "已保存脱敏内容到本会话内存，但长期记忆存储不可用";
@@ -442,17 +469,24 @@ public class MemoryManager implements AutoCloseable {
         if (confirmationId == null || confirmationId.isBlank()) {
             return invalidConfirmation("缺少 confirmation_id");
         }
-        PendingMemoryConfirmation pending = pendingMemoryConfirmations.remove(confirmationId.trim());
+        MemoryConfirmationStore.Ticket pending = memoryConfirmationStore
+                .find(confirmationId.trim(), Instant.now()).orElse(null);
         if (pending == null) {
             return invalidConfirmation("确认已过期、已使用或不存在");
         }
+        if (pending.state() == MemoryConfirmationStore.State.COMPLETED) {
+            return pending.result();
+        }
         String source = editedFact == null || editedFact.isBlank() ? pending.sanitizedFact() : editedFact;
-        return storeRedactedFact(source);
+        StoreResult result = storeRedactedFact(source);
+        memoryConfirmationStore.complete(confirmationId.trim(), result);
+        return result;
     }
 
     public boolean cancelSensitiveMemory(String confirmationId) {
         pruneExpiredMemoryConfirmations();
-        return confirmationId != null && pendingMemoryConfirmations.remove(confirmationId.trim()) != null;
+        return confirmationId != null
+                && memoryConfirmationStore.cancel(confirmationId.trim(), Instant.now());
     }
 
     private StoreResult invalidConfirmation(String reason) {
@@ -462,8 +496,7 @@ public class MemoryManager implements AutoCloseable {
     }
 
     private void pruneExpiredMemoryConfirmations() {
-        Instant now = Instant.now();
-        pendingMemoryConfirmations.entrySet().removeIf(entry -> entry.getValue().expiresAt().isBefore(now));
+        memoryConfirmationStore.pruneExpired(Instant.now());
     }
 
     private static boolean hasReusableRedactedKnowledge(String sanitized) {
@@ -583,8 +616,6 @@ public class MemoryManager implements AutoCloseable {
             this(stored, decision, message, id, "");
         }
     }
-
-    private record PendingMemoryConfirmation(String sanitizedFact, Instant expiresAt) {}
 
     /**
      * 一次长期记忆写入事件。自动写入与显式写入都走这条通道，让 CLI 能告诉用户
@@ -968,7 +999,6 @@ public class MemoryManager implements AutoCloseable {
     public void clearShortTerm() {
         sessionMemory.clear();
         compactionSummaryCache.clearPreSummary();
-        pendingMemoryConfirmations.clear();
         sessionEventSequence.set(0);
     }
 
@@ -1038,6 +1068,7 @@ public class MemoryManager implements AutoCloseable {
     @Override
     public void close() {
         sessionPreSummaryExecutor.shutdownNow();
+        memoryConfirmationStore.close();
         if (longTermMemory != null) {
             longTermMemory.close();
         }

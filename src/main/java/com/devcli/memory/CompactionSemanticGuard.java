@@ -37,7 +37,7 @@ final class CompactionSemanticGuard {
         }
 
         RollingSummary structured = RollingSummary.parse(safeSummary);
-        if (!structured.isEmpty()) {
+        if (!structured.isEmpty() || hasNineSectionStructure(safeSummary)) {
             String restored = "- " + String.join("\n- ", missing);
             structured.findItem("主要请求与意图", "semantic-guard:protected-constraints")
                     .ifPresentOrElse(
@@ -60,6 +60,14 @@ final class CompactionSemanticGuard {
                 ? safeSummary
                 : safeSummary.substring(0, available).stripTrailing();
         return new Validation(false, (base + repair).trim(), List.copyOf(missing), constraints.size());
+    }
+
+    private static boolean hasNineSectionStructure(String summary) {
+        if (summary == null || summary.isBlank()) {
+            return false;
+        }
+        return RollingSummary.SECTIONS.stream()
+                .allMatch(section -> summary.contains("## " + section));
     }
 
     static List<String> extractConstraints(List<LlmClient.Message> source) {

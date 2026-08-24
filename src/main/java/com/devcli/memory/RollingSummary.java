@@ -20,6 +20,9 @@ public class RollingSummary {
 
     private static final String ITEM_PREFIX = "<!-- summary-item ";
     private static final String ITEM_SUFFIX = " -->";
+    private static final String TASK_STATE_REFERENCE = "- 非权威动态状态，见本轮 Session Memory。";
+    private static final List<String> PROJECTION_ONLY_SECTIONS = List.of(
+            "待办任务", "当前在做什么", "下一步");
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private final LinkedHashMap<String, List<SummaryItem>> sections = new LinkedHashMap<>();
 
@@ -30,6 +33,9 @@ public class RollingSummary {
     }
 
     public String get(String section) {
+        if (isProjectionOnlySection(section)) {
+            return "";
+        }
         return items(section).stream()
                 .filter(SummaryItem::isVisible)
                 .map(SummaryItem::content)
@@ -40,7 +46,7 @@ public class RollingSummary {
 
     /** 兼容旧调用：整段替换为一个带默认生命周期的条目。 */
     public void set(String section, String content) {
-        if (!SECTIONS.contains(section)) {
+        if (!SECTIONS.contains(section) || isProjectionOnlySection(section)) {
             return;
         }
         sections.get(section).clear();
@@ -52,9 +58,14 @@ public class RollingSummary {
     }
 
     public void addItem(SummaryItem item) {
-        if (item != null && SECTIONS.contains(item.section())) {
+        if (item != null && SECTIONS.contains(item.section())
+                && !isProjectionOnlySection(item.section())) {
             sections.get(item.section()).add(item);
         }
+    }
+
+    public static boolean isProjectionOnlySection(String section) {
+        return PROJECTION_ONLY_SECTIONS.contains(section);
     }
 
     public List<SummaryItem> items(String section) {
@@ -179,6 +190,10 @@ public class RollingSummary {
         StringBuilder result = new StringBuilder();
         for (Map.Entry<String, List<SummaryItem>> entry : sections.entrySet()) {
             result.append("## ").append(entry.getKey()).append('\n');
+            if (isProjectionOnlySection(entry.getKey())) {
+                result.append(TASK_STATE_REFERENCE).append('\n').append('\n');
+                continue;
+            }
             for (SummaryItem item : entry.getValue()) {
                 result.append(ITEM_PREFIX).append(metadataJson(item)).append(ITEM_SUFFIX).append('\n');
                 if (item.isVisible() && !item.content().isBlank()) {

@@ -175,6 +175,7 @@ public class PlanExecuteAgent {
      */
     public void setRuleContextSupplier(Supplier<String> ruleContextSupplier) {
         this.ruleContextSupplier = ruleContextSupplier == null ? () -> "" : ruleContextSupplier;
+        memoryManager.setRuleContextSupplier(this.ruleContextSupplier);
     }
 
     /** @deprecated 使用 {@link #setRuleContextSupplier(Supplier)}。 */

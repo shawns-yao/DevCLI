@@ -13,7 +13,8 @@ public class PromptAssembler {
     private static final String TURN_CONTEXT_HEADER = """
             ## Turn Context
 
-            以下是本轮开始时的状态快照。历史消息中若出现多份快照，只有最后一份有效，更早的已被取代。""";
+            以下是本轮开始时的状态快照。历史消息中若出现多份快照，只有最后一份有效，更早的已被取代。
+            任务进度、当前工作和下一步只以最后一份 Session Memory 为准；压缩摘要中的同名段落不是状态来源。""";
 
     private final PromptRepository repository;
 

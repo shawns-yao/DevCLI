@@ -80,7 +80,7 @@ public class SessionMemory {
     private final LinkedHashMap<String, String> taskState = new LinkedHashMap<>();
     private final LinkedHashMap<String, Long> stateSequences = new LinkedHashMap<>();
     private final LinkedHashSet<String> modifiedFiles = new LinkedHashSet<>();
-    private final LinkedHashMap<String, String> attemptDigests = new LinkedHashMap<>();
+    private final LinkedHashMap<String, AttemptDigestSnapshot> attemptDigests = new LinkedHashMap<>();
     private final LinkedHashMap<String, Long> stepSequences = new LinkedHashMap<>();
     private String taskId = "";
     private boolean taskEnded;
@@ -229,7 +229,8 @@ public class SessionMemory {
                 agentId, stepId, kind, importance, reference, 1, sequence);
         mergeOrAppend(incoming);
         if (kind == EvidenceKind.FAILURE) {
-            attemptDigests.put(reference, normalizedResult);
+            attemptDigests.put(reference, new AttemptDigestSnapshot(
+                    reference, normalizedResult, agentId, stepId, sequence));
             while (attemptDigests.size() > maxVolatileFacts) {
                 attemptDigests.remove(attemptDigests.keySet().iterator().next());
             }
@@ -541,8 +542,8 @@ public class SessionMemory {
         }
         if (shouldRenderToolEvidence(effectiveView) && !attemptDigests.isEmpty()) {
             StringBuilder section = new StringBuilder("### 已尝试但失败的方案\n\n");
-            for (String digest : attemptDigests.values()) {
-                section.append("- ").append(truncate(digest, 700).replace("\n", "; ")).append('\n');
+            for (AttemptDigestSnapshot attempt : attemptDigests.values()) {
+                section.append("- ").append(truncate(attempt.digest(), 700).replace("\n", "; ")).append('\n');
             }
             appendBudgeted(sb, section.toString(), effectiveBudget);
         }
@@ -1173,10 +1174,21 @@ public class SessionMemory {
     public record KeyEventSnapshot(String description, int importance, String agentId,
                                    String stepId, long sequence) {}
 
+    public record AttemptDigestSnapshot(String reference, String digest,
+                                        String agentId, String stepId, long sequence) {
+        public AttemptDigestSnapshot {
+            reference = reference == null ? "" : reference;
+            digest = digest == null ? "" : digest;
+            agentId = agentId == null ? "" : agentId;
+            stepId = stepId == null ? "" : stepId;
+            sequence = Math.max(0, sequence);
+        }
+    }
+
     public record SessionSnapshot(Map<String, String> workState,
                                   List<EvidenceSnapshot> evidenceJournal,
                                   List<String> modifiedFiles,
-                                  List<String> attemptDigests,
+                                  List<AttemptDigestSnapshot> attemptDigests,
                                   String taskLedger,
                                   long sequence,
                                   String taskId,

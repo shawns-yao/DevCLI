@@ -51,14 +51,12 @@ class SummaryGarbageCollectorTest {
     @Test
     void keepsHighPrioritySectionsWhenTruncating() {
         RollingSummary s = new RollingSummary();
-        s.set("待办任务", "P1 九段");
-        s.set("下一步", "集成 compactor");
+        s.set("主要请求与意图", "P1 九段");
         s.set("文件和代码", "x".repeat(3_000));
 
         new SummaryGarbageCollector().gc(s, 300);
 
-        assertEquals("P1 九段", s.get("待办任务"), "高优先段不参与截断");
-        assertEquals("集成 compactor", s.get("下一步"), "高优先段不参与截断");
+        assertEquals("P1 九段", s.get("主要请求与意图"), "高优先段不参与截断");
         assertTrue(s.get("文件和代码").contains("已折叠"), "低优先段被截以腾预算");
     }
 
@@ -69,20 +67,20 @@ class SummaryGarbageCollectorTest {
                 "主要请求与意图", "decision", "保留九段摘要",
                 SummaryItem.Lifecycle.STABLE, 100, List.of()).withCompactionCount(20));
         summary.addItem(SummaryItem.create(
-                "待办任务", "open", "实现生命周期更新",
+                "主要请求与意图", "open", "实现生命周期更新",
                 SummaryItem.Lifecycle.UNRESOLVED, 90, List.of()).withCompactionCount(20));
 
         new SummaryGarbageCollector().gc(summary, 10_000, true);
 
         assertTrue(summary.findItem("主要请求与意图", "decision").isPresent());
-        assertTrue(summary.findItem("待办任务", "open").isPresent());
+        assertTrue(summary.findItem("主要请求与意图", "open").isPresent());
     }
 
     @Test
     void aggressiveGcRemovesExpiredAndOldSupersededAuditButKeepsResolvedOutcome() {
         RollingSummary summary = new RollingSummary();
         summary.addItem(SummaryItem.create(
-                "当前在做什么", "expired", "已经无用",
+                "问题解决过程", "expired", "已经无用",
                 SummaryItem.Lifecycle.EXPIRED, 10, List.of()).withCompactionCount(1));
         summary.addItem(SummaryItem.create(
                 "关键技术概念", "old", "旧值",
@@ -93,7 +91,7 @@ class SummaryGarbageCollectorTest {
 
         new SummaryGarbageCollector().gc(summary, 10_000, true);
 
-        assertTrue(summary.findItem("当前在做什么", "expired").isEmpty());
+        assertTrue(summary.findItem("问题解决过程", "expired").isEmpty());
         assertTrue(summary.findItem("关键技术概念", "old").isEmpty());
         SummaryItem resolved = summary.findItem("文件和代码", "file:A").orElseThrow();
         assertEquals("文件 A 已修改，测试通过", resolved.content());

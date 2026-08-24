@@ -8,8 +8,8 @@ import java.util.List;
  * <p>策略：
  * <ol>
  *   <li>折叠"逐条用户消息"到最近 N 条（保尾部，最近的优先），更早的折叠成一行计数</li>
- *   <li>仍超预算则按"低→高优先级"逐段截断（保头部）；高优先段
- *       （主要请求与意图 / 待办任务 / 当前在做什么 / 下一步）不参与截断，尽量保住</li>
+ *   <li>仍超预算则按"低→高优先级"逐段截断（保头部）；主要请求与意图不参与截断。
+ *       待办、当前工作和下一步由 SessionMemory 投影，不在摘要中持久化</li>
  * </ol>
  *
  * <p>裁剪是有损的粗操作；裁剪后仍超预算的极端情况由上层（{@code ConversationHistoryCompactor}）
@@ -24,7 +24,7 @@ public class SummaryGarbageCollector {
     private static final int MIN_SECTION_CHARS = 200;
 
     /**
-     * 低→高优先级截断顺序。GC 从前往后裁；高优先段（意图/待办/当前/下一步）<b>不在此列</b>，
+     * 低→高优先级截断顺序。GC 从前往后裁；主要请求与意图<b>不在此列</b>，
      * 尽量不动。"逐条用户消息"只折叠不在此截断（折叠保尾部，截断保头部，二者冲突）。
      */
     private static final List<String> TRUNCATE_ORDER = List.of(

@@ -98,4 +98,21 @@ class SummaryLifecycleReducerTest {
         assertTrue(updated.get("当前在做什么").isBlank());
         assertTrue(updated.findItem("待办任务", "obsolete").isEmpty());
     }
+
+    @Test
+    void modelOperationsCannotCreateASecondTaskStateLedger() {
+        SummaryLifecycleReducer.Result result = new SummaryLifecycleReducer().apply("", """
+                {"operations":[
+                  {"action":"ADD","section":"待办任务","subject":"task:stale","content":"继续旧任务"},
+                  {"action":"ADD","section":"当前在做什么","subject":"task:active","content":"正在做旧任务"},
+                  {"action":"ADD","section":"下一步","subject":"task:next","content":"下一步做旧任务"}
+                ]}
+                """);
+
+        assertTrue(result.applied(), result.reason());
+        assertFalse(result.summary().contains("继续旧任务"));
+        assertFalse(result.summary().contains("正在做旧任务"));
+        assertFalse(result.summary().contains("下一步做旧任务"));
+        assertEquals(3, result.summary().split("见本轮 Session Memory", -1).length - 1);
+    }
 }

@@ -86,6 +86,12 @@ public class SummaryLifecycleReducer {
     }
 
     private void apply(RollingSummary summary, SummaryOperation operation) {
+        boolean resolvesIntoHistory = operation.action() == SummaryOperation.Action.RESOLVE
+                && !operation.targetSection().isBlank()
+                && !RollingSummary.isProjectionOnlySection(operation.targetSection());
+        if (RollingSummary.isProjectionOnlySection(operation.section()) && !resolvesIntoHistory) {
+            return;
+        }
         Optional<SummaryItem> current = summary.findItem(operation.section(), operation.subject());
         switch (operation.action()) {
             case ADD -> {

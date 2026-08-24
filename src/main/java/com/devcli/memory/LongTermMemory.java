@@ -52,6 +52,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
     private final AtomicInteger tokenCounter = new AtomicInteger(0);
     private final LongTermMemoryStore store;
     private final boolean persistentStore;
+    private final Path storageDir;
 
     /** PR-C 语义检索钩子。 */
     private java.util.function.Consumer<MemoryEntry> onStoreHook = entry -> {};
@@ -77,6 +78,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
     public LongTermMemory(LongTermMemoryStore store, Path migrationDir) {
         this.store = store;
         this.persistentStore = store != null && store.isPersistent();
+        this.storageDir = migrationDir.toAbsolutePath().normalize();
         ensureDir(migrationDir);
         migrateLegacyJsonIfNeeded(migrationDir);
         loadFromStore();
@@ -494,6 +496,10 @@ public class LongTermMemory implements Memory, AutoCloseable {
      */
     public boolean isPersistent() {
         return persistentStore;
+    }
+
+    Path storageDir() {
+        return storageDir;
     }
 
     /** 按类型筛选记忆 */

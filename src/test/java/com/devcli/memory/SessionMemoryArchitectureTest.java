@@ -56,7 +56,8 @@ class SessionMemoryArchitectureTest {
         assertTrue(snapshot.evidenceJournal().stream()
                 .anyMatch(item -> item.kind() == SessionMemory.EvidenceKind.REGENERABLE
                         && item.reference().equals("src/Main.java")));
-        assertTrue(snapshot.attemptDigests().getFirst().contains("避免重复"));
+        assertTrue(snapshot.attemptDigests().getFirst().digest().contains("避免重复"));
+        assertEquals("step-1", snapshot.attemptDigests().getFirst().stepId());
     }
 
     @Test

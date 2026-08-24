@@ -34,7 +34,7 @@ class RollingSummaryTest {
         assertEquals("重构记忆系统", s.get("主要请求与意图"));
         assertEquals("subject 冲突消解", s.get("关键技术概念"));
         assertEquals("先 supersede 再 store", s.get("问题解决过程"));
-        assertEquals("集成 compactor", s.get("下一步"));
+        assertTrue(s.get("下一步").isBlank());
     }
 
     @Test
@@ -84,7 +84,7 @@ class RollingSummaryTest {
     @Test
     void parseHandlesOutOfOrderSectionsAndRenderNormalizes() {
         RollingSummary s = RollingSummary.parse("## 下一步\n先写这段\n## 主要请求与意图\n后写这段");
-        assertEquals("先写这段", s.get("下一步"));
+        assertTrue(s.get("下一步").isBlank());
         assertEquals("后写这段", s.get("主要请求与意图"));
         String rendered = s.render();
         assertTrue(rendered.indexOf("## 主要请求与意图") < rendered.indexOf("## 下一步"),
@@ -121,7 +121,7 @@ class RollingSummaryTest {
     }
 
     @Test
-    void legacyMarkdownMigratesToLifecycleItems() {
+    void legacyTaskStateIsNotMigratedIntoSummaryAuthority() {
         RollingSummary summary = RollingSummary.parse("""
                 ## 待办任务
                 - 修复上下文压缩
@@ -129,10 +129,26 @@ class RollingSummaryTest {
                 实现生命周期摘要
                 """);
 
-        assertFalse(summary.items("待办任务").isEmpty());
-        assertEquals(SummaryItem.Lifecycle.UNRESOLVED,
-                summary.items("待办任务").getFirst().lifecycle());
-        assertEquals(SummaryItem.Lifecycle.ACTIVE,
-                summary.items("当前在做什么").getFirst().lifecycle());
+        assertTrue(summary.items("待办任务").isEmpty());
+        assertTrue(summary.items("当前在做什么").isEmpty());
+        assertTrue(summary.render().contains("见本轮 Session Memory"));
+        assertFalse(summary.render().contains("修复上下文压缩"));
+        assertFalse(summary.render().contains("实现生命周期摘要"));
+    }
+
+    @Test
+    void dynamicTaskSectionsAlwaysReferenceSessionMemory() {
+        RollingSummary summary = new RollingSummary();
+        summary.set("待办任务", "过期任务 A");
+        summary.set("当前在做什么", "过期任务 B");
+        summary.set("下一步", "过期任务 C");
+
+        String rendered = summary.render();
+
+        assertTrue(summary.get("待办任务").isBlank());
+        assertFalse(rendered.contains("过期任务 A"));
+        assertFalse(rendered.contains("过期任务 B"));
+        assertFalse(rendered.contains("过期任务 C"));
+        assertEquals(3, rendered.split("见本轮 Session Memory", -1).length - 1);
     }
 }

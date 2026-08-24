@@ -33,6 +33,9 @@ final class MemoryObservationConflictDetector {
                     gradle ? "项目根目录检测到 Gradle 构建文件" : "项目根目录检测到 Maven 构建文件"));
         }
         if ("read_file".equals(toolName) && result.startsWith("文件内容:")) {
+            if (!isProjectRootFile(path)) {
+                return Optional.empty();
+            }
             String fileName = fileName(path);
             if (isGradleBuildFile(fileName)) {
                 return Optional.of(buildObservation("gradle", "成功读取 Gradle 构建文件 " + fileName));
@@ -98,7 +101,8 @@ final class MemoryObservationConflictDetector {
     }
 
     static Observation fromSideChannel(CurrentStateObservationSideChannel sideChannel) {
-        return new Observation(sideChannel.subject(), sideChannel.value(), sideChannel.evidence());
+        return new Observation(sideChannel.subject(), sideChannel.value(), sideChannel.evidence(),
+                sideChannel.confidence());
     }
 
     static String subjectFor(MemoryEntry entry, Observation observation) {
@@ -110,7 +114,8 @@ final class MemoryObservationConflictDetector {
     }
 
     private static Observation buildObservation(String value, String evidence) {
-        return new Observation("project.build_system", value, evidence);
+        return new Observation("project.build_system", value, evidence,
+                CurrentStateObservationSideChannel.ObservationStrength.HIGH);
     }
 
     private static String extractPath(String argsJson) {
@@ -123,6 +128,17 @@ final class MemoryObservationConflictDetector {
 
     private static boolean isProjectRoot(String path) {
         return path.isBlank() || ".".equals(path) || "./".equals(path);
+    }
+
+    private static boolean isProjectRootFile(String path) {
+        if (path == null || path.isBlank()) {
+            return false;
+        }
+        String normalized = path.replace('\\', '/');
+        while (normalized.startsWith("./")) {
+            normalized = normalized.substring(2);
+        }
+        return !normalized.contains("/");
     }
 
     private static String fileName(String path) {
@@ -154,6 +170,7 @@ final class MemoryObservationConflictDetector {
                 .replaceAll("[^\\p{L}\\p{N}._:/!-]+", "");
     }
 
-    record Observation(String subject, String value, String evidence) {
+    record Observation(String subject, String value, String evidence,
+                       CurrentStateObservationSideChannel.ObservationStrength strength) {
     }
 }
