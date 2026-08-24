@@ -16,6 +16,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.LinkedHashSet;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * SQLite 向量存储 + 代码关系图谱持久化
@@ -211,9 +212,8 @@ public class VectorStore implements AutoCloseable {
                                        List<CodeRelation> relations,
                                        String indexEpoch,
                                        IndexBuildSnapshot buildSnapshot) throws SQLException {
-        IndexBuildSnapshot expected = buildSnapshot == null
-                ? new IndexBuildSnapshot(IndexEpoch.none().value(), -1)
-                : buildSnapshot;
+        IndexBuildSnapshot expected = java.util.Objects.requireNonNull(
+                buildSnapshot, "buildSnapshot");
         Map<String, SymbolSnapshot> oldSnapshots = getSymbolSnapshots();
 
         // 原子操作：在同一个事务中 clear + insert，防止中途失败导致索引全部丢失
@@ -882,6 +882,34 @@ public class VectorStore implements AutoCloseable {
         return IndexEpoch.none().value();
     }
 
+    IndexWatchSnapshot indexWatchSnapshot() throws SQLException {
+        LinkedHashSet<String> indexedPaths = new LinkedHashSet<>();
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT DISTINCT file_path FROM code_chunks
+                WHERE project_path = ?
+                """)) {
+            statement.setString(1, projectPath);
+            try (ResultSet rs = statement.executeQuery()) {
+                while (rs.next()) {
+                    resolveProjectPath(rs.getString(1))
+                            .map(this::relativeProjectPath)
+                            .ifPresent(indexedPaths::add);
+                }
+            }
+        }
+        long updatedAt = 0L;
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT updated_at_ms FROM code_index_state
+                WHERE project_path = ?
+                """)) {
+            statement.setString(1, projectPath);
+            try (ResultSet rs = statement.executeQuery()) {
+                if (rs.next()) updatedAt = Math.max(0L, rs.getLong(1));
+            }
+        }
+        return new IndexWatchSnapshot(Set.copyOf(indexedPaths), updatedAt);
+    }
+
     private long currentIndexGeneration() throws SQLException {
         try (PreparedStatement ps = connection.prepareStatement(
                 "SELECT generation FROM code_index_state WHERE project_path = ?")) {
@@ -949,21 +977,17 @@ public class VectorStore implements AutoCloseable {
         Map<String, LiveFile> liveFiles = new HashMap<>();
         LinkedHashSet<String> newlyDirty = new LinkedHashSet<>();
         for (SearchResult result : results) {
-            if (result.freshness() == IndexFreshness.STALE) {
-                refreshed.add(result);
-                continue;
-            }
             LiveChunk live = readLiveChunk(result.filePath(), result.chunkType(), result.name(), liveFiles);
             if (!live.verifiable()) {
                 refreshed.add(result);
                 continue;
             }
             boolean changed = live.content().filter(result.content()::equals).isEmpty();
-            if (result.freshness() == IndexFreshness.CURRENT && !changed) {
+            if (result.freshness() != IndexFreshness.DIRTY && !changed) {
                 refreshed.add(result);
                 continue;
             }
-            if (result.freshness() == IndexFreshness.CURRENT && changed) {
+            if (changed) {
                 newlyDirty.add(result.filePath());
             }
             String currentContent = live.content().orElse(
@@ -1100,6 +1124,11 @@ public class VectorStore implements AutoCloseable {
         }
     }
 
+    private String relativeProjectPath(Path file) {
+        Path root = Path.of(projectPath).toAbsolutePath().normalize();
+        return root.relativize(file.toAbsolutePath().normalize()).toString().replace('\\', '/');
+    }
+
     private static boolean sameChunkName(String chunkType, String currentName, String indexedName) {
         if (java.util.Objects.equals(currentName, indexedName)) return true;
         if (!"file".equals(chunkType) || indexedName == null) return false;
@@ -1119,7 +1148,20 @@ public class VectorStore implements AutoCloseable {
             }
         }
         return safeIndexEpoch(resultEpoch).equals(currentIndexEpoch())
+                && "CURRENT".equals(currentIndexStatus())
                 ? IndexFreshness.CURRENT : IndexFreshness.STALE;
+    }
+
+    private String currentIndexStatus() throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT status FROM code_index_state
+                WHERE project_path = ?
+                """)) {
+            statement.setString(1, projectPath);
+            try (ResultSet rs = statement.executeQuery()) {
+                return rs.next() ? rs.getString(1) : "CURRENT";
+            }
+        }
     }
 
     private static String safeIndexEpoch(String indexEpoch) {
@@ -1167,6 +1209,13 @@ public class VectorStore implements AutoCloseable {
         public IndexBuildSnapshot {
             baseEpoch = safeIndexEpoch(baseEpoch);
             baseGeneration = Math.max(-1, baseGeneration);
+        }
+    }
+
+    record IndexWatchSnapshot(Set<String> indexedPaths, long indexUpdatedAtMillis) {
+        IndexWatchSnapshot {
+            indexedPaths = indexedPaths == null ? Set.of() : Set.copyOf(indexedPaths);
+            indexUpdatedAtMillis = Math.max(0L, indexUpdatedAtMillis);
         }
     }
 

@@ -3,6 +3,7 @@ package com.devcli.rag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.sql.SQLException;
@@ -28,6 +29,7 @@ public class CodeRetriever implements AutoCloseable {
     private final EmbeddingClient embeddingClient;
     private final VectorStore vectorStore;
     private final CodeReranker reranker;
+    private final ProjectIndexWatcher indexWatcher;
     /**
      * 最近一次 {@link #search} 是否因 embedding/语义检索不可用而降级为关键词+结构化检索。
      * 每次 search 入口重置，调用方据此向用户显式标记降级（不把降级结果伪装成完整 RAG）。
@@ -37,9 +39,7 @@ public class CodeRetriever implements AutoCloseable {
     private RetrievalAudit lastAudit = RetrievalAudit.empty();
 
     public CodeRetriever(String projectPath) throws SQLException {
-        this.embeddingClient = new EmbeddingClient();
-        this.vectorStore = new VectorStore(Paths.get(projectPath).toAbsolutePath().normalize().toString());
-        this.reranker = new CrossEncoderReranker();
+        this(projectPath, new EmbeddingClient(), new CrossEncoderReranker());
     }
 
     public CodeRetriever(String projectPath, EmbeddingClient embeddingClient) throws SQLException {
@@ -48,14 +48,17 @@ public class CodeRetriever implements AutoCloseable {
 
     public CodeRetriever(String projectPath, EmbeddingClient embeddingClient, CodeReranker reranker) throws SQLException {
         this.embeddingClient = embeddingClient;
-        this.vectorStore = new VectorStore(Paths.get(projectPath).toAbsolutePath().normalize().toString());
+        Path projectRoot = Paths.get(projectPath).toAbsolutePath().normalize();
+        this.vectorStore = new VectorStore(projectRoot.toString());
         this.reranker = reranker == null ? new NoopCodeReranker() : reranker;
+        this.indexWatcher = startIndexWatcher(projectRoot);
     }
 
     /**
      * 语义检索：用自然语言查询最相关的代码块
      */
     public List<VectorStore.SearchResult> semanticSearch(String query, int topK) throws Exception {
+        publishExternalChanges();
         float[] queryEmbedding = embeddingClient.embed(query);
         return vectorStore.search(queryEmbedding, topK);
     }
@@ -64,7 +67,26 @@ public class CodeRetriever implements AutoCloseable {
      * 关键词检索：按类名/方法名/内容精确匹配
      */
     public List<VectorStore.SearchResult> keywordSearch(String keyword) throws SQLException {
+        publishExternalChanges();
         return vectorStore.searchByKeyword(keyword);
+    }
+
+    private ProjectIndexWatcher startIndexWatcher(Path projectRoot) {
+        try {
+            return new ProjectIndexWatcher(projectRoot, vectorStore.indexWatchSnapshot());
+        } catch (IOException e) {
+            log.warn("项目索引文件监听不可用，将依赖受控写入和候选回读检测: {}", e.getMessage());
+            return null;
+        } catch (SQLException e) {
+            log.warn("读取索引监听基线失败，将依赖受控写入和候选回读检测: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private void publishExternalChanges() throws SQLException {
+        if (indexWatcher == null) return;
+        List<String> changedPaths = indexWatcher.drainChanges();
+        if (!changedPaths.isEmpty()) vectorStore.markDirtyFiles(changedPaths);
     }
 
     /**
@@ -438,6 +460,7 @@ public class CodeRetriever implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
+        if (indexWatcher != null) indexWatcher.close();
         vectorStore.close();
     }
 }

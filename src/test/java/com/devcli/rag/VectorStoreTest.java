@@ -181,6 +181,12 @@ class VectorStoreTest {
     }
 
     @Test
+    void indexSwapRequiresCompleteBuildSnapshot() {
+        assertThrows(NullPointerException.class, () -> store.replaceProjectIndex(
+                List.of(), List.of(), "idx-new", (VectorStore.IndexBuildSnapshot) null));
+    }
+
+    @Test
     void ordinaryProjectWriteCanMarkIndexedFileDirty() throws Exception {
         CodeChunk indexed = CodeChunk.fileChunk("README.md", "indexed content");
         store.replaceProjectIndex(List.of(
@@ -208,6 +214,46 @@ class VectorStoreTest {
 
             assertEquals(VectorStore.IndexFreshness.DIRTY, result.freshness());
             assertEquals("live changed content", result.content());
+        }
+    }
+
+    @Test
+    void failedBuildMarksSameEpochResultsStale(@org.junit.jupiter.api.io.TempDir Path project)
+            throws Exception {
+        Path source = project.resolve("README.md");
+        Files.writeString(source, "indexed content");
+        try (VectorStore projectStore = new VectorStore(project.toString())) {
+            projectStore.clearProject();
+            projectStore.replaceProjectIndex(List.of(new VectorStore.CodeChunkEntry(
+                    CodeChunk.fileChunk("README.md", "indexed content"),
+                    new float[]{1.0f})), List.of(), "idx-1");
+            VectorStore.IndexBuildSnapshot snapshot = projectStore.beginIndexBuildSnapshot(List.of());
+            projectStore.markIndexBuildFailed(snapshot);
+
+            VectorStore.SearchResult result = projectStore.searchByKeyword("indexed content").getFirst();
+
+            assertEquals(VectorStore.IndexFreshness.STALE, result.freshness());
+        }
+    }
+
+    @Test
+    void staleResultReReadsLiveContentBeforeDelivery(@org.junit.jupiter.api.io.TempDir Path project)
+            throws Exception {
+        Path source = project.resolve("README.md");
+        Files.writeString(source, "indexed content");
+        try (VectorStore projectStore = new VectorStore(project.toString())) {
+            projectStore.clearProject();
+            projectStore.replaceProjectIndex(List.of(new VectorStore.CodeChunkEntry(
+                    CodeChunk.fileChunk("README.md", "indexed content"),
+                    new float[]{1.0f})), List.of(), "idx-1");
+            VectorStore.IndexBuildSnapshot snapshot = projectStore.beginIndexBuildSnapshot(List.of());
+            projectStore.markIndexBuildFailed(snapshot);
+            Files.writeString(source, "live changed content");
+
+            VectorStore.SearchResult result = projectStore.searchByKeyword("indexed content").getFirst();
+
+            assertEquals("live changed content", result.content());
+            assertEquals(VectorStore.IndexFreshness.DIRTY, result.freshness());
         }
     }
 

@@ -197,16 +197,7 @@ public class CodeIndex {
             Files.walkFileTree(root, new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                    String dirName = dir.getFileName().toString();
-                    // Bug #19 修复：保留重要配置目录 (.github, .cursor, .vscode/settings.json 等)
-                    // 只跳过明确的隐藏/缓存目录
-                    if (dirName.equals("node_modules") || dirName.equals("target")
-                            || dirName.equals("build") || dirName.equals(".git")
-                            || dirName.equals(".idea") || dirName.equals("dist")
-                            || dirName.equals("out") || dirName.equals(".next")
-                            || dirName.equals(".nuxt") || dirName.equals(".cache")
-                            || dirName.equals(".pytest_cache") || dirName.equals(".mypy_cache")
-                            || dirName.equals("__pycache__")) {
+                    if (CodeIndexPathPolicy.isExcludedDirectory(dir)) {
                         return FileVisitResult.SKIP_SUBTREE;
                     }
                     return FileVisitResult.CONTINUE;
@@ -214,17 +205,7 @@ public class CodeIndex {
 
                 @Override
                 public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                    String name = file.getFileName().toString();
-                    // 只索引文本代码文件
-                    if (name.endsWith(".java") || name.endsWith(".py")
-                            || name.endsWith(".js") || name.endsWith(".ts")
-                            || name.endsWith(".go") || name.endsWith(".rs")
-                            || name.endsWith(".c") || name.endsWith(".cpp")
-                            || name.endsWith(".h") || name.endsWith(".md")
-                            || name.endsWith(".xml") || name.endsWith(".properties")
-                            || name.endsWith(".yaml") || name.endsWith(".yml")
-                            || name.endsWith(".json") || name.endsWith(".sh")
-                            || name.endsWith(".gradle") || name.endsWith(".kt")) {
+                    if (CodeIndexPathPolicy.isIndexableFile(file)) {
                         files.add(file);
                     }
                     return FileVisitResult.CONTINUE;
