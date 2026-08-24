@@ -93,7 +93,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 记忆只有两层：`SessionMemory` 保存当前任务共享的 WorkState 与 EvidenceJournal，`LongTermMemory` 保存跨会话稳定事实
 - `SessionMemory` 统一接收 SessionEvent；明确 Plan 使用 beginTask/endTask 轮换任务投影，状态按键和步骤状态机更新，全部 Prompt 区块共享一个硬 Token 预算；Multi-Agent 保存真实 agentId、stepId、sequence 并拒绝迟到计划/步骤事件
 - `ConversationHistoryCompactor` 是唯一消息窗口治理点；`CompactionSummaryCache` 只保存可复用预摘要，按消息指纹匹配并默认 30 分钟过期，不算记忆层
-- `RuleContext` 加载规则文件和 `/rule add` 强约束，支持 `/rule list`、`/rule remove`；旧 pinned facts 仅列为待分类候选。敏感 `save_memory` 必须通过一次性 `confirmation_id` 和 `confirm_memory` 完成用户确认
+- `RuleContext` 加载规则文件和 `/rule add` 强约束，支持 `/rule list`、`/rule remove`；旧 pinned facts 仅列为待分类候选。敏感 `save_memory` 必须通过持久化 `confirmation_id` 和 `confirm_memory` 完成用户确认；票据默认保留 24 小时，完成后可幂等重放终态结果
 - 压缩边界 `<compact_boundary>` 记录已加载 Skill、RAG epoch、MCP 工具快照和压缩后恢复入口状态；RAG epoch 合并当前会话已命中证据与当前项目全局索引版本，MCP 工具快照包含 server 工具数量、schema 指纹和生命周期版本
 - 长期记忆主要通过 `/save` 或用户明确要求保存；中英文显式记忆意图、少量稳定个人属性和多次重复出现的稳定项目/偏好事实可由策略自动保存
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；显式保存请求如果内容仍然明显临时或低复用，需要确认而不是直接落库；与 SessionMemory 关键事件语义重复的长期记忆在 prompt 注入时会被抑制
@@ -107,7 +107,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `MultiAgentBatchExecutor` 委托 `OrchestrationWaveExecutor` 完成有界并发、异常归属、输出隔离和稳定顺序归并；`PlanExecuteAgent` 与 STANDARD profile 仅保留内部兼容，不进入 CLI 路由。
 - 三角色：Planner / Worker(默认 2 个) / Reviewer
 - 流程：规划与确定性预检 → Reviewer 计划语义评审 → 用户确认 → 按依赖分配 Worker → Pre-Review / 产物 Reviewer → 未通过有界重试
-- 计划 Reviewer 使用独立、无工具上下文，逐项输出需求覆盖、节点引用、验收标准评审和结构化问题；拒绝反馈给 Planner 有界修复，协议错误失败关闭。恢复未完成 checkpoint 时重新评审，避免旧计划绕过新门禁。
+- 计划 Reviewer 使用独立、无工具上下文，逐项输出需求覆盖、节点引用、验收标准评审和结构化问题；critical/high 标准必须给出反例输入及预期失败信号。可选的独立 Provider / 模型通过 `DEVCLI_TEAM_REVIEWER_PROVIDER` / `DEVCLI_TEAM_REVIEWER_MODEL` 配置，显式配置不可用时失败关闭。拒绝反馈给 Planner 有界修复，协议错误失败关闭。恢复未完成 checkpoint 时重新评审，避免旧计划绕过新门禁。
 - 每条验收标准必须包含判定信号、`TOOL|HUMAN` 验证方式、验证器和 `applies_to`。目标只能是有效 DAG 节点或 `FINAL`；普通节点只接收自己的标准，Final integration 接收全部标准。缺失字段、重复 ID、未知节点、未知工具或具有项目写入副作用的自动验证器会在执行前拒绝。
 - Planner 输出先做协议与结构校验：支持从前后说明中提取完整 JSON；解析失败、DAG 无效或阻塞性空工作区纯检查步骤会触发有界修复。修复前清空 Planner 历史，并把原始任务、失败原因、无效输出预览和固定 schema 放入新请求。默认修复 2 次，可通过 `devcli.team.planner.repair.max.attempts` / `DEVCLI_TEAM_PLANNER_REPAIR_MAX_ATTEMPTS` 调整到 `[0, 3]`。
 - Planner 不调用工具；空工作区属于合法状态。目录和文件存在性检查不能成为阻塞实现的独立步骤，必要检查并入首个实现步骤并采用“若不存在则创建”语义。
@@ -115,7 +115,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - SubAgent IOException 返回 ERROR 类型
 - Planner 共享主 ToolRegistry；副作用 Worker 使用 `WorkspaceExecutionSession` 创建隔离 ToolRegistry，Pre-Review 与 Reviewer 在同一隔离目录读取真实产物，MemoryManager 继续共享角色裁剪视图。
 - Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用 `ExecutionArtifact`，统一保存 state、output、summary、modifiedResources、error、attempt、startedAt、finishedAt。
-- checkpoint 协议版本 7 通过 `RecoveryState` 恢复共享 artifact、验收方式、验证器、适用节点、pending PatchSet 写前日志、稳定子代理身份、步骤分配、消息游标、已消耗的在位重做次数和重做失败现场；旧协议缺失适用节点时迁移为 `FINAL`，缺失验证字段时迁移为人工验收。恢复保持原步骤绑定和原重做额度，只注入 schema 兼容的最近摘要，不恢复完整私有对话。
+- checkpoint 协议版本 8 通过 `RecoveryState` 恢复共享 artifact、验收方式、验证器、适用节点、pending PatchSet 写前日志、稳定子代理身份、步骤分配、消息游标、有界且按步骤归属的 AttemptDigest、已消耗的在位重做次数和重做失败现场；旧协议缺失适用节点时迁移为 `FINAL`，缺失验证字段时迁移为人工验收。恢复保持原步骤绑定和原重做额度，只注入 schema 兼容的最近摘要及当前步骤失败尝试，不恢复完整私有对话。
 - Plan Worker 每次尝试都通过隔离 ToolRegistry 的 `runWithResourceLease(stepId, ...)` 绑定资源租约上下文，并在 finally 中释放；并行工具线程显式继承步骤租约归属。ToolRegistry 统一托管 `ResourceLeaseMaintenance`，project fork 共享同一个定时线程；最后一个注册关闭后停止。默认每 60 秒清理过期租约，可通过 `devcli.resource.lease.cleanup.interval.seconds` / `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
 - Plan 副作用步骤在隔离工作区执行；`ToolEffect` / `ToolAccessScope` 在工具管线中强制限制非隔离任务只能使用只读能力。隔离命令和 Pre-Review 强制通过受限 Docker 执行，无网络且禁止回退主机。PatchSet 逐文件流式哈希，只保留变更内容；JVM 公平锁与跨进程文件锁共同串行提交，锁缓存按活跃使用者计数退役。应用前保存 before/after 哈希和原文件备份；备份限制为当前所有者访问，孤儿日志按 TTL 清理，恢复时提升完成、继续待执行或回滚，失败回滚会报告具体路径。
 - `PreReviewVerifier` 独立负责 Maven/javac 选择、Java 文件扫描、超时、进程输出解码和失败摘要。Reviewer 声称 TOOL 标准通过时，声明验证器必须出现在本轮真实成功工具调用中；实际执行的 Pre-Review 命令计为 `execute_command` 证据。Reviewer 重试和节点重做耗尽后，结果显式输出失败步骤、额度、最后原因、checkpoint 和人工处理选项。
@@ -318,7 +318,7 @@ Plan Task / Multi-Agent ExecutionStep / checkpoint 共用任务产物；统一�
 任务状态 / 进度可视化；可执行任务判定和拓扑排序委托给 ExecutionGraph
 
 ### AgentCheckpoint.java
-checkpoint 协议版本 7；通过 RecoveryState 恢复共享 ExecutionArtifact、验收方式、验证器与适用节点、稳定子代理身份、步骤分配、单调消息游标、最小摘要、已消耗的在位重做次数和失败现场，保存 PatchSet 写前日志与原文件备份，恢复时按文件哈希对账并保持原 Worker 绑定和原重做额度；旧协议缺失适用节点时迁移为 `FINAL`，缺失验证字段时转为人工确认，损坏身份拓扑或未来版本明确拒绝
+checkpoint 协议版本 8；通过 RecoveryState 恢复共享 ExecutionArtifact、验收方式、验证器与适用节点、稳定子代理身份、步骤分配、单调消息游标、最小摘要、按步骤归属的有界 AttemptDigest、已消耗的在位重做次数和失败现场，保存 PatchSet 写前日志与原文件备份，恢复时按文件哈希对账并保持原 Worker 绑定和原重做额度；旧协议缺失适用节点时迁移为 `FINAL`，缺失验证字段时转为人工确认，损坏身份拓扑或未来版本明确拒绝
 
 ### PreReviewVerifier.java
 Reviewer 前 Java 硬验证；封装 Maven/javac 命令、扫描、超时、输出解码和失败摘要，无 Maven 时使用 javac 参数文件避免命令行过长
