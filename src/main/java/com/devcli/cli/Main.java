@@ -897,6 +897,7 @@ public class Main {
                     LlmClient activeClient = llmClient;
                     runTask = () -> runOrchestratedTask(
                             activeClient,
+                            config,
                             reactAgent,
                             lineReader,
                             ui,
@@ -1000,11 +1001,14 @@ public class Main {
         );
     }
 
-    private static AgentOrchestrator createUnifiedPlanAgent(LlmClient llmClient, Agent reactAgent,
+    private static AgentOrchestrator createUnifiedPlanAgent(LlmClient llmClient,
+                                                            LlmClient reviewerClient,
+                                                            Agent reactAgent,
                                                             LineReader lineReader, PrintStream out) {
         out.println("📋 使用 Plan 模式\n");
         AgentOrchestrator orchestrator = new AgentOrchestrator(
-                llmClient, reactAgent.getToolRegistry(), reactAgent.getMemoryManager(), out);
+                llmClient, reviewerClient, reactAgent.getToolRegistry(),
+                reactAgent.getMemoryManager(), out);
         orchestrator.setPlanReviewHandler(createTeamPlanReviewHandler(lineReader, out));
         return orchestrator;
     }
@@ -1047,6 +1051,7 @@ public class Main {
     }
 
     private static String runOrchestratedTask(LlmClient llmClient,
+                                              DevCliConfig config,
                                               Agent reactAgent,
                                               LineReader lineReader,
                                               PrintStream out,
@@ -1055,8 +1060,9 @@ public class Main {
                                               SkillRegistry skillRegistry,
                                               SkillContextBuffer skillContextBuffer,
                                               String taskInput) {
+        LlmClient reviewerClient = LlmClientFactory.createTeamReviewer(config, llmClient);
         AgentOrchestrator orchestrator = createUnifiedPlanAgent(
-                llmClient, reactAgent, lineReader, out);
+                llmClient, reviewerClient, reactAgent, lineReader, out);
         orchestrator.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
         orchestrator.setRuleContextSupplier(ruleContext::renderForPrompt);
         orchestrator.setSkillSystem(skillRegistry, skillContextBuffer);

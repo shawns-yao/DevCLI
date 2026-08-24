@@ -27,6 +27,11 @@ final class TeamPlanReviewProtocol {
     }
 
     static Evaluation evaluate(String content, List<String> criterionIds, Set<String> stepIds) {
+        return evaluate(content, criterionIds, stepIds, Set.of());
+    }
+
+    static Evaluation evaluate(String content, List<String> criterionIds, Set<String> stepIds,
+                               Set<String> counterexampleRequiredCriterionIds) {
         if (content == null || content.isBlank()) {
             return new Evaluation(false, false, "", "计划评审结果为空");
         }
@@ -38,6 +43,8 @@ final class TeamPlanReviewProtocol {
                     safeSet(criterionIds), safeSet(stepIds), problems);
             validateCriteriaReviews(root.path("criteria_reviews"),
                     safeSet(criterionIds), problems);
+            validateCounterexamples(root.path("counterexamples"),
+                    safeSet(counterexampleRequiredCriterionIds), safeSet(stepIds), problems);
             appendReportedIssues(root.path("issues"), problems);
             if (!root.path("approved").asBoolean(false) && problems.isEmpty()) {
                 problems.add(summary.isBlank() ? "计划语义评审未通过" : summary);
@@ -46,6 +53,37 @@ final class TeamPlanReviewProtocol {
             return new Evaluation(approved, true, summary, String.join("\n", problems));
         } catch (Exception error) {
             return new Evaluation(false, false, "", "计划评审输出不是有效 JSON");
+        }
+    }
+
+    private static void validateCounterexamples(JsonNode counterexamples,
+                                                Set<String> requiredCriterionIds,
+                                                Set<String> stepIds,
+                                                List<String> problems) {
+        if (requiredCriterionIds.isEmpty()) return;
+        if (!counterexamples.isArray()) {
+            problems.add("计划评审缺少关键验收标准的反例生成结果");
+            return;
+        }
+        Set<String> covered = new HashSet<>();
+        for (JsonNode counterexample : counterexamples) {
+            String criterionId = counterexample.path("criterion_id").asText("").trim();
+            if (!requiredCriterionIds.contains(criterionId)) continue;
+            boolean concrete = !counterexample.path("input").asText("").isBlank()
+                    && !counterexample.path("expected_failure_signal").asText("").isBlank();
+            if (!concrete) {
+                problems.add("关键验收标准反例不具体: " + criterionId);
+                continue;
+            }
+            int before = problems.size();
+            validateReferences(counterexample.path("step_ids"), stepIds,
+                    "关键验收标准反例缺少有效执行节点: " + criterionId, problems);
+            if (problems.size() == before) covered.add(criterionId);
+        }
+        for (String criterionId : requiredCriterionIds) {
+            if (!covered.contains(criterionId)) {
+                problems.add("计划评审遗漏关键验收标准反例: " + criterionId);
+            }
         }
     }
 

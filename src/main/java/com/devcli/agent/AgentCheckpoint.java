@@ -45,8 +45,10 @@ public class AgentCheckpoint {
         .enable(SerializationFeature.INDENT_OUTPUT);
     /** 步骤 result 落盘上限：buildStepContext 注入依赖结果最多 800 字符，8KB 足够保真。 */
     public static final int MAX_SUMMARY_LENGTH = 8 * 1024;
-    public static final int CURRENT_PROTOCOL_VERSION = 7;
+    public static final int CURRENT_PROTOCOL_VERSION = 8;
     private static final int MAX_AGENT_SUMMARY_LENGTH = 2 * 1024;
+    private static final int MAX_ATTEMPT_DIGESTS = 32;
+    private static final int MAX_ATTEMPT_DIGEST_LENGTH = 1_024;
 
     private int protocolVersion = CURRENT_PROTOCOL_VERSION;
     private String orchestrationId;
@@ -66,6 +68,8 @@ public class AgentCheckpoint {
     private Map<String, Integer> redoCounts;
     /** 每次在位重做的失败现场摘要，用于恢复、审计和避免把重做次数与失败产物混为一谈。 */
     private List<RedoAttemptRecord> redoAttempts;
+    /** 有界、按步骤归属的失败尝试摘要，恢复后用于避免重复已排除方案。 */
+    private List<AttemptDigestRecord> attemptDigests;
     /** 已批准且尚未形成成功或失败终态的重做步骤，用于区分中途崩溃与额度耗尽。 */
     private Set<String> redoPendingSteps;
     private Map<String, PendingPatchCommit> pendingPatchCommits;
@@ -110,6 +114,19 @@ public class AgentCheckpoint {
         }
     }
 
+    public record AttemptDigestRecord(String stepId, String digest,
+                                      String reference, long sequence) {
+        public AttemptDigestRecord {
+            stepId = stepId == null ? "" : stepId.trim();
+            digest = digest == null ? "" : digest.trim();
+            if (digest.length() > MAX_ATTEMPT_DIGEST_LENGTH) {
+                digest = digest.substring(0, MAX_ATTEMPT_DIGEST_LENGTH) + "...(截断)";
+            }
+            reference = reference == null ? "" : reference.trim();
+            sequence = Math.max(0, sequence);
+        }
+    }
+
     public record PendingPatchEntry(String relativePath, PatchSet.ChangeType type,
                                     String beforeHash, String afterHash,
                                     boolean backupPresent) {
@@ -147,7 +164,8 @@ public class AgentCheckpoint {
                                 long messageSequence,
                                 Map<String, Integer> redoCounts,
                                 List<RedoAttemptRecord> redoAttempts,
-                                Set<String> redoPendingSteps) {
+                                Set<String> redoPendingSteps,
+                                List<AttemptDigestRecord> attemptDigests) {
         public RecoveryState {
             planSteps = planSteps == null ? List.of() : List.copyOf(planSteps);
             acceptanceCriteria = acceptanceCriteria == null ? List.of() : List.copyOf(acceptanceCriteria);
@@ -158,6 +176,7 @@ public class AgentCheckpoint {
             redoCounts = redoCounts == null ? Map.of() : Map.copyOf(redoCounts);
             redoAttempts = redoAttempts == null ? List.of() : List.copyOf(redoAttempts);
             redoPendingSteps = redoPendingSteps == null ? Set.of() : Set.copyOf(redoPendingSteps);
+            attemptDigests = attemptDigests == null ? List.of() : List.copyOf(attemptDigests);
         }
     }
 
@@ -237,6 +256,7 @@ public class AgentCheckpoint {
         this.failedArtifacts = new HashMap<>();
         this.redoCounts = new HashMap<>();
         this.redoAttempts = new ArrayList<>();
+        this.attemptDigests = new ArrayList<>();
         this.redoPendingSteps = new HashSet<>();
         this.pendingPatchCommits = new HashMap<>();
         this.planSteps = new ArrayList<>();
@@ -393,6 +413,35 @@ public class AgentCheckpoint {
                 System.currentTimeMillis()));
         redoPendingSteps().add(normalizedStepId);
         timestamp = System.currentTimeMillis();
+    }
+
+    public synchronized void recordAttemptDigests(List<AttemptDigestRecord> records) {
+        if (records == null || records.isEmpty()) return;
+        LinkedHashMap<String, AttemptDigestRecord> merged = new LinkedHashMap<>();
+        for (AttemptDigestRecord existing : attemptDigests()) {
+            merged.put(attemptKey(existing), existing);
+        }
+        for (AttemptDigestRecord record : records) {
+            if (record == null || record.digest().isBlank()) continue;
+            merged.remove(attemptKey(record));
+            merged.put(attemptKey(record), record);
+        }
+        while (merged.size() > MAX_ATTEMPT_DIGESTS) {
+            merged.remove(merged.keySet().iterator().next());
+        }
+        attemptDigests = new ArrayList<>(merged.values());
+        timestamp = System.currentTimeMillis();
+    }
+
+    private static String attemptKey(AttemptDigestRecord record) {
+        return record.reference().isBlank()
+                ? record.stepId() + "#" + record.sequence() + "#" + record.digest().hashCode()
+                : record.reference();
+    }
+
+    private List<AttemptDigestRecord> attemptDigests() {
+        if (attemptDigests == null) attemptDigests = new ArrayList<>();
+        return attemptDigests;
     }
 
     public synchronized void preparePatchCommit(String stepId, Path projectRoot,
@@ -654,7 +703,8 @@ public class AgentCheckpoint {
                 messageSequence,
                 redoCounts(),
                 redoAttempts(),
-                redoPendingSteps());
+                redoPendingSteps(),
+                attemptDigests());
     }
 
     // ─────────────────────────────────────────────────────────
@@ -988,6 +1038,10 @@ public class AgentCheckpoint {
 
     public List<RedoAttemptRecord> getRedoAttempts() {
         return List.copyOf(redoAttempts());
+    }
+
+    public List<AttemptDigestRecord> getAttemptDigests() {
+        return List.copyOf(attemptDigests());
     }
 
     public void setRedoAttempts(List<RedoAttemptRecord> redoAttempts) {

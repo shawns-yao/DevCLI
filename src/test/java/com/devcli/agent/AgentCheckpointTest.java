@@ -169,6 +169,24 @@ class AgentCheckpointTest {
     }
 
     @Test
+    void roundTripsBoundedStepScopedAttemptDigests() {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-attempt-digests", "目标");
+        checkpoint.recordAttemptDigests(List.of(
+                new AgentCheckpoint.AttemptDigestRecord(
+                        "step-1", "execute_command: mvn test 失败，已排除缺少 JDK", "tool-failure-1", 10),
+                new AgentCheckpoint.AttemptDigestRecord(
+                        "step-2", "write_file: 参数校验失败", "tool-failure-2", 11)));
+        checkpoint.save();
+
+        AgentCheckpoint.RecoveryState recovery = AgentCheckpoint
+                .load("orch-attempt-digests").recoveryState();
+
+        assertEquals(2, recovery.attemptDigests().size());
+        assertEquals("step-1", recovery.attemptDigests().getFirst().stepId());
+        assertTrue(recovery.attemptDigests().getFirst().digest().contains("已排除缺少 JDK"));
+    }
+
+    @Test
     void clearsRedoPendingMarkerWhenAttemptReachesTerminalState() {
         AgentCheckpoint checkpoint = new AgentCheckpoint("orch-redo-terminal", "目标");
         checkpoint.recordRedoAttempt("step-1", 1, "首次失败", List.of("src/A.java"));

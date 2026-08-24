@@ -111,4 +111,27 @@ class TeamPlanReviewProtocolTest {
         assertTrue(rejected.issues().contains("missing_requirement"), rejected.issues());
         assertTrue(rejected.issues().contains("增加失败路径"), rejected.issues());
     }
+
+    @Test
+    void highSeverityCriterionRequiresAConcreteCounterexample() {
+        String review = """
+                {
+                  "approved": true,
+                  "summary": "计划覆盖完整",
+                  "requirement_coverage": [
+                    {"requirement":"错误输入必须失败","status":"covered","step_ids":["step_1"],"criterion_ids":["AC-01"]}
+                  ],
+                  "criteria_reviews": [
+                    {"id":"AC-01","clear":true,"verifiable":true,"scope_valid":true,"evidence":"工具可验证"}
+                  ],
+                  "issues": []
+                }
+                """;
+
+        TeamPlanReviewProtocol.Evaluation result = TeamPlanReviewProtocol.evaluate(
+                review, List.of("AC-01"), Set.of("step_1"), Set.of("AC-01"));
+
+        assertFalse(result.approved());
+        assertTrue(result.issues().contains("反例"), result.issues());
+    }
 }

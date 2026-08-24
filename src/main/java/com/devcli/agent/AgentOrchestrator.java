@@ -67,6 +67,7 @@ public class AgentOrchestrator {
     private static final int MAX_REDO_PER_STEP = 1;
     private static final int MAX_PLAN_REVIEW_REVISIONS = 3;
     private final LlmClient llmClient;
+    private final LlmClient reviewerLlmClient;
     private final SubAgent planner;
     private List<SubAgent> workers;
     private final SubAgent reviewer;
@@ -91,6 +92,7 @@ public class AgentOrchestrator {
     private Map<String, Integer> restoredRedoCounts = Map.of();
     /** resume 时恢复每个步骤最近一次在位重做失败原因。 */
     private List<AgentCheckpoint.RedoAttemptRecord> restoredRedoAttempts = List.of();
+    private List<AgentCheckpoint.AttemptDigestRecord> restoredAttemptDigests = List.of();
     private final ThreadLocal<ToolRegistry> activeStepToolRegistry = new ThreadLocal<>();
     private final ThreadLocal<StepUpdateBuffer> activeStepUpdate = new ThreadLocal<>();
     private PreReviewVerifier preReviewVerifier = new PreReviewVerifier();
@@ -295,14 +297,21 @@ public class AgentOrchestrator {
 
     public AgentOrchestrator(LlmClient llmClient, ToolRegistry toolRegistry,
                              MemoryManager memoryManager, PrintStream out) {
+        this(llmClient, llmClient, toolRegistry, memoryManager, out);
+    }
+
+    public AgentOrchestrator(LlmClient llmClient, LlmClient reviewerLlmClient,
+                             ToolRegistry toolRegistry, MemoryManager memoryManager, PrintStream out) {
         this.llmClient = llmClient;
+        this.reviewerLlmClient = reviewerLlmClient == null ? llmClient : reviewerLlmClient;
         this.out = out == null ? System.out : out;
         this.toolRegistry = toolRegistry;
         this.memoryManager = memoryManager;
         AgentRuntimeSupport.bindMemory(this.toolRegistry, this.memoryManager);
         this.planner = new SubAgent("planner", AgentRole.PLANNER, llmClient, toolRegistry);
         this.workers = buildWorkers(resolveWorkerCount(), llmClient, toolRegistry);
-        this.reviewer = new SubAgent("reviewer", AgentRole.REVIEWER, llmClient, toolRegistry);
+        this.reviewer = new SubAgent(
+                "reviewer", AgentRole.REVIEWER, this.reviewerLlmClient, toolRegistry);
         configureSubAgent(planner);
         workers.forEach(this::configureSubAgent);
         configureSubAgent(reviewer);
@@ -438,6 +447,7 @@ public class AgentOrchestrator {
      */
     public void setRuleContextSupplier(Supplier<String> ruleContextSupplier) {
         this.ruleContextSupplier = ruleContextSupplier == null ? () -> "" : ruleContextSupplier;
+        memoryManager.setRuleContextSupplier(this.ruleContextSupplier);
         planner.setRuleContextSupplier(this.ruleContextSupplier);
         workers.forEach(worker -> worker.setRuleContextSupplier(this.ruleContextSupplier));
         reviewer.setRuleContextSupplier(this.ruleContextSupplier);
@@ -556,6 +566,7 @@ public class AgentOrchestrator {
                     .append(" | method=").append(criterion.verificationMethod())
                     .append(" | verifier=").append(criterion.verifier())
                     .append(" | signal=").append(criterion.testSignal())
+                    .append(" | severity=").append(criterion.severity())
                     .append(" | applies_to=").append(criterion.appliesTo()).append('\n');
         }
         AgentMessage review = reviewer.executePlanReview(
@@ -567,7 +578,12 @@ public class AgentOrchestrator {
         return TeamPlanReviewProtocol.evaluate(
                 review.content(),
                 currentAcceptanceCriteria.stream().map(AcceptanceCriterion::id).toList(),
-                currentPlanStepIds);
+                currentPlanStepIds,
+                currentAcceptanceCriteria.stream()
+                        .filter(criterion -> "critical".equalsIgnoreCase(criterion.severity())
+                                || "high".equalsIgnoreCase(criterion.severity()))
+                        .map(AcceptanceCriterion::id)
+                        .collect(Collectors.toUnmodifiableSet()));
     }
 
     private String validateGeneratedPlan(List<ExecutionStep> steps, String userInput) {
@@ -878,6 +894,7 @@ public class AgentOrchestrator {
     }
 
     private void restoreCheckpointArtifactsIntoSessionMemory(AgentCheckpoint.RecoveryState recovery) {
+        restoredAttemptDigests = recovery.attemptDigests();
         for (Map.Entry<String, ExecutionArtifact> entry : recovery.artifacts().entrySet()) {
             String source = entry.getValue().successful()
                     ? "checkpoint 已完成步骤"
@@ -1461,6 +1478,12 @@ public class AgentOrchestrator {
         if (checkpoint == null) {
             return;
         }
+        checkpoint.recordAttemptDigests(memoryManager.getSessionMemory().snapshot()
+                .attemptDigests().stream()
+                .filter(attempt -> stepId.equals(attempt.stepId()))
+                .map(attempt -> new AgentCheckpoint.AttemptDigestRecord(
+                        attempt.stepId(), attempt.digest(), attempt.reference(), attempt.sequence()))
+                .toList());
         if (updated.status() == StepStatus.COMPLETED) {
             // 完整 result 落盘（上限见 AgentCheckpoint.MAX_SUMMARY_LENGTH）：
             // resume 后 buildStepContext 要用它给后续步骤当依赖上下文
@@ -1610,7 +1633,7 @@ public class AgentOrchestrator {
             SubAgent isolatedWorker = new SubAgent(
                     worker.getName(), worker.getRole(), llmClient, isolatedRegistry);
             SubAgent isolatedReviewer = new SubAgent(
-                    reviewer.getName(), reviewer.getRole(), llmClient, isolatedRegistry);
+                    reviewer.getName(), reviewer.getRole(), reviewerLlmClient, isolatedRegistry);
             configureSubAgent(isolatedWorker);
             configureSubAgent(isolatedReviewer);
             if (checkpoint != null) {
@@ -2137,6 +2160,16 @@ public class AgentOrchestrator {
                     : failedArtifact.error();
             if (!failureSummary.isBlank()) {
                 context.append("上次失败摘要：").append(abbreviate(failureSummary, 300)).append("\n");
+            }
+            context.append("\n");
+        }
+        List<AgentCheckpoint.AttemptDigestRecord> priorAttempts = restoredAttemptDigests.stream()
+                .filter(attempt -> currentStep.id().equals(attempt.stepId()))
+                .toList();
+        if (!priorAttempts.isEmpty()) {
+            context.append("checkpoint 恢复的已失败尝试（不得无依据重复同一方案）：\n");
+            for (AgentCheckpoint.AttemptDigestRecord attempt : priorAttempts) {
+                context.append("- ").append(abbreviate(attempt.digest(), 500)).append('\n');
             }
             context.append("\n");
         }

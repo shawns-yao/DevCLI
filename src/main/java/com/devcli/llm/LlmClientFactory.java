@@ -1,12 +1,17 @@
 package com.devcli.llm;
 
 import com.devcli.config.DevCliConfig;
+import com.devcli.config.ConfigResolver;
 
 public class LlmClientFactory {
 
     private LlmClientFactory() {}
 
     public static LlmClient create(String provider, DevCliConfig config) {
+        return create(provider, config, null);
+    }
+
+    private static LlmClient create(String provider, DevCliConfig config, String modelOverride) {
         if (provider == null) return null;
 
         String normalized = ModelCapabilityRegistry.normalizeProvider(provider);
@@ -19,8 +24,8 @@ public class LlmClientFactory {
             return null;
         }
 
-        String model = firstConfigured(config.getModel(normalized),
-                configuredProvider.equals(normalized) ? null : config.getModel(configuredProvider));
+        String model = firstConfigured(modelOverride, firstConfigured(config.getModel(normalized),
+                configuredProvider.equals(normalized) ? null : config.getModel(configuredProvider)));
         String baseUrl = firstConfigured(config.getBaseUrl(normalized),
                 configuredProvider.equals(normalized) ? null : config.getBaseUrl(configuredProvider));
 
@@ -50,6 +55,27 @@ public class LlmClientFactory {
         }
 
         return null;
+    }
+
+    /**
+     * Team Reviewer 的可选独立模型路由。未配置时保持兼容并复用主模型；
+     * 一旦显式配置，缺少凭据或 provider 无效时失败关闭，避免静默退化为自我评审。
+     */
+    public static LlmClient createTeamReviewer(DevCliConfig config, LlmClient primary) {
+        String provider = ConfigResolver.optional(
+                "devcli.team.reviewer.provider", "DEVCLI_TEAM_REVIEWER_PROVIDER");
+        String model = ConfigResolver.optional(
+                "devcli.team.reviewer.model", "DEVCLI_TEAM_REVIEWER_MODEL");
+        if (provider == null && model == null) {
+            return primary;
+        }
+        String effectiveProvider = provider == null ? primary.getProviderName() : provider;
+        LlmClient reviewer = create(effectiveProvider, config, model);
+        if (reviewer == null) {
+            throw new IllegalArgumentException(
+                    "独立 Reviewer 配置无效或缺少凭据: " + effectiveProvider);
+        }
+        return reviewer;
     }
 
     private static String firstConfigured(String primary, String fallback) {

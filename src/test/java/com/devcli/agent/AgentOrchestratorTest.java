@@ -640,6 +640,8 @@ class AgentOrchestratorTest {
                           {"requirement":"交付功能","status":"covered","step_ids":["step_1"],"criterion_ids":["AC-01"]}
                         ],"criteria_reviews":[
                           {"id":"AC-01","clear":true,"verifiable":true,"scope_valid":true,"evidence":"list_dir 返回成功即可判定"}
+                        ],"counterexamples":[
+                          {"criterion_id":"AC-01","input":"目标目录不存在","expected_failure_signal":"list_dir 返回不存在","step_ids":["step_1"]}
                         ],"issues":[]}
                         """);
             }
@@ -663,6 +665,51 @@ class AgentOrchestratorTest {
             assertNotNull(approvalRequest.get());
             assertTrue(approvalRequest.get().semanticReviewExecuted());
             assertTrue(approvalRequest.get().semanticReviewSummary().contains("闭环"));
+        }
+    }
+
+    @Test
+    void semanticPlanReviewUsesIndependentReviewerClient(@TempDir Path tempDir) {
+        AtomicInteger primarySemanticCalls = new AtomicInteger();
+        AtomicInteger reviewerCalls = new AtomicInteger();
+        LlmClient primary = new DispatchingStubGLMClient(body -> {
+            if (body.contains("计划语义评审")) {
+                primarySemanticCalls.incrementAndGet();
+            }
+            return response("""
+                    {"summary":"交付计划","acceptance_criteria":[{
+                      "id":"AC-01","description":"功能可验证","test_signal":"目录存在",
+                      "verification_method":"TOOL","verifier":"list_dir","severity":"high","applies_to":["s1"]
+                    }],"steps":[
+                      {"id":"s1","description":"实现完整功能","type":"ANALYSIS","dependencies":[]}
+                    ]}
+                    """);
+        });
+        LlmClient independentReviewer = new DispatchingStubGLMClient(body -> {
+            reviewerCalls.incrementAndGet();
+            return response("""
+                    {"approved":true,"summary":"独立评审通过","requirement_coverage":[
+                      {"requirement":"实现完整功能","status":"covered","step_ids":["step_1"],"criterion_ids":["AC-01"]}
+                    ],"criteria_reviews":[
+                      {"id":"AC-01","clear":true,"verifiable":true,"scope_valid":true,"evidence":"list_dir 验证"}
+                    ],"counterexamples":[
+                      {"criterion_id":"AC-01","input":"目标目录不存在","expected_failure_signal":"list_dir 返回不存在","step_ids":["step_1"]}
+                    ],"issues":[]}
+                    """);
+        });
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    primary, independentReviewer, isolatedToolRegistry(tempDir), mm, System.out);
+            orchestrator.setPlanSemanticReviewEnabled(true);
+            orchestrator.setPlanReviewHandler(request ->
+                    AgentOrchestrator.TeamPlanReviewDecision.cancel("测试结束"));
+
+            String result = orchestrator.run("实现完整功能");
+
+            assertTrue(result.contains("测试结束"), result);
+            assertEquals(1, reviewerCalls.get());
+            assertEquals(0, primarySemanticCalls.get());
         }
     }
 
@@ -2438,6 +2485,14 @@ class AgentOrchestratorTest {
         return (String) method.invoke(orchestrator, steps, current);
     }
 
+    private static void invokeRestoreCheckpointArtifacts(
+            AgentOrchestrator orchestrator, AgentCheckpoint.RecoveryState recovery) throws Exception {
+        Method method = AgentOrchestrator.class.getDeclaredMethod(
+                "restoreCheckpointArtifactsIntoSessionMemory", AgentCheckpoint.RecoveryState.class);
+        method.setAccessible(true);
+        method.invoke(orchestrator, recovery);
+    }
+
     private static String invokePreviewDependencyResult(String result) throws Exception {
         Method method = AgentOrchestrator.class.getDeclaredMethod("previewDependencyResult", String.class);
         method.setAccessible(true);
@@ -2505,6 +2560,28 @@ class AgentOrchestratorTest {
             assertTrue(context.contains("修改文件"));
             assertTrue(context.contains("src/main/java/App.java"));
             assertTrue(context.contains("基于真实落盘状态衔接实现"));
+        }
+    }
+
+    @Test
+    void resumedStepContextIncludesOnlyItsPersistedAttemptDigests(@TempDir File memoryDir) throws Exception {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-attempt-context", "目标");
+        checkpoint.recordAttemptDigests(List.of(
+                new AgentCheckpoint.AttemptDigestRecord(
+                        "step-1", "mvn test 已失败：排除网络问题", "attempt-1", 1),
+                new AgentCheckpoint.AttemptDigestRecord(
+                        "step-2", "npm test 已失败：排除依赖缺失", "attempt-2", 2)));
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(memoryDir)) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    new GLMClient("test-key"), new ToolRegistry(), mm);
+            invokeRestoreCheckpointArtifacts(orchestrator, checkpoint.recoveryState());
+            AgentOrchestrator.ExecutionStep current = AgentOrchestrator.ExecutionStep.pending(
+                    "step-1", "修复测试", "test", List.of());
+
+            String context = invokeBuildStepContext(orchestrator, List.of(current), current);
+
+            assertTrue(context.contains("排除网络问题"));
+            assertFalse(context.contains("排除依赖缺失"));
         }
     }
 
