@@ -97,16 +97,19 @@ class ProtocolBaselineGateTest {
             CodeChunk newChunk = CodeChunk.fileChunk("README.md", "new index content");
             store.replaceProjectIndex(List.of(
                     new VectorStore.CodeChunkEntry(oldChunk, new float[]{1.0f})), List.of(), "idx-1");
-            VectorStore.IndexBuildSnapshot buildSnapshot =
-                    store.beginIndexBuildSnapshot(List.of("README.md"));
-            boolean dirtyVisible = store.searchByKeyword("old").getFirst().freshness()
-                    == VectorStore.IndexFreshness.DIRTY;
-            store.replaceProjectIndex(List.of(
-                    new VectorStore.CodeChunkEntry(newChunk, new float[]{1.0f})),
-                    List.of(), "idx-2", buildSnapshot);
-            boolean staleRejected = !store.replaceProjectIndex(List.of(
-                    new VectorStore.CodeChunkEntry(oldChunk, new float[]{1.0f})),
-                    List.of(), "idx-old", buildSnapshot);
+            boolean staleRejected;
+            boolean dirtyVisible;
+            try (VectorStore.ShadowIndexSession shadow = store.beginShadowIndex(
+                    "idx-2", List.of("README.md"), VectorStore.ShadowIndexMode.INCREMENTAL)) {
+                dirtyVisible = store.searchByKeyword("old").getFirst().freshness()
+                        == VectorStore.IndexFreshness.DIRTY;
+                shadow.stageChunks(List.of(
+                        new VectorStore.CodeChunkEntry(newChunk, new float[]{1.0f})));
+                shadow.stageRelations(List.of());
+                shadow.validate();
+                store.markDirtyFiles(List.of("README.md"));
+                staleRejected = !shadow.promote();
+            }
             return Map.of(
                     "stale_cas_rejection_rate", staleRejected ? 1.0 : 0.0,
                     "freshness_visibility_rate", dirtyVisible ? 1.0 : 0.0);

@@ -140,6 +140,45 @@ public class VectorStore implements AutoCloseable {
                         PRIMARY KEY(project_path, file_path)
                     )
                     """);
+            stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS code_shadow_chunks (
+                        project_path TEXT NOT NULL,
+                        target_epoch TEXT NOT NULL,
+                        file_path TEXT NOT NULL,
+                        chunk_type TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        embedding_json TEXT,
+                        symbol_version TEXT NOT NULL,
+                        classpath_epoch TEXT NOT NULL
+                    )
+                    """);
+            stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS code_shadow_relations (
+                        project_path TEXT NOT NULL,
+                        target_epoch TEXT NOT NULL,
+                        from_file TEXT NOT NULL,
+                        from_name TEXT NOT NULL,
+                        to_file TEXT,
+                        to_name TEXT,
+                        relation_type TEXT NOT NULL,
+                        resolution_source TEXT NOT NULL,
+                        confidence REAL NOT NULL,
+                        classpath_epoch TEXT NOT NULL
+                    )
+                    """);
+            stmt.execute("""
+                    CREATE TABLE IF NOT EXISTS code_shadow_state (
+                        project_path TEXT NOT NULL,
+                        target_epoch TEXT NOT NULL,
+                        base_epoch TEXT NOT NULL,
+                        base_generation INTEGER NOT NULL,
+                        mode TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at_ms INTEGER NOT NULL,
+                        PRIMARY KEY(project_path, target_epoch)
+                    )
+                    """);
             stmt.execute(createIdxProject);
             stmt.execute(createIdxFile);
             stmt.execute(createIdxType);
@@ -148,6 +187,10 @@ public class VectorStore implements AutoCloseable {
             stmt.execute(createIdxRelProject);
             stmt.execute(createIdxRelFrom);
             stmt.execute(createIdxRelTo);
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_shadow_chunks_project_epoch "
+                    + "ON code_shadow_chunks(project_path, target_epoch)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_shadow_relations_project_epoch "
+                    + "ON code_shadow_relations(project_path, target_epoch)");
         }
     }
 
@@ -170,21 +213,33 @@ public class VectorStore implements AutoCloseable {
         String deleteInvalidations = "DELETE FROM symbol_invalidations WHERE project_path = ?";
         String deleteState = "DELETE FROM code_index_state WHERE project_path = ?";
         String deleteDirty = "DELETE FROM code_index_dirty_files WHERE project_path = ?";
+        String deleteShadowChunks = "DELETE FROM code_shadow_chunks WHERE project_path = ?";
+        String deleteShadowRelations = "DELETE FROM code_shadow_relations WHERE project_path = ?";
+        String deleteShadowState = "DELETE FROM code_shadow_state WHERE project_path = ?";
         try (PreparedStatement ps1 = connection.prepareStatement(deleteChunks);
              PreparedStatement ps2 = connection.prepareStatement(deleteRelations);
              PreparedStatement ps3 = connection.prepareStatement(deleteInvalidations);
              PreparedStatement ps4 = connection.prepareStatement(deleteState);
-             PreparedStatement ps5 = connection.prepareStatement(deleteDirty)) {
+             PreparedStatement ps5 = connection.prepareStatement(deleteDirty);
+             PreparedStatement ps6 = connection.prepareStatement(deleteShadowChunks);
+             PreparedStatement ps7 = connection.prepareStatement(deleteShadowRelations);
+             PreparedStatement ps8 = connection.prepareStatement(deleteShadowState)) {
             ps1.setString(1, projectPath);
             ps2.setString(1, projectPath);
             ps3.setString(1, projectPath);
             ps4.setString(1, projectPath);
             ps5.setString(1, projectPath);
+            ps6.setString(1, projectPath);
+            ps7.setString(1, projectPath);
+            ps8.setString(1, projectPath);
             ps1.executeUpdate();
             ps2.executeUpdate();
             ps3.executeUpdate();
             ps4.executeUpdate();
             ps5.executeUpdate();
+            ps6.executeUpdate();
+            ps7.executeUpdate();
+            ps8.executeUpdate();
         }
     }
 
@@ -198,69 +253,296 @@ public class VectorStore implements AutoCloseable {
     public void replaceProjectIndex(List<CodeChunkEntry> entries,
                                     List<CodeRelation> relations,
                                     String indexEpoch) throws SQLException {
-        IndexBuildSnapshot snapshot = new IndexBuildSnapshot(
-                currentIndexEpoch(), currentIndexGeneration());
-        if (!replaceProjectIndex(entries, relations, indexEpoch, snapshot)) {
-            throw new SQLException("index snapshot CAS failed: expected=" + snapshot
-                    + ", actualEpoch=" + currentIndexEpoch()
-                    + ", actualGeneration=" + currentIndexGeneration());
+        List<CodeChunkEntry> safeEntries = entries == null ? List.of() : entries;
+        List<String> indexedFiles = safeEntries.stream()
+                .map(entry -> entry.chunk().filePath())
+                .distinct()
+                .toList();
+        try (ShadowIndexSession shadow = beginShadowIndex(
+                indexEpoch, indexedFiles, ShadowIndexMode.FULL)) {
+            shadow.stageChunks(safeEntries);
+            shadow.stageRelations(relations);
+            shadow.validate();
+            if (!shadow.promote()) {
+                throw new SQLException("shadow index CAS failed: target=" + safeIndexEpoch(indexEpoch)
+                        + ", actualEpoch=" + currentIndexEpoch()
+                        + ", actualGeneration=" + currentIndexGeneration());
+            }
         }
     }
 
-    /** 仅当 epoch 与构建起点 generation 均未变化时交换新索引。 */
-    public boolean replaceProjectIndex(List<CodeChunkEntry> entries,
-                                       List<CodeRelation> relations,
-                                       String indexEpoch,
-                                       IndexBuildSnapshot buildSnapshot) throws SQLException {
-        IndexBuildSnapshot expected = java.util.Objects.requireNonNull(
-                buildSnapshot, "buildSnapshot");
-        Map<String, SymbolSnapshot> oldSnapshots = getSymbolSnapshots();
+    /**
+     * 创建持久化影子索引。增量模式先复制活跃代码块并剔除脏文件，后续只需补入脏文件的新块。
+     * 关系图由调用方完整重建，避免变更符号的入边沿用旧解析结果。
+     */
+    public ShadowIndexSession beginShadowIndex(String targetEpoch,
+                                               List<String> dirtyFiles,
+                                               ShadowIndexMode mode) throws SQLException {
+        String safeTargetEpoch = safeIndexEpoch(targetEpoch);
+        if (IndexEpoch.none().value().equals(safeTargetEpoch)) {
+            throw new IllegalArgumentException("shadow target epoch must not be none");
+        }
+        ShadowIndexMode effectiveMode = mode == null ? ShadowIndexMode.FULL : mode;
+        List<String> dirtyAliases = dirtyPathAliases(dirtyFiles == null ? List.of() : dirtyFiles);
+        ShadowIndexBuild build = new ShadowIndexBuild(
+                currentIndexEpoch(), currentIndexGeneration(), safeTargetEpoch, effectiveMode);
 
-        // 原子操作：在同一个事务中 clear + insert，防止中途失败导致索引全部丢失
         boolean autoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
         try {
-            String currentEpoch = currentIndexEpoch();
-            long currentGeneration = currentIndexGeneration();
-            if (!safeIndexEpoch(expected.baseEpoch()).equals(currentEpoch)
-                    || (expected.baseGeneration() >= 0
-                    && expected.baseGeneration() != currentGeneration)) {
+            deleteShadowIndex(safeTargetEpoch);
+            if (effectiveMode == ShadowIndexMode.INCREMENTAL) {
+                copyActiveChunksToShadow(safeTargetEpoch);
+                deleteShadowChunksForFiles(safeTargetEpoch, dirtyAliases);
+            }
+            insertShadowState(build);
+            upsertIndexState(build.baseEpoch(), "BUILDING", false);
+            insertDirtyFiles(dirtyAliases);
+            connection.commit();
+            return new ShadowIndexSession(build);
+        } catch (SQLException e) {
+            connection.rollback();
+            throw e;
+        } finally {
+            connection.setAutoCommit(autoCommit);
+        }
+    }
+
+    /** 当前项目已经进入 dirty queue 的规范化文件。 */
+    public List<Path> pendingDirtyFiles() throws SQLException {
+        return dirtyProjectFiles();
+    }
+
+    /** classpath 变化时符号版本也会变化，禁止复用旧 epoch 的块。 */
+    public boolean canReuseActiveChunks() throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT 1 FROM code_chunks
+                WHERE project_path = ? AND classpath_epoch <> ?
+                LIMIT 1
+                """)) {
+            statement.setString(1, projectPath);
+            statement.setString(2, classpathEpoch);
+            try (ResultSet rs = statement.executeQuery()) {
+                return !rs.next();
+            }
+        }
+    }
+
+    private void copyActiveChunksToShadow(String targetEpoch) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                INSERT INTO code_shadow_chunks (
+                    project_path, target_epoch, file_path, chunk_type, name, content,
+                    embedding_json, symbol_version, classpath_epoch)
+                SELECT project_path, ?, file_path, chunk_type, name, content,
+                    embedding_json, symbol_version, classpath_epoch
+                FROM code_chunks WHERE project_path = ?
+                """)) {
+            statement.setString(1, targetEpoch);
+            statement.setString(2, projectPath);
+            statement.executeUpdate();
+        }
+    }
+
+    private void deleteShadowChunksForFiles(String targetEpoch, List<String> filePaths) throws SQLException {
+        if (filePaths.isEmpty()) return;
+        try (PreparedStatement statement = connection.prepareStatement("""
+                DELETE FROM code_shadow_chunks
+                WHERE project_path = ? AND target_epoch = ? AND file_path = ?
+                """)) {
+            for (String filePath : filePaths) {
+                statement.setString(1, projectPath);
+                statement.setString(2, targetEpoch);
+                statement.setString(3, filePath);
+                statement.addBatch();
+            }
+            statement.executeBatch();
+        }
+    }
+
+    private void insertShadowState(ShadowIndexBuild build) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                INSERT INTO code_shadow_state (
+                    project_path, target_epoch, base_epoch, base_generation, mode, status, created_at_ms)
+                VALUES (?, ?, ?, ?, ?, 'BUILDING', ?)
+                """)) {
+            statement.setString(1, projectPath);
+            statement.setString(2, build.targetEpoch());
+            statement.setString(3, build.baseEpoch());
+            statement.setLong(4, build.baseGeneration());
+            statement.setString(5, build.mode().name());
+            statement.setLong(6, System.currentTimeMillis());
+            statement.executeUpdate();
+        }
+    }
+
+    private void stageShadowChunks(ShadowIndexBuild build, List<CodeChunkEntry> entries) throws SQLException {
+        requireShadowState(build, "BUILDING");
+        String sql = """
+                INSERT INTO code_shadow_chunks (
+                    project_path, target_epoch, file_path, chunk_type, name, content,
+                    embedding_json, symbol_version, classpath_epoch)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """;
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            for (CodeChunkEntry entry : entries == null ? List.<CodeChunkEntry>of() : entries) {
+                SymbolSnapshot snapshot = SymbolSnapshot.from(
+                        entry.chunk.filePath(), entry.chunk.chunkType(), entry.chunk.name(),
+                        entry.chunk.content(), build.targetEpoch(), classpathEpoch);
+                statement.setString(1, projectPath);
+                statement.setString(2, build.targetEpoch());
+                statement.setString(3, entry.chunk.filePath());
+                statement.setString(4, entry.chunk.chunkType());
+                statement.setString(5, entry.chunk.name());
+                statement.setString(6, entry.chunk.content());
+                statement.setString(7, embeddingToJson(entry.embedding));
+                statement.setString(8, snapshot.symbolVersion());
+                statement.setString(9, snapshot.classpathEpoch());
+                statement.addBatch();
+            }
+            statement.executeBatch();
+        }
+    }
+
+    private void stageShadowRelations(ShadowIndexBuild build, List<CodeRelation> relations) throws SQLException {
+        requireShadowState(build, "BUILDING");
+        try (PreparedStatement delete = connection.prepareStatement("""
+                DELETE FROM code_shadow_relations WHERE project_path = ? AND target_epoch = ?
+                """)) {
+            delete.setString(1, projectPath);
+            delete.setString(2, build.targetEpoch());
+            delete.executeUpdate();
+        }
+        String sql = """
+                INSERT INTO code_shadow_relations (
+                    project_path, target_epoch, from_file, from_name, to_file, to_name,
+                    relation_type, resolution_source, confidence, classpath_epoch)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """;
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            for (CodeRelation relation : relations == null ? List.<CodeRelation>of() : relations) {
+                statement.setString(1, projectPath);
+                statement.setString(2, build.targetEpoch());
+                statement.setString(3, relation.fromFile());
+                statement.setString(4, relation.fromName());
+                statement.setString(5, relation.toFile());
+                statement.setString(6, relation.toName());
+                statement.setString(7, relation.relationType());
+                statement.setString(8, relation.resolutionSource());
+                statement.setDouble(9, relation.confidence());
+                statement.setString(10, relation.classpathEpoch());
+                statement.addBatch();
+            }
+            statement.executeBatch();
+        }
+    }
+
+    private void validateShadowIndex(ShadowIndexBuild build) throws SQLException {
+        requireShadowState(build, "BUILDING");
+        try (PreparedStatement statement = connection.prepareStatement("""
+                UPDATE code_shadow_state SET status = 'VALIDATED'
+                WHERE project_path = ? AND target_epoch = ?
+                """)) {
+            statement.setString(1, projectPath);
+            statement.setString(2, build.targetEpoch());
+            if (statement.executeUpdate() != 1) {
+                throw new SQLException("shadow index disappeared before validation: " + build.targetEpoch());
+            }
+        }
+    }
+
+    private boolean promoteShadowIndex(ShadowIndexBuild build) throws SQLException {
+        requireShadowState(build, "VALIDATED");
+        boolean autoCommit = connection.getAutoCommit();
+        connection.setAutoCommit(false);
+        try {
+            if (!build.baseEpoch().equals(currentIndexEpoch())
+                    || build.baseGeneration() != currentIndexGeneration()) {
                 connection.rollback();
                 return false;
             }
+            Map<String, SymbolSnapshot> oldSnapshots = getSymbolSnapshots();
             clearChunksAndRelations();
-            insertChunks(entries, indexEpoch);
-            insertRelations(relations);
-            List<SymbolInvalidation> invalidations = diffInvalidations(oldSnapshots, getSymbolSnapshots(), safeIndexEpoch(indexEpoch));
+            copyShadowChunksToActive(build.targetEpoch());
+            copyShadowRelationsToActive(build.targetEpoch());
+            List<SymbolInvalidation> invalidations = diffInvalidations(
+                    oldSnapshots, getSymbolSnapshots(), build.targetEpoch());
             insertInvalidations(invalidations);
-            upsertIndexState(indexEpoch, "CURRENT", true);
+            upsertIndexState(build.targetEpoch(), "CURRENT", true);
             clearDirtyFiles();
+            deleteShadowIndex(build.targetEpoch());
             connection.commit();
             return true;
         } catch (SQLException e) {
             connection.rollback();
-            log.error("索引替换失败，已回滚到旧索引: {}", e.getMessage());
+            log.error("影子索引提升失败，已保留活跃索引: {}", e.getMessage());
             throw e;
         } finally {
             connection.setAutoCommit(autoCommit);
         }
     }
 
-    public IndexBuildSnapshot beginIndexBuildSnapshot(List<String> filePaths) throws SQLException {
-        String baseEpoch = currentIndexEpoch();
-        long baseGeneration = currentIndexGeneration();
-        boolean autoCommit = connection.getAutoCommit();
-        connection.setAutoCommit(false);
-        try {
-            upsertIndexState(baseEpoch, "BUILDING", false);
-            insertDirtyFiles(filePaths);
-            connection.commit();
-            return new IndexBuildSnapshot(baseEpoch, baseGeneration);
-        } catch (SQLException e) {
-            connection.rollback();
-            throw e;
-        } finally {
-            connection.setAutoCommit(autoCommit);
+    private void copyShadowChunksToActive(String targetEpoch) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                INSERT INTO code_chunks (
+                    project_path, file_path, chunk_type, name, content, embedding_json,
+                    index_epoch, symbol_version, classpath_epoch)
+                SELECT project_path, file_path, chunk_type, name, content, embedding_json,
+                    target_epoch, symbol_version, classpath_epoch
+                FROM code_shadow_chunks WHERE project_path = ? AND target_epoch = ?
+                """)) {
+            statement.setString(1, projectPath);
+            statement.setString(2, targetEpoch);
+            statement.executeUpdate();
+        }
+    }
+
+    private void copyShadowRelationsToActive(String targetEpoch) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                INSERT INTO code_relations (
+                    project_path, from_file, from_name, to_file, to_name, relation_type,
+                    resolution_source, confidence, classpath_epoch)
+                SELECT project_path, from_file, from_name, to_file, to_name, relation_type,
+                    resolution_source, confidence, classpath_epoch
+                FROM code_shadow_relations WHERE project_path = ? AND target_epoch = ?
+                """)) {
+            statement.setString(1, projectPath);
+            statement.setString(2, targetEpoch);
+            statement.executeUpdate();
+        }
+    }
+
+    private void requireShadowState(ShadowIndexBuild build, String expectedStatus) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT base_epoch, base_generation, mode, status
+                FROM code_shadow_state WHERE project_path = ? AND target_epoch = ?
+                """)) {
+            statement.setString(1, projectPath);
+            statement.setString(2, build.targetEpoch());
+            try (ResultSet rs = statement.executeQuery()) {
+                if (!rs.next()
+                        || !build.baseEpoch().equals(safeIndexEpoch(rs.getString("base_epoch")))
+                        || build.baseGeneration() != rs.getLong("base_generation")
+                        || !build.mode().name().equals(rs.getString("mode"))
+                        || !expectedStatus.equals(rs.getString("status"))) {
+                    throw new SQLException("shadow index state mismatch: target=" + build.targetEpoch()
+                            + ", expectedStatus=" + expectedStatus);
+                }
+            }
+        }
+    }
+
+    private void deleteShadowIndex(String targetEpoch) throws SQLException {
+        deleteShadowRows("code_shadow_chunks", targetEpoch);
+        deleteShadowRows("code_shadow_relations", targetEpoch);
+        deleteShadowRows("code_shadow_state", targetEpoch);
+    }
+
+    private void deleteShadowRows(String table, String targetEpoch) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "DELETE FROM " + table + " WHERE project_path = ? AND target_epoch = ?")) {
+            statement.setString(1, projectPath);
+            statement.setString(2, targetEpoch);
+            statement.executeUpdate();
         }
     }
 
@@ -306,18 +588,14 @@ public class VectorStore implements AutoCloseable {
             if (filePath == null || filePath.isBlank()) continue;
             Path candidate = Path.of(filePath);
             aliases.add(filePath);
-            aliases.add((candidate.isAbsolute() ? candidate : root.resolve(candidate))
-                    .toAbsolutePath().normalize().toString());
+            Path absolute = (candidate.isAbsolute() ? candidate : root.resolve(candidate))
+                    .toAbsolutePath().normalize();
+            aliases.add(absolute.toString());
+            if (absolute.startsWith(root)) {
+                aliases.add(relativeProjectPath(absolute));
+            }
         }
         return List.copyOf(aliases);
-    }
-
-    public void markIndexBuildFailed(IndexBuildSnapshot snapshot) throws SQLException {
-        if (snapshot != null
-                && safeIndexEpoch(snapshot.baseEpoch()).equals(currentIndexEpoch())
-                && snapshot.baseGeneration() == currentIndexGeneration()) {
-            upsertIndexState(snapshot.baseEpoch(), "STALE", false);
-        }
     }
 
     private void upsertIndexState(String epoch, String status, boolean incrementGeneration)
@@ -1205,10 +1483,73 @@ public class VectorStore implements AutoCloseable {
      */
     public record CodeChunkEntry(CodeChunk chunk, float[] embedding) {}
 
-    public record IndexBuildSnapshot(String baseEpoch, long baseGeneration) {
-        public IndexBuildSnapshot {
+    public enum ShadowIndexMode {
+        FULL,
+        INCREMENTAL
+    }
+
+    private record ShadowIndexBuild(String baseEpoch,
+                                    long baseGeneration,
+                                    String targetEpoch,
+                                    ShadowIndexMode mode) {
+        private ShadowIndexBuild {
             baseEpoch = safeIndexEpoch(baseEpoch);
-            baseGeneration = Math.max(-1, baseGeneration);
+            targetEpoch = safeIndexEpoch(targetEpoch);
+            baseGeneration = Math.max(0, baseGeneration);
+            mode = mode == null ? ShadowIndexMode.FULL : mode;
+        }
+    }
+
+    public final class ShadowIndexSession implements AutoCloseable {
+        private final ShadowIndexBuild build;
+        private boolean validated;
+        private boolean promoted;
+        private boolean closed;
+
+        private ShadowIndexSession(ShadowIndexBuild build) {
+            this.build = build;
+        }
+
+        public void stageChunks(List<CodeChunkEntry> entries) throws SQLException {
+            ensureOpen();
+            stageShadowChunks(build, entries);
+        }
+
+        public void stageRelations(List<CodeRelation> relations) throws SQLException {
+            ensureOpen();
+            stageShadowRelations(build, relations);
+        }
+
+        public void validate() throws SQLException {
+            ensureOpen();
+            validateShadowIndex(build);
+            validated = true;
+        }
+
+        public boolean promote() throws SQLException {
+            ensureOpen();
+            if (!validated) {
+                throw new IllegalStateException("shadow index must be validated before promotion");
+            }
+            promoted = promoteShadowIndex(build);
+            return promoted;
+        }
+
+        private void ensureOpen() {
+            if (closed) throw new IllegalStateException("shadow index session is closed");
+        }
+
+        @Override
+        public void close() throws SQLException {
+            if (closed) return;
+            closed = true;
+            if (!promoted) {
+                deleteShadowIndex(build.targetEpoch());
+                if (build.baseEpoch().equals(currentIndexEpoch())
+                        && build.baseGeneration() == currentIndexGeneration()) {
+                    upsertIndexState(build.baseEpoch(), "STALE", false);
+                }
+            }
         }
     }
 

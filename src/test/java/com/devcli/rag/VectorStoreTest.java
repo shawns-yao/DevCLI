@@ -139,51 +139,126 @@ class VectorStoreTest {
     }
 
     @Test
-    void rejectsStaleBuildWithBaseEpochCasAndMarksDirtyResults() throws Exception {
-        CodeChunk oldChunk = CodeChunk.fileChunk("README.md", "old");
-        CodeChunk newChunk = CodeChunk.fileChunk("README.md", "new");
+    void shadowIndexRemainsInvisibleUntilValidatedPromotion() throws Exception {
+        CodeChunk oldChunk = CodeChunk.fileChunk("README.md", "active content");
+        CodeChunk newChunk = CodeChunk.fileChunk("README.md", "shadow content");
         store.replaceProjectIndex(List.of(
                 new VectorStore.CodeChunkEntry(oldChunk, new float[]{1.0f})), List.of(), "idx-1");
 
-        VectorStore.IndexBuildSnapshot buildSnapshot = store.beginIndexBuildSnapshot(List.of("README.md"));
-        assertEquals("idx-1", buildSnapshot.baseEpoch());
-        assertEquals(VectorStore.IndexFreshness.DIRTY,
-                store.searchByKeyword("old").getFirst().freshness());
+        try (VectorStore.ShadowIndexSession shadow = store.beginShadowIndex(
+                "idx-2", List.of("README.md"), VectorStore.ShadowIndexMode.FULL)) {
+            shadow.stageChunks(List.of(
+                    new VectorStore.CodeChunkEntry(newChunk, new float[]{2.0f})));
+            shadow.stageRelations(List.of());
+            shadow.validate();
 
-        store.replaceProjectIndex(List.of(
-                new VectorStore.CodeChunkEntry(newChunk, new float[]{1.0f})), List.of(), "idx-2", buildSnapshot);
-        boolean staleSwap = store.replaceProjectIndex(List.of(
-                new VectorStore.CodeChunkEntry(oldChunk, new float[]{1.0f})), List.of(), "idx-old", buildSnapshot);
+            assertEquals(1, store.searchByKeyword("active content").size());
+            assertTrue(store.searchByKeyword("shadow content").isEmpty());
+            assertEquals(VectorStore.IndexFreshness.DIRTY,
+                    store.searchByKeyword("active content").getFirst().freshness());
 
-        assertFalse(staleSwap);
-        assertEquals("idx-2", store.currentIndexEpoch());
-        assertEquals(VectorStore.IndexFreshness.CURRENT,
-                store.searchByKeyword("new").getFirst().freshness());
+            assertTrue(shadow.promote());
+        }
+
+        assertTrue(store.searchByKeyword("active content").isEmpty());
+        assertEquals("idx-2", store.searchByKeyword("shadow content").getFirst().indexEpoch());
     }
 
     @Test
-    void projectWriteDuringBuildInvalidatesGenerationCas() throws Exception {
-        CodeChunk oldChunk = CodeChunk.fileChunk("README.md", "old");
-        CodeChunk staleBuildChunk = CodeChunk.fileChunk("README.md", "stale build");
+    void incrementalShadowIndexReusesUnchangedChunks() throws Exception {
+        CodeChunk dirtyOld = CodeChunk.fileChunk("Dirty.java", "dirty old content");
+        CodeChunk stable = CodeChunk.fileChunk("Stable.java", "stable content");
+        CodeChunk dirtyNew = CodeChunk.fileChunk("Dirty.java", "dirty new content");
         store.replaceProjectIndex(List.of(
-                new VectorStore.CodeChunkEntry(oldChunk, new float[]{1.0f})), List.of(), "idx-1");
-        VectorStore.IndexBuildSnapshot buildSnapshot = store.beginIndexBuildSnapshot(List.of("README.md"));
+                new VectorStore.CodeChunkEntry(dirtyOld, new float[]{1.0f}),
+                new VectorStore.CodeChunkEntry(stable, new float[]{2.0f})), List.of(), "idx-1");
 
-        store.markDirtyFiles(List.of("README.md"));
-        boolean swapped = store.replaceProjectIndex(List.of(
-                new VectorStore.CodeChunkEntry(staleBuildChunk, new float[]{1.0f})),
-                List.of(), "idx-stale", buildSnapshot);
+        try (VectorStore.ShadowIndexSession shadow = store.beginShadowIndex(
+                "idx-2", List.of("Dirty.java"), VectorStore.ShadowIndexMode.INCREMENTAL)) {
+            shadow.stageChunks(List.of(
+                    new VectorStore.CodeChunkEntry(dirtyNew, new float[]{3.0f})));
+            shadow.stageRelations(List.of());
+            shadow.validate();
+            assertTrue(shadow.promote());
+        }
 
-        assertFalse(swapped);
+        assertTrue(store.searchByKeyword("dirty old content").isEmpty());
+        assertEquals(1, store.searchByKeyword("dirty new content").size());
+        assertEquals(1, store.searchByKeyword("stable content").size());
+    }
+
+    @Test
+    void incrementalShadowIndexMatchesAbsoluteDirtyPathToLegacyRelativeChunk(
+            @org.junit.jupiter.api.io.TempDir Path project) throws Exception {
+        Path dirtyFile = project.resolve("Dirty.java");
+        Files.writeString(dirtyFile, "class Dirty { String current() { return \"new\"; } }");
+        try (VectorStore projectStore = new VectorStore(project.toString())) {
+            projectStore.clearProject();
+            projectStore.replaceProjectIndex(List.of(new VectorStore.CodeChunkEntry(
+                    CodeChunk.fileChunk("Dirty.java", "legacy old content"),
+                    new float[]{1.0f})), List.of(), "idx-1");
+
+            try (VectorStore.ShadowIndexSession shadow = projectStore.beginShadowIndex(
+                    "idx-2", List.of(dirtyFile.toString()), VectorStore.ShadowIndexMode.INCREMENTAL)) {
+                shadow.stageChunks(List.of(new VectorStore.CodeChunkEntry(
+                        CodeChunk.fileChunk(dirtyFile.toString(), "current new content"),
+                        new float[]{2.0f})));
+                shadow.stageRelations(List.of());
+                shadow.validate();
+                assertTrue(shadow.promote());
+            }
+
+            assertTrue(projectStore.searchByKeyword("legacy old content").isEmpty());
+            assertEquals(1, projectStore.searchByKeyword("current new content").size());
+        }
+    }
+
+    @Test
+    void dirtyGenerationPreventsShadowPromotion() throws Exception {
+        CodeChunk active = CodeChunk.fileChunk("README.md", "active content");
+        CodeChunk stale = CodeChunk.fileChunk("README.md", "stale shadow content");
+        store.replaceProjectIndex(List.of(
+                new VectorStore.CodeChunkEntry(active, new float[]{1.0f})), List.of(), "idx-1");
+
+        try (VectorStore.ShadowIndexSession shadow = store.beginShadowIndex(
+                "idx-2", List.of("README.md"), VectorStore.ShadowIndexMode.INCREMENTAL)) {
+            shadow.stageChunks(List.of(
+                    new VectorStore.CodeChunkEntry(stale, new float[]{2.0f})));
+            shadow.stageRelations(List.of());
+            shadow.validate();
+            store.markDirtyFiles(List.of("README.md"));
+
+            assertFalse(shadow.promote());
+        }
+
         assertEquals("idx-1", store.currentIndexEpoch());
-        assertEquals(VectorStore.IndexFreshness.DIRTY,
-                store.searchByKeyword("old").getFirst().freshness());
+        assertEquals(1, store.searchByKeyword("active content").size());
+        assertTrue(store.searchByKeyword("stale shadow content").isEmpty());
     }
 
     @Test
-    void indexSwapRequiresCompleteBuildSnapshot() {
-        assertThrows(NullPointerException.class, () -> store.replaceProjectIndex(
-                List.of(), List.of(), "idx-new", (VectorStore.IndexBuildSnapshot) null));
+    void staleBaseEpochRejectsCandidateWithoutRemovingNewActiveIndex() throws Exception {
+        CodeChunk active = CodeChunk.fileChunk("README.md", "active content");
+        CodeChunk stale = CodeChunk.fileChunk("README.md", "stale candidate content");
+        CodeChunk concurrent = CodeChunk.fileChunk("README.md", "concurrent active content");
+        store.replaceProjectIndex(List.of(
+                new VectorStore.CodeChunkEntry(active, new float[]{1.0f})), List.of(), "idx-1");
+
+        try (VectorStore.ShadowIndexSession shadow = store.beginShadowIndex(
+                "idx-2", List.of("README.md"), VectorStore.ShadowIndexMode.INCREMENTAL)) {
+            shadow.stageChunks(List.of(
+                    new VectorStore.CodeChunkEntry(stale, new float[]{2.0f})));
+            shadow.stageRelations(List.of());
+            shadow.validate();
+            store.replaceProjectIndex(List.of(
+                    new VectorStore.CodeChunkEntry(concurrent, new float[]{3.0f})), List.of(), "idx-3");
+
+            assertFalse(shadow.promote());
+        }
+
+        assertEquals("idx-3", store.currentIndexEpoch());
+        assertEquals(1, store.searchByKeyword("concurrent active content").size());
+        assertTrue(store.searchByKeyword("stale candidate content").isEmpty());
     }
 
     @Test
@@ -227,8 +302,10 @@ class VectorStoreTest {
             projectStore.replaceProjectIndex(List.of(new VectorStore.CodeChunkEntry(
                     CodeChunk.fileChunk("README.md", "indexed content"),
                     new float[]{1.0f})), List.of(), "idx-1");
-            VectorStore.IndexBuildSnapshot snapshot = projectStore.beginIndexBuildSnapshot(List.of());
-            projectStore.markIndexBuildFailed(snapshot);
+            try (VectorStore.ShadowIndexSession ignored = projectStore.beginShadowIndex(
+                    "idx-2", List.of(), VectorStore.ShadowIndexMode.FULL)) {
+                // Closing an unpromoted candidate records a degraded active index.
+            }
 
             VectorStore.SearchResult result = projectStore.searchByKeyword("indexed content").getFirst();
 
@@ -246,8 +323,10 @@ class VectorStoreTest {
             projectStore.replaceProjectIndex(List.of(new VectorStore.CodeChunkEntry(
                     CodeChunk.fileChunk("README.md", "indexed content"),
                     new float[]{1.0f})), List.of(), "idx-1");
-            VectorStore.IndexBuildSnapshot snapshot = projectStore.beginIndexBuildSnapshot(List.of());
-            projectStore.markIndexBuildFailed(snapshot);
+            try (VectorStore.ShadowIndexSession ignored = projectStore.beginShadowIndex(
+                    "idx-2", List.of(), VectorStore.ShadowIndexMode.FULL)) {
+                // Closing an unpromoted candidate records a degraded active index.
+            }
             Files.writeString(source, "live changed content");
 
             VectorStore.SearchResult result = projectStore.searchByKeyword("indexed content").getFirst();

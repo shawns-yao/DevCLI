@@ -174,7 +174,7 @@ negativeFact: Do not rely on xxx from symbolVersion sv_old.
 
 - 运行中 Worker 中断：需要 Orchestrator 根据符号版本变化判断是否暂停、刷新上下文或重跑子任务。
 - `LongTermMemory（长期记忆）` 代码事实版本化：需要禁止无版本代码事实长期保存。
-- `IndexEpoch（索引版本）` 目前是重建批次，不是影子索引原子切换。
+- `IndexEpoch（索引版本）` 已使用持久化影子候选、校验和 `base_epoch + generation` CAS 原子切换；后台调度、自动 rebase 与分片级等待仍未实现。
 
 ## 文字解释
 

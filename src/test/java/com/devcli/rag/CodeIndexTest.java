@@ -84,6 +84,46 @@ class CodeIndexTest {
     }
 
     @Test
+    void dirtyProjectBuildEmbedsOnlyChangedFilesAndKeepsUnchangedChunks() throws Exception {
+        Path project = Files.createDirectory(ragDir.resolve("incremental-project"));
+        Path dirtyFile = project.resolve("FirstService.java");
+        Files.writeString(dirtyFile, """
+                class FirstService {
+                    String value() { return "before"; }
+                }
+                """);
+        Files.writeString(project.resolve("SecondService.java"), """
+                class SecondService {
+                    String stableValue() { return "stable"; }
+                }
+                """);
+        BatchAwareEmbeddingClient client = new BatchAwareEmbeddingClient();
+        CodeIndex indexer = new CodeIndex(client);
+        assertTrue(indexer.index(project.toString()).chunkCount() > 0);
+        client.batchCalls = 0;
+        client.singleCalls = 0;
+
+        Files.writeString(dirtyFile, """
+                class FirstService {
+                    String updatedValue() { return "after"; }
+                }
+                """);
+        try (VectorStore store = new VectorStore(project.toString())) {
+            store.markDirtyFiles(List.of(dirtyFile.toString()));
+        }
+
+        CodeIndex.IndexResult result = indexer.index(project.toString());
+
+        assertTrue(result.message().contains("增量"), result.message());
+        assertEquals(1, client.batchCalls, "增量构建只应为脏文件生成 embedding");
+        assertEquals(0, client.singleCalls);
+        try (VectorStore store = new VectorStore(project.toString())) {
+            assertFalse(store.searchByKeyword("updatedValue").isEmpty());
+            assertFalse(store.searchByKeyword("stableValue").isEmpty());
+        }
+    }
+
+    @Test
     void indexFallsBackToSingleEmbeddingWhenBatchFails() throws Exception {
         Path project = Files.createDirectory(ragDir.resolve("fallback-project"));
         Files.writeString(project.resolve("FallbackService.java"), """

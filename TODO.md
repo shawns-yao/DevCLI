@@ -37,14 +37,15 @@
 - 状态：已实现并通过协议限定验证
 - 已实现：父 Registry 与隔离 fork 共享 `ContextVersionLedger`；Java 符号与普通 file 指纹统一进入写闸门；generation/mtime/size/dirty 缓存避免无变化文件重复解析
 - 已实现：`write_file` 前置校验与 PatchSet 应用前提交校验共同覆盖直接写入和命令间接写入；`STALE_CONTEXT -> REFRESHING_CONTEXT -> RUNNING/FAILED_RETRYABLE` 使用强类型 `RunEvent`，刷新后可安全重写同一依赖文件
-- 已实现：索引构建使用 dirty 标记、`base_epoch + generation` CAS、事务内原子交换和 `CURRENT/STALE/DIRTY` 检索标记；DIRTY 文件实时重新分块，并把新增方法与配置键合并进关键词候选；项目级递归 `WatchService` 会把 IDE 或脚本直接创建、修改、删除的索引文件发布为 DIRTY，新目录注册后立即扫描现有子文件，目录删除和事件溢出通过已知索引路径对账避免漏报
+- 已实现：索引构建使用 dirty 标记、持久化影子候选、`base_epoch + generation` CAS、事务内原子提升和 `CURRENT/STALE/DIRTY` 检索标记；增量构建复用未变化代码块及 embedding，只重新分块和嵌入 DIRTY 文件，关系图保守全量重算；DIRTY 文件实时重新分块，并把新增方法与配置键合并进关键词候选；项目级递归 `WatchService` 会把 IDE 或脚本直接创建、修改、删除的索引文件发布为 DIRTY，新目录注册后立即扫描现有子文件，目录删除和事件溢出通过已知索引路径对账避免漏报
 - 已实现：长期记忆按 `subject + predicate + scope` 稳定键管理修订；未确认候选隔离为非 ACTIVE，确认后原子 supersede；Organizer 和观测失效通过显式目标协议原子取代来源；有效性、新鲜度、相关性和证据权重分层，移除全局 `0.5` 衰减下限
 - 已实现：新增 `protocol-regression` Maven profile、确定性故障模拟器、仓库固定 JSON 基线和 `target/benchmark-reports/protocol-regression.json` 报告
 - 影响范围：Agent 执行内核、ToolRegistry、Workspace/PatchSet、Code RAG/VectorStore、LongTermMemory/MemoryRetriever、Runtime 事件、Maven profile 和协议测试
 - 验证：`mvn -q -Pprotocol-regression test`、主代码编译和跨模块限定回归通过；共享账本、PatchSet 门禁、刷新重写、索引 CAS、pending 确认、SQLite 重载和原子失败回滚均有确定性用例
 - 全局回归：2026-08-23 执行 `mvn test -Pquick -DskipTests=false`，共 1611 项，0 失败、0 错误、4 项按配置跳过；项目级 WatchService 的新增文件、新目录即时写入、目录删除和停机期间删除均有 Windows 确定性回归用例
+- 影子索引回归：2026-08-25 删除旧 `IndexBuildSnapshot` 双轨协议和 3 条重复测试，协议基线改用 ShadowIndex；执行 RAG/ToolRegistry 限定回归与 `mvn -q -Pquick -DskipTests=false test`，quick 共 1648 项，0 失败、0 错误
 - 未验证：真实 LLM、真实 Docker、跨 JVM 并发索引、不同文件系统上的 WatchService 行为和真实长期运行资源回收；未启动项目
-- 剩余风险：大文件 `file#N` 分段证据暂不进入写闸门；WatchService 的 `OVERFLOW` 会保守扫描全部当前索引文件，超大仓库可能产生一次性 I/O 峰值
+- 剩余风险：影子索引仍由 `/index` 同步触发，尚无后台调度、自动 rebase 和分片级等待；大文件 `file#N` 分段证据暂不进入写闸门；WatchService 的 `OVERFLOW` 会保守扫描全部当前索引文件，超大仓库可能产生一次性 I/O 峰值
 
 ## 2026-08-22 符号证据写入门禁与普通对话轮数
 

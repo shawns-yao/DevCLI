@@ -64,75 +64,92 @@ public class CodeIndex {
         IndexEpoch indexEpoch = IndexEpoch.next();
         emit("🧭 IndexEpoch: " + indexEpoch.value());
 
-        List<Path> filesToIndex = new ArrayList<>();
-        collectFiles(root, filesToIndex);
-        emit("📁 发现 " + filesToIndex.size() + " 个文件待索引");
-        VectorStore.IndexBuildSnapshot buildSnapshot;
-        try (VectorStore store = new VectorStore(root.toString())) {
-            buildSnapshot = store.beginIndexBuildSnapshot(
-                    filesToIndex.stream().map(Path::toString).toList());
-        } catch (Exception e) {
-            String error = "无法建立索引构建快照: " + e.getMessage();
-            emit("❌ " + error);
-            return new IndexResult(0, 0, error);
-        }
-
+        List<Path> projectFiles = new ArrayList<>();
+        collectFiles(root, projectFiles);
         CodeAnalyzer projectAnalyzer = new CodeAnalyzer(root);
-        List<VectorStore.CodeChunkEntry> entries = new ArrayList<>();
-        List<CodeRelation> allRelations = new ArrayList<>();
 
-        int processed = 0;
-        int total = filesToIndex.size();
-
-        for (Path file : filesToIndex) {
-            processed++;
-            if (processed % 10 == 0 || processed == total) {
-                emit(String.format("   进度: %d/%d (%s)", processed, total, file.getFileName()));
-            }
-
-            try {
-                // 1. 分块
-                List<CodeChunk> chunks = chunker.chunkFile(file);
-
-                // 2. 生成 Embedding 并组装条目
-                addChunkEmbeddings(file, chunks, entries);
-
-                // 3. 分析关系（仅 Java 文件）
-                if (file.toString().endsWith(".java")) {
-                    allRelations.addAll(projectAnalyzer.analyzeFile(file));
-                }
-            } catch (Exception e) {
-                String message = "   ⚠️ 索引失败: " + file + " - " + e.getMessage();
-                emit(message);
-                log.warn("code index failed for file {}", file, e);
-            }
-        }
-
-        // 4. 持久化到 SQLite
         try (VectorStore store = new VectorStore(root.toString())) {
-            if (!store.replaceProjectIndex(entries, allRelations, indexEpoch.value(), buildSnapshot)) {
-                String error = "索引构建期间 active epoch 已变化，旧构建结果已拒绝交换";
-                emit("❌ " + error);
-                return new IndexResult(0, 0, error);
-            }
-
-            VectorStore.IndexStats stats = store.getStats();
-            int invalidationCount = store.getRecentInvalidations(1000).stream()
-                    .filter(invalidation -> indexEpoch.value().equals(invalidation.newIndexEpoch()))
+            List<Path> pendingDirtyFiles = store.pendingDirtyFiles();
+            boolean incremental = !IndexEpoch.none().value().equals(store.currentIndexEpoch())
+                    && !pendingDirtyFiles.isEmpty()
+                    && store.canReuseActiveChunks();
+            List<Path> filesToIndex = incremental
+                    ? pendingDirtyFiles.stream()
+                    .filter(Files::isRegularFile)
+                    .filter(CodeIndexPathPolicy::isIndexableFile)
                     .toList()
-                    .size();
-            String msg = String.format("索引完成：%d 个代码块，%d 条关系，%d 条失效事件，indexEpoch=%s",
-                    stats.chunkCount(), stats.relationCount(), invalidationCount, indexEpoch.value());
-            emit("✅ " + msg);
-            return new IndexResult(stats.chunkCount(), stats.relationCount(), msg);
-        } catch (Exception e) {
-            try (VectorStore store = new VectorStore(root.toString())) {
-                store.markIndexBuildFailed(buildSnapshot);
-            } catch (Exception ignored) {
+                    : List.copyOf(projectFiles);
+            List<String> dirtyFiles = (incremental ? pendingDirtyFiles : projectFiles).stream()
+                    .map(Path::toString)
+                    .toList();
+            VectorStore.ShadowIndexMode mode = incremental
+                    ? VectorStore.ShadowIndexMode.INCREMENTAL
+                    : VectorStore.ShadowIndexMode.FULL;
+
+            emit("📁 发现 " + filesToIndex.size() + " 个文件待索引（"
+                    + (incremental ? "增量" : "全量") + "构建，"
+                    + projectFiles.size() + " 个文件校验关系图）");
+
+            try (VectorStore.ShadowIndexSession shadow = store.beginShadowIndex(
+                    indexEpoch.value(), dirtyFiles, mode)) {
+                List<VectorStore.CodeChunkEntry> entries = new ArrayList<>();
+                int processed = 0;
+                int total = filesToIndex.size();
+
+                for (Path file : filesToIndex) {
+                    processed++;
+                    if (processed % 10 == 0 || processed == total) {
+                        emit(String.format("   代码块进度: %d/%d (%s)",
+                                processed, total, file.getFileName()));
+                    }
+
+                    try {
+                        List<CodeChunk> chunks = chunker.chunkFile(file);
+                        addChunkEmbeddings(file, chunks, entries);
+                    } catch (Exception e) {
+                        String message = "   ⚠️ 索引失败: " + file + " - " + e.getMessage();
+                        emit(message);
+                        log.warn("code index failed for file {}", file, e);
+                    }
+                }
+
+                List<CodeRelation> allRelations = new ArrayList<>();
+                for (Path file : projectFiles) {
+                    if (!file.toString().endsWith(".java")) continue;
+                    try {
+                        allRelations.addAll(projectAnalyzer.analyzeFile(file));
+                    } catch (Exception e) {
+                        String message = "   ⚠️ 关系分析失败: " + file + " - " + e.getMessage();
+                        emit(message);
+                        log.warn("code relation analysis failed for file {}", file, e);
+                    }
+                }
+
+                shadow.stageChunks(entries);
+                shadow.stageRelations(allRelations);
+                shadow.validate();
+                if (!shadow.promote()) {
+                    String error = "影子索引构建期间 active epoch 或 generation 已变化，候选提升被拒绝";
+                    emit("❌ " + error);
+                    return new IndexResult(0, 0, error);
+                }
+
+                VectorStore.IndexStats stats = store.getStats();
+                int invalidationCount = store.getRecentInvalidations(1000).stream()
+                        .filter(invalidation -> indexEpoch.value().equals(invalidation.newIndexEpoch()))
+                        .toList()
+                        .size();
+                String buildKind = incremental ? "增量" : "全量";
+                String msg = String.format("索引完成（影子%s）：%d 个代码块，%d 条关系，%d 条失效事件，indexEpoch=%s",
+                        buildKind, stats.chunkCount(), stats.relationCount(), invalidationCount,
+                        indexEpoch.value());
+                emit("✅ " + msg);
+                return new IndexResult(stats.chunkCount(), stats.relationCount(), msg);
             }
-            String error = "持久化失败: " + e.getMessage();
+        } catch (Exception e) {
+            String error = "影子索引构建失败，活跃索引保持不变: " + e.getMessage();
             emit("❌ " + error);
-            log.warn("code index persistence failed for root {}", root, e);
+            log.warn("shadow code index build failed for root {}", root, e);
             return new IndexResult(0, 0, error);
         }
     }
