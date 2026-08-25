@@ -3,6 +3,7 @@ package com.devcli.memory;
 import com.devcli.llm.GLMClient;
 import com.devcli.llm.LlmClient;
 import com.devcli.rag.RagEvidencePayload;
+import com.devcli.rag.RagEvidenceSideChannel;
 import com.devcli.rag.SymbolInvalidation;
 import com.devcli.rag.VectorStore;
 import org.junit.jupiter.api.Test;
@@ -42,12 +43,12 @@ class MemoryManagerTest {
     Path tempDir;
 
     @Test
-    void addToolResultShouldRecordEvidenceInWorkingMemory() {
+    void addToolResultShouldRecordEvidenceInSessionMemory() {
         try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
              MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {
             memoryManager.addToolResult("read_file", "{\"path\":\"pom.xml\"}", "<file>pom.xml content</file>");
 
-            String section = memoryManager.buildWorkingMemorySection();
+            String section = memoryManager.buildSessionMemorySection();
             assertTrue(section.contains("read_file"));
             assertTrue(section.contains("pom.xml"));
             assertEquals(1, memoryManager.getSessionMemory().getRecentToolResults().size());
@@ -76,7 +77,7 @@ class MemoryManagerTest {
             assertEquals(old.getId(), negative.getMetadata().get("invalidates_memory_ids"));
             assertEquals(List.of(old.getId()), negative.getEvidence().conflictsWith());
             assertEquals(negative.getId(), superseded.getSupersededBy());
-            assertTrue(memoryManager.buildWorkingMemorySection().contains("NegativeFact（负向事实）"));
+            assertTrue(memoryManager.buildSessionMemorySection().contains("NegativeFact（负向事实）"));
             assertTrue(memoryManager.drainCurrentStateConflictInstruction()
                     .contains("程序已确认当前状态推翻旧记忆"));
             assertTrue(memoryManager.drainCurrentStateConflictInstruction().isBlank());
@@ -259,7 +260,7 @@ class MemoryManagerTest {
              MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {
             memoryManager.addUserMessage("帮我读取 pom.xml 并解释其中的依赖配置");
 
-            String section = memoryManager.buildWorkingMemorySection();
+            String section = memoryManager.buildSessionMemorySection();
             assertTrue(section.contains("用户最新输入"));
             assertTrue(memoryManager.getSessionMemory().getVolatileFacts().stream()
                     .anyMatch(f -> f.contains("pom.xml")));
@@ -557,7 +558,7 @@ class MemoryManagerTest {
 
             memoryManager.addToolResult("search_code", "{\"query\":\"CodeRetriever search\"}", result);
 
-            String section = memoryManager.buildWorkingMemorySection();
+            String section = memoryManager.buildSessionMemorySection();
             assertEquals(1, memoryManager.getSessionMemory().getRagEvidenceMemory().size());
             assertTrue(section.contains("RAG 证据记忆"));
             assertTrue(section.contains("symbolVersion=sv_test123"));
@@ -593,12 +594,15 @@ class MemoryManagerTest {
                     "cp-1",
                     "idx_new",
                     List.of(invalidation));
-            String result = RagEvidencePayload.appendTo("formatter text can change",
+            RagEvidencePayload.Payload payload = RagEvidencePayload.fromSearchResults(
                     "CodeRetriever search", List.of(searchResult), List.of());
+            memoryManager.addToolResult(
+                    "search_code",
+                    "{\"query\":\"ignored legacy query\"}",
+                    "formatter text can change",
+                    List.of(new RagEvidenceSideChannel(payload)));
 
-            memoryManager.addToolResult("search_code", "{\"query\":\"ignored legacy query\"}", result);
-
-            String section = memoryManager.buildWorkingMemorySection();
+            String section = memoryManager.buildSessionMemorySection();
             assertEquals(1, memoryManager.getSessionMemory().getRagEvidenceMemory().size());
             assertTrue(section.contains("symbolVersion=sv_new"));
             assertTrue(section.contains("indexEpoch=idx_new"));
@@ -813,8 +817,8 @@ class MemoryManagerTest {
 
             assertTrue(memoryManager.isMemoryIgnored());
             assertTrue(memoryManager.buildContextForQuery("Java 17", 512).isBlank());
-            assertTrue(memoryManager.buildWorkingMemorySection().isBlank());
-            assertTrue(memoryManager.buildWorkingMemorySectionForAgent("worker").isBlank());
+            assertTrue(memoryManager.buildSessionMemorySection().isBlank());
+            assertTrue(memoryManager.buildSessionMemorySectionForAgent("worker").isBlank());
         }
     }
 
@@ -894,7 +898,7 @@ class MemoryManagerTest {
             memoryManager.setTaskState("plan_task", "task_3 (analyzing log)");
             memoryManager.setTaskState("last_error", "MCP schema missing required");
 
-            String section = memoryManager.buildWorkingMemorySection();
+            String section = memoryManager.buildSessionMemorySection();
             assertTrue(section.contains("plan_task"));
             assertTrue(section.contains("task_3"));
             assertTrue(section.contains("last_error"));
@@ -902,10 +906,10 @@ class MemoryManagerTest {
     }
 
     @Test
-    void buildWorkingMemorySectionReturnsEmptyWhenAllSubStoresEmpty() {
+    void buildSessionMemorySectionReturnsEmptyWhenAllSubStoresEmpty() {
         try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
              MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {
-            assertTrue(memoryManager.buildWorkingMemorySection().isBlank());
+            assertTrue(memoryManager.buildSessionMemorySection().isBlank());
         }
     }
 
@@ -1014,25 +1018,25 @@ class MemoryManagerTest {
     }
 
     @Test
-    void buildWorkingMemorySectionForAgentShouldIsolateRoleSpecificViews() {
+    void buildSessionMemorySectionForAgentShouldIsolateRoleSpecificViews() {
         try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
              MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {
             memoryManager.setTaskState("plan_task", "step_1");
             memoryManager.addVolatileFact("用户最新输入: 修复 agent 记忆隔离");
             memoryManager.addToolResult("read_file", "{\"path\":\"Secret.java\"}", "secret tool evidence");
 
-            String planner = memoryManager.buildWorkingMemorySectionForAgent("planner");
+            String planner = memoryManager.buildSessionMemorySectionForAgent("planner");
             assertTrue(planner.contains("plan_task"));
             assertTrue(planner.contains("用户最新输入"));
             assertFalse(planner.contains("secret tool evidence"), planner);
             assertFalse(planner.contains("最近工具调用证据"), planner);
 
-            String worker = memoryManager.buildWorkingMemorySectionForAgent("worker");
+            String worker = memoryManager.buildSessionMemorySectionForAgent("worker");
             assertTrue(worker.contains("plan_task"));
             assertTrue(worker.contains("用户最新输入"));
             assertTrue(worker.contains("secret tool evidence"));
 
-            String reviewer = memoryManager.buildWorkingMemorySectionForAgent("reviewer");
+            String reviewer = memoryManager.buildSessionMemorySectionForAgent("reviewer");
             assertTrue(reviewer.contains("plan_task"));
             assertTrue(reviewer.contains("secret tool evidence"));
             assertFalse(reviewer.contains("用户最新输入"), reviewer);
@@ -1061,7 +1065,7 @@ class MemoryManagerTest {
                                     "{\"i\":" + i + "}",
                                     "result-" + workerId + '-' + i);
                             memoryManager.addVolatileFact("worker-" + workerId + "-fact-" + i);
-                            memoryManager.buildWorkingMemorySection();
+                            memoryManager.buildSessionMemorySection();
                         }
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
@@ -1078,7 +1082,7 @@ class MemoryManagerTest {
                     memoryManager.getSessionMemory().getRecentToolResults().size());
             assertEquals(SessionMemory.DEFAULT_MAX_VOLATILE_FACTS,
                     memoryManager.getSessionMemory().getVolatileFacts().size());
-            assertFalse(memoryManager.buildWorkingMemorySection().isBlank());
+            assertFalse(memoryManager.buildSessionMemorySection().isBlank());
         }
     }
 

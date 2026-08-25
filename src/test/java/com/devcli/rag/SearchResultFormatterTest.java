@@ -83,33 +83,12 @@ class SearchResultFormatterTest {
     }
 
     @Test
-    void ragEvidencePayloadRoundTripsStructuredEvidenceAndInvalidations() {
-        SymbolInvalidation invalidation = new SymbolInvalidation(
-                "CodeRetriever.java#method#CodeRetriever.search",
-                "src/main/java/com/devcli/rag/CodeRetriever.java",
-                "method",
-                "CodeRetriever.search",
-                "sv_old",
-                "sv_new",
-                "idx_old",
-                "idx_new",
-                "cp-1",
-                "Do not rely on CodeRetriever.search from symbolVersion sv_old.");
-        List<VectorStore.SearchResult> results = List.of(
-                new VectorStore.SearchResult(
-                        "src/main/java/com/devcli/rag/CodeRetriever.java",
-                        "method",
-                        "CodeRetriever.search",
-                        "content",
-                        0.91,
-                        "sv_new",
-                        "cp-1",
-                        "idx_new",
-                        List.of(invalidation)
-                )
-        );
+    void extractsLegacyEmbeddedEvidenceAndInvalidations() {
+        String output = """
+                visible
 
-        String output = RagEvidencePayload.appendTo("visible", "CodeRetriever search", results, List.of());
+                <RAG_EVIDENCE_JSON>{"evidence":[{"filePath":"src/main/java/com/devcli/rag/CodeRetriever.java","symbolName":"CodeRetriever.search","chunkType":"method","symbolVersion":"sv_new","indexEpoch":"idx_new","classpathEpoch":"cp-1","query":"CodeRetriever search","similarity":0.91}],"negativeFacts":[{"negativeFact":"Do not rely on CodeRetriever.search from symbolVersion sv_old.","oldSymbolVersion":"sv_old","newSymbolVersion":"sv_new","oldIndexEpoch":"idx_old","newIndexEpoch":"idx_new"}]}</RAG_EVIDENCE_JSON>
+                """;
         RagEvidencePayload.Payload payload = RagEvidencePayload.extract(output);
 
         assertEquals(1, payload.evidence().size());

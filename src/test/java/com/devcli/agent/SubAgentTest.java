@@ -141,11 +141,11 @@ class SubAgentTest {
                         new LlmClient.ChatResponse("assistant", "完成", null, 8, 3))
         ));
         SubAgent worker = new SubAgent("worker", AgentRole.WORKER, llm, new ToolRegistry());
-        AtomicReference<String> workingMemory = new AtomicReference<>("wave-snapshot-before");
-        worker.setWorkingMemorySupplier(workingMemory::get);
+        AtomicReference<String> sessionMemory = new AtomicReference<>("wave-snapshot-before");
+        worker.setSessionMemorySupplier(sessionMemory::get);
 
         SubAgent.ForkContext forkContext = worker.createForkContext();
-        workingMemory.set("wave-snapshot-after");
+        sessionMemory.set("wave-snapshot-after");
         worker.executeForked(AgentMessage.task("orchestrator", "执行独立步骤"), forkContext,
                 new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
 

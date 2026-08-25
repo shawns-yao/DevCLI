@@ -1851,7 +1851,7 @@ class AgentOrchestratorTest {
                     mm
             );
             orchestrator.setExternalContextSupplier(() -> "稳定外部上下文");
-            orchestrator.setStickyMemorySupplier(() -> "稳定长期记忆");
+            orchestrator.setRuleContextSupplier(() -> "稳定长期记忆");
             SkillContextBuffer skillBuffer = new SkillContextBuffer();
             skillBuffer.push("parallel-skill", "并行 worker 都应该看到这段 skill");
             orchestrator.setSkillSystem(null, skillBuffer);
@@ -2343,13 +2343,13 @@ class AgentOrchestratorTest {
 
             orchestrator.run("列目录并验收");
 
-            List<String> scopes = mm.getSessionMemory().getRecentToolResults().stream()
-                    .map(evidence -> evidence.scope)
+            List<String> stepIds = mm.getSessionMemory().getRecentToolResults().stream()
+                    .map(evidence -> evidence.stepId)
                     .toList();
-            assertTrue(scopes.stream().anyMatch(scope -> !scope.isBlank()),
-                    "Multi-Agent 步骤产生的工具证据必须带出处，实际: " + scopes);
-            assertTrue(scopes.stream().anyMatch("step_1"::equals),
-                    "出处应为产生它的步骤 id，实际: " + scopes);
+            assertTrue(stepIds.stream().anyMatch(stepId -> !stepId.isBlank()),
+                    "Multi-Agent 步骤产生的工具证据必须带步骤标识，实际: " + stepIds);
+            assertTrue(stepIds.stream().anyMatch("step_1"::equals),
+                    "步骤标识应为产生证据的步骤 id，实际: " + stepIds);
         }
     }
 

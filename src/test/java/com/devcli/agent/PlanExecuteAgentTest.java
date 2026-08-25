@@ -78,9 +78,9 @@ class PlanExecuteAgentTest {
             // assistant 内容只进 conversationHistory（已不再回写到记忆笔记本）
             assertTrue(result.contains("计划执行完成"));
 
-            String section = memoryManager.buildWorkingMemorySection();
-            assertTrue(section.contains("read_file"), "工具调用应记录到 working memory");
-            assertTrue(section.contains("plan-memory-content"), "工具返回的文件原文应保留在 working memory");
+            String section = memoryManager.buildSessionMemorySection();
+            assertTrue(section.contains("read_file"), "工具调用应记录到 session memory");
+            assertTrue(section.contains("plan-memory-content"), "工具返回的文件原文应保留在 session memory");
             assertTrue(llmClient.messagesByCall.size() >= 2);
             // 工作记忆改由任务消息的当轮快照承载，system prompt 保持逐字节稳定
             String secondSystem = llmClient.messagesByCall.get(1).get(0).content();
