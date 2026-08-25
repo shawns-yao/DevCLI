@@ -4,12 +4,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.time.Instant;
-import java.time.format.DateTimeFormatter;
-import java.time.ZoneId;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -28,15 +22,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <ol>
  *   <li>≤ {@link #INLINE_THRESHOLD_CHARS} (5K)：原文进 messages，零额外开销</li>
  *   <li>{@link #INLINE_THRESHOLD_CHARS} ~ {@link #PERSIST_THRESHOLD_CHARS} (5K~50K)：
- *       尾部截断到 5K + 标注剩余字符数。中等输出，截断后能保留 LLM 最关心的命令前缀（路径/文件名/错误关键字一般在前部）</li>
+ *       保留 5K 预览，完整原文写入运行时结果存储并返回 result_ref</li>
  *   <li>> {@link #PERSIST_THRESHOLD_CHARS} (50K)：完整落盘到
- *       {@code <projectPath>/.devcli/tool_outputs/<sessionId>/<toolUseId>.txt}，
- *       messages 里只保留 1.5K 预览 + 文件路径 + 提示"用 read_file 看完整内容"</li>
+ *       受控运行时结果目录，messages 里只保留 1.5K 预览 + result_ref</li>
  * </ol>
  *
  * <p><b>不参与治理的工具白名单</b>（{@link #PASSTHROUGH_TOOLS}）：
  * <ul>
- *   <li>{@code read_file}：自身就是文件读取，再次落盘等于 read→file→read 死循环</li>
  *   <li>{@code list_dir}：目录树本身就是结构化短输出，截断会破坏可读性</li>
  *   <li>{@code revert_turn}：状态控制工具，结果是简单确认信息</li>
  *   <li>image-bearing 结果（含 imageParts）：图片 part 不能截断</li>
@@ -55,7 +47,6 @@ public final class ToolResultSizeManager {
 
     /** 不参与尺寸治理的工具名白名单。 */
     private static final Set<String> PASSTHROUGH_TOOLS = Set.of(
-            "read_file",     // 自身就是文件读取，截断等于破坏功能
             "list_dir",      // 短结构化输出
             "revert_turn",    // 状态控制
             "search_code"    // 尾部含 RAG 证据 JSON，截断会破坏 SessionMemory 解析
@@ -72,16 +63,6 @@ public final class ToolResultSizeManager {
 
     /** 中间档（5K~50K）的截断目标长度。 */
     public static final int TRUNCATE_TARGET_CHARS = INLINE_THRESHOLD_CHARS;
-
-    /** 落盘根目录名（在 projectPath 下）。 */
-    public static final String OUTPUTS_DIR = ".devcli/tool_outputs";
-
-    private static final DateTimeFormatter SESSION_ID_FMT =
-            DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", Locale.ROOT)
-                    .withZone(ZoneId.systemDefault());
-
-    /** 当前会话的目录名（启动时确定，进程内复用）。 */
-    private static final String SESSION_ID = SESSION_ID_FMT.format(Instant.now());
 
     /** 同轮所有工具结果聚合预算上限：超过此值后继续降低每项截断阈值。 */
     public static final int AGGREGATE_LIMIT_CHARS = INLINE_THRESHOLD_CHARS * 4;  // 20K
@@ -125,10 +106,27 @@ public final class ToolResultSizeManager {
      */
     public static String process(String toolName, String toolUseId, String projectPath,
                                  boolean hasImages, String result) {
+        return manage(toolName, toolUseId, hasImages, result).text();
+    }
+
+    /** 治理完整 ToolOutput，并把可恢复引用作为强类型 side channel 继续向下游传播。 */
+    public static ToolOutput processOutput(String toolName, String toolUseId, ToolOutput output) {
+        ToolOutput normalized = output == null ? ToolOutput.success("") : output;
+        ManagedResult managed = manage(
+                toolName, toolUseId, normalized.hasImageParts(), normalized.text());
+        ToolOutput result = new ToolOutput(
+                normalized.status(), normalized.errorCode(), normalized.retryable(),
+                managed.text(), normalized.imageParts(), normalized.modifiedResources(),
+                normalized.sideChannels());
+        return managed.artifact() == null ? result : result.withSideChannel(managed.artifact());
+    }
+
+    private static ManagedResult manage(String toolName, String toolUseId,
+                                        boolean hasImages, String result) {
         // 空结果注入：避免 LLM 看到空 tool_result 后断裂对话
         if (result == null || result.isBlank()) {
             String label = toolName == null ? "工具" : toolName;
-            return "(" + label + " 执行完毕无输出)";
+            return new ManagedResult("(" + label + " 执行完毕无输出)", null);
         }
         CollapseClassification classification = classify(toolName, hasImages, result);
         if (classification == CollapseClassification.IMAGE_PASSTHROUGH
@@ -136,27 +134,47 @@ public final class ToolResultSizeManager {
                 || classification == CollapseClassification.INLINE) {
             // 低档不治理：直接计入聚合预算但不截断
             currentBudget().addAndGet(result.length());
-            return result;
+            return new ManagedResult(result, null);
         }
 
         // 防御 MCP 工具默认全部进入 size 治理（mcp__server__tool 命名）
         // 已经在 PASSTHROUGH 之外，自动接管
 
-        String managed;
+        int previewChars;
+        int reservedBudget = 0;
         if (classification == CollapseClassification.INLINE_TRUNCATED) {
             AtomicInteger budget = currentBudget();
             int usedBefore = budget.getAndAdd(TRUNCATE_TARGET_CHARS);
+            reservedBudget = TRUNCATE_TARGET_CHARS;
             boolean underPressure = usedBefore >= AGGREGATE_LIMIT_CHARS;
-            managed = underPressure
-                    ? truncateInline(result, TRUNCATE_TARGET_UNDER_PRESSURE)
-                    : truncateInline(result, TRUNCATE_TARGET_CHARS);
-            budget.addAndGet(managed.length() - TRUNCATE_TARGET_CHARS);
+            previewChars = underPressure
+                    ? TRUNCATE_TARGET_UNDER_PRESSURE : TRUNCATE_TARGET_CHARS;
         } else {
-            managed = persistAndPreview(toolName, toolUseId, projectPath, result);
-            // 治理后的结果长度为实际注入长度，而非原始长度
-            currentBudget().addAndGet(managed.length());
+            previewChars = PERSIST_PREVIEW_CHARS;
         }
-        return appendMcpClassification(toolName, managed, classification);
+        try {
+            ToolResultArtifactStore.StoredArtifact stored =
+                    ToolResultArtifactStore.store(toolUseId, result);
+            int kept = Math.min(previewChars, result.length());
+            String preview = result.substring(0, kept);
+            int dropped = result.length() - kept;
+            String nextCursor = dropped > 0 ? Integer.toString(kept) : "";
+            ToolResultArtifact artifact = new ToolResultArtifact(
+                    classification.name(), stored.chars(), stored.bytes(), kept,
+                    stored.ref(), nextCursor, stored.sha256());
+            String managed = renderArtifactPreview(
+                    preview, dropped, result.length(), classification, artifact);
+            currentBudget().addAndGet(managed.length() - reservedBudget);
+            return new ManagedResult(
+                    appendMcpClassification(toolName, managed, classification), artifact);
+        } catch (IOException | RuntimeException e) {
+            log.warn("Failed to persist tool output for {} ({}): {} — falling back to inline truncation",
+                    toolName, toolUseId, e.getMessage());
+            String fallback = truncateInline(result, TRUNCATE_TARGET_CHARS);
+            currentBudget().addAndGet(fallback.length() - reservedBudget);
+            return new ManagedResult(
+                    appendMcpClassification(toolName, fallback, classification), null);
+        }
     }
 
     /** 暴露给测试或 Agent：当前轮已消耗的聚合预算。 */
@@ -218,53 +236,29 @@ public final class ToolResultSizeManager {
                 + " 字符；使用 search_code 或 grep 进一步过滤可避免截断)";
     }
 
-    /**
-     * 高档：落盘 + 预览。落盘失败时降级为 {@link #truncateInline}（不阻断主流程）。
-     */
-    static String persistAndPreview(String toolName, String toolUseId, String projectPath, String result) {
-        Path outFile;
-        try {
-            Path outDir = Path.of(projectPath, OUTPUTS_DIR, SESSION_ID);
-            Files.createDirectories(outDir);
-            String safeId = sanitizeFileName(toolUseId == null ? "anon" : toolUseId);
-            outFile = outDir.resolve(safeId + ".txt");
-            Files.writeString(outFile, result, StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            log.warn("Failed to persist tool output for {} ({}): {} — falling back to inline truncation",
-                    toolName, toolUseId, e.getMessage());
-            return truncateInline(result, TRUNCATE_TARGET_CHARS);
-        }
-
-        int total = result.length();
-        String preview = result.length() <= PERSIST_PREVIEW_CHARS
-                ? result
-                : result.substring(0, PERSIST_PREVIEW_CHARS);
-
+    private static String renderArtifactPreview(
+            String preview, int dropped, int total,
+            CollapseClassification classification, ToolResultArtifact artifact) {
+        String headline = classification == CollapseClassification.PERSISTED_PREVIEW
+                ? "[工具输出过大已落盘 " + total + " 字符]"
+                : "...(已截断 " + dropped + " 字符 / 共 " + total + " 字符)";
         return String.format(Locale.ROOT,
-                "%s\n\n[工具输出过大已落盘 %d 字符 → 完整内容: %s]\n"
-                        + "(以上为前 %d 字符预览，需要完整内容请用 read_file 读取该文件)",
+                "%s\n\n%s\n"
+                        + "[tool_result metadata: classification=%s, original_chars=%d, "
+                        + "original_bytes=%d, preview_chars=%d, result_ref=%s, "
+                        + "next_cursor=%s, sha256=%s]\n"
+                        + "(需要精确恢复时调用 read_tool_result，并传入 result_ref 与 next_cursor)",
                 preview,
-                total,
-                outFile.toAbsolutePath(),
-                Math.min(PERSIST_PREVIEW_CHARS, total));
+                headline,
+                classification,
+                artifact.originalChars(),
+                artifact.originalBytes(),
+                artifact.previewChars(),
+                artifact.artifactRef(),
+                artifact.nextCursor().isBlank() ? "none" : artifact.nextCursor(),
+                artifact.sha256());
     }
 
-    /** 文件名安全化：去掉路径分隔符和控制字符。 */
-    private static String sanitizeFileName(String raw) {
-        StringBuilder sb = new StringBuilder(raw.length());
-        for (int i = 0; i < raw.length() && sb.length() < 128; i++) {
-            char c = raw.charAt(i);
-            if (Character.isLetterOrDigit(c) || c == '-' || c == '_' || c == '.') {
-                sb.append(c);
-            } else {
-                sb.append('_');
-            }
-        }
-        return sb.length() == 0 ? "anon" : sb.toString();
-    }
-
-    /** 暴露给测试：当前会话目录名。 */
-    public static String currentSessionId() {
-        return SESSION_ID;
+    private record ManagedResult(String text, ToolResultArtifact artifact) {
     }
 }

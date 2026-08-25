@@ -753,7 +753,7 @@ public class AgentOrchestrator {
      *
      * <p>恢复范围：计划（步骤/依赖/验收点）与进度（已完成步骤带回完整 result 与产物文件，
      * 其余——包括上次失败的、被阻塞的——重置为 PENDING 重新执行）。
-     * <b>不恢复</b> WorkingMemory / 会话记忆：Worker 上下文完全来自 checkpoint 内的步骤 result。
+     * <b>不恢复</b> SessionMemory / 会话记忆：Worker 上下文完全来自 checkpoint 内的步骤 result。
      *
      * @param orchestrationIdOrNull 指定 checkpoint id；为空时取最近一次保存的 checkpoint
      */
@@ -1594,7 +1594,7 @@ public class AgentOrchestrator {
                          PrintStream out,
                          SubAgent.ForkContext workerForkContext,
                          SubAgent.ForkContext reviewerForkContext) {
-        // 本步骤产生的工具证据都标记为该步骤出处：多个 Worker 共享同一份 WorkingMemory，
+        // 本步骤产生的工具证据都标记为该步骤出处：多个 Worker 共享同一份 SessionMemory，
         // 不标出处会让 Reviewer 把别的步骤的产物当作本步骤证据，也让淘汰无法跨步骤公平
         memoryManager.runWithEvidenceScope(step.id(), () -> {
             try {
@@ -2144,7 +2144,7 @@ public class AgentOrchestrator {
             }
             context.append("\n");
         }
-        // resume 跨进程恢复：WorkingMemory 已空、StepRedoTracker 无上次失败原因，失败步骤的副作用
+        // resume 跨进程恢复：SessionMemory 已空、StepRedoTracker 无上次失败原因，失败步骤的副作用
         // （已写文件 + 失败摘要）从 checkpoint 注入，让重做的 Worker 知道上次失败留下了什么。
         ExecutionArtifact failedArtifact = restoredFailedArtifacts.get(currentStep.id());
         if (failedArtifact != null) {

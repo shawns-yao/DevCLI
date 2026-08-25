@@ -128,10 +128,7 @@ public class Agent implements AutoCloseable {
         this.externalContextSupplier = externalContextSupplier == null ? () -> "" : externalContextSupplier;
     }
 
-    /**
-     * 注入 Sticky Memory 渲染源（PR-B）：返回的 Markdown 整段会作为 system prompt 的
-     * "Sticky Memory" 段注入。Main 启动时构造 StickyMemory 后通过此 setter 接进来。
-     */
+    /** 注入规则上下文渲染源；返回的 Markdown 整段会进入 system prompt。 */
     public void setRuleContextSupplier(Supplier<String> ruleContextSupplier) {
         this.ruleContextSupplier = ruleContextSupplier == null ? () -> "" : ruleContextSupplier;
         memoryManager.setRuleContextSupplier(this.ruleContextSupplier);

@@ -476,8 +476,12 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     @Override
     public void recordFileRead(Path safePath, String content, String stepId) {
         String resourceKey = contextResourceKey(safePath);
-        contextVersionLedger.recordRead(stepId, resourceKey,
-                contextProjectRoot.resolve(resourceKey), content);
+        Path authoritativePath = contextProjectRoot.resolve(resourceKey);
+        if (content == null) {
+            contextVersionLedger.recordReadFile(stepId, resourceKey, authoritativePath);
+        } else {
+            contextVersionLedger.recordRead(stepId, resourceKey, authoritativePath, content);
+        }
     }
 
     @Override
@@ -1056,10 +1060,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         if (invocationId == null || invocationId.isBlank()) {
             return normalized;
         }
-        String managedText = ToolResultSizeManager.process(
-                name, invocationId, projectPath, normalized.hasImageParts(), normalized.text());
-        return new ToolOutput(normalized.status(), normalized.errorCode(), normalized.retryable(),
-                managedText, normalized.imageParts(), normalized.modifiedResources(), normalized.sideChannels());
+        return ToolResultSizeManager.processOutput(name, invocationId, normalized);
     }
 
     private ToolOutput executeWithAudit(ToolExecutionPipeline.Context context,

@@ -32,6 +32,7 @@ public interface ToolProvider {
 
         /**
          * 记录一次文件读取，供过期写入屏障比对版本。stepId 为空表示单 Agent 路径，不参与屏障。
+         * content 为 null 表示分页读取，只登记磁盘整文件指纹，不把局部页面误作完整基线。
          * 默认空实现，保证既有 ToolContext 实现无需改动。
          */
         default void recordFileRead(Path safePath, String content, String stepId) {

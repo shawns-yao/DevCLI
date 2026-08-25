@@ -22,8 +22,9 @@
 10. `save_memory` - 在用户明确要求“记一下/记住/以后记得”时保存长期记忆
 11. `confirm_memory` - 仅在用户明确选择敏感记忆的保存方式后，使用持久化 confirmation_id 继续或取消；重复提交同一已完成票据只返回既有结果
 12. `list_memory` - 只读列出当前已持久化的长期记忆，适合用户要求查看或核对系统记住了什么
-13. `revert_turn` - 恢复到最近第 N 个 pre-turn 快照，属于高危写入操作
-14. `mcp__{server}__{tool}` - MCP server 动态提供的外部工具，具体参数以工具 schema 为准
+13. `read_tool_result` - 通过 `result_ref` 分页恢复被折叠的完整工具结果
+14. `revert_turn` - 恢复到最近第 N 个 pre-turn 快照，属于高危写入操作
+15. `mcp__{server}__{tool}` - MCP server 动态提供的外部工具，具体参数以工具 schema 为准
 
 ## Tool Policy
 

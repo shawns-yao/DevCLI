@@ -332,8 +332,8 @@ Reviewer 前 Java 硬验证；封装 Maven/javac 命令、扫描、超时、输�
 ### MCP Package
 McpServerManager / McpClient / JsonRpcClient / StdioTransport / StreamableHttpTransport / McpSchemaSanitizer / resources/ / mention/ / notifications/
 
-### TUI Package
-兼容源码仍位于 `tui/`，但生产入口已停用；待兼容周期和现存改动清理后物理删除
+### 旧 TUI 兼容
+旧 `tui/` 实现已经删除；`lanterna`、`tui` 和 `DEVCLI_TUI=true` 仅作为配置兼容值映射到 Inline
 
 ### LLM Clients
 - AnthropicClient：默认 provider，Claude / Anthropic Messages 原生兼容端点
@@ -390,7 +390,6 @@ EMBEDDING_BASE_URL=http://localhost:11434
 # DEVCLI_SNAPSHOT_GC_MAX_SECONDS=30
 # DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS=60
 # DEVCLI_TUI=true
-# NO_TUI=true
 ```
 
 ---

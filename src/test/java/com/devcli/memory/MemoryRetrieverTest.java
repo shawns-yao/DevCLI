@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * 路径 B 重构后：MemoryRetriever 只检索 {@link LongTermMemory}。
- * 短期/工作记忆走 {@link WorkingMemory#renderForPrompt()} 直接注入 system prompt，
+ * 会话记忆走 {@link SessionMemory#renderForPrompt()} 直接注入 system prompt，
  * 不再参与 query-based 检索。
  */
 class MemoryRetrieverTest {

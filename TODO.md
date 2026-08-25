@@ -1,5 +1,18 @@
 # TODO
 
+## 2026-08-24 工具结果分页与可恢复引用
+
+- 状态：第一批已完成
+- 已实现：`read_file` 支持行范围、字符偏移和游标续读，默认采用 4,000 字符保守上限；分页读取不会把局部页面误登记为完整文件版本
+- 已实现：中等和超大工具结果统一保存完整 Artifact，展示层返回 preview、`result_ref`、`next_cursor`、SHA-256 与结构化 `ToolResultArtifact`；新增 `read_tool_result` 精确分页恢复，避免引用再次生成引用
+- 已实现：Artifact 使用 `runId + toolCallId + UUID` 写入 `~/.devcli/runtime/tool-results` 或显式配置目录，采用临时文件原子替换、受控根路径校验和 SHA-256 读取校验；`SessionMemory` 保留结构化引用
+- 日期：`2026-08-24`
+- 影响范围：文件工具、工具结果尺寸治理、ToolRegistry、SessionMemory、上下文版本账本、SubAgent 工具白名单和基础 Prompt
+- 验证：相关限定测试通过；`mvn test -Pquick` 共 1633 项，0 失败、0 错误、4 项按配置跳过；`git diff --check` 通过
+- 未实现：Provider 级严格 Token 总预算、`TOOL_RESULT_BUDGET_EXCEEDED`、Artifact TTL、磁盘配额、敏感信息脱敏和跨平台权限统一
+- 未验证：未启动 CLI，未调用真实 LLM/MCP，未做磁盘耗尽、并行进程和长期清理压力测试
+- 剩余风险：当前分页上限是保守字符预算，不是 Provider 原生 tokenizer；Artifact 在脱敏与生命周期治理完成前仍可能保存敏感工具原文
+
 ## 2026-08-24 状态、证据与恢复可靠性修复
 
 - 状态：已完成

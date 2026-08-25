@@ -8,14 +8,14 @@ import java.time.Instant;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * 测试 WorkingMemory 的 RAG 证据清理功能
+ * 测试 SessionMemory 的 RAG 证据清理功能
  */
-class WorkingMemoryPruneTest {
+class SessionMemoryPruneTest {
 
     @Test
     void pruneInvalidEvidence_shouldRemoveStaleEvidence() {
         // Arrange
-        WorkingMemory memory = new WorkingMemory();
+        SessionMemory memory = new SessionMemory();
 
         // 模拟添加 RAG 证据（通过 recordToolResult 触发）
         String searchResult = """
@@ -53,7 +53,7 @@ class WorkingMemoryPruneTest {
     @Test
     void pruneInvalidEvidence_shouldHandleNullEpoch() {
         // Arrange
-        WorkingMemory memory = new WorkingMemory();
+        SessionMemory memory = new SessionMemory();
 
         String searchResult = """
             1. [class:UserService] (相似度: 0.95) com/example/UserService.java
@@ -87,7 +87,7 @@ class WorkingMemoryPruneTest {
     @Test
     void pruneInvalidEvidence_shouldNotRemoveNewEpochEvidence() {
         // Arrange
-        WorkingMemory memory = new WorkingMemory();
+        SessionMemory memory = new SessionMemory();
 
         // 旧 epoch 证据
         String oldResult = """
@@ -130,7 +130,7 @@ class WorkingMemoryPruneTest {
     @Test
     void pruneInvalidEvidence_shouldHandleNullInput() {
         // Arrange
-        WorkingMemory memory = new WorkingMemory();
+        SessionMemory memory = new SessionMemory();
         String searchResult = """
             1. [class:Test] (相似度: 0.9) test.java
                evidence: symbolVersion=v1, indexEpoch=e1, classpathEpoch=cp1
@@ -150,7 +150,7 @@ class WorkingMemoryPruneTest {
     @Test
     void negativeFactWithOldSymbolVersion_shouldPruneStaleEvidenceImmediately() {
         // Arrange: 先建立一条旧版本证据
-        WorkingMemory memory = new WorkingMemory();
+        SessionMemory memory = new SessionMemory();
         String firstResult = """
             1. [class:UserService] (相似度: 0.95) com/example/UserService.java
                evidence: symbolVersion=sv_old, indexEpoch=epoch-001, classpathEpoch=cp-001
@@ -174,7 +174,7 @@ class WorkingMemoryPruneTest {
     @Test
     void negativeFactWithoutStructuredFields_shouldNotPruneAnything() {
         // Arrange
-        WorkingMemory memory = new WorkingMemory();
+        SessionMemory memory = new SessionMemory();
         String firstResult = """
             1. [class:UserService] (相似度: 0.95) com/example/UserService.java
                evidence: symbolVersion=sv_old, indexEpoch=epoch-001, classpathEpoch=cp-001

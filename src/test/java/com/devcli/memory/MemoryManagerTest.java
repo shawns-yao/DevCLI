@@ -32,7 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * 路径 B 重构后：MemoryManager 三层职责（WorkingMemory / LongTermMemory / 派生视图）。
+ * 路径 B 重构后：MemoryManager 三层职责（SessionMemory / LongTermMemory / 派生视图）。
  * 短期记忆压缩职责整体迁出——真实窗口治理由 {@link ConversationHistoryCompactor} 在
  * {@code Agent.conversationHistory} 上做。
  */

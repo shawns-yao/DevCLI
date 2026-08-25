@@ -9,11 +9,11 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class WorkingMemoryTypedRagEvidenceTest {
+class SessionMemoryTypedRagEvidenceTest {
 
     @Test
     void visibleTextFormatDoesNotAffectTypedEvidence() {
-        WorkingMemory memory = new WorkingMemory();
+        SessionMemory memory = new SessionMemory();
         RagEvidencePayload.Payload payload = new RagEvidencePayload.Payload(
                 List.of(new RagEvidencePayload.Evidence(
                         "src/main/java/com/devcli/agent/Agent.java",
@@ -38,7 +38,7 @@ class WorkingMemoryTypedRagEvidenceTest {
 
     @Test
     void typedNegativeFactPrunesOldSymbolVersion() {
-        WorkingMemory memory = new WorkingMemory();
+        SessionMemory memory = new SessionMemory();
         RagEvidencePayload.Payload oldEvidence = new RagEvidencePayload.Payload(
                 List.of(new RagEvidencePayload.Evidence(
                         "src/main/java/com/devcli/rag/CodeRetriever.java",

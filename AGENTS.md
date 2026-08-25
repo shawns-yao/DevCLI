@@ -39,7 +39,7 @@ cp .env.example .env
 mvn clean package        # 默认跳过测试，优先产出可手工验收 jar
 java -jar target/devcli-1.0-SNAPSHOT.jar
 mvn test -Pquick          # 常规回归
-mvn test -Pphase16-smoke  # TUI 相关
+mvn test -Pphase16-smoke  # 终端交互兼容回归
 mvn test -Dtest=XxxTest -DskipTests=false   # 针对性
 mvn test -DskipTests=false                  # 全量回归
 ```
@@ -139,7 +139,7 @@ Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔�
 
 启动与 inline 渲染当前约定：
 
-- 交互渲染器只保留 Inline 与 Plain。`DEVCLI_RENDERER=lanterna|tui` 和旧 `DEVCLI_TUI=true` 在兼容期映射到 Inline；`Main` 不再调用 `TuiBootstrap`。
+- 交互渲染器只保留 Inline 与 Plain。`DEVCLI_RENDERER=lanterna|tui` 和旧 `DEVCLI_TUI=true` 在兼容期映射到 Inline；旧 `TuiBootstrap` 已删除。
 
 - 开屏 Banner 使用无右边框的简洁布局，避免 CJK/ANSI 字宽导致右侧竖线错位；Phase 22 后默认是 π 主题彩色 logo + Qoder 风格首屏，只展示模型、MCP、Skill、ReAct 状态和三条 getting-started tips，不再把 MCP server 明细刷成启动日志。
 - inline 模式使用 JLine 4 的 LineReader 编辑能力，默认提示符是 `* `，右提示显示 `message / @path / @image`。
@@ -150,7 +150,7 @@ Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔�
 - 交互期输出应优先走 `Renderer.stream()`；`Main`、`PlanExecuteAgent`、`Planner`、`AgentOrchestrator` 都支持把输出流接到 inline renderer，避免直接争抢 stdout。`CodeIndex` 的索引进度通过 `ProgressListener` 注入，`/index` 应绑定到当前 renderer 输出流。
 - Phase 22 开始，`InlineRenderer` 可绑定当前 `LineReader`；当 `LineReader.isReading()` 为 true 时，`Renderer.stream()` 的完整行输出优先通过 `LineReader#printAbove` 显示在输入行上方，未绑定 / 非读取态 / 测试路径回退到原 `PrintStream`。
 - ReAct 正常结束后不再把 `📊 Token: ...` 打进正文区；token/cost/elapsed 会保留在底部强状态行，phase 回到 `idle`。
-- 默认 CLI 启动路径应尽早建立 `Terminal -> LineReader -> Renderer`，启动 Banner、模型加载、MCP 启动、Skill summary、ReAct 提示和退出提示都应走 `Renderer.stream()`；除 fatal bootstrap / runtime API / legacy TUI 降级外，不要在交互主路径新增裸 `System.out.println`。
+- 默认 CLI 启动路径应尽早建立 `Terminal -> LineReader -> Renderer`，启动 Banner、模型加载、MCP 启动、Skill summary、ReAct 提示和退出提示都应走 `Renderer.stream()`；除 fatal bootstrap / runtime API 外，不要在交互主路径新增裸 `System.out.println`。
 - 启动期 MCP 不得阻塞首屏：CLI 默认最多等待 8 秒（`DEVCLI_MCP_STARTUP_WAIT_SECONDS` / `-Ddevcli.mcp.startup.wait.seconds` 可调），超时后保留未完成 server 为 `STARTING` 并后台继续初始化；`/mcp` 查看最新状态。Windows stdio transport 必须按 `PATH` / `PATHEXT` 解析 `.cmd` / `.bat` 包装器，不能把无扩展名的 npm shell 脚本直接交给 ProcessBuilder。
 - `LineReader` 使用 `DevCliHighlighter` 做输入实时高亮：slash 命令、`@` 引用、`@image:`、`@clipboard`、敏感词和明显危险 shell 片段会在编辑阶段被标记；不要把这类视觉提示混入最终提交文本。
 - `LineReader` 使用 `DevCliCompleter` 做上下文补全：`/model` provider、`/mcp` 子命令与 server、`/skill` 子命令与 skill name、`/task` / `/browser` / `/snapshot` 子命令、`@image:` 本地路径、本地 `@path` 和 MCP resource `@server:uri` 引用都应从同一个 completer 出口维护；`/help` 必须由 CLI 直接解析并显示同一份命令清单。
@@ -268,7 +268,7 @@ Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔�
 | 命令解析 | `mvn test -Dtest=CliCommandParserTest,PlanReviewInputParserTest,MainInputNormalizationTest` |
 | DAG/Plan | `mvn test -Dtest=ExecutionPlanTest` |
 | Multi-Agent | `mvn test -Dtest=AgentRoleTest,AgentMessageTest,AgentOrchestratorTest` |
-| TUI/终端 | `mvn test -Pphase16-smoke` |
+| 终端交互 | `mvn test -Pphase16-smoke` |
 | RAG | `mvn test -Dtest=CodeChunkerTest,CodeAnalyzerTest,VectorStoreTest,CodeIndexTest` |
 | 常规回归 | `mvn test -Pquick` |
 
@@ -285,7 +285,7 @@ Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔�
 | RAG | CodeRetriever.java + CodeIndex.java + VectorStore.java |
 | Multi-Agent | AgentOrchestrator.java + MultiAgentBatchExecutor.java + SubAgent.java |
 | MCP | McpServerManager.java + McpClient.java |
-| TUI/渲染 | render/Renderer.java + RendererFactory.java |
+| 终端渲染 | render/Renderer.java + RendererFactory.java |
 
 ## 当前已知边界
 

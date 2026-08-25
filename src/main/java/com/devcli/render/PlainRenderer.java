@@ -25,7 +25,7 @@ import java.util.Map;
 /**
  * Plain 渲染器：纯 println 模式，等价 phase-15 行为，无折叠、无状态栏。
  *
- * <p>同时充当 inline / lanterna 两套实现的回退基线——任何高级特性都退化成普通文本。
+ * <p>作为 inline 交互能力不可用时的纯文本回退基线。
  */
 public final class PlainRenderer implements Renderer {
 

@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -45,6 +46,19 @@ public final class ContextVersionLedger {
         Snapshot snapshot = snapshot(authoritativePath, content);
         ResourceVersion current = currentByResource.computeIfAbsent(resourceKey,
                 ignored -> readVersion(authoritativePath, generation.get(), false));
+        observedByScope.computeIfAbsent(scope, ignored -> new ConcurrentHashMap<>())
+                .put(resourceKey, new Observation(snapshot, current.generation(), false));
+        clearCodeEvidence(scope, resourceKey);
+        Set<String> pending = pendingRefreshByScope.get(scope);
+        if (pending != null) pending.remove(resourceKey);
+    }
+
+    /** 分页读取只登记整文件流式哈希，避免把局部页面误作完整文件基线。 */
+    public void recordReadFile(String scope, String resourceKey, Path authoritativePath) {
+        if (inactive(scope) || invalid(resourceKey)) return;
+        Snapshot snapshot = snapshotFile(authoritativePath);
+        ResourceVersion current = currentByResource.computeIfAbsent(resourceKey,
+                ignored -> version(snapshot, authoritativePath, generation.get(), false));
         observedByScope.computeIfAbsent(scope, ignored -> new ConcurrentHashMap<>())
                 .put(resourceKey, new Observation(snapshot, current.generation(), false));
         clearCodeEvidence(scope, resourceKey);
@@ -288,6 +302,27 @@ public final class ContextVersionLedger {
     private Snapshot snapshot(Path path, String content) {
         ParsedSymbols parsed = parseJavaSymbols(path, content);
         return new Snapshot(fingerprint(content), content, parsed.fingerprints(), parsed.contents());
+    }
+
+    private static Snapshot snapshotFile(Path path) {
+        if (path == null || !Files.isRegularFile(path)) {
+            return new Snapshot("<absent>", null, Map.of(), Map.of());
+        }
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            try (var input = Files.newInputStream(path)) {
+                byte[] buffer = new byte[8_192];
+                int read;
+                while ((read = input.read(buffer)) >= 0) {
+                    if (read > 0) digest.update(buffer, 0, read);
+                }
+            }
+            byte[] hash = digest.digest();
+            String fingerprint = HexFormat.of().formatHex(hash, 0, Math.min(16, hash.length));
+            return new Snapshot(fingerprint, null, Map.of(), Map.of());
+        } catch (IOException | NoSuchAlgorithmException e) {
+            return new Snapshot("<unreadable>", null, Map.of(), Map.of());
+        }
     }
 
     private ParsedSymbols parseJavaSymbols(Path path, String content) {

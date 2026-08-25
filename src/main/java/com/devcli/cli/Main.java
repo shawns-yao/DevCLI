@@ -102,10 +102,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * DevCLI v16.1.0 - Terminal-First Agent IDE
  * 支持 ReAct、Plan、Memory、RAG、HITL、并行工具调用、多模型切换、MCP、CDP 会话复用
  * 第 15 期新增：Skill 系统（三层加载 + load_skill 工具 + SkillContextBuffer 注入）、内置 web-access skill
- * 第 16 期新增：TUI 界面（Lanterna 3）、文件树浏览、代码高亮、对话历史可视化、配置管理面板
- * 第 16.1 期形态修正：抽出 Renderer 接口 + 三个实现（inline/lanterna/plain），默认形态切换为 inline 流式 TUI（Claude Code 风格）
+ * 第 16 期新增终端交互；第 16.1 期收敛为 inline / plain 两种 Renderer 实现
  *   - inline 流式：prompt 下方 inline 状态区、行内可折叠工具块、行内 git diff、单字符 HITL 提示、命令 palette
- *   - lanterna：保留 phase-16 全屏窗口（向后兼容 DEVCLI_TUI=true）
  *   - plain：纯 println 兜底
  * HITL 增强：路径围栏（PathGuard）、命令快速拒绝（CommandGuard）、操作审计链（AuditLog）—— 见 com.devcli.policy
  */
@@ -1824,8 +1822,8 @@ public class Main {
             case 0, 1 -> "💡 默认 Anthropic Messages: /model anthropic；其它: /model openai|glm-5.1|deepseek|step|kimi";
             case 2 -> "💡 切换 HITL: /hitl on / /hitl off";
             case 3 -> "💡 管理 Skill: /skill list / /skill on <name> / /skill off <name>";
-            case 4 -> "💡 切换渲染器（重启后生效）: DEVCLI_RENDERER=inline|lanterna|plain";
-            case 5 -> "💡 当前不在 TUI 内编辑 config.json，建议在编辑器里改完重启";
+            case 4 -> "💡 切换渲染器（重启后生效）: DEVCLI_RENDERER=inline|plain";
+            case 5 -> "💡 当前不在终端内编辑 config.json，建议在编辑器里改完重启";
             default -> "(unknown)";
         };
         renderer.stream().println(hint);

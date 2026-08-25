@@ -1,6 +1,7 @@
 package com.devcli.tool;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -24,6 +25,13 @@ class ToolResultSizeManagerTest {
     @BeforeEach
     void resetBudgetBetweenTests() {
         ToolResultSizeManager.resetTurnBudget();
+        System.setProperty("devcli.tool.results.root",
+                tempDir.resolve("runtime-tool-results").toString());
+    }
+
+    @AfterEach
+    void clearResultRoot() {
+        System.clearProperty("devcli.tool.results.root");
     }
 
     @Test
@@ -46,6 +54,9 @@ class ToolResultSizeManagerTest {
         assertTrue(out.contains("已截断"), "应有截断提示");
         assertTrue(out.contains("15000 字符"), "提示应说明丢了多少字符");
         assertTrue(out.contains("共 20000 字符"), "提示应说明总字符数");
+        assertTrue(out.contains("result_ref"), "中等结果必须提供可恢复引用");
+        assertTrue(out.contains("next_cursor"), "中等结果必须提供继续读取游标");
+        assertTrue(hasStoredTextArtifact(), "中等结果完整原文必须落到运行时结果目录");
     }
 
     @Test
@@ -58,24 +69,21 @@ class ToolResultSizeManagerTest {
         // 预览部分
         assertTrue(out.startsWith("z".repeat(1_500)), "预览应为前 1500 字符");
         assertTrue(out.contains("[工具输出过大已落盘 80000 字符"), "应有落盘提示");
-        assertTrue(out.contains("read_file"), "应提示用 read_file 读取完整内容");
+        assertTrue(out.contains("read_tool_result"), "应提示用专用工具读取完整内容");
 
         // 验证文件真的写到磁盘
-        Path outDir = tempDir.resolve(ToolResultSizeManager.OUTPUTS_DIR)
-                .resolve(ToolResultSizeManager.currentSessionId());
-        assertTrue(Files.isDirectory(outDir), "落盘目录应存在");
-        Path file = outDir.resolve("call_huge_42.txt");
-        assertTrue(Files.isRegularFile(file), "落盘文件应存在");
+        Path file = firstStoredTextArtifact();
         assertEquals(large, Files.readString(file), "落盘内容应为完整原文");
     }
 
     @Test
-    void readFileToolBypassesSizeManagement() {
-        // read_file 在白名单里：再大也不应被截断（避免 read→file→read 死循环）
+    void readFileToolUsesRecoverableSizeManagement() {
         String huge = "a".repeat(100_000);
         String out = ToolResultSizeManager.process(
                 "read_file", "call_3", tempDir.toString(), false, huge);
-        assertEquals(huge, out, "read_file 结果不应被治理");
+        assertNotEquals(huge, out, "read_file 不得绕过尺寸治理");
+        assertTrue(out.contains("result_ref"), out);
+        assertTrue(out.contains("read_tool_result"), out);
     }
 
     @Test
@@ -152,12 +160,7 @@ class ToolResultSizeManagerTest {
         ToolResultSizeManager.process(
                 "execute_command", unsafeId, tempDir.toString(), false, big);
 
-        Path outDir = tempDir.resolve(ToolResultSizeManager.OUTPUTS_DIR)
-                .resolve(ToolResultSizeManager.currentSessionId());
-        // 不应在 outDir 之外创建目录
-        assertTrue(Files.list(outDir)
-                .anyMatch(p -> p.getFileName().toString().endsWith(".txt")),
-                "落盘文件应在合法目录下");
+        assertTrue(hasStoredTextArtifact(), "落盘文件应在受控运行时目录下");
     }
 
     @Test
@@ -165,6 +168,7 @@ class ToolResultSizeManagerTest {
         // 落盘失败必须降级为截断文本，绝不把成功结果变成错误（参考 dsh spill-policy 语义）
         Path occupied = tempDir.resolve("occupied.txt");
         Files.writeString(occupied, "occupied");
+        System.setProperty("devcli.tool.results.root", occupied.toString());
         String large = "h".repeat(60_000);
         String out = ToolResultSizeManager.process(
                 "execute_command", "call_fail_persist", occupied.toString(), false, large);
@@ -192,12 +196,12 @@ class ToolResultSizeManagerTest {
 
     @Test
     void truncationProducesGreppableHint() {
-        // 截断提示应建议 LLM 用 search_code/grep 进一步过滤
+        // 截断提示应提供精确恢复工具，而不是要求重新执行原工具
         String medium = "g".repeat(15_000);
         String out = ToolResultSizeManager.process(
                 "execute_command", "call_11", tempDir.toString(), false, medium);
-        assertTrue(out.contains("search_code") || out.contains("grep"),
-                "截断提示应教 LLM 怎么避免再次撞阈值");
+        assertTrue(out.contains("read_tool_result"),
+                "截断提示应提供精确恢复路径");
     }
 
     @Test
@@ -216,5 +220,24 @@ class ToolResultSizeManagerTest {
         String out = task.get(5, TimeUnit.SECONDS);
         assertTrue(out.startsWith("p".repeat(2_500)), "并行工具线程应继承同轮聚合预算");
         assertTrue(out.contains("已截断 17500 字符"), "聚合超限后应降低单项截断长度");
+    }
+
+    private boolean hasStoredTextArtifact() {
+        try {
+            return Files.walk(tempDir.resolve("runtime-tool-results"))
+                    .anyMatch(path -> Files.isRegularFile(path)
+                            && path.getFileName().toString().endsWith(".txt"));
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private Path firstStoredTextArtifact() throws IOException {
+        try (var paths = Files.walk(tempDir.resolve("runtime-tool-results"))) {
+            return paths.filter(path -> Files.isRegularFile(path)
+                            && path.getFileName().toString().endsWith(".txt"))
+                    .findFirst()
+                    .orElseThrow();
+        }
     }
 }

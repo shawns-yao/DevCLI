@@ -2,6 +2,7 @@ package com.devcli.memory;
 
 import com.devcli.rag.RagEvidencePayload;
 import com.devcli.rag.RagEvidenceSideChannel;
+import com.devcli.tool.ToolResultArtifact;
 import com.devcli.tool.ToolSideChannel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -174,7 +175,7 @@ public class SessionMemory {
     public synchronized SessionSnapshot snapshot() {
         List<EvidenceSnapshot> evidence = recentToolResults.stream()
                 .map(item -> new EvidenceSnapshot(item.toolName, item.kind, item.importance,
-                        item.reference, item.agentId, item.stepId, item.occurrences))
+                        item.reference, item.agentId, item.stepId, item.occurrences, item.artifact))
                 .toList();
         return new SessionSnapshot(Map.copyOf(taskState), List.copyOf(evidence),
                 List.copyOf(modifiedFiles), List.copyOf(attemptDigests.values()),
@@ -225,8 +226,12 @@ public class SessionMemory {
         int importance = baselineImportance(kind, toolName, result);
         String reference = evidenceReference(toolName, safeArgs, result);
         String normalizedResult = normalizeEvidenceResult(kind, toolName, safeArgs, result, reference);
+        ToolResultArtifact artifact = sideChannels == null ? null : sideChannels.stream()
+                .filter(ToolResultArtifact.class::isInstance)
+                .map(ToolResultArtifact.class::cast)
+                .findFirst().orElse(null);
         ToolEvidence incoming = new ToolEvidence(toolName, safeArgs, normalizedResult, Instant.now(),
-                agentId, stepId, kind, importance, reference, 1, sequence);
+                agentId, stepId, kind, importance, reference, 1, sequence, artifact);
         mergeOrAppend(incoming);
         if (kind == EvidenceKind.FAILURE) {
             attemptDigests.put(reference, new AttemptDigestSnapshot(
@@ -261,7 +266,8 @@ public class SessionMemory {
             recentToolResults.set(i, new ToolEvidence(incoming.toolName, incoming.argsJson,
                     mergedResult, incoming.capturedAt, incoming.agentId, incoming.stepId, mergedKind,
                     Math.max(existing.importance, baselineImportance(mergedKind, incoming.toolName, mergedResult)),
-                    incoming.reference, occurrences, incoming.sequence));
+                    incoming.reference, occurrences, incoming.sequence,
+                    incoming.artifact == null ? existing.artifact : incoming.artifact));
             return;
         }
         recentToolResults.addLast(incoming);
@@ -1080,10 +1086,12 @@ public class SessionMemory {
         public final String reference;
         public final int occurrences;
         public final long sequence;
+        public final ToolResultArtifact artifact;
 
         ToolEvidence(String toolName, String argsJson, String result, Instant capturedAt,
                      String agentId, String stepId, EvidenceKind kind, int importance,
-                     String reference, int occurrences, long sequence) {
+                     String reference, int occurrences, long sequence,
+                     ToolResultArtifact artifact) {
             this.toolName = toolName;
             this.argsJson = argsJson;
             this.result = result;
@@ -1096,11 +1104,12 @@ public class SessionMemory {
             this.reference = reference == null ? "" : reference;
             this.occurrences = Math.max(1, occurrences);
             this.sequence = sequence;
+            this.artifact = artifact;
         }
 
         ToolEvidence withResult(String compactedResult) {
             return new ToolEvidence(toolName, argsJson, compactedResult, capturedAt, agentId, stepId,
-                    kind, importance, reference, occurrences, sequence);
+                    kind, importance, reference, occurrences, sequence, artifact);
         }
     }
 
@@ -1169,7 +1178,8 @@ public class SessionMemory {
     }
 
     public record EvidenceSnapshot(String toolName, EvidenceKind kind, int importance,
-                                   String reference, String agentId, String stepId, int occurrences) {}
+                                   String reference, String agentId, String stepId, int occurrences,
+                                   ToolResultArtifact artifact) {}
 
     public record KeyEventSnapshot(String description, int importance, String agentId,
                                    String stepId, long sequence) {}

@@ -410,10 +410,10 @@
 - 安装包分发
 
 **第 16.1 期形态修正（v16.1.0）**：
-- 抽出 `Renderer` 接口 + 三个实现：inline 流式（默认）/ lanterna 全屏（保留）/ plain 兜底
+- 抽出 `Renderer` 接口；当前保留 inline 流式（默认）与 plain 兜底两种实现
 - 默认形态切换为 **inline 流式 TUI**（Claude Code 风格），主屏直出 + 底部 DECSTBM 状态栏 + 行内可折叠工具块（`ctrl+o`）+ 行内 diff
 - HITL 改为单字符 `[y/n/a/s/m]` 提示；`/config` 改为浮起 palette
-- 切换：`DEVCLI_RENDERER=inline|lanterna|plain`，旧 `DEVCLI_TUI=true` 兼容映射到 lanterna
+- 切换：`DEVCLI_RENDERER=inline|plain`；旧 `lanterna`、`tui` 和 `DEVCLI_TUI=true` 兼容映射到 inline
 
 **核心知识点**：
 - TUI开发
@@ -652,4 +652,4 @@ Git       Prompt    异步后台    图片
 
 ---
 
-*已完成第 16 期 TUI 产品化（含 16.1 形态修正：默认切换为 inline 流式 TUI，Lanterna 全屏 TUI 通过 `DEVCLI_RENDERER=lanterna` 保留）、第 17 期 LSP 诊断注入 MVP、第 18 期 Git Side-History 快照与回滚 MVP、第 19 期 Prompt 分层架构 MVP、第 20 期后台任务 + Runtime API MVP、第 21 期图片复制粘贴输入 MVP。*
+*已完成第 16 期 TUI 产品化（含 16.1 形态修正：默认切换为 inline 流式终端；旧 Lanterna 实现已删除，配置值兼容映射到 inline）、第 17 期 LSP 诊断注入 MVP、第 18 期 Git Side-History 快照与回滚 MVP、第 19 期 Prompt 分层架构 MVP、第 20 期后台任务 + Runtime API MVP、第 21 期图片复制粘贴输入 MVP。*

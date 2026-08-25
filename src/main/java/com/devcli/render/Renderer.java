@@ -13,14 +13,13 @@ import java.util.List;
  * 终端渲染器抽象。
  *
  * <p>把对话流核心交互（流式输出、工具调用、HITL、状态栏、行内 diff、palette）
- * 收口到一个接口，方便 inline 流式 / Lanterna 全屏 / plain 三种形态切换。
+ * 收口到一个接口，支持 inline 流式与 plain 两种形态。
  *
  * <p>启动期一次性输出（banner、MCP/Skill 摘要等）仍可走原有 stdout；
  * 对话期的流、工具块、状态栏、输入区应尽量经过 Renderer，避免多个组件
  * 直接争抢终端光标。
  *
- * <p>线程模型：所有方法应在调用方线程同步返回；
- * 涉及异步（如 Lanterna GUI 线程）的实现负责自己做线程封送。
+ * <p>线程模型：所有方法应在调用方线程同步返回。
  */
 public interface Renderer extends AutoCloseable {
 
@@ -79,17 +78,14 @@ public interface Renderer extends AutoCloseable {
      * <p>Agent.StreamRenderer / PlanExecuteAgent.TaskStreamRenderer / SubAgent.SubAgentStreamRenderer
      * 把流式 reasoning / content 写到这里。
      *
-     * <p>对 InlineRenderer / PlainRenderer 而言这就是 {@code System.out}；
-     * LanternaRenderer 返回一个把字节写入 CenterPane 的 PrintStream。
+     * <p>对 InlineRenderer / PlainRenderer 而言这就是 {@code System.out}。
      */
     PrintStream stream();
 
     /**
      * 渲染一组工具调用的标签和关键参数。
      *
-     * <p>InlineRenderer 把每条调用包装成可折叠块（Day 3）；
-     * LanternaRenderer 写入 CenterPane.appendToolCall；
-     * PlainRenderer 直接 println 当前 Agent 内已有的标签格式。
+     * <p>InlineRenderer 把每条调用包装成可折叠块；PlainRenderer 直接输出文本标签。
      */
     void appendToolCalls(List<LlmClient.ToolCall> toolCalls);
 
@@ -115,14 +111,13 @@ public interface Renderer extends AutoCloseable {
      */
     void appendDiff(String filePath, String before, String after);
 
-    /** 更新底部状态栏 / StatusPane。允许频繁调用，渲染器内部自行节流。 */
+    /** 更新底部状态栏。允许频繁调用，渲染器内部自行节流。 */
     void updateStatus(StatusInfo status);
 
     /**
      * 同步阻塞地展示 HITL 审批请求并收集决策。
      *
-     * <p>实现需要保证在 GUI 线程之外调用时不死锁；如果实现是 Lanterna，
-     * 内部用 CountDownLatch 把 GUI 线程结果回写主线程。
+     * <p>实现必须复用当前终端输入入口，避免多个读取器竞争标准输入。
      */
     ApprovalResult promptApproval(ApprovalRequest request);
 

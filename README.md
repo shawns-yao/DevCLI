@@ -104,7 +104,7 @@ Main
 ├── MemoryManager          # SessionMemory + LongTermMemory
 ├── SnapshotService        # turn 前后快照
 ├── PromptAssembler        # 分层 prompt 组装
-├── Renderer               # inline / plain / lanterna
+├── Renderer               # inline / plain
 └── McpServerManager       # MCP server 生命周期
 ```
 
@@ -357,8 +357,8 @@ DEVCLI_RENDERER=inline
 可选值：
 
 - `inline`：默认，底部状态栏、行内工具块、行内 diff。
-- `lanterna`：三栏全屏 TUI。
 - `plain`：纯文本输出。
+- 旧 `lanterna`、`tui` 和 `DEVCLI_TUI=true`：兼容映射到 `inline`。
 
 如果终端不支持底部状态栏：
 

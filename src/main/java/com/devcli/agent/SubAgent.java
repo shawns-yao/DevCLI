@@ -862,6 +862,7 @@ public class SubAgent {
         }
         return tools.stream()
                 .filter(tool -> tool.name().equals("read_file")
+                        || tool.name().equals("read_tool_result")
                         || tool.name().equals("list_dir")
                         || tool.name().equals("grep_code")
                         || tool.name().equals("execute_command"))
