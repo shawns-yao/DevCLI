@@ -16,6 +16,7 @@ import java.util.function.Function;
 public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnStarted,
         RunEvent.ReasoningDelta, RunEvent.MessageDelta, RunEvent.ModelContext,
         RunEvent.ModelMessage, RunEvent.ModelUsage, RunEvent.ExecutionStateChanged,
+        RunEvent.FailureGuidance,
         RunEvent.QueueUpdated, RunEvent.ToolCalls,
         RunEvent.SessionStateChanged, RunEvent.CustomMessage,
         RunEvent.ContextRefresh,
@@ -173,6 +174,29 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
         @Override
         public String type() {
             return "execution.state";
+        }
+    }
+
+    record FailureAction(String type, String label, String instruction) {
+        public FailureAction {
+            type = text(type);
+            label = text(label);
+            instruction = text(instruction);
+        }
+    }
+
+    record FailureGuidance(String category, String reason, String suggestion,
+                           List<FailureAction> actions) implements RunEvent {
+        public FailureGuidance {
+            category = text(category);
+            reason = text(reason);
+            suggestion = text(suggestion);
+            actions = actions == null ? List.of() : List.copyOf(actions);
+        }
+
+        @Override
+        public String type() {
+            return "failure.guidance";
         }
     }
 

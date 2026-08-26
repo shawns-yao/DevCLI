@@ -159,6 +159,25 @@ class SubAgentTest {
     }
 
     @Test
+    void forkContextCapturesContextEpochAndIncludesItInFingerprint(@TempDir Path project)
+            throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(project.toString());
+        SubAgent worker = new SubAgent("worker", AgentRole.WORKER,
+                new GLMClient("test-key"), registry);
+        SubAgent.ForkContext before = worker.createForkContext();
+        Path target = project.resolve("State.java");
+        Files.writeString(target, "class State {}\n");
+        registry.contextVersionLedger().publishWrite(
+                "external", "State.java", target, Files.readString(target));
+
+        SubAgent.ForkContext after = worker.createForkContext();
+
+        assertTrue(after.contextEpoch() > before.contextEpoch());
+        assertNotEquals(before.fingerprint(), after.fingerprint());
+    }
+
+    @Test
     void shouldRouteLateReasoningToSupplementalSection() {
         // 模拟服务器先下发 content、再追加 reasoning 的情况
         ScriptedStreamClient llm = new ScriptedStreamClient(listener -> {

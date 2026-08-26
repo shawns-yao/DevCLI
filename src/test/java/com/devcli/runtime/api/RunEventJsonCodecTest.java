@@ -118,4 +118,21 @@ class RunEventJsonCodecTest {
         assertEquals("TERMINAL", encodedPresentation.path("kind").asText());
         assertEquals("stdout", encodedPresentation.path("metadata").path("stream").asText());
     }
+
+    @Test
+    void encodesStructuredFailureGuidance() throws Exception {
+        RunEvent.FailureGuidance event = new RunEvent.FailureGuidance(
+                "BUDGET_EXHAUSTED", "Token 预算已用尽", "缩小任务范围后重试",
+                List.of(
+                        new RunEvent.FailureAction("RETRY", "重试", "补充优先级后重新提交"),
+                        new RunEvent.FailureAction("ROLLBACK", "回滚", "使用 /restore <N>")));
+
+        JsonNode payload = MAPPER.readTree(RunEventJsonCodec.encode(event, "turn_1"));
+
+        assertEquals("failure.guidance", event.type());
+        assertEquals("BUDGET_EXHAUSTED", payload.path("category").asText());
+        assertEquals("Token 预算已用尽", payload.path("reason").asText());
+        assertEquals("重试", payload.path("actions").get(0).path("label").asText());
+        assertEquals("使用 /restore <N>", payload.path("actions").get(1).path("instruction").asText());
+    }
 }

@@ -473,7 +473,12 @@ class AgentOrchestratorTest {
         assertTrue(escalation.contains("Reviewer 重试 2/2"), escalation);
         assertTrue(escalation.contains("原位重做 1/1"), escalation);
         assertTrue(escalation.contains("orch-pay"), escalation);
-        assertTrue(escalation.contains("重新规划"), escalation);
+        assertTrue(escalation.contains("失败分类：校验错误"), escalation);
+        assertTrue(escalation.contains("操作建议："), escalation);
+        assertTrue(escalation.contains("/plan resume orch-pay"), escalation);
+        assertTrue(escalation.contains("人工接手："), escalation);
+        assertTrue(escalation.contains("接受部分结果："), escalation);
+        assertTrue(escalation.contains("回滚："), escalation);
     }
 
     @Test
@@ -878,6 +883,40 @@ class AgentOrchestratorTest {
         assertEquals("step_4", finalStep.id());
         assertEquals(List.of("step_2", "step_3"), finalStep.dependencies());
         assertTrue(finalStep.description().contains("最终集成验收"));
+    }
+
+    @Test
+    void dependencyContextUsesOrchestratorSummaryInsteadOfWorkerSelfReport() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        AgentOrchestrator.ExecutionStep dependency = AgentOrchestrator.ExecutionStep
+                .pending("step_1", "实现支付状态机", "FILE_WRITE", List.of())
+                .withResult("我已经全部做好了", "summary_source=ORCHESTRATOR; review=APPROVED; tools=write_file");
+        AgentOrchestrator.ExecutionStep current = AgentOrchestrator.ExecutionStep
+                .pending("step_2", "接入支付接口", "FILE_WRITE", List.of("step_1"));
+
+        String context = orchestrator.buildStepContext(List.of(dependency, current), current);
+
+        assertTrue(context.contains("summary_source=ORCHESTRATOR"), context);
+        assertFalse(context.contains("我已经全部做好了"), context);
+        assertEquals("我已经全部做好了", dependency.artifact().output());
+    }
+
+    @Test
+    void trustedSummaryIsDerivedFromReviewerAndStructuredToolEvidence() {
+        AgentOrchestrator.ExecutionStep step = AgentOrchestrator.ExecutionStep
+                .pending("step_1", "写入订单服务", "FILE_WRITE", List.of());
+        SubAgent.ExecutionEvidence evidence = new SubAgent.ExecutionEvidence(List.of(
+                new SubAgent.ToolEvidence("write_file", com.devcli.tool.ToolStatus.SUCCESS,
+                        "已写入 src/OrderService.java")));
+
+        String summary = AgentOrchestrator.buildTrustedStepSummary(
+                step, evidence, new AgentOrchestrator.ReviewDecision(true, "", false, true));
+
+        assertTrue(summary.contains("summary_source=ORCHESTRATOR"), summary);
+        assertTrue(summary.contains("review=APPROVED"), summary);
+        assertTrue(summary.contains("hard_check=PASSED"), summary);
+        assertTrue(summary.contains("write_file"), summary);
+        assertTrue(summary.contains("OrderService.java"), summary);
     }
 
     @Test

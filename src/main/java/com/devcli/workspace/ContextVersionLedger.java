@@ -125,7 +125,17 @@ public final class ContextVersionLedger {
 
     public void markDirty(String resourceKey) {
         if (invalid(resourceKey)) return;
-        currentByResource.computeIfPresent(resourceKey, (key, value) -> value.withDirty(true));
+        currentByResource.computeIfPresent(resourceKey, (key, value) -> {
+            if (!value.dirty()) {
+                generation.incrementAndGet();
+            }
+            return value.withDirty(true);
+        });
+    }
+
+    /** 当前项目上下文的单调逻辑版本；只用于新鲜度判定，不使用墙钟时间。 */
+    public long currentGeneration() {
+        return generation.get();
     }
 
     /** 写闸门只做哈希、generation 和 AST 比较，不引入模型判断。 */

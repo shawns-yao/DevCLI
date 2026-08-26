@@ -49,6 +49,17 @@ public final class RunEventJsonCodec {
             payload.put("iteration", state.iteration());
             payload.put("state", state.state().name());
             payload.put("reason", state.reason());
+        } else if (event instanceof RunEvent.FailureGuidance guidance) {
+            payload.put("category", guidance.category());
+            payload.put("reason", guidance.reason());
+            payload.put("suggestion", guidance.suggestion());
+            ArrayNode actions = payload.putArray("actions");
+            for (RunEvent.FailureAction action : guidance.actions()) {
+                ObjectNode item = actions.addObject();
+                item.put("type", action.type());
+                item.put("label", action.label());
+                item.put("instruction", action.instruction());
+            }
         } else if (event instanceof RunEvent.ContextRefresh refresh) {
             payload.put("scope", refresh.scope());
             payload.put("state", refresh.state().name());

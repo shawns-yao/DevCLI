@@ -83,6 +83,7 @@ public class SessionMemory {
     private final LinkedHashSet<String> modifiedFiles = new LinkedHashSet<>();
     private final LinkedHashMap<String, AttemptDigestSnapshot> attemptDigests = new LinkedHashMap<>();
     private final LinkedHashMap<String, Long> stepSequences = new LinkedHashMap<>();
+    private final LinkedHashMap<String, EvidenceOrigin> activeEvidenceOrigins = new LinkedHashMap<>();
     private String taskId = "";
     private boolean taskEnded;
     private long planSequence = Long.MIN_VALUE;
@@ -121,9 +122,18 @@ public class SessionMemory {
         localSequence = Math.max(localSequence, sequence);
         if (event instanceof StateChanged changed) {
             applyStateChange(changed.key(), changed.value(), sequence);
+        } else if (event instanceof EvidenceScopeStarted started) {
+            String key = evidenceOriginKey(started.agentId(), started.stepId());
+            EvidenceOrigin previous = activeEvidenceOrigins.get(key);
+            if (previous == null || started.originSequence() >= previous.originSequence()) {
+                activeEvidenceOrigins.put(key, new EvidenceOrigin(
+                        started.originSequence(), started.contextEpoch()));
+            }
         } else if (event instanceof ToolResultObserved observed) {
+            if (!acceptEvidenceOrigin(observed)) return;
             recordToolResultInternal(observed.toolName(), observed.argsJson(), observed.result(),
-                    observed.sideChannels(), observed.agentId(), observed.stepId(), sequence);
+                    observed.sideChannels(), observed.agentId(), observed.stepId(),
+                    observed.originSequence(), observed.contextEpoch(), sequence);
         } else if (event instanceof KeyEvent keyEvent) {
             int importance = keyEvent.importance() > 0
                     ? keyEvent.importance() : inferEventImportance(keyEvent.description());
@@ -145,6 +155,25 @@ public class SessionMemory {
                 case PENDING, SKIPPED -> taskLedger.transitionStep(step.stepId(), step.status(), step.detail());
             }
         }
+    }
+
+    private boolean acceptEvidenceOrigin(ToolResultObserved observed) {
+        if (observed.originSequence() <= 0) return true;
+        String key = evidenceOriginKey(observed.agentId(), observed.stepId());
+        EvidenceOrigin active = activeEvidenceOrigins.get(key);
+        if (active == null) {
+            activeEvidenceOrigins.put(key, new EvidenceOrigin(
+                    observed.originSequence(), observed.contextEpoch()));
+            return true;
+        }
+        return observed.originSequence() == active.originSequence()
+                && (observed.contextEpoch() == 0
+                || active.contextEpoch() == 0
+                || observed.contextEpoch() == active.contextEpoch());
+    }
+
+    private static String evidenceOriginKey(String agentId, String stepId) {
+        return (agentId == null ? "" : agentId) + '\u0000' + (stepId == null ? "" : stepId);
     }
 
     /** 开始一个明确任务。切换 taskId 时清理上一个任务的运行投影。 */
@@ -175,7 +204,8 @@ public class SessionMemory {
     public synchronized SessionSnapshot snapshot() {
         List<EvidenceSnapshot> evidence = recentToolResults.stream()
                 .map(item -> new EvidenceSnapshot(item.toolName, item.kind, item.importance,
-                        item.reference, item.agentId, item.stepId, item.occurrences, item.artifact))
+                        item.reference, item.agentId, item.stepId, item.occurrences,
+                        item.originSequence, item.contextEpoch, item.artifact))
                 .toList();
         return new SessionSnapshot(Map.copyOf(taskState), List.copyOf(evidence),
                 List.copyOf(modifiedFiles), List.copyOf(attemptDigests.values()),
@@ -219,7 +249,7 @@ public class SessionMemory {
 
     private void recordToolResultInternal(String toolName, String argsJson, String result,
                                           List<ToolSideChannel> sideChannels, String agentId, String stepId,
-                                          long sequence) {
+                                          long originSequence, long contextEpoch, long sequence) {
         if (toolName == null || result == null) return;
         String safeArgs = argsJson == null ? "" : argsJson;
         EvidenceKind kind = classifyEvidence(toolName, result);
@@ -231,7 +261,8 @@ public class SessionMemory {
                 .map(ToolResultArtifact.class::cast)
                 .findFirst().orElse(null);
         ToolEvidence incoming = new ToolEvidence(toolName, safeArgs, normalizedResult, Instant.now(),
-                agentId, stepId, kind, importance, reference, 1, sequence, artifact);
+                agentId, stepId, kind, importance, reference, 1, sequence, artifact,
+                originSequence, contextEpoch);
         mergeOrAppend(incoming);
         if (kind == EvidenceKind.FAILURE) {
             attemptDigests.put(reference, new AttemptDigestSnapshot(
@@ -253,6 +284,7 @@ public class SessionMemory {
             ToolEvidence existing = recentToolResults.get(i);
             if (!existing.agentId.equals(incoming.agentId)
                     || !existing.stepId.equals(incoming.stepId)
+                    || existing.originSequence != incoming.originSequence
                     || !existing.toolName.equals(incoming.toolName)
                     || !existing.argsJson.equals(incoming.argsJson)) {
                 continue;
@@ -267,7 +299,8 @@ public class SessionMemory {
                     mergedResult, incoming.capturedAt, incoming.agentId, incoming.stepId, mergedKind,
                     Math.max(existing.importance, baselineImportance(mergedKind, incoming.toolName, mergedResult)),
                     incoming.reference, occurrences, incoming.sequence,
-                    incoming.artifact == null ? existing.artifact : incoming.artifact));
+                    incoming.artifact == null ? existing.artifact : incoming.artifact,
+                    incoming.originSequence, incoming.contextEpoch));
             return;
         }
         recentToolResults.addLast(incoming);
@@ -599,6 +632,12 @@ public class SessionMemory {
             StringBuilder rendered = new StringBuilder("- **").append(item.toolName).append("**")
                     .append(" [").append(item.kind).append('/').append(item.importance).append("]");
             appendOrigin(rendered, item.agentId, item.stepId);
+            if (item.originSequence > 0) {
+                rendered.append(" [origin=").append(item.originSequence).append(']');
+            }
+            if (item.contextEpoch > 0) {
+                rendered.append(" [context_epoch=").append(item.contextEpoch).append(']');
+            }
             if (!item.argsJson.isBlank()) {
                 rendered.append(" args: `").append(truncate(item.argsJson, 120)).append('`');
             }
@@ -889,6 +928,7 @@ public class SessionMemory {
         taskState.clear();
         stateSequences.clear();
         stepSequences.clear();
+        activeEvidenceOrigins.clear();
         modifiedFiles.clear();
         attemptDigests.clear();
         localSequence = 0;
@@ -1087,11 +1127,21 @@ public class SessionMemory {
         public final int occurrences;
         public final long sequence;
         public final ToolResultArtifact artifact;
+        public final long originSequence;
+        public final long contextEpoch;
 
         ToolEvidence(String toolName, String argsJson, String result, Instant capturedAt,
                      String agentId, String stepId, EvidenceKind kind, int importance,
                      String reference, int occurrences, long sequence,
                      ToolResultArtifact artifact) {
+            this(toolName, argsJson, result, capturedAt, agentId, stepId, kind, importance,
+                    reference, occurrences, sequence, artifact, 0, 0);
+        }
+
+        ToolEvidence(String toolName, String argsJson, String result, Instant capturedAt,
+                     String agentId, String stepId, EvidenceKind kind, int importance,
+                     String reference, int occurrences, long sequence,
+                     ToolResultArtifact artifact, long originSequence, long contextEpoch) {
             this.toolName = toolName;
             this.argsJson = argsJson;
             this.result = result;
@@ -1105,11 +1155,14 @@ public class SessionMemory {
             this.occurrences = Math.max(1, occurrences);
             this.sequence = sequence;
             this.artifact = artifact;
+            this.originSequence = Math.max(0, originSequence);
+            this.contextEpoch = Math.max(0, contextEpoch);
         }
 
         ToolEvidence withResult(String compactedResult) {
             return new ToolEvidence(toolName, argsJson, compactedResult, capturedAt, agentId, stepId,
-                    kind, importance, reference, occurrences, sequence, artifact);
+                    kind, importance, reference, occurrences, sequence, artifact,
+                    originSequence, contextEpoch);
         }
     }
 
@@ -1142,6 +1195,7 @@ public class SessionMemory {
     }
 
     public sealed interface SessionEvent permits StateChanged, ToolResultObserved, KeyEvent,
+            EvidenceScopeStarted,
             PlanChanged, StepChanged {
         String agentId();
         String stepId();
@@ -1153,9 +1207,28 @@ public class SessionMemory {
 
     public record ToolResultObserved(String toolName, String argsJson, String result,
                                      List<ToolSideChannel> sideChannels, String agentId,
-                                     String stepId, long sequence) implements SessionEvent {
+                                     String stepId, long originSequence, long contextEpoch,
+                                     long sequence) implements SessionEvent {
         public ToolResultObserved {
             sideChannels = sideChannels == null ? List.of() : List.copyOf(sideChannels);
+            originSequence = Math.max(0, originSequence);
+            contextEpoch = Math.max(0, contextEpoch);
+        }
+
+        public ToolResultObserved(String toolName, String argsJson, String result,
+                                  List<ToolSideChannel> sideChannels, String agentId,
+                                  String stepId, long sequence) {
+            this(toolName, argsJson, result, sideChannels, agentId, stepId, 0, 0, sequence);
+        }
+    }
+
+    public record EvidenceScopeStarted(String agentId, String stepId, long originSequence,
+                                       long contextEpoch, long sequence) implements SessionEvent {
+        public EvidenceScopeStarted {
+            agentId = agentId == null ? "" : agentId;
+            stepId = stepId == null ? "" : stepId;
+            originSequence = Math.max(0, originSequence);
+            contextEpoch = Math.max(0, contextEpoch);
         }
     }
 
@@ -1179,7 +1252,18 @@ public class SessionMemory {
 
     public record EvidenceSnapshot(String toolName, EvidenceKind kind, int importance,
                                    String reference, String agentId, String stepId, int occurrences,
-                                   ToolResultArtifact artifact) {}
+                                   long originSequence, long contextEpoch,
+                                   ToolResultArtifact artifact) {
+        public EvidenceSnapshot(String toolName, EvidenceKind kind, int importance,
+                                String reference, String agentId, String stepId, int occurrences,
+                                ToolResultArtifact artifact) {
+            this(toolName, kind, importance, reference, agentId, stepId, occurrences,
+                    0, 0, artifact);
+        }
+    }
+
+    private record EvidenceOrigin(long originSequence, long contextEpoch) {
+    }
 
     public record KeyEventSnapshot(String description, int importance, String agentId,
                                    String stepId, long sequence) {}

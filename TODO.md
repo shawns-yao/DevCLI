@@ -1,5 +1,28 @@
 # TODO
 
+## 2026-08-26 上下文证据来源与新鲜度
+
+- 状态：已完成
+- 已实现：依赖摘要由 Orchestrator 根据结构化成功工具证据和 Reviewer / Pre-Review 结论生成，Worker 原始输出与可信摘要分离；依赖步骤和 Final integration 只注入可信摘要
+- 已实现：`ForkContext` 固化 `context_epoch` 并纳入 fingerprint；Planner 状态暴露当前 epoch；工具证据携带 agent、step、单调 origin sequence 与 epoch，同一 agent/step 的旧 attempt 迟到证据按逻辑序拒绝
+- 已实现：只读步骤在全局 epoch 过期时以 `STALE_CONTEXT` 拒收，隔离写步骤保留 PatchSet 资源级版本闸门；固定 Final integration 继续负责补丁合并后的硬检查和全部验收点复核
+- 日期：`2026-08-26`
+- 影响范围：Multi-Agent 依赖上下文、Fork 快照、SessionMemory 证据日志、上下文版本账本、编排测试和项目行为说明
+- 验证：可信摘要、Fork epoch、迟到证据拒绝、generation 单调推进及相关编排、记忆、工作区、checkpoint 限定回归通过；`mvn -q -Pquick -DskipTests=false test` 共 1619 项，0 失败、0 错误
+- 未验证：未启动 CLI，未调用真实 LLM、MCP 或 Docker，未执行跨进程并发和长期 WatchService 压力测试
+- 剩余风险：全局 epoch 对只读步骤采用保守失效策略，高并发写入时可能增加只读步骤重试；非 Java 的 `file#N` 分段证据仍不进入资源级写闸门
+
+## 2026-08-25 可操作失败反馈
+
+- 状态：已完成
+- 已实现：新增共享 `FailureFeedback`，统一输出失败原因、分类、操作建议以及重试、人工接手、接受部分结果、回滚四个动作；覆盖 ReAct、Plan task、SubAgent 与 Orchestrator 终态出口
+- 已实现：Runtime schema v2 增加兼容性的 `failure.guidance` 事件，保留原 `execution.state.reason` 和 checkpoint 协议，不改变现有消费者字段
+- 日期：`2026-08-25`
+- 影响范围：Agent 执行内核、Plan/Multi-Agent 失败汇总、Runtime 事件 JSON 投影、项目行为说明和回归测试
+- 验证：失败分类、四动作、预算事件、Runtime JSON 和 Plan checkpoint 限定测试通过；`mvn -q -Pquick -DskipTests=false test` 共 1619 项，0 失败、0 错误
+- 未验证：未启动 CLI，未调用真实 LLM、MCP 或 Docker，未执行真实 checkpoint 恢复和 Side-Git 回滚
+- 剩余风险：非结构化第三方错误仍通过保守关键词归类，未知错误会落入“执行失败”；动作只提供入口，不会自动执行回滚或接受部分结果
+
 ## 2026-08-24 工具结果分页与可恢复引用
 
 - 状态：第一批已完成

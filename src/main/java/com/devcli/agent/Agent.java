@@ -460,14 +460,14 @@ public class Agent implements AutoCloseable {
                     @Override
                     public String budgetExceeded(AgentBudget.ExitReason reason,
                                                  AgentBudget currentBudget) {
-                        String description = currentBudget.describeExit(reason);
+                        FailureFeedback feedback = FailureFeedback.forBudget(reason, currentBudget);
                         log.warn("ReAct run exhausted budget: reason={}, iteration={}, tokens={}/{}",
                                 reason, currentBudget.iteration(),
                                 currentBudget.totalInputTokens() + currentBudget.totalOutputTokens(),
                                 currentBudget.tokenBudget());
                         streamRenderer.finish();
                         pushStatus(currentBudget, startNanos, "idle");
-                        return "❌ " + description;
+                        return "❌ " + feedback.render();
                     }
 
                     @Override
@@ -480,7 +480,8 @@ public class Agent implements AutoCloseable {
                     public String failed(IOException error, AgentBudget currentBudget) {
                         log.error("LLM call failed in ReAct loop", error);
                         streamRenderer.finish();
-                        return "❌ 调用 LLM 失败: " + error.getMessage();
+                        return "❌ " + FailureFeedback.fromReason(
+                                "调用 LLM 失败: " + error.getMessage()).render();
                     }
                 });
     }

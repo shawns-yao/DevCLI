@@ -66,6 +66,7 @@ public class SubAgent {
                               String turnContextSnapshot,
                               String modelName,
                               String providerName,
+                              long contextEpoch,
                               String fingerprint) {
         public ForkContext {
             sharedPrefix = List.copyOf(sharedPrefix == null ? List.of() : sharedPrefix);
@@ -74,10 +75,22 @@ public class SubAgent {
             turnContextSnapshot = turnContextSnapshot == null ? "" : turnContextSnapshot;
             modelName = modelName == null ? "" : modelName;
             providerName = providerName == null ? "" : providerName;
+            contextEpoch = Math.max(0, contextEpoch);
             fingerprint = fingerprint == null || fingerprint.isBlank()
                     ? computeFingerprint(sharedPrefix, toolDefinitions, skillBodySnapshot,
-                    turnContextSnapshot, modelName, providerName)
+                    turnContextSnapshot, modelName, providerName, contextEpoch)
                     : fingerprint;
+        }
+
+        public ForkContext(List<LlmClient.Message> sharedPrefix,
+                           List<LlmClient.Tool> toolDefinitions,
+                           String skillBodySnapshot,
+                           String turnContextSnapshot,
+                           String modelName,
+                           String providerName,
+                           String fingerprint) {
+            this(sharedPrefix, toolDefinitions, skillBodySnapshot, turnContextSnapshot,
+                    modelName, providerName, 0, fingerprint);
         }
     }
 
@@ -402,8 +415,9 @@ public class SubAgent {
         String turnContextSnapshot = buildTurnContext();
         String modelName = llmClient == null ? "" : llmClient.getModelName();
         String providerName = llmClient == null ? "" : llmClient.getProviderName();
+        long contextEpoch = toolRegistry.contextVersionLedger().currentGeneration();
         return new ForkContext(sharedPrefix, toolDefinitions, skillBodySnapshot, turnContextSnapshot,
-                modelName, providerName, null);
+                modelName, providerName, contextEpoch, null);
     }
 
     /**
@@ -475,6 +489,10 @@ public class SubAgent {
                                             boolean toolsEnabled) {
         // 当轮快照：非 fork 路径实时渲染，fork 路径用冻结快照（同批 Worker 一致且无并发读竞争）
         String turnContext = forkContext == null ? buildTurnContext() : forkContext.turnContextSnapshot();
+        if (forkContext != null) {
+            turnContext = "上下文快照：context_epoch=" + forkContext.contextEpoch()
+                    + "，fork_fingerprint=" + forkContext.fingerprint() + "\n" + turnContext;
+        }
         String taskContent = prependTurnContext(forkContext == null
                 ? prependSkillBodies(task.content(), true)
                 : AgentRuntimeSupport.prependSkillBodies(
@@ -645,12 +663,12 @@ public class SubAgent {
                     public AgentMessage budgetExceeded(AgentBudget.ExitReason reason,
                                                        AgentBudget currentBudget) {
                         streamRenderer.finish();
-                        String description = currentBudget.describeExit(reason);
+                        FailureFeedback feedback = FailureFeedback.forBudget(reason, currentBudget);
                         log.warn("[{}] run exhausted budget: reason={}, iteration={}, tokens={}/{}",
                                 name, reason, currentBudget.iteration(),
                                 currentBudget.totalInputTokens() + currentBudget.totalOutputTokens(),
                                 currentBudget.tokenBudget());
-                        return AgentMessage.error(name, role, description);
+                        return AgentMessage.error(name, role, feedback.render());
                     }
 
                     @Override
@@ -663,7 +681,8 @@ public class SubAgent {
                     public AgentMessage failed(IOException error, AgentBudget currentBudget) {
                         log.error("[{}] LLM call failed", name, error);
                         streamRenderer.finish();
-                        return AgentMessage.error(name, role, describeLlmFailure(error));
+                        return AgentMessage.error(name, role,
+                                FailureFeedback.fromReason(describeLlmFailure(error)).render());
                     }
                 });
     }
@@ -1051,10 +1070,12 @@ public class SubAgent {
                                              String skillBodySnapshot,
                                              String turnContextSnapshot,
                                              String modelName,
-                                             String providerName) {
+                                             String providerName,
+                                             long contextEpoch) {
         StringBuilder sb = new StringBuilder();
         sb.append("provider=").append(providerName == null ? "" : providerName).append('\n');
         sb.append("model=").append(modelName == null ? "" : modelName).append('\n');
+        sb.append("contextEpoch=").append(Math.max(0, contextEpoch)).append('\n');
         sb.append("messages=").append(sharedPrefix == null ? 0 : sharedPrefix.size()).append('\n');
         if (sharedPrefix != null) {
             for (LlmClient.Message message : sharedPrefix) {

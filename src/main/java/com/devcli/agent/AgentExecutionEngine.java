@@ -222,8 +222,11 @@ final class AgentExecutionEngine<R> {
                 return delegate.cancelled(budget);
             }
             if (budget.iteration() >= delegate.maxIterations()) {
+                FailureFeedback feedback = FailureFeedback.forBudget(
+                        AgentBudget.ExitReason.HARD_ITERATION_LIMIT, budget);
                 emitState(eventSink, RunEvent.ExecutionState.ITERATION_LIMIT_REACHED,
-                        budget.iteration(), "达到当前执行入口的迭代上限");
+                        budget.iteration(), feedback.toRunEvent().reason());
+                eventSink.emit(feedback.toRunEvent());
                 return delegate.iterationLimitReached(budget);
             }
             AgentBudget.ExitReason exitReason = budget.check();
@@ -232,6 +235,7 @@ final class AgentExecutionEngine<R> {
                 emitState(eventSink, RunEvent.ExecutionState.BUDGET_EXCEEDED,
                         budget.iteration(), reason);
                 emitCircuitBreaker(eventSink, exitReason, reason);
+                eventSink.emit(FailureFeedback.forBudget(exitReason, budget).toRunEvent());
                 return delegate.budgetExceeded(exitReason, budget);
             }
 
@@ -337,6 +341,7 @@ final class AgentExecutionEngine<R> {
                     String referenceFailure = contextReferenceGuard.terminalFailure();
                     if (!referenceFailure.isBlank()) {
                         emitState(eventSink, RunEvent.ExecutionState.FAILED, iteration, referenceFailure);
+                        eventSink.emit(FailureFeedback.fromReason(referenceFailure).toRunEvent());
                         return delegate.failed(new IOException(referenceFailure), budget);
                     }
                     Optional<R> completed = contextReferenceGuard.isSatisfied()
@@ -385,6 +390,7 @@ final class AgentExecutionEngine<R> {
             } catch (IOException e) {
                 emitState(eventSink, RunEvent.ExecutionState.FAILED,
                         iteration, e.getMessage());
+                eventSink.emit(FailureFeedback.fromReason(e.getMessage()).toRunEvent());
                 return delegate.failed(e, budget);
             }
         }

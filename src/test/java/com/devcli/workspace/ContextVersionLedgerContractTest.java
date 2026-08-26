@@ -17,6 +17,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ContextVersionLedgerContractTest {
 
     @Test
+    void globalGenerationAdvancesForPublishedAndDirtyChanges(@TempDir Path project) throws Exception {
+        ContextVersionLedger ledger = new ContextVersionLedger();
+        Path file = project.resolve("State.java");
+        Files.writeString(file, "class State {}\n");
+        long initial = ledger.currentGeneration();
+
+        ledger.publishWrite("worker", "State.java", file, Files.readString(file));
+        long published = ledger.currentGeneration();
+        ledger.markDirty("State.java");
+
+        assertTrue(published > initial);
+        assertTrue(ledger.currentGeneration() > published);
+    }
+
+    @Test
     void codeChunkerSymbolsRemainCompatibleWithWriteGate(@TempDir Path project) throws Exception {
         Path service = project.resolve("OrderService.java");
         Path caller = project.resolve("OrderController.java");

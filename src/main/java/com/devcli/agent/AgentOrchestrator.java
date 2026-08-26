@@ -171,8 +171,13 @@ public class AgentOrchestrator {
         }
 
         ExecutionStep withResult(String result) {
+            return withResult(result, result);
+        }
+
+        ExecutionStep withResult(String result, String trustedSummary) {
             return new ExecutionStep(id, description, type, dependencies,
-                    artifact.complete(result, result, artifact.modifiedResources(), System.currentTimeMillis()));
+                    artifact.complete(result, trustedSummary, artifact.modifiedResources(),
+                            System.currentTimeMillis()));
         }
 
         ExecutionStep withFailed(String result) {
@@ -628,6 +633,8 @@ public class AgentOrchestrator {
         currentPlanStepIds = Set.of();
         // 回收上一轮崩溃残留的超时租约，避免历史租约阻塞本轮写入
         toolRegistry.pruneExpiredLeases();
+        memoryManager.setTaskState("context_epoch",
+                Long.toString(toolRegistry.contextVersionLedger().currentGeneration()));
         if (CancellationContext.isCancelled()) {
             return "⏹️ 已取消当前 Plan 任务。";
         }
@@ -1733,18 +1740,31 @@ public class AgentOrchestrator {
             out.println("❌ 步骤 [" + step.id() + "] 执行失败：" + result.content() + "\n");
             return;
         }
-        String acceptedResult = resolveWorkerResultContent(result.content(), worker.getLastExecutionEvidence());
+        SubAgent.ExecutionEvidence acceptedEvidence = worker.getLastExecutionEvidence();
+        String acceptedResult = resolveWorkerResultContent(result.content(), acceptedEvidence);
         if (acceptedResult.isBlank()) {
             updateStep(steps, step.id(), step.withFailed("执行结果为空"));
             out.println("❌ 步骤 [" + step.id() + "] 执行失败：结果为空\n");
             return;
         }
+        if (!requiresIsolatedWorkspace(step) && workerForkContext != null) {
+            long currentEpoch = toolRegistry.contextVersionLedger().currentGeneration();
+            if (workerForkContext.contextEpoch() != currentEpoch) {
+                String reason = "STALE_CONTEXT：步骤基于 context_epoch="
+                        + workerForkContext.contextEpoch() + "，当前为 " + currentEpoch;
+                updateStep(steps, step.id(), step.withFailed(reason));
+                out.println("❌ 步骤 [" + step.id() + "] " + reason + "\n");
+                return;
+            }
+        }
 
         ReviewDecision reviewDecision = reviewWorkerResult(step, reviewer, acceptedResult, out, reviewerForkContext);
+        ReviewDecision acceptedReview = reviewDecision;
         boolean approved = reviewDecision.approved();
 
         if (approved) {
-            updateStep(steps, step.id(), step.withResult(acceptedResult));
+            updateStep(steps, step.id(), step.withResult(acceptedResult,
+                    buildTrustedStepSummary(step, acceptedEvidence, acceptedReview)));
             out.println("✅ 步骤 [" + step.id() + "] 审查通过\n");
             return;
         }
@@ -1757,7 +1777,10 @@ public class AgentOrchestrator {
                 String degradedResult = acceptedResult
                         + "\n\nReviewer 可恢复故障；Pre-Review 硬检查已通过，按降级策略接受。\n"
                         + issues;
-                updateStep(steps, step.id(), step.withResult(degradedResult));
+                ReviewDecision degradedReview = new ReviewDecision(
+                        true, issues, true, reviewDecision.hardCheckExecuted());
+                updateStep(steps, step.id(), step.withResult(degradedResult,
+                        buildTrustedStepSummary(step, acceptedEvidence, degradedReview)));
                 out.println("✅ 步骤 [" + step.id()
                         + "] Pre-Review 硬检查已通过，Reviewer 可恢复故障降级接受\n");
                 return;
@@ -1782,8 +1805,8 @@ public class AgentOrchestrator {
                 approved = false;
                 continue;
             }
-            acceptedResult = resolveWorkerResultContent(
-                    retryResult.content(), worker.getLastExecutionEvidence());
+            acceptedEvidence = worker.getLastExecutionEvidence();
+            acceptedResult = resolveWorkerResultContent(retryResult.content(), acceptedEvidence);
             if (acceptedResult.isBlank()) {
                 approved = false;
                 issues = "执行结果为空";
@@ -1793,6 +1816,7 @@ public class AgentOrchestrator {
             }
 
             ReviewDecision retryReview = reviewWorkerResult(step, reviewer, acceptedResult, out, reviewerForkContext);
+            acceptedReview = retryReview;
             if (retryReview.reviewerError()) {
                 issues = retryReview.issues();
                 if (shouldAcceptAfterRecoverableReviewerFailure(
@@ -1801,6 +1825,8 @@ public class AgentOrchestrator {
                             + "\n\nReviewer 可恢复故障；Pre-Review 硬检查已通过，按降级策略接受。\n"
                             + issues;
                     approved = true;
+                    acceptedReview = new ReviewDecision(
+                            true, issues, true, retryReview.hardCheckExecuted());
                 }
                 break;
             }
@@ -1809,7 +1835,8 @@ public class AgentOrchestrator {
         }
 
         if (approved) {
-            updateStep(steps, step.id(), step.withResult(acceptedResult));
+            updateStep(steps, step.id(), step.withResult(acceptedResult,
+                    buildTrustedStepSummary(step, acceptedEvidence, acceptedReview)));
             out.println("✅ 步骤 [" + step.id() + "] 重试后审查通过\n");
         } else {
             updateStep(steps, step.id(), step.withFailed(issues));
@@ -1933,7 +1960,11 @@ public class AgentOrchestrator {
             ToolRegistry registry = activeToolRegistry();
             String completionToolName = TeamWorkerProtocol.completionToolName(
                     step.type(), toolChoice);
-            AgentMessage result = memoryManager.runWithEvidenceOrigin(worker.getName(), step.id(),
+            long contextEpoch = workerForkContext == null
+                    ? registry.contextVersionLedger().currentGeneration()
+                    : workerForkContext.contextEpoch();
+            AgentMessage result = memoryManager.runWithEvidenceOrigin(
+                    worker.getName(), step.id(), contextEpoch,
                     () -> registry.runWithResourceLease(step.id(), () -> workerForkContext == null
                             ? worker.executeWithContext(taskMsg, context, out, toolChoice,
                                     completionToolName)
@@ -2003,7 +2034,11 @@ public class AgentOrchestrator {
                 reviewToolCalls.add(result.name());
             }
         });
-        AgentMessage reviewResult = memoryManager.runWithEvidenceOrigin(reviewer.getName(), step.id(),
+        long contextEpoch = reviewerForkContext == null
+                ? activeToolRegistry().contextVersionLedger().currentGeneration()
+                : reviewerForkContext.contextEpoch();
+        AgentMessage reviewResult = memoryManager.runWithEvidenceOrigin(
+                reviewer.getName(), step.id(), contextEpoch,
                 () -> reviewerForkContext == null
                         ? reviewer.review(reviewTask, workerResult, out)
                         : reviewer.reviewForked(reviewTask, workerResult, reviewerForkContext, out));
@@ -2039,6 +2074,40 @@ public class AgentOrchestrator {
 
     record ReviewDecision(boolean approved, String issues, boolean reviewerError,
                           boolean hardCheckExecuted) {
+    }
+
+    static String buildTrustedStepSummary(ExecutionStep step,
+                                          SubAgent.ExecutionEvidence evidence,
+                                          ReviewDecision review) {
+        StringBuilder summary = new StringBuilder("summary_source=ORCHESTRATOR")
+                .append("; step=").append(step == null ? "" : step.id())
+                .append("; review=")
+                .append(review != null && review.approved()
+                        ? (review.reviewerError() ? "DEGRADED" : "APPROVED")
+                        : "REJECTED")
+                .append("; hard_check=")
+                .append(review != null && review.hardCheckExecuted() ? "PASSED" : "NOT_RUN");
+        List<SubAgent.ToolEvidence> successful = evidence == null ? List.of() : evidence.toolResults().stream()
+                .filter(item -> item.status() == ToolStatus.SUCCESS)
+                .toList();
+        if (successful.isEmpty()) {
+            summary.append("; tools=none");
+        } else {
+            summary.append("; tools=");
+            for (int i = 0; i < successful.size(); i++) {
+                if (i > 0) summary.append(", ");
+                SubAgent.ToolEvidence item = successful.get(i);
+                String evidencePreview = item.result().replace('\n', ' ').trim();
+                if (evidencePreview.length() > 160) {
+                    evidencePreview = evidencePreview.substring(0, 160) + "...";
+                }
+                summary.append(item.name());
+                if (!evidencePreview.isBlank()) {
+                    summary.append('(').append(evidencePreview).append(')');
+                }
+            }
+        }
+        return summary.toString();
     }
 
     List<String> missingDeclaredVerifierTools(List<String> reviewToolCalls) {
@@ -2127,7 +2196,7 @@ public class AgentOrchestrator {
         return text.substring(0, maxLength) + "\n...<truncated>";
     }
 
-    private String buildStepContext(List<ExecutionStep> steps, ExecutionStep currentStep) {
+    String buildStepContext(List<ExecutionStep> steps, ExecutionStep currentStep) {
         StringBuilder context = new StringBuilder();
         context.append("总任务上下文：\n");
         if (currentUserTask != null && !currentUserTask.isBlank()) {
@@ -2183,9 +2252,10 @@ public class AgentOrchestrator {
                     context.append("[").append(step.id()).append("] ")
                             .append(step.status()).append(" - ")
                             .append(step.description()).append("\n");
-                    if (step.result() != null && !step.result().isBlank()) {
-                        context.append("结果预览：")
-                                .append(step.result(), 0, Math.min(step.result().length(), 800))
+                    String trustedSummary = step.artifact().summary();
+                    if (!trustedSummary.isBlank()) {
+                        context.append("可信摘要：")
+                                .append(trustedSummary, 0, Math.min(trustedSummary.length(), 800))
                                 .append("\n");
                     }
                     if (!step.modifiedFiles().isEmpty()) {
@@ -2207,8 +2277,10 @@ public class AgentOrchestrator {
                     }
                     context.append("继续前请优先读取这些文件的当前内容，基于真实落盘状态衔接实现。\n");
                 }
-                if (step.result() != null && !step.result().isBlank()) {
-                    context.append("结果：").append(previewDependencyResult(step.result())).append("\n");
+                String trustedSummary = step.artifact().summary();
+                if (!trustedSummary.isBlank()) {
+                    context.append("可信摘要：")
+                            .append(previewDependencyResult(trustedSummary)).append("\n");
                 }
                 context.append("\n");
             }
@@ -2492,7 +2564,19 @@ public class AgentOrchestrator {
         if (orchestrationId != null && !orchestrationId.isBlank()) {
             summary.append("- checkpoint：").append(orchestrationId).append('\n');
         }
-        summary.append("- 后续处理：补充或修正验收约束后重新规划；也可以人工修复后重新发起 Plan。");
+        String failureReason = failedSteps.stream()
+                .map(ExecutionStep::result)
+                .filter(reason -> reason != null && !reason.isBlank())
+                .findFirst()
+                .orElse("自动恢复额度已用尽");
+        FailureFeedback feedback = FailureFeedback.fromReason(failureReason);
+        if (orchestrationId != null && !orchestrationId.isBlank()) {
+            feedback = feedback.withRetryInstruction(
+                    "运行 `/plan resume " + orchestrationId + "` 从 checkpoint 继续");
+        } else {
+            feedback = feedback.withRetryInstruction("补充或修正验收约束后重新发起 `/plan`");
+        }
+        summary.append(feedback.render());
         return summary.toString();
     }
 

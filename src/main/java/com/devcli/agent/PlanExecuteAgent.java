@@ -375,7 +375,10 @@ public class PlanExecuteAgent {
 
         if (!plan.isAllCompleted() && !plan.hasFailed()) {
             plan.markFailed();
-            return "⚠️ 计划未能继续推进，存在未满足依赖的任务。";
+            String reason = "计划未能继续推进，存在未满足依赖的任务";
+            return "⚠️ " + FailureFeedback.fromReason(reason)
+                    .withRetryInstruction("修正任务依赖后重新发起 `/plan`")
+                    .render();
         }
 
         // Bug #7 修复：始终调用 buildFinalResult 生成完整摘要（包含成功和失败）
@@ -387,10 +390,17 @@ public class PlanExecuteAgent {
 
         if (plan.hasFailed()) {
             plan.markFailed();
+            String failureReason = finalResult.isEmpty()
+                    ? "计划部分完成，有任务失败"
+                    : finalResult.toString();
+            String guidance = FailureFeedback.fromReason(failureReason)
+                    .withRetryInstruction("修正失败任务后重新发起 `/plan`")
+                    .render();
             if (planSummary.isBlank()) {
-                return "⚠️ 计划部分完成，有任务失败。";
+                return "⚠️ " + guidance;
             }
-            return "⚠️ 计划部分完成，有任务失败。\n" + planSummary;
+            return "⚠️ 计划部分完成，有任务失败。\n" + planSummary
+                    + "\n\n" + guidance;
         }
 
         plan.markCompleted();
@@ -668,7 +678,7 @@ public class PlanExecuteAgent {
                                                         AgentBudget currentBudget) {
                         streamRenderer.finish();
                         return TaskRunResult.of(
-                                currentBudget.describeExit(reason),
+                                FailureFeedback.forBudget(reason, currentBudget).render(),
                                 streamRenderer.hasStreamedOutput());
                     }
 
@@ -680,8 +690,13 @@ public class PlanExecuteAgent {
                                     "[计划任务 " + task.getId() + "] " + fallbackResult);
                         }
                         streamRenderer.finish();
+                        String guidance = FailureFeedback.forBudget(
+                                AgentBudget.ExitReason.HARD_ITERATION_LIMIT, currentBudget).render();
                         return TaskRunResult.of(
-                                fallbackResult, streamRenderer.hasStreamedOutput());
+                                fallbackResult.isBlank()
+                                        ? guidance
+                                        : fallbackResult + "\n\n" + guidance,
+                                streamRenderer.hasStreamedOutput());
                     }
 
                     @Override

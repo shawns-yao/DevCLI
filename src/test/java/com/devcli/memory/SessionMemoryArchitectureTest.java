@@ -136,6 +136,32 @@ class SessionMemoryArchitectureTest {
     }
 
     @Test
+    void rejectsEvidenceFromSupersededLogicalOriginAndRendersFreshness() {
+        SessionMemory memory = new SessionMemory();
+        memory.accept(new SessionMemory.EvidenceScopeStarted(
+                "worker-1", "step-1", 10, 7, 1));
+        memory.accept(new SessionMemory.ToolResultObserved(
+                "read_file", "{\"path\":\"fresh.txt\"}", "fresh", List.of(),
+                "worker-1", "step-1", 10, 7, 2));
+        memory.accept(new SessionMemory.EvidenceScopeStarted(
+                "worker-1", "step-1", 20, 9, 3));
+        memory.accept(new SessionMemory.ToolResultObserved(
+                "read_file", "{\"path\":\"late.txt\"}", "late", List.of(),
+                "worker-1", "step-1", 10, 7, 4));
+        memory.accept(new SessionMemory.ToolResultObserved(
+                "read_file", "{\"path\":\"current.txt\"}", "current", List.of(),
+                "worker-1", "step-1", 20, 9, 5));
+
+        String rendered = memory.render(SessionMemory.SessionView.WORKER, 2_000);
+        SessionMemory.SessionSnapshot snapshot = memory.snapshot();
+
+        assertEquals(2, snapshot.evidenceJournal().size());
+        assertFalse(rendered.contains("late.txt"), rendered);
+        assertTrue(rendered.contains("origin=20"), rendered);
+        assertTrue(rendered.contains("context_epoch=9"), rendered);
+    }
+
+    @Test
     void renderUsesOneHardBudgetAndPrioritizesCriticalEvidence() {
         SessionMemory memory = new SessionMemory();
         memory.accept(new SessionMemory.StateChanged("goal", "分析项目", "planner", "", 1));

@@ -165,6 +165,7 @@ public class MemoryManager implements AutoCloseable {
         if (toolName == null || result == null) return;
         sessionMemory.accept(new SessionMemory.ToolResultObserved(
                 toolName, argsJson, result, sideChannels, currentAgentId(), currentEvidenceScope(),
+                currentEvidenceOrigin(), currentContextEpoch(),
                 sessionEventSequence.incrementAndGet()));
         recordCurrentStateInvalidations(toolName, argsJson, result, sideChannels);
     }
@@ -282,6 +283,8 @@ public class MemoryManager implements AutoCloseable {
      */
     private final ThreadLocal<String> evidenceScope = ThreadLocal.withInitial(() -> "");
     private final ThreadLocal<String> evidenceAgentId = ThreadLocal.withInitial(() -> "react");
+    private final ThreadLocal<Long> evidenceOrigin = ThreadLocal.withInitial(() -> 0L);
+    private final ThreadLocal<Long> evidenceContextEpoch = ThreadLocal.withInitial(() -> 0L);
     private final ThreadLocal<List<String>> currentStateConflictNotices =
             ThreadLocal.withInitial(ArrayList::new);
 
@@ -295,6 +298,16 @@ public class MemoryManager implements AutoCloseable {
         return agentId == null || agentId.isBlank() ? "react" : agentId;
     }
 
+    private long currentEvidenceOrigin() {
+        Long value = evidenceOrigin.get();
+        return value == null ? 0 : Math.max(0, value);
+    }
+
+    private long currentContextEpoch() {
+        Long value = evidenceContextEpoch.get();
+        return value == null ? 0 : Math.max(0, value);
+    }
+
     /**
      * 在给定证据出处范围内执行。范围只影响本线程，嵌套调用结束后恢复外层范围。
      */
@@ -304,10 +317,24 @@ public class MemoryManager implements AutoCloseable {
 
     public <T> T runWithEvidenceOrigin(String agentId, String stepId,
                                        java.util.function.Supplier<T> action) {
+        return runWithEvidenceOrigin(agentId, stepId, 0, action);
+    }
+
+    public <T> T runWithEvidenceOrigin(String agentId, String stepId, long contextEpoch,
+                                       java.util.function.Supplier<T> action) {
         String previous = currentEvidenceScope();
         String previousAgent = currentAgentId();
-        evidenceScope.set(stepId == null ? "" : stepId);
-        evidenceAgentId.set(agentId == null || agentId.isBlank() ? "react" : agentId);
+        long previousOrigin = currentEvidenceOrigin();
+        long previousContextEpoch = currentContextEpoch();
+        String nextStep = stepId == null ? "" : stepId;
+        String nextAgent = agentId == null || agentId.isBlank() ? "react" : agentId;
+        long origin = sessionEventSequence.incrementAndGet();
+        evidenceScope.set(nextStep);
+        evidenceAgentId.set(nextAgent);
+        evidenceOrigin.set(origin);
+        evidenceContextEpoch.set(Math.max(0, contextEpoch));
+        sessionMemory.accept(new SessionMemory.EvidenceScopeStarted(
+                nextAgent, nextStep, origin, Math.max(0, contextEpoch), origin));
         try {
             return action.get();
         } finally {
@@ -318,6 +345,10 @@ public class MemoryManager implements AutoCloseable {
             }
             if ("react".equals(previousAgent)) evidenceAgentId.remove();
             else evidenceAgentId.set(previousAgent);
+            if (previousOrigin == 0) evidenceOrigin.remove();
+            else evidenceOrigin.set(previousOrigin);
+            if (previousContextEpoch == 0) evidenceContextEpoch.remove();
+            else evidenceContextEpoch.set(previousContextEpoch);
         }
     }
 

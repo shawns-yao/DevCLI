@@ -227,6 +227,11 @@ class AgentExecutionEngineTest {
                 .map(RunEvent.CustomMessage.class::cast)
                 .anyMatch(event -> "tool_loop_guard".equals(event.messageType())
                         && "CIRCUIT_BREAKER".equals(event.attributes().get("action"))));
+        assertTrue(delegate.runEvents.stream()
+                .filter(RunEvent.FailureGuidance.class::isInstance)
+                .map(RunEvent.FailureGuidance.class::cast)
+                .anyMatch(event -> "BUDGET_EXHAUSTED".equals(event.category())
+                        && event.actions().size() == 4));
     }
 
     @Test

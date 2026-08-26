@@ -63,9 +63,9 @@ Agent、Plan、Worker 和 Reviewer 的流式输出状态机统一委托 `AgentSt
 
 Multi-Agent Planner 输出前后允许存在说明文本，编排器会提取完整 JSON 对象；解析失败、图结构无效或出现阻塞后续实现的空工作区纯检查步骤时，清空 Planner 历史并携带失败原因有界修复，默认 2 次，可通过 `DEVCLI_TEAM_PLANNER_REPAIR_MAX_ATTEMPTS` / `-Ddevcli.team.planner.repair.max.attempts` 调整。空工作区是合法状态，目录或文件存在性检查应并入实现步骤并写明“若不存在则创建”。Worker 最终文本为空但本轮存在结构化 `SUCCESS` 工具证据时，编排器生成执行摘要并继续 Reviewer；没有成功工具证据时先进行一次强制执行协议修复，代码任务必须调用 `write_file` 并最小验证，读取或分析任务必须取得真实工具证据；该请求按步骤类型强制具体工具，FILE_WRITE / INTEGRATION 选择 `write_file`，COMMAND 选择 `execute_command`，其他类型选择 `list_dir`；Anthropic 与 OpenAI-compatible 都映射为命名工具选择。FILE_WRITE / INTEGRATION 步骤出现成功 `write_file` 批次后直接以结构化证据结束当前 Worker 执行；强制修复中的指定工具也采用同一规则，不再追加 LLM 收尾调用。Provider 忽略命名工具选择时，执行引擎追加一次严格 JSON 工具信封请求；只接受完整 JSON、目标工具名和对象参数，随后仍由工具参数校验与权限管线执行，不解析 reasoning、Markdown 或代码围栏。工具失败时继续让模型纠正，最终仍无成功证据才判失败。
 
-Multi-Agent 的 `SessionMemory` 按角色注入隔离视图：Planner 只看任务状态 + 会话关键事件，不看工具原文证据；Worker 看完整任务状态 + 关键事件 + 工具证据；Reviewer 只看任务状态 + 工具证据，避免把会话事件误当验收依据。
+Multi-Agent 的 `SessionMemory` 按角色注入隔离视图：Planner 只看任务状态 + 会话关键事件，不看工具原文证据；Worker 看完整任务状态 + 关键事件 + 工具证据；Reviewer 只看任务状态 + 工具证据，避免把会话事件误当验收依据。工具证据显式携带 agent、step、单调 origin sequence 和 `context_epoch`；同一 agent/step 的新执行开始后，旧 origin 的迟到证据会按逻辑序拒绝，不依赖墙钟时间。
 
-Multi-Agent 并行批次由 `MultiAgentBatchExecutor` 负责资源冲突分波、Worker 分配和公平锁，再委托 `OrchestrationWaveExecutor` 执行并发与输出归并；批次使用 `SubAgent.ForkContext` 共享冻结 system prompt 前缀、exact tool definitions 快照、skill body 快照和 fork fingerprint，每个子任务只追加自己的 user 后缀，避免并行 Worker / Reviewer 因历史或动态工具差异破坏 prompt cache 命中。
+Multi-Agent 并行批次由 `MultiAgentBatchExecutor` 负责资源冲突分波、Worker 分配和公平锁，再委托 `OrchestrationWaveExecutor` 执行并发与输出归并；批次使用 `SubAgent.ForkContext` 共享冻结 system prompt 前缀、exact tool definitions 快照、skill body 快照、`context_epoch` 和 fork fingerprint，每个子任务只追加自己的 user 后缀，避免并行 Worker / Reviewer 因历史或动态工具差异破坏 prompt cache 命中。只读步骤提交时若全局 epoch 已推进，会以 `STALE_CONTEXT` 拒收；隔离写步骤继续由资源级 PatchSet 版本闸门判定，避免无关文件变化造成误杀。
 
 并行 Worker 写文件时，隔离 ToolRegistry 内的 `write_file` 仍进入运行时资源租约检查：每个 Plan step 以自己的 id 持有写租约，同一隔离工作区文件只能被一个运行中步骤写入；冲突返回策略拒绝，不做 last-writer-wins 覆盖或 LLM 自动合并。Worker 尝试结束后都会在 finally 中释放本步骤租约。ToolRegistry 共享后台清理器，project fork 不重复创建线程，最后一个注册表关闭后终止；默认周期 60 秒，可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` / `-Ddevcli.resource.lease.cleanup.interval.seconds` 调整。设计说明见 `docs/runtime-resource-lease-design.md`。
 
@@ -79,13 +79,13 @@ Reviewer 输出必须是可解析 JSON，并包含三层评分：`functional_cor
 
 Final integration 只做入口/API/默认参数/跨模块联动胶水；普通步骤失败比例达到 `50%` 时熔断，不让最终步骤强行修补。
 
-失败步骤支持有界在位重做（默认 1 次）：失败步骤保持原 id/依赖在 DAG 原位换思路重做，redo 用尽后保持 FAILED；最终结果显式输出 Reviewer 重试、原位重做、最后失败原因、checkpoint 和人工处理选项。checkpoint 协议版本 8 保存共享 `ExecutionArtifact`、验收方式、验证器、适用节点、pending PatchSet 写前日志、稳定 Planner/Worker/Reviewer 身份、步骤分配、单调消息游标、有界且按步骤归属的 AttemptDigest、已消耗的重做次数和重做失败现场；应用前记录 before/after 哈希与原文件备份，恢复时在项目提交锁内按最终哈希提升 COMPLETED、继续 PENDING 或自动回滚。恢复优先重建 checkpoint 中的 Worker 拓扑并保持原步骤绑定，沿用原重做额度，并按上下文 schema 版本注入最近摘要和当前步骤的失败尝试；不持久化完整 SubAgent 对话对象图。旧协议缺失适用节点时迁移为 `FINAL`，缺失验证字段时迁移为人工验收；没有可执行验收标准的未完成 checkpoint 拒绝恢复。对账保存失败、回滚不完整或身份拓扑损坏时停止 resume；高于当前版本的 checkpoint 明确报告不兼容。计划、依赖、验收点、执行产物和恢复元数据原子写入 `~/.devcli/checkpoints/`，全部成功后删除；resume 不恢复完整 `SessionMemory`。
+失败步骤支持有界在位重做（默认 1 次）：失败步骤保持原 id/依赖在 DAG 原位换思路重做，redo 用尽后保持 FAILED；最终结果显式输出 Reviewer 重试、原位重做、最后失败原因、checkpoint 和人工处理选项。ReAct、Plan task、SubAgent 与 Orchestrator 的终态失败统一由 `FailureFeedback` 输出“原因 + 分类 + 操作建议 + 下一步动作”，固定提供重试、人工接手、接受部分结果和回滚；执行内核另发出 `failure.guidance` 强类型事件供 Runtime 审计与投影。checkpoint 协议版本 8 保存共享 `ExecutionArtifact`、验收方式、验证器、适用节点、pending PatchSet 写前日志、稳定 Planner/Worker/Reviewer 身份、步骤分配、单调消息游标、有界且按步骤归属的 AttemptDigest、已消耗的重做次数和重做失败现场；应用前记录 before/after 哈希与原文件备份，恢复时在项目提交锁内按最终哈希提升 COMPLETED、继续 PENDING 或自动回滚。恢复优先重建 checkpoint 中的 Worker 拓扑并保持原步骤绑定，沿用原重做额度，并按上下文 schema 版本注入最近摘要和当前步骤的失败尝试；不持久化完整 SubAgent 对话对象图。旧协议缺失适用节点时迁移为 `FINAL`，缺失验证字段时迁移为人工验收；没有可执行验收标准的未完成 checkpoint 拒绝恢复。对账保存失败、回滚不完整或身份拓扑损坏时停止 resume；高于当前版本的 checkpoint 明确报告不兼容。计划、依赖、验收点、执行产物和恢复元数据原子写入 `~/.devcli/checkpoints/`，全部成功后删除；resume 不恢复完整 `SessionMemory`。
 
 Side-Git 快照按 `devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX` 保留最近快照；每次新建快照后会重写 side-history，只保留最新 N 条。裁剪累计达到阈值或超过最小间隔后，会在时间上限内回收不可达松散对象；默认阈值 100、间隔 24 小时、上限 30 秒，可通过 `DEVCLI_SNAPSHOT_GC_ENABLED`、`DEVCLI_SNAPSHOT_GC_PRUNED_THRESHOLD`、`DEVCLI_SNAPSHOT_GC_MIN_INTERVAL_HOURS`、`DEVCLI_SNAPSHOT_GC_MAX_SECONDS` 调整。
 
 副作用横向信息流：write_file/execute_command 等副作用工具的证据在 `SessionMemory.EvidenceJournal` 中按高重要性保留；普通读取优先压缩或淘汰，失败压缩成 AttemptDigest，使后续步骤持续看到本任务改过哪些文件和已经排除的方案。
 
-职责边界：`SessionMemory` 是当前任务内的运行投影，会按预算压缩且不跨进程；九段会话摘要中的待办、当前工作和下一步只保留“见本轮 Session Memory”投影标记，不作为第二套状态源。`ExecutionArtifact` 是 Plan / Multi-Agent / checkpoint 的任务终态唯一来源。隔离执行期间的修改只存在工作区内，PatchSet 成功应用后才把 `modifiedResources` 同步到运行态、checkpoint 和 `SessionMemory`。后续依赖步骤读取已批准的主项目成果；同进程靠 `SessionMemory`，跨进程靠 checkpoint `RecoveryState` 的有界失败尝试摘要。
+职责边界：`SessionMemory` 是当前任务内的运行投影，会按预算压缩且不跨进程；九段会话摘要中的待办、当前工作和下一步只保留“见本轮 Session Memory”投影标记，不作为第二套状态源。`ExecutionArtifact` 是 Plan / Multi-Agent / checkpoint 的任务终态唯一来源；`output` 保留 Worker 原始结果，`summary` 由 Orchestrator 根据结构化成功工具证据和 Reviewer / Pre-Review 结论生成，依赖步骤只注入该可信摘要。隔离执行期间的修改只存在工作区内，PatchSet 成功应用后才把 `modifiedResources` 同步到运行态、checkpoint 和 `SessionMemory`。后续依赖步骤读取已批准的主项目成果；同进程靠 `SessionMemory`，跨进程靠 checkpoint `RecoveryState` 的有界失败尝试摘要。固定 Final integration 会在补丁归并后执行硬检查并复核全部验收点，承担合并结果的整体验证。
 
 内置核心工具 13 个：`read_file` / `write_file` / `list_dir` / `execute_command` / `create_project` / `search_code` / `grep_code` / `web_search` / `web_fetch` / `save_memory` / `confirm_memory` / `list_memory` / `revert_turn`
 
@@ -133,7 +133,7 @@ src/main/java/com/devcli/
 
 Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔离；turn 执行池默认 2 线程 / 64 队列，过载返回 `429 runtime_busy`；`KeyedSerialExecutor` 保证同一 thread 串行。CLI、Runtime API 和后台任务通过 `RunCoordinator` 写入同一 `RunStore`，后台任务不再维护独立状态表；旧 `tasks.db` 只读导入 `runtime.db`。CLI `/session` 与 Runtime branch 共用持久事件树，切换分支只重建 Agent 历史，不恢复工作区；`/branch` 仅为兼容别名。检查点和会话投影是事件日志的可重建缓存。模型 reasoning/content delta、模型上下文、工具调用、工具结果和 turn/checkpoint 生命周期统一使用强类型 `RunEvent`；`AgentExecutionEngine` 是领域事件出口，Runtime API 使用 schema v2 JSON 投影。交互、后台任务和无头 turn 使用运行级 `RunContext` 隔离项目路径、取消令牌和资源生命周期。
 
-执行状态同样使用强类型 `RunEvent`，由执行内核输出 `THINKING`、`TOOL_EXECUTING`、`TOOL_RESULTS_PAIRED` 以及完成、取消、预算退出、迭代上限和失败终态，供 CLI 与 Runtime 投影统一消费。
+执行状态同样使用强类型 `RunEvent`，由执行内核输出 `THINKING`、`TOOL_EXECUTING`、`TOOL_RESULTS_PAIRED` 以及完成、取消、预算退出、迭代上限和失败终态；失败终态同时输出 `failure.guidance` 的分类、建议与动作列表，供 CLI 与 Runtime 投影统一消费。
 
 受控 Hook 生命周期：`AgentExecutionEngine` 在 ReAct、Plan task 和 SubAgent 共用 agent/turn/message/tool execution 四层幂等生命周期。Hook 配置从 `~/.devcli/hooks.json` 与项目 `.devcli/hooks.json` 按 id 合并，或由 `DEVCLI_HOOKS_FILE` / `-Ddevcli.hooks.file` 指定；最多 64 条。Hook 只能调用 ToolRegistry 已注册工具，不直接开放 shell/HTTP 执行器；READ_ONLY / LOCAL_CONTEXT 强制在只读能力范围执行，其他 ToolEffect 必须显式 `allowSideEffects`、使用已启用的 `HitlToolRegistry`，且目标工具必须有逐次审批策略，否则拒绝。所有调用继续经过参数校验、HITL、策略、审计和当前工作区能力范围，不允许 Hook 提升 Plan/SubAgent 的权限。`warn` 失败只记录警告，`required` 失败进入 Agent 统一失败出口；异常和取消出口都会按 message → turn → agent 顺序闭合生命周期。模板位于 `Config/hooks.example.json`。
 
