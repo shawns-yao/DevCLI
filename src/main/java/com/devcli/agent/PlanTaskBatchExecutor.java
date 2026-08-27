@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.PrintStream;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.BiFunction;
@@ -23,20 +24,31 @@ final class PlanTaskBatchExecutor {
     private final Consumer<Task> taskStarter;
     private final BiFunction<Task, PrintStream, PlanTaskExecutionResult> taskRunner;
     private final Function<Task, List<String>> modifiedFilesReader;
+    private final Path projectRoot;
+
+    PlanTaskBatchExecutor(PrintStream out,
+                          Consumer<Task> taskStarter,
+                          BiFunction<Task, PrintStream, PlanTaskExecutionResult> taskRunner,
+                          Function<Task, List<String>> modifiedFilesReader,
+                          Path projectRoot) {
+        this.out = out;
+        this.taskStarter = taskStarter;
+        this.taskRunner = taskRunner;
+        this.modifiedFilesReader = modifiedFilesReader;
+        this.projectRoot = projectRoot;
+    }
 
     PlanTaskBatchExecutor(PrintStream out,
                           Consumer<Task> taskStarter,
                           BiFunction<Task, PrintStream, PlanTaskExecutionResult> taskRunner,
                           Function<Task, List<String>> modifiedFilesReader) {
-        this.out = out;
-        this.taskStarter = taskStarter;
-        this.taskRunner = taskRunner;
-        this.modifiedFilesReader = modifiedFilesReader;
+        this(out, taskStarter, taskRunner, modifiedFilesReader, null);
     }
 
     List<PlanTaskExecutionResult> execute(List<Task> executableTasks) {
         List<List<Task>> waves = ResourceConflictDetector.splitConflictFree(
-                executableTasks, Task::getId, Task::getDescription, task -> task.getType().name());
+                executableTasks, Task::getId, Task::getDescription,
+                task -> task.getType().name(), projectRoot);
         if (waves.size() <= 1) {
             return executeConflictFreeWave(executableTasks);
         }

@@ -150,6 +150,15 @@ public final class ContextVersionLedger {
                                          Path writePath, String currentContent,
                                          Path authoritativeRoot,
                                          boolean currentContentAuthoritative) {
+        return validateWrite(scope, writeResourceKey, writePath, currentContent,
+                authoritativeRoot, currentContentAuthoritative, Set.of());
+    }
+
+    private WriteGateResult validateWrite(String scope, String writeResourceKey,
+                                          Path writePath, String currentContent,
+                                          Path authoritativeRoot,
+                                          boolean currentContentAuthoritative,
+                                          Set<String> ignoredResources) {
         if (inactive(scope)) return WriteGateResult.allowed();
         LinkedHashSet<String> affected = new LinkedHashSet<>();
         LinkedHashSet<String> resources = new LinkedHashSet<>();
@@ -159,6 +168,7 @@ public final class ContextVersionLedger {
         if (observed != null) {
             for (Map.Entry<String, Observation> entry : observed.entrySet()) {
                 String resourceKey = entry.getKey();
+                if (ignoredResources.contains(resourceKey)) continue;
                 ResourceVersion current = currentContentAuthoritative
                         && resourceKey.equals(writeResourceKey)
                         ? version(snapshot(writePath, currentContent), writePath,
@@ -177,6 +187,7 @@ public final class ContextVersionLedger {
         Map<String, CodeObservation> evidence = codeEvidenceByScope.get(scope);
         if (evidence != null) {
             for (CodeObservation observation : evidence.values()) {
+                if (ignoredResources.contains(observation.resourceKey())) continue;
                 ResourceVersion current = current(observation.resourceKey(), authoritativeRoot, false);
                 String currentSource = observation.chunkType().equals("file")
                         ? current.snapshot().content()
@@ -207,14 +218,62 @@ public final class ContextVersionLedger {
     }
 
     public WriteGateResult validatePatchSet(String scope, PatchSet patchSet, Path projectRoot) {
+        return preparePatchSet(scope, patchSet, projectRoot).writeGate();
+    }
+
+    public PatchPreparation preparePatchSet(String scope, PatchSet patchSet, Path projectRoot) {
         markScopeDirty(scope);
-        for (PatchSet.FileChange change : patchSet.changes()) {
+        AstRebase astRebase = rebaseNonOverlappingJavaChanges(scope, patchSet, projectRoot);
+        for (PatchSet.FileChange change : astRebase.patchSet().changes()) {
             Path target = projectRoot.resolve(change.relativePath()).normalize();
             WriteGateResult result = validateWrite(scope, normalizeKey(change.relativePath()),
-                    target, readContent(target), projectRoot);
-            if (!result.isAllowed()) return result;
+                    target, readContent(target), projectRoot, false, astRebase.mergedResources());
+            if (!result.isAllowed()) return new PatchPreparation(result, patchSet);
         }
-        return WriteGateResult.allowed();
+        PatchSet effective = rebaseRefreshedChanges(scope, astRebase.patchSet(), projectRoot);
+        return new PatchPreparation(WriteGateResult.allowed(), effective);
+    }
+
+    private AstRebase rebaseNonOverlappingJavaChanges(String scope, PatchSet patchSet, Path projectRoot) {
+        Map<String, Observation> observations = observedByScope.get(scope);
+        if (observations == null || observations.isEmpty()) {
+            return new AstRebase(patchSet, Set.of());
+        }
+        List<PatchSet.FileChange> changes = new ArrayList<>();
+        Set<String> mergedResources = new LinkedHashSet<>();
+        for (PatchSet.FileChange change : patchSet.changes()) {
+            String resourceKey = normalizeKey(change.relativePath());
+            Observation observation = observations.get(resourceKey);
+            Path target = projectRoot.resolve(change.relativePath()).normalize();
+            String currentContent = readContent(target);
+            if (change.type() != PatchSet.ChangeType.MODIFY
+                    || observation == null || observation.snapshot().content() == null
+                    || currentContent == null
+                    || observation.snapshot().fingerprint().equals(fingerprint(currentContent))) {
+                changes.add(change);
+                continue;
+            }
+            String proposed = new String(change.content(), StandardCharsets.UTF_8);
+            JavaAstPatchMerger.MergeResult merge = JavaAstPatchMerger.merge(
+                    target, observation.snapshot().content(), proposed, currentContent);
+            if (!merge.merged()) {
+                changes.add(change);
+                continue;
+            }
+            byte[] mergedContent = merge.content().getBytes(StandardCharsets.UTF_8);
+            String currentHash;
+            try {
+                currentHash = PatchSet.hash(target);
+            } catch (IOException e) {
+                changes.add(change);
+                continue;
+            }
+            changes.add(new PatchSet.FileChange(
+                    change.relativePath(), change.type(), currentHash,
+                    PatchSet.hash(mergedContent), mergedContent));
+            mergedResources.add(resourceKey);
+        }
+        return new AstRebase(new PatchSet(changes), Set.copyOf(mergedResources));
     }
 
     /**
@@ -471,6 +530,12 @@ public final class ContextVersionLedger {
 
     int cachedResourceCount() {
         return currentByResource.size();
+    }
+
+    public record PatchPreparation(WriteGateResult writeGate, PatchSet patchSet) {
+    }
+
+    private record AstRebase(PatchSet patchSet, Set<String> mergedResources) {
     }
 
     private record Observation(Snapshot snapshot, long generation, boolean localModified) {

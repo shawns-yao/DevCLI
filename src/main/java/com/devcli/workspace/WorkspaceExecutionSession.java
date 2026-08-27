@@ -73,15 +73,15 @@ public final class WorkspaceExecutionSession implements AutoCloseable {
                 ? result -> { }
                 : terminalDecision;
         return ProjectCommitCoordinator.withProjectLock(projectRoot, () -> {
-            WriteGateResult writeGate = toolRegistry.contextVersionLedger()
-                    .validatePatchSet(stepId, patchSet, projectRoot);
+            ContextVersionLedger.PatchPreparation prepared = toolRegistry.contextVersionLedger()
+                    .preparePatchSet(stepId, patchSet, projectRoot);
+            WriteGateResult writeGate = prepared.writeGate();
             if (!writeGate.isAllowed()) {
                 PatchSet.ApplyResult result = PatchSet.ApplyResult.contextStale(writeGate.reason());
                 decision.accept(result);
                 return result;
             }
-            PatchSet effectivePatchSet = toolRegistry.contextVersionLedger()
-                    .rebaseRefreshedChanges(stepId, patchSet, projectRoot);
+            PatchSet effectivePatchSet = prepared.patchSet();
             beforeApply.prepare(effectivePatchSet);
             PatchSet.ApplyResult result = effectivePatchSet.apply(projectRoot);
             if (result.applied()) {

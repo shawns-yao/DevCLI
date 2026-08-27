@@ -11,6 +11,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -186,6 +187,105 @@ class ContextVersionLedgerContractTest {
                 PatchSet.ApplyResult result = staleWorker.apply(staleWorker.patchSet());
                 assertTrue(result.applied(), result.failureDescription());
                 assertTrue(Files.readString(service).contains("return 3"));
+            }
+        }
+    }
+
+    @Test
+    void mergesConcurrentChangesToDifferentJavaMethodBodies(@TempDir Path project) throws Exception {
+        Path service = project.resolve("Service.java");
+        Files.writeString(service, """
+                class Service {
+                    int alpha() { return 1; }
+                    int beta() { return 2; }
+                }
+                """);
+        try (ToolRegistry parent = new ToolRegistry()) {
+            parent.setProjectPath(project.toString());
+            try (WorkspaceExecutionSession first = WorkspaceExecutionSession.open(parent, "first");
+                 WorkspaceExecutionSession second = WorkspaceExecutionSession.open(parent, "second")) {
+                ToolOutput firstWrite = first.toolRegistry().runWithResourceLease("first", () ->
+                        first.toolRegistry().executeToolOutput("write_file", """
+                                {"path":"Service.java","content":"class Service {\\n    int alpha() { return 10; }\\n    int beta() { return 2; }\\n}\\n"}
+                                """));
+                ToolOutput secondWrite = second.toolRegistry().runWithResourceLease("second", () ->
+                        second.toolRegistry().executeToolOutput("write_file", """
+                                {"path":"Service.java","content":"class Service {\\n    int alpha() { return 1; }\\n    int beta() { return 20; }\\n}\\n"}
+                                """));
+                assertTrue(firstWrite.isSuccess(), firstWrite.text());
+                assertTrue(secondWrite.isSuccess(), secondWrite.text());
+
+                assertTrue(first.apply(first.patchSet()).applied());
+                PatchSet.ApplyResult secondResult = second.apply(second.patchSet());
+
+                assertTrue(secondResult.applied(), secondResult.failureDescription());
+                String merged = Files.readString(service);
+                assertTrue(merged.contains("return 10"), merged);
+                assertTrue(merged.contains("return 20"), merged);
+            }
+        }
+    }
+
+    @Test
+    void rejectsConcurrentChangesToSameJavaMethodBody(@TempDir Path project) throws Exception {
+        Path service = project.resolve("Service.java");
+        Files.writeString(service, "class Service { int value() { return 1; } }\n");
+        try (ToolRegistry parent = new ToolRegistry()) {
+            parent.setProjectPath(project.toString());
+            try (WorkspaceExecutionSession first = WorkspaceExecutionSession.open(parent, "first");
+                 WorkspaceExecutionSession second = WorkspaceExecutionSession.open(parent, "second")) {
+                ToolOutput firstWrite = first.toolRegistry().runWithResourceLease("first", () ->
+                        first.toolRegistry().executeToolOutput("write_file", """
+                                {"path":"Service.java","content":"class Service { int value() { return 2; } }\\n"}
+                                """));
+                ToolOutput secondWrite = second.toolRegistry().runWithResourceLease("second", () ->
+                        second.toolRegistry().executeToolOutput("write_file", """
+                                {"path":"Service.java","content":"class Service { int value() { return 3; } }\\n"}
+                                """));
+                assertTrue(firstWrite.isSuccess(), firstWrite.text());
+                assertTrue(secondWrite.isSuccess(), secondWrite.text());
+
+                assertTrue(first.apply(first.patchSet()).applied());
+                PatchSet.ApplyResult secondResult = second.apply(second.patchSet());
+
+                assertFalse(secondResult.applied());
+                assertTrue(secondResult.failureDescription().contains("method:Service.value"),
+                        secondResult.failureDescription());
+                assertEquals("class Service { int value() { return 2; } }\n", Files.readString(service));
+            }
+        }
+    }
+
+    @Test
+    void rejectsAstMergeWhenJavaStructureAlsoChanged(@TempDir Path project) throws Exception {
+        Path service = project.resolve("Service.java");
+        Files.writeString(service, """
+                class Service {
+                    int alpha() { return 1; }
+                    int beta() { return 2; }
+                }
+                """);
+        try (ToolRegistry parent = new ToolRegistry()) {
+            parent.setProjectPath(project.toString());
+            try (WorkspaceExecutionSession first = WorkspaceExecutionSession.open(parent, "first");
+                 WorkspaceExecutionSession second = WorkspaceExecutionSession.open(parent, "second")) {
+                ToolOutput firstWrite = first.toolRegistry().runWithResourceLease("first", () ->
+                        first.toolRegistry().executeToolOutput("write_file", """
+                                {"path":"Service.java","content":"class Service {\\n    private int state;\\n    int alpha() { return 10; }\\n    int beta() { return 2; }\\n}\\n"}
+                                """));
+                ToolOutput secondWrite = second.toolRegistry().runWithResourceLease("second", () ->
+                        second.toolRegistry().executeToolOutput("write_file", """
+                                {"path":"Service.java","content":"class Service {\\n    int alpha() { return 1; }\\n    int beta() { return 20; }\\n}\\n"}
+                                """));
+                assertTrue(firstWrite.isSuccess(), firstWrite.text());
+                assertTrue(secondWrite.isSuccess(), secondWrite.text());
+
+                assertTrue(first.apply(first.patchSet()).applied());
+                PatchSet.ApplyResult secondResult = second.apply(second.patchSet());
+
+                assertFalse(secondResult.applied());
+                assertTrue(secondResult.failureDescription().contains("上下文已过期"),
+                        secondResult.failureDescription());
             }
         }
     }

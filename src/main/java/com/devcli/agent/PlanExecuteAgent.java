@@ -433,7 +433,8 @@ public class PlanExecuteAgent {
                     memoryManager.startTaskStep(task.getId());
                 },
                 (task, taskOut) -> executeTaskWithArtifact(plan, task, streamState, taskOut),
-                task -> consumeTaskModifiedFiles(task.getId()));
+                task -> consumeTaskModifiedFiles(task.getId()),
+                Path.of(toolRegistry.getProjectPath()));
         return batchExecutor.execute(executableTasks);
     }
 
