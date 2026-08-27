@@ -31,11 +31,17 @@ public final class AgentSessionRuntime implements AutoCloseable {
 
     public static AgentSessionRuntime create(LlmClient llmClient, Path projectPath,
                                              RunEventSink eventSink) {
+        return create(llmClient, null, projectPath, eventSink);
+    }
+
+    public static AgentSessionRuntime create(LlmClient llmClient, LlmClient memoryCuratorClient,
+                                             Path projectPath, RunEventSink eventSink) {
         Objects.requireNonNull(llmClient, "llmClient");
         Path normalized = normalize(projectPath);
         ToolRegistry registry = new ToolRegistry();
         registry.setProjectPath(normalized.toString());
         Agent agent = new Agent(llmClient, registry);
+        agent.setMemoryCuratorClient(memoryCuratorClient);
         agent.setRunEventSink(eventSink);
         return new AgentSessionRuntime(agent, registry, normalized, true, true);
     }

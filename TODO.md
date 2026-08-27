@@ -1,5 +1,19 @@
 # TODO
 
+## 2026-08-27 三层记忆架构收敛
+
+- 状态：已完成
+- 日期：`2026-08-27`
+- 已实现：短期上下文统一由 `conversationHistory + 六段 RollingSummary` 按 Token 预算治理；待办、当前工作和下一步只保存在当前任务的 `SessionMemory`，不再复制进摘要
+- 已实现：普通用户消息不再直接自动落库；任务晋升使用脱敏、限长的 `TaskMemorySnapshot`、SQLite `MemoryPromotionQueue` 和全隔离 `IsolatedMemoryCurator`。未配置独立 Curator 时跳过自动晋升，不产生无人消费的队列作业；`CONFIRM` 通过持久状态和 `/memory pending|confirm|reject` 非阻塞处理
+- 已实现：长期记忆以 SQLite 为事实源、向量索引为可选召回通道；增加项目作用域、`recallCount`、`lastRecalledAt`、最高 1% 使用微调、最近召回新鲜度锚点和滑动 TTL。策略 FACT/FEEDBACK 在真实 Prompt 注入后续期，显式固定到期时间保持不变，到期只软归档
+- 已实现：晋升队列支持崩溃租约回收、清空闸门、来源与作用域校验；Curator 不继承旧记忆，不提供工具、MCP、Skill、文件、命令、网络工具或子 Agent 入口，仅保留独立模型传输
+- 影响范围：上下文压缩、SessionMemory、长期记忆存储与检索、任务结束生命周期、CLI/Runtime 装配、记忆命令、测试和架构文档
+- 验证：记忆模块限定回归通过；`mvn -q -DskipTests=false test` 本轮新生成 228 份 Surefire 报告，共 1719 项，0 失败、0 错误、6 项按条件跳过，退出码 0。OpenCode Go `deepseek-v4-flash` 真实 Curator 用例通过；60 场景真实记忆评测的写入准确率、低价值拦截率、Recall@5、Prompt 注入命中率和召回到注入转化率均为 100%，生成 60 条记忆与 60 个向量
+- 文档：新增 `docs/memory-architecture-v2.drawio`，并同步更新 `AGENTS.md`、`README.md`、`docs/agents-reference.md` 和滚动摘要设计说明
+- 未验证：未启动交互 CLI，未执行长期多进程 SQLite 压力测试，也未验证 Curator 网关长期故障下的队列吞吐与磁盘配额
+- 剩余风险：跨进程同时召回同一条记忆仍只保证 SQLite 单语句更新，不提供全局排序事务；软归档向量继续保留，恢复语义依赖检索侧始终按事实状态过滤
+
 ## 2026-08-26 上下文证据来源与新鲜度
 
 - 状态：已完成
@@ -39,7 +53,7 @@
 ## 2026-08-24 状态、证据与恢复可靠性修复
 
 - 状态：已完成
-- 已实现：Reviewer 支持独立 Provider/模型，critical/high 语义验收强制反例；九段摘要的动态任务段只引用 `SessionMemory`；敏感记忆确认票据持久化、延长窗口并支持幂等重放
+- 已实现：Reviewer 支持独立 Provider/模型，critical/high 语义验收强制反例；当时的九段摘要动态任务段只引用 `SessionMemory`，后续已收敛为不保存任务状态的六段摘要；敏感记忆确认票据持久化、延长窗口并支持幂等重放
 - 已实现：当前状态观察按证据强度处理，规则冲突显式提示用户裁决；STALE 检索命中默认回读校验；checkpoint 协议升级到 8，并按步骤恢复有界 `AttemptDigest`
 - 日期：`2026-08-24`
 - 影响范围：Multi-Agent Reviewer、上下文摘要、Memory、Code RAG、checkpoint 恢复、配置与公开文档
@@ -173,10 +187,10 @@
 - 影响范围：ConversationHistoryCompactor、ContextProfile、TokenBudget、ReAct、Plan、SubAgent 的请求前压缩阈值
 - 剩余风险：Provider 原生 tokenizer 与本地估算可能存在偏差；周期性重建无法恢复既没有摘要也没有落盘引用的历史内容
 
-## 2026-08-20 九段式生命周期滚动摘要
+## 2026-08-20 生命周期滚动摘要（九段旧版，现已收敛为六段）
 
 - 状态：已实现并通过限定回归
-- 已实现：保留九段摘要分类；新增主题、生命周期、重要性、版本、压缩次数、覆盖关系和证据引用；增量模型只输出受限变更操作，程序负责校验、覆盖、完成迁移和删除；格式损坏时保留上一版摘要；周期性全量重压缩改为生命周期 GC，稳定决策和未解决事项不按次数删除
+- 历史实现：曾保留九段摘要分类；后续删除待办、当前工作和下一步三个任务状态段，现固定为六段。主题、生命周期、重要性、版本、压缩次数、覆盖关系和证据引用继续保留；增量模型只输出受限变更操作，程序负责校验、覆盖、完成迁移和删除；格式损坏时保留上一版摘要；周期性全量重压缩改为生命周期 GC
 - 验证：`RollingSummaryTest`、`SummaryLifecycleReducerTest`、`SummaryGarbageCollectorTest`、`CompactionSemanticGuardTest`、`ConversationHistoryCompactorTest` 定向测试通过
 - 未验证：未运行全量测试，未启动项目，未执行真实模型长会话评测
 - 影响范围：上下文压缩摘要模型、增量更新协议、周期治理、摘要文档

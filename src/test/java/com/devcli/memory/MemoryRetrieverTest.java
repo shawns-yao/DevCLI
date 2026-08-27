@@ -6,6 +6,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -52,6 +55,41 @@ class MemoryRetrieverTest {
         String context = retriever.buildContextForQuery("项目路径", 200);
         assertFalse(context.isEmpty());
         assertTrue(context.contains("/home/dev/myapp"));
+    }
+
+    @Test
+    void projectScopedMemoryDoesNotLeakAcrossProjects() {
+        longTerm.store(new MemoryEntry("global", "统一使用简体中文",
+                MemoryEntry.MemoryType.FACT, java.time.Instant.now(),
+                Map.of("scope_type", "GLOBAL", "scope_key", ""), 10));
+        longTerm.store(new MemoryEntry("project-a", "构建命令是 mvn -Pproject-a verify",
+                MemoryEntry.MemoryType.FACT, java.time.Instant.now(),
+                Map.of("scope_type", "PROJECT", "scope_key", "project-a"), 10));
+        longTerm.store(new MemoryEntry("project-b", "构建命令是 gradle project-b-check",
+                MemoryEntry.MemoryType.FACT, java.time.Instant.now(),
+                Map.of("scope_type", "PROJECT", "scope_key", "project-b"), 10));
+
+        var results = retriever.retrieveLongTerm("构建命令", 5, Set.of("project-a"));
+
+        assertTrue(results.stream().anyMatch(entry -> entry.getId().equals("project-a")));
+        assertTrue(results.stream().noneMatch(entry -> entry.getId().equals("project-b")));
+    }
+
+    @Test
+    void recallUsageChangesOnlyAfterPromptInjection() {
+        longTerm.store(new MemoryEntry("used", "项目构建命令是 mvn verify",
+                MemoryEntry.MemoryType.FACT, null, 10));
+
+        retriever.retrieveLongTerm("构建命令", 5);
+        assertEquals(0, longTerm.retrieve("used").orElseThrow().getRecallCount());
+
+        MemoryRetriever.ContextResult result = retriever.buildContext(
+                "构建命令", 200, java.util.List.of(), Set.of());
+        longTerm.recordRecalled(result.injectedMemoryIds(), java.time.Instant.now());
+
+        MemoryEntry recalled = longTerm.retrieve("used").orElseThrow();
+        assertEquals(1, recalled.getRecallCount());
+        assertNotNull(recalled.getLastRecalledAt());
     }
 
     @Test
@@ -236,5 +274,26 @@ class MemoryRetrieverTest {
         assertEquals(0.765, ranked.get(0).semanticScore(), 0.001,
                 "语义分数应乘以记忆证据权重后参与过滤");
         assertEquals("f2", ranked.get(1).entry().getId());
+    }
+
+    @Test
+    void usageFrequencyCannotOutrankClearlyMoreRelevantMemory() {
+        MemoryEntry relevant = new MemoryEntry("relevant", "目标构建命令", MemoryEntry.MemoryType.FACT,
+                java.time.Instant.now(), Map.of(), 10, "", true, "",
+                MemoryEntry.CURRENT_SCHEMA_VERSION, 1, null,
+                MemoryEvidence.legacy(Map.of()), 0, null);
+        MemoryEntry frequent = new MemoryEntry("frequent", "旧构建命令", MemoryEntry.MemoryType.FACT,
+                java.time.Instant.now(), Map.of(), 10, "", true, "",
+                MemoryEntry.CURRENT_SCHEMA_VERSION, 1, null,
+                MemoryEvidence.legacy(Map.of()), 100, java.time.Instant.now());
+        longTerm.store(relevant);
+        longTerm.store(frequent);
+        retriever.setSemanticSearch((query, topK) -> List.of(
+                new MemoryRetriever.SemanticHit("relevant", 0.90),
+                new MemoryRetriever.SemanticHit("frequent", 0.89)));
+
+        var ranked = retriever.retrieveLongTermRanked("没有关键词命中的查询", 5);
+
+        assertEquals("relevant", ranked.getFirst().entry().getId());
     }
 }

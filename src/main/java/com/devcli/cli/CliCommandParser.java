@@ -18,6 +18,9 @@ final class CliCommandParser {
         SWITCH_HITL,
         MEMORY_STATUS,
         MEMORY_ORGANIZE,
+        MEMORY_PENDING,
+        MEMORY_CONFIRM,
+        MEMORY_REJECT,
         MEMORY_CLEAR,
         MEMORY_FORGET,
         MEMORY_SAVE,
@@ -154,6 +157,23 @@ final class CliCommandParser {
         if (trimmed.equalsIgnoreCase("/memory organize apply")
                 || trimmed.equalsIgnoreCase("/mem organize apply")) {
             return new ParsedCommand(CommandType.MEMORY_ORGANIZE, "apply");
+        }
+
+        if (trimmed.equalsIgnoreCase("/memory pending")
+                || trimmed.equalsIgnoreCase("/mem pending")) {
+            return new ParsedCommand(CommandType.MEMORY_PENDING, null);
+        }
+
+        if (trimmed.regionMatches(true, 0, "/memory confirm", 0, "/memory confirm".length())
+                || trimmed.regionMatches(true, 0, "/mem confirm", 0, "/mem confirm".length())) {
+            String id = trimmed.substring(trimmed.indexOf("confirm") + "confirm".length()).trim();
+            return new ParsedCommand(CommandType.MEMORY_CONFIRM, id);
+        }
+
+        if (trimmed.regionMatches(true, 0, "/memory reject", 0, "/memory reject".length())
+                || trimmed.regionMatches(true, 0, "/mem reject", 0, "/mem reject".length())) {
+            String id = trimmed.substring(trimmed.indexOf("reject") + "reject".length()).trim();
+            return new ParsedCommand(CommandType.MEMORY_REJECT, id);
         }
 
         if (trimmed.equalsIgnoreCase("/memory clear") || trimmed.equalsIgnoreCase("/mem clear")) {

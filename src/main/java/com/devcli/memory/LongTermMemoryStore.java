@@ -39,6 +39,11 @@ public interface LongTermMemoryStore extends AutoCloseable {
         return true;
     }
 
+    /** 原子记录一批实际注入；同一轮调用方必须先去重。 */
+    default boolean recordRecall(List<MemoryEntry> recalledEntries) {
+        return upsertAll(recalledEntries);
+    }
+
     /**
      * 当前 store 是否能确认跨进程持久化。
      * SQLite 初始化失败时会降级为 no-op store，此时返回 false，LongTermMemory 可选择

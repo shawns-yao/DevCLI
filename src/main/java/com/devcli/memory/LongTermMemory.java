@@ -88,11 +88,8 @@ public class LongTermMemory implements Memory, AutoCloseable {
     public synchronized void store(MemoryEntry entry) {
         // Bug #13 修复：整个方法加锁，确保去重检查和插入原子性
         if (entry == null) return;
-        pruneExpired();
-        Instant expiresAt = entry.getExpiresAt() != null
-                ? entry.getExpiresAt()
-                : MemoryLifecyclePolicy.expiresAt(entry.getType(), Instant.now());
-        entry = entry.withLifecycle(entry.getRevision(), expiresAt, entry.getMetadata());
+        archiveExpired();
+        entry = MemoryLifecyclePolicy.initializeExpiration(entry, Instant.now());
         MemoryEntry previousById = entries.get(entry.getId());
         if (previousById == null && findDuplicateContent(entry) != null) {
             return;
@@ -143,8 +140,8 @@ public class LongTermMemory implements Memory, AutoCloseable {
     private synchronized void storePrepared(MemoryEntry entry, List<String> explicitTargetIds) {
         if (entry == null) return;
         MemoryWriteProtocol.Prepared prepared = MemoryWriteProtocol.prepare(entry);
-        entry = prepared.entry();
-        pruneExpired();
+        entry = MemoryLifecyclePolicy.initializeExpiration(prepared.entry(), Instant.now());
+        archiveExpired();
         List<MemoryEntry> existingEntries = new ArrayList<>(entries.values());
         boolean hasExplicitTargets = explicitTargetIds != null && !explicitTargetIds.isEmpty();
         if (!hasExplicitTargets && MemoryConflictDetector.findEquivalent(entry, existingEntries).isPresent()) {
@@ -201,11 +198,8 @@ public class LongTermMemory implements Memory, AutoCloseable {
             metadata.put("conflict_with", value.existingId());
             evidence = evidence.withConflict(value.existingId());
         }
-        Instant expiresAt = entry.getExpiresAt() != null
-                ? entry.getExpiresAt()
-                : MemoryLifecyclePolicy.expiresAt(entry.getType(), Instant.now());
         MemoryEntry managedEntry = entry.copy(
-                subject, true, "", nextRevision, expiresAt, metadata, evidence);
+                subject, true, "", nextRevision, entry.getExpiresAt(), metadata, evidence);
 
         List<MemoryEntry> revisionWrites = new ArrayList<>();
         for (MemoryEntry old : supersededTargets) {
@@ -249,11 +243,9 @@ public class LongTermMemory implements Memory, AutoCloseable {
     }
 
     private void storeInactiveCandidate(MemoryEntry entry) {
-        Instant expiresAt = entry.getExpiresAt() != null
-                ? entry.getExpiresAt()
-                : MemoryLifecyclePolicy.expiresAt(entry.getType(), Instant.now());
+        entry = MemoryLifecyclePolicy.initializeExpiration(entry, Instant.now());
         MemoryEntry candidate = entry.copy(entry.getSubject(), false, "",
-                entry.getRevision(), expiresAt, entry.getMetadata(), entry.getEvidence());
+                entry.getRevision(), entry.getExpiresAt(), entry.getMetadata(), entry.getEvidence());
         boolean persisted = store.upsert(candidate);
         if (!persisted && persistentStore) {
             log.warn("Memory candidate persistence rejected for {}", candidate.getId());
@@ -274,7 +266,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
         if (entry == null || targetIds == null || targetIds.isEmpty()) {
             return false;
         }
-        pruneExpired();
+        archiveExpired();
         List<MemoryEntry> targets = targetIds.stream()
                 .map(entries::get)
                 .filter(java.util.Objects::nonNull)
@@ -305,7 +297,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
      */
     public synchronized boolean storeSuperseding(MemoryEntry entry, List<String> targetIds) {
         if (entry == null || targetIds == null || targetIds.isEmpty()) return false;
-        pruneExpired();
+        archiveExpired();
         List<String> effectiveTargets = targetIds.stream()
                 .distinct()
                 .filter(id -> {
@@ -333,13 +325,13 @@ public class LongTermMemory implements Memory, AutoCloseable {
 
     @Override
     public synchronized Optional<MemoryEntry> retrieve(String id) {
-        pruneExpired();
+        archiveExpired();
         return Optional.ofNullable(entries.get(id));
     }
 
     @Override
     public synchronized List<MemoryEntry> search(String query, int limit) {
-        pruneExpired();
+        archiveExpired();
         Set<String> queryTokens = MemoryQueryTokenizer.tokenize(query);
         return entries.values().stream()
                 .filter(MemoryEntry::isRecallable)
@@ -356,14 +348,14 @@ public class LongTermMemory implements Memory, AutoCloseable {
 
     @Override
     public synchronized List<MemoryEntry> getAll() {
-        pruneExpired();
+        archiveExpired();
         return new ArrayList<>(entries.values());
     }
 
     public synchronized boolean updateReviewState(
             String id, MemoryEvidence.ReviewState reviewState) {
         if (id == null || id.isBlank() || reviewState == null) return false;
-        pruneExpired();
+        archiveExpired();
         MemoryEntry existing = entries.get(id);
         if (existing == null) return false;
         if (existing.getEvidence().reviewState() == reviewState) return true;
@@ -414,17 +406,41 @@ public class LongTermMemory implements Memory, AutoCloseable {
         return true;
     }
 
-    private void pruneExpired() {
+    private void archiveExpired() {
         Instant now = Instant.now();
-        List<String> expiredIds = entries.values().stream()
+        List<MemoryEntry> expiredEntries = entries.values().stream()
+                .filter(MemoryEntry::isActive)
                 .filter(entry -> entry.isExpired(now))
-                .map(MemoryEntry::getId)
                 .toList();
-        for (String id : expiredIds) {
-            if (!delete(id)) {
-                log.warn("Failed to prune expired memory {}", id);
+        for (MemoryEntry entry : expiredEntries) {
+            Map<String, String> metadata = new HashMap<>(entry.getMetadata());
+            metadata.put("lifecycle_state", "ARCHIVED");
+            metadata.put("archived_at", now.toString());
+            MemoryEntry archived = entry.copy(entry.getSubject(), false, entry.getSupersededBy(),
+                    entry.getRevision(), entry.getExpiresAt(), Map.copyOf(metadata));
+            if (store.upsert(archived) || !persistentStore) {
+                entries.put(entry.getId(), archived);
+            } else {
+                log.warn("Failed to archive expired memory {}", entry.getId());
             }
         }
+    }
+
+    /** 记录真正进入 Turn Context 的条目；调用方必须传入本轮去重后的 id。 */
+    public synchronized boolean recordRecalled(java.util.Collection<String> ids, Instant recalledAt) {
+        if (ids == null || ids.isEmpty()) return true;
+        Instant effectiveTime = recalledAt == null ? Instant.now() : recalledAt;
+        List<MemoryEntry> updated = ids.stream().filter(java.util.Objects::nonNull).distinct()
+                .map(entries::get)
+                .filter(java.util.Objects::nonNull)
+                .filter(MemoryEntry::isRecallable)
+                .map(entry -> MemoryLifecyclePolicy.recordRecall(entry, effectiveTime))
+                .toList();
+        if (updated.isEmpty()) return true;
+        boolean persisted = store.recordRecall(updated);
+        if (!persisted && persistentStore) return false;
+        updated.forEach(entry -> entries.put(entry.getId(), entry));
+        return true;
     }
 
     private MemoryEntry findDuplicateContent(MemoryEntry entry) {
@@ -436,6 +452,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
             // 仅比对可召回条目：被 supersede 或已拒绝的旧条不应阻止同内容重新写入
             if (existing.isRecallable()
                     && !existing.getId().equals(entry.getId())
+                    && MemoryWriteProtocol.scopeOf(existing).equals(MemoryWriteProtocol.scopeOf(entry))
                     && existing.getContent().equals(entry.getContent())) {
                 return existing;
             }
@@ -479,13 +496,13 @@ public class LongTermMemory implements Memory, AutoCloseable {
 
     @Override
     public synchronized int getTokenCount() {
-        pruneExpired();
+        archiveExpired();
         return tokenCounter.get();
     }
 
     @Override
     public synchronized int size() {
-        pruneExpired();
+        archiveExpired();
         return entries.size();
     }
 
@@ -504,7 +521,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
 
     /** 按类型筛选记忆 */
     public synchronized List<MemoryEntry> getByType(MemoryEntry.MemoryType type) {
-        pruneExpired();
+        archiveExpired();
         return entries.values().stream()
                 .filter(entry -> entry.getType() == type)
                 .collect(Collectors.toList());

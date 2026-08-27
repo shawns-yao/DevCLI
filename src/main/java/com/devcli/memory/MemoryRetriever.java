@@ -84,14 +84,25 @@ public class MemoryRetriever {
         return retrieveLongTermRanked(query, limit).stream().map(RankedMemory::entry).toList();
     }
 
+    public List<MemoryEntry> retrieveLongTerm(String query, int limit,
+                                               Collection<String> activeScopeKeys) {
+        return retrieveLongTermRanked(query, limit, activeScopeKeys).stream()
+                .map(RankedMemory::entry).toList();
+    }
+
     public List<RankedMemory> retrieveLongTermRanked(String query, int limit) {
+        return retrieveLongTermRanked(query, limit, Set.of());
+    }
+
+    public List<RankedMemory> retrieveLongTermRanked(String query, int limit,
+                                                      Collection<String> activeScopeKeys) {
         if (query == null || query.isBlank() || limit <= 0) {
             return List.of();
         }
         Map<String, MemoryEntry> byId = new HashMap<>();
         for (MemoryEntry entry : longTermMemory.getAll()) {
             // 只把可召回事实纳入候选：被 supersede 或明确拒绝的条目不会注入 prompt
-            if (entry.isRecallable()) {
+            if (entry.isRecallable() && isVisibleInScope(entry, activeScopeKeys)) {
                 byId.put(entry.getId(), entry);
             }
         }
@@ -110,7 +121,8 @@ public class MemoryRetriever {
                 if (entry != null) {
                     double semanticScore = Math.max(0, hit.similarity())
                             * entry.getEvidence().retrievalWeight()
-                            * MemoryFreshnessPolicy.weight(entry, Instant.now());
+                            * MemoryFreshnessPolicy.weight(entry, Instant.now())
+                            * MemoryFreshnessPolicy.usageBoost(entry);
                     mergeScore(scoredById, entry, semanticScore, 0);
                 }
             }
@@ -124,7 +136,8 @@ public class MemoryRetriever {
         for (MemoryEntry entry : byId.values()) {
             double keywordScore = computeRelevanceScore(entry, query) * 1.2
                     * entry.getEvidence().retrievalWeight()
-                    * MemoryFreshnessPolicy.weight(entry, Instant.now());
+                    * MemoryFreshnessPolicy.weight(entry, Instant.now())
+                    * MemoryFreshnessPolicy.usageBoost(entry);
             if (keywordScore > 0) {
                 mergeScore(scoredById, entry, 0, keywordScore);
             }
@@ -153,8 +166,14 @@ public class MemoryRetriever {
     }
 
     public String buildContextForQuery(String query, int maxTokens, Collection<String> suppressedFacts) {
-        List<RankedMemory> relevant = retrieveLongTermRanked(query, maxInjected);
-        if (relevant.isEmpty()) return "";
+        return buildContext(query, maxTokens, suppressedFacts, Set.of()).text();
+    }
+
+    public ContextResult buildContext(String query, int maxTokens,
+                                      Collection<String> suppressedFacts,
+                                      Collection<String> activeScopeKeys) {
+        List<RankedMemory> relevant = retrieveLongTermRanked(query, maxInjected, activeScopeKeys);
+        if (relevant.isEmpty()) return ContextResult.empty();
 
         StringBuilder context = new StringBuilder();
         context.append("## 相关长期记忆\n\n");
@@ -165,6 +184,7 @@ public class MemoryRetriever {
         int preambleTokens = MemoryEntry.estimateTokens(context.toString());
         int usedTokens = preambleTokens;
         int appended = 0;
+        List<String> injectedIds = new ArrayList<>();
         for (RankedMemory ranked : relevant) {
             MemoryEntry entry = ranked.entry();
             if (MemoryFactDeduper.duplicatesAny(entry.getContent(), suppressedFacts)) {
@@ -181,13 +201,38 @@ public class MemoryRetriever {
                     .append("] ").append(safeContent).append("\n");
             usedTokens += safeTokens;
             appended++;
+            injectedIds.add(entry.getId());
         }
 
         if (appended == 0) {
-            return "";
+            return ContextResult.empty();
         }
         context.append("\n");
-        return context.toString();
+        return new ContextResult(context.toString(), List.copyOf(injectedIds), relevant);
+    }
+
+    static boolean isVisibleInScope(MemoryEntry entry,
+                                    Collection<String> activeScopeKeys) {
+        String type = entry.getMetadata().getOrDefault("scope_type", "").trim();
+        String key = entry.getMetadata().getOrDefault("scope_key", "").trim();
+        if (type.isBlank()) {
+            String legacy = entry.getMetadata().getOrDefault(
+                    MemoryWriteProtocol.META_SCOPE, MemoryWriteProtocol.DEFAULT_SCOPE);
+            if (legacy == null || legacy.isBlank() || "global".equalsIgnoreCase(legacy)) return true;
+            type = "PROJECT";
+            key = legacy;
+        }
+        if ("GLOBAL".equalsIgnoreCase(type) || "USER".equalsIgnoreCase(type)) return true;
+        if (key.isBlank() || activeScopeKeys == null || activeScopeKeys.isEmpty()) return false;
+        String normalizedKey = normalizeScopeKey(key);
+        return activeScopeKeys.stream().filter(java.util.Objects::nonNull)
+                .map(MemoryRetriever::normalizeScopeKey)
+                .anyMatch(normalizedKey::equals);
+    }
+
+    private static String normalizeScopeKey(String value) {
+        return value.trim().replace('\\', '/').replaceAll("/+$", "")
+                .toLowerCase(Locale.ROOT);
     }
 
     /**
@@ -247,6 +292,19 @@ public class MemoryRetriever {
     }
 
     public record RankedMemory(MemoryEntry entry, double score, double semanticScore, double keywordScore) {}
+
+    public record ContextResult(String text, List<String> injectedMemoryIds,
+                                List<RankedMemory> rankedCandidates) {
+        public ContextResult {
+            text = text == null ? "" : text;
+            injectedMemoryIds = injectedMemoryIds == null ? List.of() : List.copyOf(injectedMemoryIds);
+            rankedCandidates = rankedCandidates == null ? List.of() : List.copyOf(rankedCandidates);
+        }
+
+        static ContextResult empty() {
+            return new ContextResult("", List.of(), List.of());
+        }
+    }
 
     private record ScoredEntry(MemoryEntry entry, double semanticScore, double keywordScore) {
         double score() {

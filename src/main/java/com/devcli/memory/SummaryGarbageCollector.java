@@ -3,13 +3,13 @@ package com.devcli.memory;
 import java.util.List;
 
 /**
- * 摘要垃圾回收：把九段滚动摘要程序化裁剪到字符预算内，<b>不调 LLM</b>。
+ * 摘要垃圾回收：把六段滚动摘要程序化裁剪到字符预算内，<b>不调 LLM</b>。
  *
  * <p>策略：
  * <ol>
  *   <li>折叠"逐条用户消息"到最近 N 条（保尾部，最近的优先），更早的折叠成一行计数</li>
  *   <li>仍超预算则按"低→高优先级"逐段截断（保头部）；主要请求与意图不参与截断。
- *       待办、当前工作和下一步由 SessionMemory 投影，不在摘要中持久化</li>
+ *       任务状态由 SessionMemory 投影，不进入滚动摘要</li>
  * </ol>
  *
  * <p>裁剪是有损的粗操作；裁剪后仍超预算的极端情况由上层（{@code ConversationHistoryCompactor}）

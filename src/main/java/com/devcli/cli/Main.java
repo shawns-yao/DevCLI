@@ -313,6 +313,8 @@ public class Main {
             hitlToolRegistry.setSkillContextBuffer(skillContextBuffer);
 
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
+            reactAgent.setMemoryCuratorClient(
+                    LlmClientFactory.create(llmClient.getProviderName(), config));
             AgentSessionRuntime reactSession = AgentSessionRuntime.adoptOwned(
                     reactAgent, Path.of(reactAgent.getToolRegistry().getProjectPath()));
             RuntimeThreadStore cliRunStore = RuntimeCommandLauncher.openRuntimeStore();
@@ -324,8 +326,7 @@ public class Main {
             reactAgent.setSkillRegistry(skillRegistry);
             reactAgent.setSkillContextBuffer(skillContextBuffer);
 
-            // 长期记忆写入可见化：写入长期记忆意味着跨会话持久化用户内容，
-            // 保留自动保存能力但不允许无声——每次落库都告知写了什么、依据哪条规则、怎么删。
+            // 长期记忆写入可见化：显式保存、证据失效与 Curator 晋升落库都必须可见。
             reactAgent.getMemoryManager().setAutoSaveListener(fact -> ui.println(
                     "🧠 已记入长期记忆 [" + fact.memoryType() + "/" + fact.source() + "]: "
                             + abbreviateMemoryNotice(fact.content())
@@ -484,6 +485,9 @@ public class Main {
                         ui.println(ruleContext.getStatusSummary());
                         ui.println("   /memory organize - 生成长期记忆整理计划");
                         ui.println("   /memory organize apply - 应用低风险整理项");
+                        ui.println("   /memory pending - 查看待确认的记忆候选");
+                        ui.println("   /memory confirm <id> - 接受待确认候选");
+                        ui.println("   /memory reject <id> - 拒绝待确认候选");
                         ui.println("   /memory clear - 清空长期记忆");
                         ui.println("   /memory forget <id> - 删除单条长期记忆");
                         ui.println("   /save <事实> - 手动保存到长期记忆（Retrievable）");
@@ -501,6 +505,24 @@ public class Main {
                                 reactAgent.getMemoryManager().organizeLongTermMemory(organizerMode);
                         ui.println(report.render());
                         ui.println();
+                        continue;
+                    }
+                    case MEMORY_PENDING -> {
+                        ui.println(reactAgent.getMemoryManager().listPendingMemoryPromotions(20));
+                        ui.println();
+                        continue;
+                    }
+                    case MEMORY_CONFIRM, MEMORY_REJECT -> {
+                        String promotionId = command.payload();
+                        boolean approved = command.type() == CliCommandParser.CommandType.MEMORY_CONFIRM;
+                        if (promotionId == null || promotionId.isBlank()) {
+                            ui.println("❌ 请提供候选 id，例如 /memory confirm promotion-123\n");
+                        } else if (reactAgent.getMemoryManager()
+                                .confirmMemoryPromotion(promotionId, approved)) {
+                            ui.println(approved ? "已保存长期记忆候选。\n" : "已拒绝长期记忆候选。\n");
+                        } else {
+                            ui.println("❌ 候选不存在、状态已变化或处理失败。\n");
+                        }
                         continue;
                     }
                     case MEMORY_CLEAR -> {
@@ -636,6 +658,8 @@ public class Main {
                                 config.setDefaultProvider(target.provider());
                                 config.save();
                                 reactAgent.setLlmClient(llmClient);
+                                reactAgent.setMemoryCuratorClient(
+                                        LlmClientFactory.create(llmClient.getProviderName(), config));
                                 ui.println("✅ 已切换到: " + llmClient.getModelName() + " (" + llmClient.getProviderName() + ")");
                                 ui.println("   上下文策略: " + reactAgent.getMemoryManager().getContextProfile().summary());
                                 ui.println("   对话上下文已保留，使用 /clear 可清空\n");

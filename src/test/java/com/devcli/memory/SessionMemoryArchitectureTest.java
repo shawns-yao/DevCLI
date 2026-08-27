@@ -75,6 +75,20 @@ class SessionMemoryArchitectureTest {
     }
 
     @Test
+    void retryingTheSameLogicalEventIsIdempotent() {
+        SessionMemory memory = new SessionMemory();
+        SessionMemory.ToolResultObserved event = new SessionMemory.ToolResultObserved(
+                "list_dir", "{\"path\":\"src\"}", "目录结果",
+                List.of(), "worker-1", "step-1", 17);
+
+        memory.accept(event);
+        memory.accept(event);
+
+        assertEquals(1, memory.snapshot().evidenceJournal().size());
+        assertEquals(1, memory.snapshot().evidenceJournal().getFirst().occurrences());
+    }
+
+    @Test
     void roleViewsShareOneProjectionButExposeDifferentEvidence() {
         SessionMemory memory = new SessionMemory();
         memory.accept(new SessionMemory.StateChanged("goal", "分析项目", "planner", "", 1));

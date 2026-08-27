@@ -2,7 +2,7 @@
 
 > 范围：本文是第 27 期改造设计，用于补齐 `ConversationHistoryCompactor` 的滚动摘要裁剪能力。本文只描述方案，不代表当前代码已完成实现。
 >
-> 落地状态（更新）：摘要固定保留九段；`RollingSummary` 已升级为带主题、版本、重要性、证据引用和生命周期的事实集合。模型只提出受限增量操作，`SummaryLifecycleReducer` 负责确定性更新，`SummaryGarbageCollector` 负责过期与覆盖审计回收；周期治理不再把旧摘要交给 LLM 二次压缩。TaskLedger（27-D）已实现 MVP（见下方 27-D 落地状态：仅 `PlanExecuteAgent` 闭环）。真实模型语义质量仍需独立 benchmark。
+> 落地状态（2026-08-27 更新）：摘要已从九段收敛为六段；待办、当前工作和下一步只由 `SessionMemory` 提供。`RollingSummary` 保留主题、版本、重要性、证据引用和生命周期；旧九段摘要仍可兼容解析，但三个任务状态段不会迁移或重新渲染。模型只提出受限增量操作，`SummaryLifecycleReducer` 负责确定性更新，`SummaryGarbageCollector` 负责过期与覆盖审计回收。
 
 ## 1. 目标
 
@@ -329,7 +329,7 @@ WorkingMemory
 只修改 `ConversationHistoryCompactor.INCREMENTAL_PROMPT`：
 
 - 从“保留已有摘要所有事实”改成“保留仍然活跃的事实”。
-- 要求输出固定六段 Markdown：Stable Decisions / Active Context / Open Issues / Completed Milestones / Superseded Facts / Evidence Index。
+- 要求输出固定六段 Markdown：主要请求与意图 / 关键技术概念 / 文件和代码 / 踩过的坑和修复 / 问题解决过程 / 逐条用户消息。
 - 明确允许裁剪 completed / superseded / obsolete 内容。
 - 要求旧值被覆盖时只保留最终值。
 - 明确禁止输出当前 step、完整工具结果和执行流水账，避免和 WorkingMemory / TaskLedger 重复。

@@ -45,7 +45,7 @@ import java.util.function.Supplier;
  * - 历史首次压缩时使用 Map-Reduce（整段历史进 LLM 视野，不 first-N 截断）
  * - 后续压缩使用增量更新（基于上轮摘要 + 仅新增消息），避免摘要套娃稀释老事实
  * - first-N 字符截断在多轮压缩下信息保留率会塌到 16% 量级（实测）
- * - 摘要输出为固定九段结构化（{@link RollingSummary}，对标 Claude Code /compact 模板）；
+ * - 摘要输出为固定六段结构化（{@link RollingSummary}）；任务状态不进入摘要；
  *   超长时先由 {@link SummaryGarbageCollector} 程序化按段裁剪（不调 LLM），不够再 LLM recompress 兜底
  */
 public class ConversationHistoryCompactor {
@@ -114,7 +114,7 @@ public class ConversationHistoryCompactor {
 
     /**
      * 滚动摘要的字符上限。增量摘要"只追加不删除"会让摘要单调膨胀，
-     * 超过此上限时优先执行确定性生命周期 GC。结构化九段摘要不再交给 LLM 二次改写，
+     * 超过此上限时优先执行确定性生命周期 GC。结构化六段摘要不再交给 LLM 二次改写，
      * 避免稳定决策在反复摘要中漂移。
      */
     static final int MAX_SUMMARY_CHARS = 16_000;
@@ -165,7 +165,7 @@ public class ConversationHistoryCompactor {
     };
 
     private static final String SUMMARY_PROMPT = """
-            请把下面的对话历史压缩成结构化摘要，严格按以下九个 Markdown 段落输出（标题用 ## 开头，无内容写"无"）：
+            请把下面的对话历史压缩成结构化摘要，严格按以下六个 Markdown 段落输出（标题用 ## 开头，无内容写"无"）：
 
             ## 主要请求与意图
             ## 关键技术概念
@@ -173,11 +173,8 @@ public class ConversationHistoryCompactor {
             ## 踩过的坑和修复
             ## 问题解决过程
             ## 逐条用户消息
-            ## 待办任务
-            ## 当前在做什么
-            ## 下一步
 
-            要求："待办任务"、"当前在做什么"、"下一步"不是任务状态来源，三段统一只写"见本轮 Session Memory"；
+            要求：任务状态、待办事项和下一步由 Session Memory 提供，不写入摘要；
             精确实体（文件名/路径/数字/错误码）保留原文；决策被覆盖时只保留最终值；
             "逐条用户消息"按时间列每条用户消息的要点（不复述全文）；不保留过渡话术；不加段落外的前缀或元描述。
 
@@ -201,7 +198,7 @@ public class ConversationHistoryCompactor {
             """;
 
     private static final String REDUCE_PROMPT = """
-            下面是一段长对话被切成多片后各自的摘要。请合并成一份完整摘要，严格按以下九个 Markdown 段落输出（标题用 ## 开头，无内容写"无"）：
+            下面是一段长对话被切成多片后各自的摘要。请合并成一份完整摘要，严格按以下六个 Markdown 段落输出（标题用 ## 开头，无内容写"无"）：
 
             ## 主要请求与意图
             ## 关键技术概念
@@ -209,11 +206,8 @@ public class ConversationHistoryCompactor {
             ## 踩过的坑和修复
             ## 问题解决过程
             ## 逐条用户消息
-            ## 待办任务
-            ## 当前在做什么
-            ## 下一步
 
-            要求："待办任务"、"当前在做什么"、"下一步"不是任务状态来源，三段统一只写"见本轮 Session Memory"；
+            要求：任务状态、待办事项和下一步由 Session Memory 提供，不写入摘要；
             所有片段里的精确实体（文件名/路径/数字/错误码）必须以原文出现；决策被覆盖（先 A 后 B 最终 C）只保留"最终是 C"；不遗漏任何片段事实；不加段落外前缀。
 
             === 各片段摘要 ===
@@ -222,20 +216,20 @@ public class ConversationHistoryCompactor {
             """;
 
     private static final String INCREMENTAL_PROMPT = """
-            你在维护一份固定九段式滚动摘要。不要重写完整摘要，只输出 JSON 变更操作：
+            你在维护一份固定六段式滚动摘要。不要重写完整摘要，只输出 JSON 变更操作：
             {"operations":[{"action":"ADD|UPDATE|RESOLVE|SUPERSEDE|EXPIRE|DELETE",
-            "section":"九段标题之一","target_section":"可选九段标题","subject":"稳定主题键",
+            "section":"六段标题之一","target_section":"可选六段标题","subject":"稳定主题键",
             "content":"新增或最终事实","lifecycle":"STABLE|ACTIVE|UNRESOLVED|RESOLVED",
             "importance":0-100,"evidence_refs":["工具或消息引用"]}]}
 
             规则：
-            1. 九段标题保持不变，生命周期只是事实元数据，不新增段落。
+            1. 六段标题保持不变，生命周期只是事实元数据，不新增段落；任务状态不进入摘要。
             2. 新事实用 ADD；同主题最终值变化用 UPDATE，且必须原样复用已有元数据中的 subject；任务完成用 RESOLVE 并写入最终结果。
             3. 已被覆盖用 SUPERSEDE，暂时失效用 EXPIRE，确定无审计价值才用 DELETE。
             4. 保留仍有效的决策、未完成事项、当前阻塞、精确实体和证据引用。
             5. 只输出一个 JSON 对象，不输出 Markdown、解释或代码围栏。
 
-            === 已有摘要（九段） ===
+            === 已有摘要（六段） ===
             %s
             === 已有摘要（结束） ===
 
@@ -258,7 +252,7 @@ public class ConversationHistoryCompactor {
 
     private LlmClient llmClient;
     private final int retainRecentTokens;
-    /** 九段摘要的程序化垃圾回收（capSummarySize 优先用它裁剪，不调 LLM）。 */
+    /** 六段摘要的程序化垃圾回收（capSummarySize 优先用它裁剪，不调 LLM）。 */
     private final SummaryGarbageCollector summaryGc = new SummaryGarbageCollector();
     private CompactionSummaryCache compactionSummaryCache;
     private Supplier<String> postCompactContextSupplier;
@@ -1246,7 +1240,7 @@ public class ConversationHistoryCompactor {
             return reduced.summary();
         }
 
-        // 兼容过渡期仍返回完整九段 Markdown 的模型；任意文本或损坏 JSON 均失败关闭，
+        // 兼容过渡期仍返回完整结构化 Markdown 的模型；任意文本或损坏 JSON 均失败关闭，
         // 保留上一版摘要，避免一次格式漂移清空核心推理状态。
         RollingSummary legacy = RollingSummary.parse(proposedOperations);
         if (!legacy.isEmpty()) {
@@ -1298,13 +1292,13 @@ public class ConversationHistoryCompactor {
 
     /**
      * 滚动摘要超过 {@link #MAX_SUMMARY_CHARS} 时先做确定性生命周期 GC。
-     * 九段摘要即使仍超预算也不再交给 LLM 二次改写；旧版非结构化摘要才保留 LLM 兼容兜底。
+     * 六段摘要即使仍超预算也不再交给 LLM 二次改写；旧版非结构化摘要才保留 LLM 兼容兜底。
      */
     private String capSummarySize(String summary) {
         if (summary == null || summary.length() <= MAX_SUMMARY_CHARS) {
             return summary;
         }
-        // 先程序化 GC（不调 LLM）：解析九段 → 按段裁剪 → 渲染
+        // 先程序化 GC（不调 LLM）：解析六段 → 按段裁剪 → 渲染
         RollingSummary parsed = RollingSummary.parse(summary);
         if (!parsed.isEmpty()) {
             summaryGc.gc(parsed, MAX_SUMMARY_CHARS);
@@ -1322,7 +1316,7 @@ public class ConversationHistoryCompactor {
             }
             return summary;
         }
-        // 旧版非九段格式无法解析时才使用 LLM 兼容兜底。
+        // 旧版非结构化格式无法解析时才使用 LLM 兼容兜底。
         if (llmClient == null) {
             return summary; // 无 LLM 可兜底，返回 GC 后结果（可能略超，宁可不崩）
         }

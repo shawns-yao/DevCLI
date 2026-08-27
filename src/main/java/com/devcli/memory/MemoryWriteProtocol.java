@@ -85,6 +85,11 @@ final class MemoryWriteProtocol {
                 entry.getMetadata().getOrDefault(META_SCOPE, DEFAULT_SCOPE));
     }
 
+    static String scopeOf(MemoryEntry entry) {
+        if (entry == null) return DEFAULT_SCOPE;
+        return normalizeScope(entry.getMetadata().getOrDefault(META_SCOPE, DEFAULT_SCOPE));
+    }
+
     private static String normalize(String value) {
         if (value == null || value.isBlank()) return "default";
         return Normalizer.normalize(value, Normalizer.Form.NFKC)

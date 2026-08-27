@@ -33,7 +33,7 @@ ReAct 主循环、Plan 多 Agent 编排、MCP 协议客户端、上下文压缩�
 
 - ReAct 主循环与统一 `/plan` 编排入口；Plan 固定使用 Planner、Worker、Reviewer 协作链路，串行或并行由 DAG 依赖与资源冲突决定。
 - RAG（检索增强生成）：JavaParser 切分、SQLite 向量存储、关键词召回、代码关系图谱、RRF（倒数排名融合）与 CrossEncoderReranker（交叉编码器重排）。
-- 两层记忆（当前任务 `SessionMemory` / 跨会话 `LongTermMemory`）与两个相邻系统（上下文压缩 / `RuleContext`），含语义守卫、Token 预算证据治理、prompt-too-long 重试与失败熔断。
+- 三种生命周期：当前线程 `conversationHistory + RollingSummary`、当前任务 `SessionMemory`、跨任务 `LongTermMemory`；含 Token 预算治理、作用域召回、可重放晋升队列和隔离 Curator。
 - MCP（Model Context Protocol）：手写 JSON-RPC 2.0 客户端，支持 stdio 与 Streamable HTTP，动态注册工具与 resources。
 - Skill：jar 内置、用户级与项目级三层加载，`load_skill` 按需展开，allowedTools 白名单约束后续工具调用。
 - 安全模型：HITL（人工审批）、路径围栏、命令快速拒绝与 JSONL 审计链。
@@ -101,7 +101,7 @@ Main
 
 各路径共享：
 ├── ToolRegistry           # 内置工具 + MCP 工具 + resources
-├── MemoryManager          # SessionMemory + LongTermMemory
+├── MemoryManager          # 上下文、任务投影、长期记忆的薄协调门面
 ├── SnapshotService        # turn 前后快照
 ├── PromptAssembler        # 分层 prompt 组装
 ├── Renderer               # inline / plain
@@ -111,10 +111,10 @@ Main
 关键边界：
 
 - 所有内置 LLM Provider 使用统一 `LlmException` 错误模型，区分认证、限流、过载、超时、网络、参数、上下文超限、内容过滤、服务端、响应格式和主动取消。限流、过载、超时、网络和 5xx 按指数退避与 jitter 有界重试；已取消请求和已经输出流式内容的请求不重试，避免重复正文或工具调用。SubAgent 会把标准错误码和 `retryable` 标记保留到编排层，瞬时故障判断不依赖具体网络错误文案。
-- `ConversationHistoryCompactor（对话历史压缩器）` 是治理 LLM messages 窗口的唯一压缩点；压缩分两层：第 0 层 `microcompact` 先处理单条超大消息，普通 user/assistant 消息和旧 `tool_result` 都会保留头尾并落盘为可恢复的 `<microcompact_boundary>` 引用（工具结果按 `toolCallId` 成批处理，不调 LLM、不删消息、保 tool_call 配对），扛不住再走 LLM 摘要（首次 Map-Reduce，后续为九段式生命周期增量操作）。原文尾部按 token 预算从最新 user 边界反向填充；若边界所在单条消息仍使尾部超预算，则继续前移安全边界，最后才对无法再切分的单条消息做可恢复截断。九段只负责信息分类，每条事实另带生命周期、主题、版本、重要性和证据引用；模型只提出受限变更操作，程序负责覆盖、完成迁移和删除。摘要提交到 history 前会经过运行时语义守卫；默认每 5 次成功压缩执行生命周期 GC，不再二次压缩旧摘要。压缩阈值还会扣除当前工具定义和输出预留，避免只统计 history 却使完整请求超出模型窗口。
+- `ConversationHistoryCompactor（对话历史压缩器）` 是治理 LLM messages 窗口的唯一压缩点；压缩分两层：第 0 层 `microcompact` 先处理单条超大消息，扛不住再走 LLM 摘要（首次 Map-Reduce，后续为六段式生命周期增量操作）。六段摘要不保存待办、当前工作或下一步，这些运行状态只来自 `SessionMemory`；旧九段摘要仍可解析，但三个旧任务状态段会被丢弃。摘要提交到 history 前会经过运行时语义守卫；默认每 5 次成功压缩执行生命周期 GC，不再二次压缩旧摘要。
 - 本地 `@path` 和 MCP resource 在展开阶段按剩余 Token 预算选择内联或不可变快照引用；内容型请求由程序强制回读，后续“里面/该文件/附件”等跨轮追问复用最近引用。元数据问题不强制读取；错误路径、读取失败或快照哈希变化达到两次后失败关闭。
-- `SessionMemory（会话记忆）` 是当前任务共享的短期记忆，通过统一事件入口维护覆盖更新的 WorkState 和 EvidenceJournal；明确 Plan 任务通过 taskId 轮换投影，Prompt 使用单一硬 Token 预算并按重要性优先注入。Multi-Agent 证据保留真实 agentId、stepId 和 sequence；失败压缩为 AttemptDigest，可再生证据只保留摘要和引用。
-- `LongTermMemory（长期记忆）` 只保存跨会话稳定事实。等价同主题事实直接去重，只有值变化才建立 revision 和 superseded 审计链；当前状态观察带证据强度，只有 HIGH 直接覆盖旧事实，规则冲突显式提示用户裁决。敏感保存使用持久化 confirmation_id，默认有效 24 小时；用户确认后由 `confirm_memory` 继续或取消，重复确认返回同一终态结果。
+- `SessionMemory（工作记忆）` 是当前任务共享运行投影，通过统一、幂等的事件入口维护 WorkState 和 EvidenceJournal；ReAct、Plan 与 Team 都使用 taskId 轮换，Prompt 使用单一硬 Token 预算。
+- `LongTermMemory（长期记忆）` 只保存跨任务稳定事实。显式配置独立 Curator 后，任务结束会把脱敏、限长的必要子集写入 SQLite 晋升队列，再由空工具、无旧记忆的隔离 Curator 输出 `SAVE / CONFIRM / SKIP`；未配置 Curator 时跳过自动晋升，不创建孤儿作业。除模型推理传输外，它没有 Web、MCP、Skill、文件、命令或子 Agent 入口。检索先按 `scope_type/scope_key` 隔离，再融合关键词与向量；只有实际注入 Turn Context 的条目才更新 `recallCount/lastRecalledAt`，使用频率只对近似同分项提供最高 1% 的微调，新鲜度优先使用最近召回时间。策略 TTL 在真实召回后滑动续期，显式固定到期时间不续期；到期先软归档，不在检索时物理删除。
 - `PathGuard（路径围栏）` 负责限制文件访问不逃逸项目根。
 - `ToolEffect + ToolAccessScope（工具副作用能力）` 由执行管线强制：非隔离分析任务只获得只读能力，隔离任务才允许项目写入和主机命令；MCP 缺失只读注解或声明 destructive/openWorld 时按外部副作用处理。工具参数先转换为稳定语义指纹，字段顺序、查询大小写、Unicode 等价字符和冗余空白不再绕过停滞检测；正则 pattern 保持大小写敏感，避免错误缓存命中；成功的只读结果会短期缓存，任何副作用执行都会清空缓存。
 - `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 并行执行时拦截 `write_file`，同一文件只能被一个运行中步骤写入；并行工具线程会继承步骤租约归属，任务结束后释放租约。`ToolRegistry` 托管共享后台清理器，project fork 复用同一线程，最后一个注册表关闭后停止；周期可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
@@ -519,14 +519,14 @@ Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个
 
 ## Memory
 
-DevCLI 只有两层记忆：
+DevCLI 按生命周期分三层：
 
-- `SessionMemory（会话记忆）`：只服务当前任务。明确 Plan 任务结束后保留最终投影，到下一个 taskId 开始时清理；ReAct 使用 `/clear` 划分边界。WorkState 保存目标、计划、步骤、用户约束、根因、修改文件、测试状态和下一步动作；EvidenceJournal 按重要性增量合并，并在统一 Token 预算内渲染。Multi-Agent 共享同一实例，通过真实 agentId、stepId、sequence 合并事件。
-- `LongTermMemory（长期记忆）`：跨会话稳定事实，SQLite 持久化并支持检索注入。写入前经过 `LongTermMemoryPolicy`，不会把临时指令、敏感载荷或低复用事实直接持久化。
+- `conversationHistory + RollingSummary（短期上下文）`：按 Token 预算保留当前线程消息；六段摘要只保存有损历史背景，不复制任务状态。
+- `SessionMemory（工作记忆）`：只服务当前任务。WorkState 保存目标、计划、步骤、用户约束、根因、修改文件、测试状态和下一步动作；EvidenceJournal 按重要性增量合并，并在统一 Token 预算内渲染。
+- `LongTermMemory（长期记忆）`：跨任务稳定事实，SQLite 是唯一事实源，向量库只是召回索引。
 
-两个相邻系统不属于记忆层：
+相邻规则系统不属于记忆层：
 
-- `ConversationHistoryCompactor + CompactionSummaryCache`：治理真实 LLM messages 和压缩预摘要；预摘要缓存默认 30 分钟过期。
 - `RuleContext`：加载 `DEVCLI.md` 和 `/rule add` 的强约束并每轮注入；`/rule list` 和 `/rule remove` 负责管理。旧 pinned facts 只显示为待分类项，避免把稳定事实误迁为规则。
 - RAG 检索默认把 keyword / semantic / graph、RRF、rerank、最终选择和降级状态写入本机 JSONL 审计记录，不保存代码正文。普通 CLI 会话归档默认关闭；启用后 ReAct 保存脱敏模型消息，Plan / Team 保存顶层输入输出，不保存图片正文与 reasoning，并按保留期限自动清理。
 
@@ -544,12 +544,12 @@ DevCLI 只有两层记忆：
 
 长期记忆写入策略：
 
-- 用户明确说“记住”“保存”“以后记得”或英文 “remember / save this preference / for future sessions” 时，低敏稳定事实优先保存；如果显式保存内容仍然包含“今天/这次/临时/朋友孩子高考”这类低复用信号，策略返回确认态。
+- 用户明确执行 `/save` 或调用 `save_memory` 时，低敏稳定事实按显式写入协议保存；如果内容仍然包含明显临时或低复用信号，策略返回确认态。
 - 个人偏好、项目约定、常用路径、长期身份属性通过 `reason_code` 记录可解释写入原因，不再依赖未校准的小数打分。
-- 个人属性类键值事实（如“我是医生”）可自动进入长期记忆；模糊的新个人状态事实（如“我刚刚搬到北京”）需要确认。
+- 普通用户消息不会绕过任务晋升协议直接落库；显式配置独立 Curator 后，任务结束的 Curator 只看当前任务脱敏快照，不读取旧记忆；未配置时不创建待处理队列。
 - 当信息涉及 token、密码、手机号、地址等敏感内容时，默认要求确认或跳过。
 - “今天临时这样做”“这次先用某个文件名”等低复用信息只留在当前任务的 `SessionMemory`。
-- 多次在短期上下文重复出现的稳定事实，会提高进入长期记忆的优先级。
+- Curator 判断不确定时写入 `AWAITING_CONFIRMATION`，使用 `/memory pending`、`/memory confirm <id>` 或 `/memory reject <id>` 非阻塞处理。
 - 命中主题键（如 JSON 库选型）的新事实写入时，同主题旧事实自动失效、检索不再召回，避免被推翻的旧设定继续误导模型；抽不到主题则退回追加不覆盖。
 
 ## RAG

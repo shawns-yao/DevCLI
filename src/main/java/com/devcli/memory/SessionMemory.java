@@ -84,6 +84,7 @@ public class SessionMemory {
     private final LinkedHashMap<String, AttemptDigestSnapshot> attemptDigests = new LinkedHashMap<>();
     private final LinkedHashMap<String, Long> stepSequences = new LinkedHashMap<>();
     private final LinkedHashMap<String, EvidenceOrigin> activeEvidenceOrigins = new LinkedHashMap<>();
+    private final LinkedHashSet<String> processedEventIds = new LinkedHashSet<>();
     private String taskId = "";
     private boolean taskEnded;
     private long planSequence = Long.MIN_VALUE;
@@ -119,6 +120,12 @@ public class SessionMemory {
     public synchronized void accept(SessionEvent event) {
         if (event == null) return;
         long sequence = event.sequence() > 0 ? event.sequence() : ++localSequence;
+        String eventId = event.getClass().getSimpleName() + "\u0000" + event.agentId()
+                + "\u0000" + event.stepId() + "\u0000" + sequence;
+        if (!processedEventIds.add(eventId)) return;
+        while (processedEventIds.size() > 4_096) {
+            processedEventIds.remove(processedEventIds.iterator().next());
+        }
         localSequence = Math.max(localSequence, sequence);
         if (event instanceof StateChanged changed) {
             applyStateChange(changed.key(), changed.value(), sequence);
@@ -929,6 +936,7 @@ public class SessionMemory {
         stateSequences.clear();
         stepSequences.clear();
         activeEvidenceOrigins.clear();
+        processedEventIds.clear();
         modifiedFiles.clear();
         attemptDigests.clear();
         localSequence = 0;

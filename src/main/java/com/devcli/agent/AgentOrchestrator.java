@@ -618,6 +618,7 @@ public class AgentOrchestrator {
         log.info("Multi-Agent run started: inputLength={}", userInput == null ? 0 : userInput.length());
         String sessionTaskId = "plan-run-" + UUID.randomUUID().toString().substring(0, 8);
         memoryManager.beginTask(sessionTaskId);
+        memoryManager.setActiveProjectScope(toolRegistry.getProjectPath());
         TraceContext traceContext = TraceContext.root("plan");
         traceRecorder.record(traceContext, "run.start", Map.of(
                 "inputChars", userInput == null ? 0 : userInput.length(),
@@ -712,6 +713,8 @@ public class AgentOrchestrator {
             finalResultForSummary = executeSteps(steps, traceContext);
             return finalResultForSummary;
         } finally {
+            memoryManager.completeTask(sessionTaskId, userInput, finalResultForSummary,
+                    toolRegistry.getProjectPath());
             memoryManager.endTask(sessionTaskId);
             scheduleSessionPreSummaryMaintenance(userInput, finalResultForSummary);
         }

@@ -53,10 +53,9 @@ public class MemoryManager implements AutoCloseable {
     private final AtomicLong preSummaryFailureCount = new AtomicLong();
     private final AtomicLong sessionEventSequence = new AtomicLong();
     private volatile SessionPreSummaryMetrics lastPreSummaryMetrics = SessionPreSummaryMetrics.empty();
-    // Bug #12 修复：使用 ConcurrentHashMap 支持 Multi-Agent 并发调用
-    private final Map<String, Integer> memoryCandidateOccurrences = new java.util.concurrent.ConcurrentHashMap<>();
-    /** recurrence 候选计数器的容量上限，防止长会话下无界增长。 */
-    private static final int MAX_MEMORY_CANDIDATE_ENTRIES = 512;
+    private final MemoryPromotionQueue memoryPromotionQueue;
+    private final ExecutorService memoryPromotionExecutor;
+    private volatile MemoryPromotionPipeline memoryPromotionPipeline;
     private static final long MEMORY_CONFIRMATION_TTL_SECONDS = ConfigResolver.longValue(
             "devcli.memory.confirmation.ttl.seconds", "DEVCLI_MEMORY_CONFIRMATION_TTL_SECONDS",
             86_400, 600, 2_592_000);
@@ -67,6 +66,7 @@ public class MemoryManager implements AutoCloseable {
     /** 当前会话显式忽略记忆 flag。用户说"忘记记忆"/"别管记忆"时设为 true。 */
     private volatile boolean memoryIgnored = false;
     private volatile Supplier<String> ruleContextSupplier = () -> "";
+    private volatile java.util.Set<String> activeScopeKeys = java.util.Set.of();
 
     public MemoryManager(LlmClient llmClient) {
         this(llmClient, ContextProfile.from(llmClient), null);
@@ -92,10 +92,16 @@ public class MemoryManager implements AutoCloseable {
         this.compactionSummaryCache = new CompactionSummaryCache();
         this.longTermMemory = longTermMemory != null ? longTermMemory : new LongTermMemory();
         this.memoryConfirmationStore = new MemoryConfirmationStore(this.longTermMemory.storageDir());
+        this.memoryPromotionQueue = new MemoryPromotionQueue(this.longTermMemory.storageDir());
         this.retriever = new MemoryRetriever(this.longTermMemory);
         this.tokenBudget = new TokenBudget(contextProfile.maxContextWindow());
         this.sessionPreSummaryExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "devcli-session-pre-summary");
+            t.setDaemon(true);
+            return t;
+        });
+        this.memoryPromotionExecutor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "devcli-memory-promotion");
             t.setDaemon(true);
             return t;
         });
@@ -104,6 +110,15 @@ public class MemoryManager implements AutoCloseable {
     public void setLlmClient(LlmClient llmClient) {
         this.llmClient = llmClient;
         applyContextProfile(ContextProfile.from(llmClient));
+    }
+
+    /** 显式注入独立 Curator 客户端；主 Agent 客户端绝不隐式复用。 */
+    public void setMemoryCuratorClient(LlmClient curatorClient) {
+        memoryPromotionPipeline = curatorClient == null ? null
+                : new MemoryPromotionPipeline(memoryPromotionQueue,
+                new IsolatedMemoryCurator(curatorClient), longTermMemory,
+                entry -> notifyAutoSaved(entry, entry.getMetadata()));
+        schedulePendingPromotions();
     }
 
     public void applyContextProfile(ContextProfile contextProfile) {
@@ -133,7 +148,6 @@ public class MemoryManager implements AutoCloseable {
         sessionMemory.accept(new SessionMemory.KeyEvent(
                 "用户最新输入: " + preview, 90, "user", "",
                 sessionEventSequence.incrementAndGet()));
-        maybePersistUserFact(content);
     }
 
     /**
@@ -408,6 +422,50 @@ public class MemoryManager implements AutoCloseable {
         sessionMemory.endTask(taskId);
     }
 
+    /**
+     * 先把当前任务必要子集写入可重放队列，再异步交给全隔离 Curator。
+     * 调用方应在 {@link #endTask(String)} 前调用，避免下一个任务轮换运行投影。
+     */
+    public String completeTask(String taskId, String userRequest,
+                               String finalResult, String projectScope) {
+        MemoryPromotionPipeline pipeline = memoryPromotionPipeline;
+        if (pipeline == null) return "";
+        TaskMemorySnapshot snapshot = TaskMemorySnapshot.capture(taskId, projectScope,
+                userRequest, finalResult, sessionMemory.snapshot());
+        String jobId = pipeline.enqueue(snapshot);
+        schedulePendingPromotions();
+        return jobId;
+    }
+
+    private void schedulePendingPromotions() {
+        if (memoryPromotionPipeline == null || memoryPromotionExecutor.isShutdown()) return;
+        memoryPromotionExecutor.submit(() -> {
+            MemoryPromotionPipeline pipeline = memoryPromotionPipeline;
+            while (pipeline != null && pipeline.processNext()) {
+                pipeline = memoryPromotionPipeline;
+            }
+        });
+    }
+
+    public String listPendingMemoryPromotions(int limit) {
+        List<MemoryPromotionQueue.Job> jobs = memoryPromotionQueue.listAwaitingConfirmation(limit);
+        if (jobs.isEmpty()) return "没有待确认的长期记忆候选。";
+        StringBuilder output = new StringBuilder("待确认的长期记忆候选：\n");
+        for (MemoryPromotionQueue.Job job : jobs) {
+            output.append("- id=").append(job.id())
+                    .append(", task=").append(job.snapshot().taskId())
+                    .append("\n  candidate=").append(truncateForPrompt(job.detail(), 300))
+                    .append('\n');
+        }
+        return output.toString().trim();
+    }
+
+    public boolean confirmMemoryPromotion(String jobId, boolean approved) {
+        MemoryPromotionPipeline pipeline = memoryPromotionPipeline;
+        return pipeline != null && jobId != null && !jobId.isBlank()
+                && pipeline.confirm(jobId.trim(), approved, "");
+    }
+
     // ─────────────────────────────────────────────────────────
     // 写入 LongTermMemory
     // ─────────────────────────────────────────────────────────
@@ -543,37 +601,6 @@ public class MemoryManager implements AutoCloseable {
                 .replaceAll("[\\p{Punct}，。；：、\\s]+", "")
                 .trim();
         return remainder.length() >= 6;
-    }
-
-    private void maybePersistUserFact(String content) {
-        String candidate = normalizeMemoryCandidate(content);
-        if (candidate.isBlank()) {
-            return;
-        }
-        // 进程内计数器防泄漏：超过上限直接清空重新统计。
-        // recurrence 本就不跨会话持久化，清空只是重置单会话内的重复计数，影响可接受。
-        if (memoryCandidateOccurrences.size() > MAX_MEMORY_CANDIDATE_ENTRIES) {
-            memoryCandidateOccurrences.clear();
-            log.debug("memoryCandidateOccurrences exceeded {} entries; reset recurrence counters",
-                    MAX_MEMORY_CANDIDATE_ENTRIES);
-        }
-        int recurrence = memoryCandidateOccurrences.merge(candidate, 1, Integer::sum);
-        LongTermMemoryPolicy.Decision decision = LongTermMemoryPolicy.evaluate(candidate, recurrence, false);
-        if (decision.action() == LongTermMemoryPolicy.Action.SAVE
-                && longTermMemory.search(candidate, 1).stream().noneMatch(e -> e.getContent().equals(candidate))) {
-            storeFact(candidate, decision.metadata());
-        }
-    }
-
-    private String normalizeMemoryCandidate(String content) {
-        if (content == null) {
-            return "";
-        }
-        String normalized = content.replace("\r\n", "\n").replace('\r', '\n').trim().replaceAll("\\s+", " ");
-        if (normalized.length() > 200) {
-            return "";
-        }
-        return normalized;
     }
 
     private String storeFact(String fact, Map<String, String> metadata) {
@@ -730,7 +757,17 @@ public class MemoryManager implements AutoCloseable {
      * 直接注入，不参与 query-based 检索。
      */
     public List<MemoryEntry> retrieveRelevant(String query, int limit) {
-        return retriever.retrieveLongTerm(query, limit);
+        return retriever.retrieveLongTerm(query, limit, activeScopeKeys);
+    }
+
+    /** 绑定当前项目作用域；全局和用户偏好仍始终可见。 */
+    public void setActiveProjectScope(String projectPath) {
+        if (projectPath == null || projectPath.isBlank()) {
+            activeScopeKeys = java.util.Set.of();
+            return;
+        }
+        activeScopeKeys = java.util.Set.of(java.nio.file.Path.of(projectPath)
+                .toAbsolutePath().normalize().toString());
     }
 
     public void setMemoryIgnored(boolean ignored) {
@@ -751,29 +788,38 @@ public class MemoryManager implements AutoCloseable {
         }
         int safeBudget = Math.max(64, maxTokens);
         List<String> volatileFacts = sessionMemory.getVolatileFacts();
-        String inventory = MemoryIntentClassifier.classify(query) == MemoryIntentClassifier.Intent.INVENTORY
+        InventoryContext inventory = MemoryIntentClassifier.classify(query) == MemoryIntentClassifier.Intent.INVENTORY
                 ? buildLongTermMemoryInventorySnapshot(5, Math.min(256, safeBudget), volatileFacts)
-                : "";
-        int relevantBudget = Math.max(0, safeBudget - MemoryEntry.estimateTokens(inventory));
-        String relevant = relevantBudget == 0 ? "" : retriever.buildContextForQuery(query, relevantBudget, volatileFacts);
+                : InventoryContext.empty();
+        int relevantBudget = Math.max(0, safeBudget - MemoryEntry.estimateTokens(inventory.text()));
+        MemoryRetriever.ContextResult relevantResult = relevantBudget == 0
+                ? MemoryRetriever.ContextResult.empty()
+                : retriever.buildContext(query, relevantBudget, volatileFacts, activeScopeKeys);
+        String relevant = relevantResult.text();
+        java.util.LinkedHashSet<String> injectedIds = new java.util.LinkedHashSet<>(inventory.memoryIds());
+        injectedIds.addAll(relevantResult.injectedMemoryIds());
+        longTermMemory.recordRecalled(injectedIds, Instant.now());
         if (relevant.isBlank()) {
-            return inventory;
+            return inventory.text();
         }
-        if (inventory.isBlank()) {
+        if (inventory.text().isBlank()) {
             return relevant.trim();
         }
-        return inventory + "\n\n" + relevant.trim();
+        return inventory.text() + "\n\n" + relevant.trim();
     }
 
-    private String buildLongTermMemoryInventorySnapshot(int limit, int maxTokens, List<String> suppressedFacts) {
+    private InventoryContext buildLongTermMemoryInventorySnapshot(
+            int limit, int maxTokens, List<String> suppressedFacts) {
         List<MemoryEntry> activeEntries = longTermMemory.getAll().stream()
                 .filter(MemoryEntry::isRecallable)
+                .filter(entry -> MemoryRetriever.isVisibleInScope(entry, activeScopeKeys))
                 .filter(entry -> !MemoryFactDeduper.duplicatesAny(entry.getContent(), suppressedFacts))
                 .sorted(java.util.Comparator.comparing(MemoryEntry::getTimestamp).reversed())
                 .toList();
         int total = activeEntries.size();
         if (total == 0) {
-            return "## 长期记忆索引快照\n\n- total: 0\n- 当前持久化长期记忆为空。";
+            return new InventoryContext(
+                    "## 长期记忆索引快照\n\n- total: 0\n- 当前持久化长期记忆为空。", List.of());
         }
         StringBuilder context = new StringBuilder("## 长期记忆索引快照\n\n");
         context.append("- total: ").append(total).append('\n');
@@ -782,6 +828,7 @@ public class MemoryManager implements AutoCloseable {
                 .limit(Math.max(1, limit))
                 .toList();
         int usedTokens = MemoryEntry.estimateTokens(context.toString());
+        List<String> injectedIds = new ArrayList<>();
         for (MemoryEntry entry : entries) {
             String line = "- [" + entry.getType()
                     + "; confidence=" + entry.getEvidence().confidence()
@@ -794,8 +841,20 @@ public class MemoryManager implements AutoCloseable {
             }
             context.append(line);
             usedTokens += lineTokens;
+            injectedIds.add(entry.getId());
         }
-        return context.toString().trim();
+        return new InventoryContext(context.toString().trim(), injectedIds);
+    }
+
+    private record InventoryContext(String text, List<String> memoryIds) {
+        private InventoryContext {
+            text = text == null ? "" : text;
+            memoryIds = memoryIds == null ? List.of() : List.copyOf(memoryIds);
+        }
+
+        static InventoryContext empty() {
+            return new InventoryContext("", List.of());
+        }
     }
 
     private static String truncateForPrompt(String text, int maxChars) {
@@ -1035,6 +1094,7 @@ public class MemoryManager implements AutoCloseable {
 
     /** 清空长期记忆（用于 /memory clear 命令）。 */
     public void clearLongTerm() {
+        memoryPromotionQueue.deleteAllJobs();
         longTermMemory.clear();
     }
 
@@ -1099,6 +1159,17 @@ public class MemoryManager implements AutoCloseable {
     @Override
     public void close() {
         sessionPreSummaryExecutor.shutdownNow();
+        memoryPromotionExecutor.shutdown();
+        try {
+            if (!memoryPromotionExecutor.awaitTermination(
+                    2, java.util.concurrent.TimeUnit.SECONDS)) {
+                memoryPromotionExecutor.shutdownNow();
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            memoryPromotionExecutor.shutdownNow();
+        }
+        memoryPromotionQueue.close();
         memoryConfirmationStore.close();
         if (longTermMemory != null) {
             longTermMemory.close();

@@ -9,7 +9,7 @@ import java.util.Map;
  * 记忆条目 - Memory 系统的基础数据单元
  */
 public class MemoryEntry {
-    public static final int CURRENT_SCHEMA_VERSION = 2;
+    public static final int CURRENT_SCHEMA_VERSION = 4;
 
     private final String id;
     private final String content;
@@ -31,6 +31,10 @@ public class MemoryEntry {
     private final Instant expiresAt;
     /** 结构化证据、置信度和审核状态。 */
     private final MemoryEvidence evidence;
+    /** 真正进入模型 Turn Context 的次数；单纯检索、预览或排序不计数。 */
+    private final long recallCount;
+    /** 最近一次真正注入模型上下文的时间；null 表示从未使用。 */
+    private final Instant lastRecalledAt;
 
     public enum MemoryType {
         CONVERSATION,  // 对话记忆
@@ -74,6 +78,15 @@ public class MemoryEntry {
                        String subject, boolean active, String supersededBy,
                        int schemaVersion, int revision, Instant expiresAt,
                        MemoryEvidence evidence) {
+        this(id, content, type, timestamp, metadata, tokenCount, subject, active, supersededBy,
+                schemaVersion, revision, expiresAt, evidence, 0, null);
+    }
+
+    public MemoryEntry(String id, String content, MemoryType type, Instant timestamp,
+                       Map<String, String> metadata, int tokenCount,
+                       String subject, boolean active, String supersededBy,
+                       int schemaVersion, int revision, Instant expiresAt,
+                       MemoryEvidence evidence, long recallCount, Instant lastRecalledAt) {
         this.id = id;
         this.content = content;
         this.type = type;
@@ -88,6 +101,8 @@ public class MemoryEntry {
         this.revision = Math.max(1, revision);
         this.expiresAt = expiresAt;
         this.evidence = evidence == null ? MemoryEvidence.legacy(this.metadata) : evidence;
+        this.recallCount = Math.max(0, recallCount);
+        this.lastRecalledAt = lastRecalledAt;
     }
 
     public String getId() { return id; }
@@ -103,6 +118,8 @@ public class MemoryEntry {
     public int getRevision() { return revision; }
     public Instant getExpiresAt() { return expiresAt; }
     public MemoryEvidence getEvidence() { return evidence; }
+    public long getRecallCount() { return recallCount; }
+    public Instant getLastRecalledAt() { return lastRecalledAt; }
 
     public boolean isRecallable() {
         return active && evidence.isRecallable()
@@ -132,6 +149,12 @@ public class MemoryEntry {
         return copy(subject, active, supersededBy, revision, expiresAt, metadata, nextEvidence);
     }
 
+    public MemoryEntry withRecallAt(Instant recalledAt) {
+        return new MemoryEntry(id, content, type, timestamp, metadata, tokenCount,
+                subject, active, supersededBy, CURRENT_SCHEMA_VERSION, revision, expiresAt,
+                evidence, recallCount + 1, recalledAt == null ? Instant.now() : recalledAt);
+    }
+
     MemoryEntry copy(String nextSubject, boolean nextActive, String nextSupersededBy,
                      int nextRevision, Instant nextExpiresAt, Map<String, String> nextMetadata) {
         return copy(nextSubject, nextActive, nextSupersededBy, nextRevision, nextExpiresAt,
@@ -144,7 +167,7 @@ public class MemoryEntry {
         return new MemoryEntry(id, content, type, timestamp,
                 nextMetadata == null ? metadata : nextMetadata, tokenCount,
                 nextSubject, nextActive, nextSupersededBy, CURRENT_SCHEMA_VERSION,
-                nextRevision, nextExpiresAt, nextEvidence);
+                nextRevision, nextExpiresAt, nextEvidence, recallCount, lastRecalledAt);
     }
 
     /**

@@ -85,7 +85,7 @@ Side-Git 快照按 `devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX` 保留最近快
 
 副作用横向信息流：write_file/execute_command 等副作用工具的证据在 `SessionMemory.EvidenceJournal` 中按高重要性保留；普通读取优先压缩或淘汰，失败压缩成 AttemptDigest，使后续步骤持续看到本任务改过哪些文件和已经排除的方案。
 
-职责边界：`SessionMemory` 是当前任务内的运行投影，会按预算压缩且不跨进程；九段会话摘要中的待办、当前工作和下一步只保留“见本轮 Session Memory”投影标记，不作为第二套状态源。`ExecutionArtifact` 是 Plan / Multi-Agent / checkpoint 的任务终态唯一来源；`output` 保留 Worker 原始结果，`summary` 由 Orchestrator 根据结构化成功工具证据和 Reviewer / Pre-Review 结论生成，依赖步骤只注入该可信摘要。隔离执行期间的修改只存在工作区内，PatchSet 成功应用后才把 `modifiedResources` 同步到运行态、checkpoint 和 `SessionMemory`。后续依赖步骤读取已批准的主项目成果；同进程靠 `SessionMemory`，跨进程靠 checkpoint `RecoveryState` 的有界失败尝试摘要。固定 Final integration 会在补丁归并后执行硬检查并复核全部验收点，承担合并结果的整体验证。
+职责边界：`conversationHistory` 与六段 `RollingSummary` 只治理当前线程上下文窗口，不保存待办、当前工作或下一步；`SessionMemory` 是当前任务内的运行投影，会按 Token 预算裁剪且不跨进程。`ExecutionArtifact` 是 Plan / Multi-Agent / checkpoint 的任务终态唯一来源；`output` 保留 Worker 原始结果，`summary` 由 Orchestrator 根据结构化成功工具证据和 Reviewer / Pre-Review 结论生成，依赖步骤只注入该可信摘要。隔离执行期间的修改只存在工作区内，PatchSet 成功应用后才把 `modifiedResources` 同步到运行态、checkpoint 和 `SessionMemory`。后续依赖步骤读取已批准的主项目成果；同进程靠 `SessionMemory`，跨进程靠 checkpoint `RecoveryState` 的有界失败尝试摘要。固定 Final integration 会在补丁归并后执行硬检查并复核全部验收点，承担合并结果的整体验证。
 
 内置核心工具 13 个：`read_file` / `write_file` / `list_dir` / `execute_command` / `create_project` / `search_code` / `grep_code` / `web_search` / `web_fetch` / `save_memory` / `confirm_memory` / `list_memory` / `revert_turn`
 
@@ -164,18 +164,18 @@ Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔�
 
 ### Memory
 
-- 记忆只分两层：`SessionMemory` 是当前任务共享的短期记忆，`LongTermMemory` 是跨会话长期记忆。Conversation History / Summary 属于上下文治理，`RuleContext` 属于规则系统，均不算记忆层
-- `SessionMemory` 通过 `accept(SessionEvent)` 统一接收工具结果、用户确认和步骤变化；内部 `WorkState` 按键覆盖或按步骤状态机推进，`EvidenceJournal` 按 CRITICAL / FAILURE / MILESTONE / ORDINARY / REGENERABLE 分级。`beginTask/endTask` 管理明确 Plan 任务边界：任务结束后保留最终投影，到下一个 taskId 开始时清理；ReAct 仍以 `/clear` 作为显式边界
+- 记忆按生命周期分三层：`conversationHistory` 与六段 `RollingSummary` 是当前线程的短期上下文治理；`SessionMemory` 是当前任务共享的工作记忆；`LongTermMemory` 是跨任务持久事实。`RuleContext` 属于规则系统，不是记忆
+- `SessionMemory` 通过 `accept(SessionEvent)` 统一接收工具结果、用户确认和步骤变化；内部 `WorkState` 按键覆盖或按步骤状态机推进，`EvidenceJournal` 按 CRITICAL / FAILURE / MILESTONE / ORDINARY / REGENERABLE 分级。事件按 agent、step、类型和逻辑 sequence 幂等，旧 origin 证据按 `context_epoch` 拒绝。ReAct、Plan 和 Team 都使用 `beginTask/completeTask/endTask` 明确任务边界
 - SessionMemory Prompt 使用单一硬 Token 预算：先保留任务状态、修改文件和失败摘要，再按 importance/sequence 注入关键事件和工具证据；关键原文超限时折叠成规范化引用。Multi-Agent 共享单一实例，真实 agentId、stepId 和单调 sequence 会参与证据归属与迟到计划/步骤事件拒绝；`ExecutionArtifact` 仍是任务终态唯一来源
 - `CompactionSummaryCache` 只缓存压缩预摘要，不是记忆；`RuleContext` 加载 `DEVCLI.md` 和 `/rule add` 强约束，支持 `/rule list`、`/rule remove`，旧 `pinned_facts.json` 只列为待分类迁移候选，不会静默当成规则。稳定事实使用 `/save` 写入 `LongTermMemory`，旧 `/save --pin` 仅保留废弃提示
-- 长期记忆主要通过 `/save` 或用户明确要求保存；中英文显式记忆意图、少量稳定个人属性和多次重复出现的稳定项目/偏好事实可由策略自动保存
+- 长期记忆可由 `/save` 显式写入；普通用户消息不得直接自动落库。只有显式配置独立 Curator 客户端后，任务完成才会把脱敏、限长的 `TaskMemorySnapshot` 写入 SQLite `MemoryPromotionQueue`，再由一次性 `IsolatedMemoryCurator` 在空工具列表、无旧记忆、无 Skill/MCP/文件/命令/子 Agent 入口的上下文中输出 `SAVE / CONFIRM / SKIP`；未配置时直接跳过自动晋升，不创建无人消费的队列作业。除模型推理传输外不提供网络能力。崩溃后的 `PENDING / FAILED_RETRYABLE` 作业可重放，`CONFIRM` 通过 `/memory pending|confirm|reject` 非阻塞处理
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；显式保存请求如果内容仍然明显临时或低复用，需要确认而不是直接落库；中英文临时表达、敏感信息和模糊新个人状态必须确认或跳过；与 SessionMemory 关键事件语义重复的长期记忆在 prompt 注入时会被抑制；普通 turn 只注入达到最低分数、与第一名差距未超限且数量受限的查询相关记忆，长期记忆目录快照仅在统一意图分类器识别出查看、列出或审计意图时注入
 - 用户显式要求忽略记忆（如“别管记忆”“忽略记忆”）时，本会话不注入长期记忆、通用 SessionMemory 和角色裁剪后的 SessionMemory
 - 反馈类长期记忆按 `FEEDBACK` 类型落库，不混入普通 `FACT`
-- 长期记忆统一记录 `schemaVersion`、主题内 `revision`、`expiresAt` 和结构化 `MemoryEvidence`；证据包含 confidence、sourceQuote、reasoning、reviewState、conflictsWith；HIGH 至少需要 5 字符来源引用，MEDIUM 需要非空引用，否则领域层自动降级。显式写入默认 REVIEWED，策略自动写入默认 UNREVIEWED，REJECTED 保留审计但不进入召回。命中 subject 的等价事实直接去重，只有值变化才 supersede；工具通过 `CurrentStateObservationSideChannel(subject,value,evidence,strength)` 提交当前状态观察，只有 HIGH 直接覆盖旧事实，MEDIUM/LOW 只降低置信度并提示冲突；Maven/Gradle 文本检测仅作低强度兼容回退。规则与当前状态冲突时显式提示用户裁决，不静默改写规则
+- 长期记忆统一记录 `schemaVersion`、主题内 `revision`、`expiresAt`、`expiry_mode`、`recallCount`、`lastRecalledAt`、`scope_type/scope_key` 和结构化 `MemoryEvidence`。项目、仓库或符号记忆只有作用域匹配时才参与关键词与向量排序；只有实际注入 Turn Context 的 id 才按轮去重、批量增加使用次数。使用频率仅对近似同分项提供最高 1% 的微调，新鲜度以最近一次真实召回时间为优先年龄锚点，新记忆不受冷启动惩罚。策略生成的 FACT/FEEDBACK TTL 使用滑动续期，显式传入的固定到期时间不续期；到期后软归档并保留向量索引用于恢复，不在检索时物理删除。命中同作用域稳定键的等价事实直接去重，只有值变化才 supersede；工具观察与规则冲突继续显式提示用户裁决
 - 敏感 `save_memory` 返回持久化 `confirmation_id`；模型必须先询问用户，再调用 `confirm_memory(save_redacted|save_edited|cancel)`。确认 id 默认 24 小时过期，可通过 `DEVCLI_MEMORY_CONFIRMATION_TTL_SECONDS` 调整；已完成票据重复确认返回同一终态结果，最终仍统一经过明文脱敏边界
 - `/memory organize` 只生成整理计划；`/memory organize apply` 仍由程序重新计算风险，只自动应用同主题、同类型、全部未审核、覆盖完整且计划置信度不低于 0.9 的合并。已审核条目、跨主题、跨类型、部分覆盖、REVIEW 和 REJECT 候选不得自动应用，只在本次报告中标记为需要人工复核；记忆正文按 JSON 数据载荷交给整理模型，不作为指令
-- `ConversationHistoryCompactor` 是唯一治理 LLM messages 窗口的压缩点；压缩前先走第 0 层 `microcompact`（单条超大消息头尾截断；旧轮次 tool_result 按 toolCallId 成批落盘并替换为 `<microcompact_boundary>` 引用；不删消息、保 tool_call 配对），扛不住再摘要。首次摘要使用 Map-Reduce；后续固定保留九段，模型只提出受限生命周期操作，程序负责覆盖、完成迁移和删除；默认每 5 次成功压缩执行生命周期 GC，不再二次压缩旧摘要。摘要写回 history 前必须经过 `CompactionSemanticGuard`；恢复区会按 storedPath/toolCallId 去重 microcompact 工具引用
+- `ConversationHistoryCompactor` 是唯一治理 LLM messages 窗口的压缩点；压缩前先走第 0 层 `microcompact`（单条超大消息头尾截断；旧轮次 tool_result 按 toolCallId 成批落盘并替换为 `<microcompact_boundary>` 引用；不删消息、保 tool_call 配对），扛不住再摘要。首次摘要使用 Map-Reduce；后续固定保留六段，模型只提出受限生命周期操作，程序负责覆盖、完成迁移和删除；旧九段摘要可解析，但待办、当前工作和下一步会被丢弃。默认每 5 次成功压缩执行生命周期 GC，不再二次压缩旧摘要。摘要写回 history 前必须经过 `CompactionSemanticGuard`
 - `CompactionSummaryCache` 维护当前进程内会话预摘要，自动压缩时优先复用覆盖同一消息指纹且未过期的预摘要；已有预摘要覆盖当前历史前缀时，只用旧摘要和新增消息生成完整替代摘要；预摘要默认 30 分钟过期，不写长期记忆
 - RAG 每次检索保存不含代码正文的分阶段审计记录，覆盖 keyword / semantic / graph 候选、RRF 融合、rerank、最终选择和降级状态；普通 CLI 会话归档默认关闭，启用后 ReAct 保存脱敏模型消息，Plan / Team 保存顶层输入输出，`/history clear` 同时删除归档
 - 压缩成功后会插入 `[压缩后恢复上下文]` 消息：恢复段按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 和 MCP 工具状态分节；恢复内容经统一预算与行级去重后注入，Multi-Agent 会按 Planner / Worker / Reviewer 角色裁剪；SkillContextBuffer 追加已加载 Skill 与 allowedTools 状态

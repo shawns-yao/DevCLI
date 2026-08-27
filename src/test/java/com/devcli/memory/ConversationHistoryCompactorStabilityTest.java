@@ -26,11 +26,11 @@ class ConversationHistoryCompactorStabilityTest {
         return "x".repeat(n);
     }
 
-    /** 九段摘要，把膨胀内容堆到低优先段「问题解决过程」（GC 的 TRUNCATE_ORDER 覆盖它）。 */
-    private static String nineSection(String process) {
+    /** 六段摘要，把膨胀内容堆到低优先段「问题解决过程」（GC 的 TRUNCATE_ORDER 覆盖它）。 */
+    private static String sixSection(String process) {
         return "## 主要请求与意图\n重构记忆模块\n## 关键技术概念\n无\n## 文件和代码\n无\n"
                 + "## 踩过的坑和修复\n无\n## 问题解决过程\n" + process
-                + "\n## 逐条用户消息\n无\n## 待办任务\n无\n## 当前在做什么\n无\n## 下一步\n无";
+                + "\n## 逐条用户消息\n无";
     }
 
     /**
@@ -43,7 +43,7 @@ class ConversationHistoryCompactorStabilityTest {
         ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 2_000, true) {
             @Override
             protected String summarize(List<LlmClient.Message> messages) {
-                return nineSection(x(20_000));
+                return sixSection(x(20_000));
             }
 
             @Override
@@ -97,7 +97,7 @@ class ConversationHistoryCompactorStabilityTest {
             @Override
             protected String summarize(List<LlmClient.Message> messages) {
                 fullCalls[0]++;
-                return nineSection("首轮全量摘要 " + x(2_000));
+                return sixSection("首轮全量摘要 " + x(2_000));
             }
 
             @Override

@@ -538,6 +538,23 @@ class MemoryManagerTest {
         }
     }
 
+    @Test
+    void buildContextRecordsOnlyMemoriesActuallyInjectedIntoTheTurn() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+            memoryManager.storeFact("项目默认使用 Java 17");
+            String id = longTermMemory.getAll().getFirst().getId();
+
+            String context = memoryManager.buildContextForQuery("项目使用哪个 Java 版本", 512);
+
+            assertTrue(context.contains("Java 17"));
+            MemoryEntry recalled = longTermMemory.retrieve(id).orElseThrow();
+            assertEquals(1, recalled.getRecallCount());
+            assertTrue(recalled.getLastRecalledAt().isAfter(Instant.EPOCH));
+        }
+    }
+
 
     @Test
     void searchCodeToolResultShouldRecordRagEvidenceWithSymbolVersion() {
@@ -838,22 +855,19 @@ class MemoryManagerTest {
     }
 
     @Test
-    void addUserMessageShouldAutoPersistStableProfileAttribute() {
+    void addUserMessageShouldNotBypassTaskPromotionForProfileAttribute() {
         try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
              MemoryManager memoryManager = new MemoryManager(
                      new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
 
             memoryManager.addUserMessage("我是医生");
 
-            assertEquals(1, longTermMemory.size());
-            MemoryEntry entry = longTermMemory.getAll().get(0);
-            assertEquals("我是医生", entry.getContent());
-            assertEquals("PROFILE_ATTRIBUTE", entry.getMetadata().get("reason_code"));
+            assertEquals(0, longTermMemory.size());
         }
     }
 
     @Test
-    void addUserMessageShouldPromoteRepeatedStableProjectFact() {
+    void repeatedUserMessagesShouldNotBypassTaskPromotion() {
         try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
              MemoryManager memoryManager = new MemoryManager(
                      new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
@@ -862,10 +876,7 @@ class MemoryManagerTest {
             memoryManager.addUserMessage("项目默认测试命令是 mvn test -Pquick");
             memoryManager.addUserMessage("项目默认测试命令是 mvn test -Pquick");
 
-            assertEquals(1, longTermMemory.size());
-            MemoryEntry entry = longTermMemory.getAll().get(0);
-            assertEquals("recurrence", entry.getMetadata().get("source"));
-            assertEquals("REPEATED_STABLE_MEMORY", entry.getMetadata().get("reason_code"));
+            assertEquals(0, longTermMemory.size());
         }
     }
 
@@ -902,6 +913,68 @@ class MemoryManagerTest {
             assertTrue(section.contains("plan_task"));
             assertTrue(section.contains("task_3"));
             assertTrue(section.contains("last_error"));
+        }
+    }
+
+    @Test
+    void completeTaskWithoutCuratorDoesNotEnqueueOrphanPromotion() {
+        try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {
+            memoryManager.beginTask("task-without-curator");
+            memoryManager.addVolatileFact("构建命令已验证为 mvn test");
+
+            String jobId = memoryManager.completeTask(
+                    "task-without-curator", "验证构建命令", "mvn test 已通过", "project-a");
+
+            assertTrue(jobId.isBlank());
+            try (MemoryPromotionQueue queue = new MemoryPromotionQueue(tempDir)) {
+                assertTrue(queue.claimNext().isEmpty());
+            }
+        }
+    }
+
+    @Test
+    void completeTaskWithCuratorUsesDurablePromotionPipeline() throws Exception {
+        LlmClient curator = new LlmClient() {
+            @Override
+            public ChatResponse chat(List<Message> messages, List<Tool> tools) {
+                return new ChatResponse("assistant", """
+                        {"action":"SAVE","kind":"PROCEDURE","content":"构建命令是 mvn test",\
+                        "scope_type":"PROJECT","scope_key":"project-a","confidence":"HIGH",\
+                        "source_refs":["result"]}
+                        """, List.of(), 10, 10);
+            }
+
+            @Override
+            public ChatResponse chat(List<Message> messages, List<Tool> tools,
+                                     StreamListener listener) {
+                return chat(messages, tools);
+            }
+
+            @Override
+            public String getModelName() {
+                return "curator-stub";
+            }
+
+            @Override
+            public String getProviderName() {
+                return "stub";
+            }
+        };
+        try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(new StubGLMClient(List.of()), 4096, 128000, ltm)) {
+            memoryManager.setMemoryCuratorClient(curator);
+
+            String jobId = memoryManager.completeTask(
+                    "task-with-curator", "验证构建命令", "mvn test 已通过", "project-a");
+
+            assertFalse(jobId.isBlank());
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+            while (ltm.getAll().isEmpty() && System.nanoTime() < deadline) {
+                Thread.sleep(20);
+            }
+            assertTrue(ltm.getAll().stream()
+                    .anyMatch(entry -> entry.getContent().equals("构建命令是 mvn test")));
         }
     }
 

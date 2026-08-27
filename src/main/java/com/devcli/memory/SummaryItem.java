@@ -5,7 +5,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 
-/** 九段摘要中的可演进事实。生命周期是条目元数据，不新增摘要分段。 */
+/** 六段摘要中的可演进事实。生命周期是条目元数据，不新增摘要分段。 */
 public record SummaryItem(
         String id, String section, String subject, String content, Lifecycle lifecycle,
         int importance, int revision, int compactionCount, String supersededBy,

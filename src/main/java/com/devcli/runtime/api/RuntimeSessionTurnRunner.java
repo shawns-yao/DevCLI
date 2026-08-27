@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 
 /**
  * Runtime API 的持久会话执行器：每个 thread 绑定一个 AgentSessionRuntime，
@@ -20,19 +21,34 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
     private final RuntimeThreadStore store;
     private final Path projectPath;
     private final int checkpointTriggerTokens;
+    private final Supplier<LlmClient> memoryCuratorClientSupplier;
     private final ConcurrentHashMap<String, AgentSessionRuntime> sessions = new ConcurrentHashMap<>();
 
     public RuntimeSessionTurnRunner(LlmClient llmClient, RuntimeThreadStore store, Path projectPath) {
-        this(llmClient, store, projectPath, RuntimeCheckpointPolicy.configuredTriggerTokens());
+        this(llmClient, store, projectPath, RuntimeCheckpointPolicy.configuredTriggerTokens(), () -> null);
+    }
+
+    public RuntimeSessionTurnRunner(LlmClient llmClient, RuntimeThreadStore store, Path projectPath,
+                                    Supplier<LlmClient> memoryCuratorClientSupplier) {
+        this(llmClient, store, projectPath, RuntimeCheckpointPolicy.configuredTriggerTokens(),
+                memoryCuratorClientSupplier);
     }
 
     public RuntimeSessionTurnRunner(LlmClient llmClient, RuntimeThreadStore store,
                                     Path projectPath, int checkpointTriggerTokens) {
+        this(llmClient, store, projectPath, checkpointTriggerTokens, () -> null);
+    }
+
+    private RuntimeSessionTurnRunner(LlmClient llmClient, RuntimeThreadStore store,
+                                     Path projectPath, int checkpointTriggerTokens,
+                                     Supplier<LlmClient> memoryCuratorClientSupplier) {
         this.llmClient = java.util.Objects.requireNonNull(llmClient, "llmClient");
         this.store = java.util.Objects.requireNonNull(store, "store");
         this.projectPath = java.util.Objects.requireNonNull(projectPath, "projectPath")
                 .toAbsolutePath().normalize();
         this.checkpointTriggerTokens = Math.max(0, checkpointTriggerTokens);
+        this.memoryCuratorClientSupplier = memoryCuratorClientSupplier == null ? () -> null
+                : memoryCuratorClientSupplier;
     }
 
     @Override
@@ -111,8 +127,8 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
             throw new IllegalArgumentException("threadId is required");
         }
         return sessions.computeIfAbsent(threadId, id -> {
-            AgentSessionRuntime session = AgentSessionRuntime.create(llmClient, projectPath,
-                    RunEventSink.NO_OP);
+            AgentSessionRuntime session = AgentSessionRuntime.create(
+                    llmClient, memoryCuratorClientSupplier.get(), projectPath, RunEventSink.NO_OP);
             RuntimeThreadStore.ContextView view = store.contextView(id);
             List<LlmClient.Message> seed = new ArrayList<>(view.checkpointMessages());
             for (RuntimeThreadStore.TurnRecord turn : view.turns()) {

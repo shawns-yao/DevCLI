@@ -70,7 +70,7 @@
 - Modify: `src/main/java/com/devcli/memory/ConversationHistoryCompactor.java`
 - Test: `src/test/java/com/devcli/memory/ConversationHistoryCompactorTest.java`
 - Test: `src/test/java/com/devcli/memory/ConversationHistoryCompactorStabilityTest.java`
-- Test: `src/test/java/com/devcli/memory/ConversationHistoryCompactorNineSectionTest.java`
+- Test: `src/test/java/com/devcli/memory/ConversationHistoryCompactorSixSectionTest.java`
 
 - [ ] Write failing tests proving incremental LLM output is applied as operations, malformed operations preserve the previous summary, and the Nth compaction performs lifecycle GC instead of re-summarizing the old summary as raw history.
 - [ ] Run only the three compactor test classes and verify the new assertions fail.

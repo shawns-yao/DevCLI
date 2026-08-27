@@ -102,6 +102,10 @@ public class Agent implements AutoCloseable {
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
     }
 
+    public void setMemoryCuratorClient(LlmClient curatorClient) {
+        memoryManager.setMemoryCuratorClient(curatorClient);
+    }
+
     /**
      * 注入历史对话（Runtime API 跨 turn 上下文重放）：消息插入到 system message 之后。
      * 仅允许在对话为空（只有 system message）时调用一次；已有对话内容时忽略并 warn，
@@ -205,9 +209,14 @@ public class Agent implements AutoCloseable {
     public String run(String userInput, LlmClient.ToolChoice initialToolChoice) {
         com.devcli.runtime.CancellationToken inheritedToken = CancellationContext.current();
         activeCancellationToken.set(inheritedToken);
+        String sessionTaskId = "react-run-" + java.util.UUID.randomUUID().toString().substring(0, 8);
+        memoryManager.setActiveProjectScope(toolRegistry.getProjectPath());
+        String result = "";
         try {
-            return runInternal(userInput, initialToolChoice);
+            result = runInternal(userInput, initialToolChoice);
+            return result;
         } finally {
+            memoryManager.completeTask(sessionTaskId, userInput, result, toolRegistry.getProjectPath());
             activeCancellationToken.compareAndSet(inheritedToken, null);
         }
     }
@@ -220,6 +229,7 @@ public class Agent implements AutoCloseable {
         currentSkillActivationText = userInput == null ? "" : userInput;
         toolRegistry.prefetchToolDefinitionsForInput(currentSkillActivationText);
         pruneHistoricalImagePayloads();
+        memoryManager.setActiveProjectScope(toolRegistry.getProjectPath());
         // 写入当前会话工作记忆；真实 messages 由 conversationHistory 维护。
         memoryManager.addUserMessage(userInput);
         storeExplicitBrowserMemoryHint(userInput);

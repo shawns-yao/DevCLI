@@ -19,7 +19,14 @@ public final class HeadlessAgentRunner {
 
     public static String run(LlmClient llmClient, Path projectPath, String prompt,
                              List<LlmClient.Message> seedHistory) {
-        return runDetailed(llmClient, projectPath, prompt, seedHistory, 0).output();
+        return run(llmClient, null, projectPath, prompt, seedHistory);
+    }
+
+    public static String run(LlmClient llmClient, LlmClient memoryCuratorClient,
+                             Path projectPath, String prompt,
+                             List<LlmClient.Message> seedHistory) {
+        return runDetailed(llmClient, memoryCuratorClient, projectPath, prompt,
+                seedHistory, 0, RunEventSink.NO_OP).output();
     }
 
     public static RunResult runDetailed(LlmClient llmClient, Path projectPath, String prompt,
@@ -33,6 +40,15 @@ public final class HeadlessAgentRunner {
                                         List<LlmClient.Message> seedHistory,
                                         int checkpointTriggerTokens,
                                         RunEventSink eventSink) {
+        return runDetailed(llmClient, null, projectPath, prompt, seedHistory,
+                checkpointTriggerTokens, eventSink);
+    }
+
+    private static RunResult runDetailed(LlmClient llmClient, LlmClient memoryCuratorClient,
+                                         Path projectPath, String prompt,
+                                         List<LlmClient.Message> seedHistory,
+                                         int checkpointTriggerTokens,
+                                         RunEventSink eventSink) {
         Objects.requireNonNull(llmClient, "llmClient");
         Path normalizedProject = Objects.requireNonNull(projectPath, "projectPath")
                 .toAbsolutePath()
@@ -43,21 +59,23 @@ public final class HeadlessAgentRunner {
                 throw new IllegalArgumentException("当前运行上下文项目路径不一致");
             }
             return runWithinContext(
-                    llmClient, normalizedProject, prompt, seedHistory,
+                    llmClient, memoryCuratorClient, normalizedProject, prompt, seedHistory,
                     checkpointTriggerTokens, eventSink);
         }
         try (RunContext ignored = CancellationContext.startRunContext(normalizedProject)) {
             return runWithinContext(
-                    llmClient, normalizedProject, prompt, seedHistory,
+                    llmClient, memoryCuratorClient, normalizedProject, prompt, seedHistory,
                     checkpointTriggerTokens, eventSink);
         }
     }
 
-    private static RunResult runWithinContext(LlmClient llmClient, Path projectPath, String prompt,
+    private static RunResult runWithinContext(LlmClient llmClient, LlmClient memoryCuratorClient,
+                                              Path projectPath, String prompt,
                                               List<LlmClient.Message> seedHistory,
                                               int checkpointTriggerTokens,
                                               RunEventSink eventSink) {
-        try (AgentSessionRuntime session = AgentSessionRuntime.create(llmClient, projectPath, eventSink)) {
+        try (AgentSessionRuntime session = AgentSessionRuntime.create(
+                llmClient, memoryCuratorClient, projectPath, eventSink)) {
             Agent agent = session.agent();
             agent.seedHistory(seedHistory);
             String output = session.runBlocking(prompt).output();

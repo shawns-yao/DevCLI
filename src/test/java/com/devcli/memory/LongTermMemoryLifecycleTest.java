@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 
@@ -180,13 +181,86 @@ class LongTermMemoryLifecycleTest {
     }
 
     @Test
-    void expiredMemoryIsExcludedAndPruned() throws Exception {
+    void expiredMemoryIsArchivedInsteadOfPhysicallyDeleted() throws Exception {
         try (LongTermMemory memory = new LongTermMemory(tempDir.toFile())) {
             memory.store(entry("expired", "临时事实", "", Instant.now().minusSeconds(1)));
 
             assertTrue(memory.search("临时事实", 5).isEmpty());
-            assertTrue(memory.retrieve("expired").isEmpty());
-            assertEquals(0, memory.size());
+            MemoryEntry archived = memory.retrieve("expired").orElseThrow();
+            assertFalse(archived.isActive());
+            assertEquals("ARCHIVED", archived.getMetadata().get("lifecycle_state"));
+            assertEquals(1, memory.size());
+        }
+    }
+
+    @Test
+    void policyExpirationRenewsWhenMemoryIsActuallyRecalled() throws Exception {
+        try (LongTermMemory memory = new LongTermMemory(tempDir.toFile())) {
+            memory.store(entry("sliding", "项目构建命令是 mvn test", "project.build", null));
+            MemoryEntry stored = memory.retrieve("sliding").orElseThrow();
+            Instant initialExpiry = stored.getExpiresAt();
+            Instant recalledAt = initialExpiry.minus(Duration.ofHours(1));
+
+            assertEquals("SLIDING", stored.getMetadata().get("expiry_mode"));
+            assertTrue(memory.recordRecalled(java.util.List.of("sliding"), recalledAt));
+
+            MemoryEntry renewed = memory.retrieve("sliding").orElseThrow();
+            assertEquals(recalledAt, renewed.getLastRecalledAt());
+            assertTrue(renewed.getExpiresAt().isAfter(initialExpiry));
+            assertEquals(MemoryLifecyclePolicy.expiresAt(MemoryEntry.MemoryType.FACT, recalledAt),
+                    renewed.getExpiresAt());
+        }
+    }
+
+    @Test
+    void explicitExpirationRemainsFixedWhenMemoryIsRecalled() throws Exception {
+        Instant fixedExpiry = Instant.now().plus(Duration.ofDays(30));
+        try (LongTermMemory memory = new LongTermMemory(tempDir.toFile())) {
+            memory.store(entry("fixed", "临时发布窗口在九月结束", "project.release_window", fixedExpiry));
+            MemoryEntry stored = memory.retrieve("fixed").orElseThrow();
+
+            assertEquals("FIXED", stored.getMetadata().get("expiry_mode"));
+            assertTrue(memory.recordRecalled(java.util.List.of("fixed"), Instant.now().plusSeconds(60)));
+
+            MemoryEntry recalled = memory.retrieve("fixed").orElseThrow();
+            assertEquals(fixedExpiry, recalled.getExpiresAt());
+        }
+    }
+
+    @Test
+    void renewedExpirationPersistsAcrossReload() throws Exception {
+        Instant renewedExpiry;
+        try (LongTermMemory memory = new LongTermMemory(tempDir.toFile())) {
+            memory.store(entry("persistent-sliding", "项目测试命令是 mvn test",
+                    "project.test", null));
+            Instant recalledAt = memory.retrieve("persistent-sliding").orElseThrow()
+                    .getExpiresAt().minus(Duration.ofHours(1));
+            assertTrue(memory.recordRecalled(java.util.List.of("persistent-sliding"), recalledAt));
+            renewedExpiry = memory.retrieve("persistent-sliding").orElseThrow().getExpiresAt();
+        }
+
+        try (LongTermMemory reloaded = new LongTermMemory(tempDir.toFile())) {
+            MemoryEntry recalled = reloaded.retrieve("persistent-sliding").orElseThrow();
+            assertEquals(1, recalled.getRecallCount());
+            assertEquals(renewedExpiry.toEpochMilli(), recalled.getExpiresAt().toEpochMilli());
+            assertEquals("SLIDING", recalled.getMetadata().get("expiry_mode"));
+        }
+    }
+
+    @Test
+    void legacyPolicyExpirationBecomesSlidingAfterFirstRecall() throws Exception {
+        Instant oldExpiry = Instant.now().plus(Duration.ofDays(10));
+        MemoryEntry legacy = new MemoryEntry("legacy-sliding", "项目构建命令是 mvn verify",
+                MemoryEntry.MemoryType.FACT, Instant.now().minus(Duration.ofDays(170)), Map.of(), 10,
+                "project.build", true, "", 3, 1, oldExpiry,
+                MemoryEvidence.legacy(Map.of()), 0, null);
+        try (LongTermMemory memory = new LongTermMemory(tempDir.toFile())) {
+            memory.store(legacy);
+            MemoryEntry stored = memory.retrieve("legacy-sliding").orElseThrow();
+
+            assertEquals("SLIDING", stored.getMetadata().get("expiry_mode"));
+            assertTrue(memory.recordRecalled(java.util.List.of("legacy-sliding"), Instant.now()));
+            assertTrue(memory.retrieve("legacy-sliding").orElseThrow().getExpiresAt().isAfter(oldExpiry));
         }
     }
 

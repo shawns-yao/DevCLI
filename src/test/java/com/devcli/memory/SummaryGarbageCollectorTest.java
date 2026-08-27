@@ -51,12 +51,12 @@ class SummaryGarbageCollectorTest {
     @Test
     void keepsHighPrioritySectionsWhenTruncating() {
         RollingSummary s = new RollingSummary();
-        s.set("主要请求与意图", "P1 九段");
+        s.set("主要请求与意图", "P1 六段");
         s.set("文件和代码", "x".repeat(3_000));
 
         new SummaryGarbageCollector().gc(s, 300);
 
-        assertEquals("P1 九段", s.get("主要请求与意图"), "高优先段不参与截断");
+        assertEquals("P1 六段", s.get("主要请求与意图"), "高优先段不参与截断");
         assertTrue(s.get("文件和代码").contains("已折叠"), "低优先段被截以腾预算");
     }
 
@@ -64,7 +64,7 @@ class SummaryGarbageCollectorTest {
     void aggressiveGcNeverDeletesStableOrUnresolvedItemsOnlyBecauseTheyAreOld() {
         RollingSummary summary = new RollingSummary();
         summary.addItem(SummaryItem.create(
-                "主要请求与意图", "decision", "保留九段摘要",
+                "主要请求与意图", "decision", "保留六段摘要",
                 SummaryItem.Lifecycle.STABLE, 100, List.of()).withCompactionCount(20));
         summary.addItem(SummaryItem.create(
                 "主要请求与意图", "open", "实现生命周期更新",

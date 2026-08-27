@@ -21,6 +21,7 @@ final class MemoryConflictDetector {
         for (MemoryEntry existing : existingEntries) {
             if (existing == null || !existing.isRecallable() || existing.isExpired(null)
                     || existing.getId().equals(candidate.getId())) continue;
+            if (!MemoryWriteProtocol.scopeOf(candidate).equals(MemoryWriteProtocol.scopeOf(existing))) continue;
             Optional<StructuredClaim.Claim> existingClaim = StructuredClaim.parse(existing.getContent());
             String existingSubject = existing.getSubject().isBlank()
                     ? existingClaim.map(StructuredClaim.Claim::subject).orElse("")
@@ -46,6 +47,7 @@ final class MemoryConflictDetector {
         for (MemoryEntry existing : existingEntries) {
             if (existing == null || !existing.isRecallable() || existing.isExpired(null)
                     || existing.getId().equals(candidate.getId())) continue;
+            if (!MemoryWriteProtocol.scopeOf(candidate).equals(MemoryWriteProtocol.scopeOf(existing))) continue;
             Optional<StructuredClaim.Claim> existingClaim = StructuredClaim.parse(existing.getContent());
             String existingSubject = existing.getSubject().isBlank()
                     ? existingClaim.map(StructuredClaim.Claim::subject).orElse("")

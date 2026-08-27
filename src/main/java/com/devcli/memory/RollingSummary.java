@@ -10,18 +10,18 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.function.Predicate;
 
-/** 固定九段的滚动摘要。九段负责信息分类，生命周期负责条目演进。 */
+/** 固定六段的滚动摘要；任务状态只由 SessionMemory 投影，不再生成空占位段。 */
 public class RollingSummary {
 
     public static final List<String> SECTIONS = List.of(
             "主要请求与意图", "关键技术概念", "文件和代码", "踩过的坑和修复", "问题解决过程",
-            "逐条用户消息", "待办任务", "当前在做什么", "下一步"
+            "逐条用户消息"
     );
 
     private static final String ITEM_PREFIX = "<!-- summary-item ";
     private static final String ITEM_SUFFIX = " -->";
-    private static final String TASK_STATE_REFERENCE = "- 非权威动态状态，见本轮 Session Memory。";
-    private static final List<String> PROJECTION_ONLY_SECTIONS = List.of(
+    /** 只用于解析旧九段摘要；内容会被丢弃，不再渲染。 */
+    private static final List<String> LEGACY_PROJECTION_SECTIONS = List.of(
             "待办任务", "当前在做什么", "下一步");
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private final LinkedHashMap<String, List<SummaryItem>> sections = new LinkedHashMap<>();
@@ -65,7 +65,7 @@ public class RollingSummary {
     }
 
     public static boolean isProjectionOnlySection(String section) {
-        return PROJECTION_ONLY_SECTIONS.contains(section);
+        return LEGACY_PROJECTION_SECTIONS.contains(section);
     }
 
     public List<SummaryItem> items(String section) {
@@ -169,7 +169,7 @@ public class RollingSummary {
             return null;
         }
         String name = trimmed.replaceFirst("^#+\\s*", "").trim();
-        return SECTIONS.contains(name) ? name : null;
+        return SECTIONS.contains(name) || LEGACY_PROJECTION_SECTIONS.contains(name) ? name : null;
     }
 
     private static ItemMetadata parseMetadata(String line) {
@@ -190,10 +190,6 @@ public class RollingSummary {
         StringBuilder result = new StringBuilder();
         for (Map.Entry<String, List<SummaryItem>> entry : sections.entrySet()) {
             result.append("## ").append(entry.getKey()).append('\n');
-            if (isProjectionOnlySection(entry.getKey())) {
-                result.append(TASK_STATE_REFERENCE).append('\n').append('\n');
-                continue;
-            }
             for (SummaryItem item : entry.getValue()) {
                 result.append(ITEM_PREFIX).append(metadataJson(item)).append(ITEM_SUFFIX).append('\n');
                 if (item.isVisible() && !item.content().isBlank()) {
@@ -219,15 +215,14 @@ public class RollingSummary {
     static SummaryItem.Lifecycle defaultLifecycle(String section) {
         return switch (section) {
             case "主要请求与意图", "关键技术概念" -> SummaryItem.Lifecycle.STABLE;
-            case "待办任务", "下一步" -> SummaryItem.Lifecycle.UNRESOLVED;
-            case "当前在做什么", "逐条用户消息" -> SummaryItem.Lifecycle.ACTIVE;
+            case "逐条用户消息" -> SummaryItem.Lifecycle.ACTIVE;
             default -> SummaryItem.Lifecycle.RESOLVED;
         };
     }
 
     private static int defaultImportance(String section) {
         return switch (section) {
-            case "主要请求与意图", "待办任务", "当前在做什么", "下一步" -> 90;
+            case "主要请求与意图" -> 90;
             case "文件和代码", "踩过的坑和修复", "关键技术概念" -> 70;
             default -> 50;
         };

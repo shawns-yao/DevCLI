@@ -9,7 +9,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class RollingSummaryTest {
 
     @Test
-    void parsesAllNineSections() {
+    void parsesLegacyNineSectionsWithoutRestoringTaskState() {
         String md = """
                 ## 主要请求与意图
                 重构记忆系统
@@ -24,7 +24,7 @@ class RollingSummaryTest {
                 ## 逐条用户消息
                 - 讨论记忆机制
                 ## 待办任务
-                P1 九段摘要
+                P1 旧任务状态段
                 ## 当前在做什么
                 写 RollingSummary
                 ## 下一步
@@ -52,23 +52,24 @@ class RollingSummaryTest {
 
     @Test
     void parseIgnoresNonSectionHeadingsAsContent() {
-        // 内容里出现的 ## 噪声（非九段名）应并入当前段，不被当成段标题
+        // 内容里出现的 ## 噪声（非六段名）应并入当前段，不被当成段标题
         RollingSummary s = RollingSummary.parse("## 文件和代码\n## 这不是段名\nA.java");
         assertTrue(s.get("文件和代码").contains("## 这不是段名"));
         assertTrue(s.get("文件和代码").contains("A.java"));
     }
 
     @Test
-    void renderProducesStableNineSectionOrder() {
+    void renderProducesStableSixSectionOrder() {
         RollingSummary s = new RollingSummary();
         s.set("下一步", "X");
         s.set("主要请求与意图", "Y");
         String rendered = s.render();
-        assertTrue(rendered.indexOf("## 主要请求与意图") < rendered.indexOf("## 下一步"),
-                "渲染应按固定九段顺序，意图在下一步之前");
         for (String section : RollingSummary.SECTIONS) {
             assertTrue(rendered.contains("## " + section), "应包含段标题: " + section);
         }
+        assertFalse(rendered.contains("## 待办任务"));
+        assertFalse(rendered.contains("## 当前在做什么"));
+        assertFalse(rendered.contains("## 下一步"));
     }
 
     @Test
@@ -87,12 +88,12 @@ class RollingSummaryTest {
         assertTrue(s.get("下一步").isBlank());
         assertEquals("后写这段", s.get("主要请求与意图"));
         String rendered = s.render();
-        assertTrue(rendered.indexOf("## 主要请求与意图") < rendered.indexOf("## 下一步"),
-                "render 应把乱序归一到固定顺序");
+        assertFalse(rendered.contains("先写这段"));
+        assertFalse(rendered.contains("## 下一步"));
     }
 
     @Test
-    void lifecycleItemsRoundTripWithoutChangingNineSections() {
+    void lifecycleItemsRoundTripWithoutChangingSixSections() {
         RollingSummary summary = new RollingSummary();
         summary.addItem(SummaryItem.create(
                 "文件和代码", "file:A.java", "A.java 已修改，测试通过",
@@ -104,7 +105,7 @@ class RollingSummaryTest {
         assertEquals(SummaryItem.Lifecycle.RESOLVED, item.lifecycle());
         assertEquals(List.of("tool-17", "test-18"), item.evidenceRefs());
         assertEquals("A.java 已修改，测试通过", reparsed.get("文件和代码"));
-        assertEquals(9, RollingSummary.SECTIONS.size());
+        assertEquals(6, RollingSummary.SECTIONS.size());
     }
 
     @Test
@@ -131,7 +132,7 @@ class RollingSummaryTest {
 
         assertTrue(summary.items("待办任务").isEmpty());
         assertTrue(summary.items("当前在做什么").isEmpty());
-        assertTrue(summary.render().contains("见本轮 Session Memory"));
+        assertFalse(summary.render().contains("见本轮 Session Memory"));
         assertFalse(summary.render().contains("修复上下文压缩"));
         assertFalse(summary.render().contains("实现生命周期摘要"));
     }
@@ -149,6 +150,6 @@ class RollingSummaryTest {
         assertFalse(rendered.contains("过期任务 A"));
         assertFalse(rendered.contains("过期任务 B"));
         assertFalse(rendered.contains("过期任务 C"));
-        assertEquals(3, rendered.split("见本轮 Session Memory", -1).length - 1);
+        assertFalse(rendered.contains("见本轮 Session Memory"));
     }
 }

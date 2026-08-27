@@ -159,6 +159,20 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesMemoryPromotionConfirmationCommands() {
+        assertEquals(CliCommandParser.CommandType.MEMORY_PENDING,
+                CliCommandParser.parse("/memory pending").type());
+        CliCommandParser.ParsedCommand confirm = CliCommandParser.parse(
+                "/memory confirm promotion-123");
+        assertEquals(CliCommandParser.CommandType.MEMORY_CONFIRM, confirm.type());
+        assertEquals("promotion-123", confirm.payload());
+        CliCommandParser.ParsedCommand reject = CliCommandParser.parse(
+                "/memory reject promotion-456");
+        assertEquals(CliCommandParser.CommandType.MEMORY_REJECT, reject.type());
+        assertEquals("promotion-456", reject.payload());
+    }
+
+    @Test
     void parsesMemoryForgetSlashCommandWithId() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/memory forget fact-1a2b3c4d");
 

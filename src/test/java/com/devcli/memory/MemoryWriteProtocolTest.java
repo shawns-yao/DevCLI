@@ -3,6 +3,7 @@ package com.devcli.memory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -120,6 +121,20 @@ class MemoryWriteProtocolTest {
         double feedbackWeight = MemoryFreshnessPolicy.weight(feedback, Instant.now());
         assertTrue(factWeight < 0.5, "旧事实应能自然降到 0.5 以下");
         assertTrue(feedbackWeight > factWeight, "反馈的半衰期应长于普通事实");
+    }
+
+    @Test
+    void freshnessUsesLastActualRecallAsItsAgeAnchor() {
+        Instant now = Instant.now();
+        MemoryEntry neverRecalled = new MemoryEntry("never", "project.version=1",
+                MemoryEntry.MemoryType.FACT, now.minus(Duration.ofDays(240)), Map.of(), 1);
+        MemoryEntry recentlyRecalled = new MemoryEntry("recent", "project.version=1",
+                MemoryEntry.MemoryType.FACT, now.minus(Duration.ofDays(240)), Map.of(), 1,
+                "", true, "", MemoryEntry.CURRENT_SCHEMA_VERSION, 1, null,
+                MemoryEvidence.legacy(Map.of()), 5, now.minus(Duration.ofDays(1)));
+
+        assertTrue(MemoryFreshnessPolicy.weight(recentlyRecalled, now)
+                > MemoryFreshnessPolicy.weight(neverRecalled, now));
     }
 
     @Test
