@@ -120,7 +120,7 @@ final class PreReviewVerifier {
                     new CommandExecutionService.Request(
                             command, projectRoot, timeoutSeconds, true));
             if (execution.succeeded()) {
-                return Result.verified();
+                return Result.verified(execution.output());
             }
             if (execution.timedOut()) {
                 return Result.failed("Pre-review hard check failed: " + displayCommand
@@ -198,8 +198,10 @@ final class PreReviewVerifier {
             return new Result(true, false, "");
         }
 
-        static Result verified() {
-            return new Result(true, true, "");
+        static Result verified(String feedback) {
+            String normalized = feedback == null ? "" : feedback.trim();
+            return new Result(true, true,
+                    normalized.contains("HOST_WARN") ? normalized : "");
         }
 
         static Result failed(String feedback) {

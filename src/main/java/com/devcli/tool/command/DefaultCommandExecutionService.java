@@ -19,6 +19,8 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
 
 public final class DefaultCommandExecutionService implements CommandExecutionService {
+    public static final String SANDBOX_MODE_PROPERTY = "devcli.command.sandbox.mode";
+    public static final String SANDBOX_MODE_ENV = "DEVCLI_COMMAND_SANDBOX_MODE";
     public static final String SANDBOX_IMAGE_PROPERTY = "devcli.command.sandbox.image";
     public static final String SANDBOX_IMAGE_ENV = "DEVCLI_COMMAND_SANDBOX_IMAGE";
     public static final String DOCKER_BINARY_PROPERTY = "devcli.command.sandbox.docker.binary";
@@ -28,20 +30,40 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
 
     private final Backend hostBackend;
     private final Backend sandboxBackend;
+    private final SandboxMode sandboxMode;
 
     public DefaultCommandExecutionService() {
-        this(new HostBackend(), new DockerBackend(Config.resolve(
-                System.getProperties(), System.getenv())));
+        this(Config.resolve(System.getProperties(), System.getenv()));
+    }
+
+    private DefaultCommandExecutionService(Config config) {
+        this(new HostBackend(), new DockerBackend(config), config.mode());
     }
 
     DefaultCommandExecutionService(Backend hostBackend, Backend sandboxBackend) {
+        this(hostBackend, sandboxBackend, SandboxMode.DOCKER);
+    }
+
+    DefaultCommandExecutionService(Backend hostBackend, Backend sandboxBackend,
+                                   SandboxMode sandboxMode) {
         this.hostBackend = hostBackend;
         this.sandboxBackend = sandboxBackend;
+        this.sandboxMode = sandboxMode == null ? SandboxMode.DOCKER : sandboxMode;
     }
 
     @Override
     public Result execute(Request request) {
-        return (request.sandboxRequired() ? sandboxBackend : hostBackend).execute(request);
+        if (!request.sandboxRequired() || sandboxMode == SandboxMode.DOCKER) {
+            return (request.sandboxRequired() ? sandboxBackend : hostBackend).execute(request);
+        }
+        String hostCommand = HostWarnCommandPolicy.validateAndNormalize(request.command());
+        Request hostRequest = new Request(hostCommand, request.projectRoot(), request.timeoutSeconds(),
+                false, request.executionContext());
+        Result result = hostBackend.execute(hostRequest);
+        return new Result(result.exitCode(),
+                "⚠️ 沙箱模式 HOST_WARN：隔离命令在主机上执行，风险由用户承担。\n"
+                        + result.output(),
+                result.timedOut(), result.cancelled());
     }
 
     static List<String> dockerCommand(Request request, Config config) {
@@ -268,7 +290,24 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
         }
     }
 
-    record Config(String dockerBinary, String image) {
+    public enum SandboxMode {
+        DOCKER,
+        HOST_WARN;
+
+        static SandboxMode parse(String value) {
+            if (value == null || value.isBlank()) {
+                return DOCKER;
+            }
+            return switch (value.trim().toUpperCase(Locale.ROOT).replace('-', '_')) {
+                case "DOCKER" -> DOCKER;
+                case "HOST_WARN" -> HOST_WARN;
+                default -> throw new IllegalArgumentException(
+                        "sandbox mode must be DOCKER|HOST_WARN: " + value);
+            };
+        }
+    }
+
+    record Config(String dockerBinary, String image, SandboxMode mode) {
         Config {
             if (dockerBinary == null || dockerBinary.isBlank()) {
                 throw new IllegalArgumentException("docker binary is required");
@@ -276,6 +315,7 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
             if (image == null || image.isBlank()) {
                 throw new IllegalArgumentException("sandbox image is required");
             }
+            mode = mode == null ? SandboxMode.DOCKER : mode;
         }
 
         static Config resolve(Properties properties, Map<String, String> environment) {
@@ -283,7 +323,10 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
                     firstNonBlank(properties.getProperty(DOCKER_BINARY_PROPERTY),
                             environment.get(DOCKER_BINARY_ENV), "docker"),
                     firstNonBlank(properties.getProperty(SANDBOX_IMAGE_PROPERTY),
-                            environment.get(SANDBOX_IMAGE_ENV), DEFAULT_SANDBOX_IMAGE));
+                            environment.get(SANDBOX_IMAGE_ENV), DEFAULT_SANDBOX_IMAGE),
+                    SandboxMode.parse(firstNonBlank(
+                            properties.getProperty(SANDBOX_MODE_PROPERTY),
+                            environment.get(SANDBOX_MODE_ENV), "DOCKER")));
         }
 
         private static String firstNonBlank(String first, String second, String fallback) {

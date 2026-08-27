@@ -14,7 +14,8 @@ public final class ShellToolProvider implements ToolProvider {
     public void register(ToolContext context) {
         context.registerTool(ToolRegistry.Tool.contextualStructured(
                 "execute_command",
-                "执行短时 Shell 命令。隔离任务强制使用无网络、最小权限 Docker 容器，禁止回退到主机。",
+                "执行短时 Shell 命令。隔离任务默认使用无网络、最小权限 Docker；"
+                        + "仅显式配置 HOST_WARN 时在主机执行并返回风险警告。",
                 context.createToolParameters(new ToolParameter(
                         "command", "string", "要执行的命令", true)),
                 (args, executionContext) -> executeCommand(args, context, executionContext),

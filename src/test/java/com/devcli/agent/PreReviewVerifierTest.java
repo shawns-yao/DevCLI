@@ -105,6 +105,24 @@ class PreReviewVerifierTest {
         assertEquals("mvn -q -DskipTests test-compile", captured.get().command());
     }
 
+    @Test
+    void shouldPreserveHostWarnNoticeFromSuccessfulHardCheck(@TempDir Path tempDir) throws Exception {
+        Path javaRoot = tempDir.resolve("src/main/java");
+        Files.createDirectories(javaRoot);
+        Files.writeString(javaRoot.resolve("Hello.java"), "public class Hello {}",
+                StandardCharsets.UTF_8);
+        Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        PreReviewVerifier verifier = new PreReviewVerifier(30, request ->
+                CommandExecutionService.Result.completed(0,
+                        "⚠️ 沙箱模式 HOST_WARN：隔离命令在主机上执行，风险由用户承担。"));
+
+        PreReviewVerifier.Result result = verifier.verify(tempDir, "step-host-warn");
+
+        assertTrue(result.passed(), result.feedback());
+        assertTrue(result.hardCheckExecuted());
+        assertTrue(result.feedback().contains("HOST_WARN"), result.feedback());
+    }
+
     private PreReviewVerifier verifierWithHostBackend() {
         return new PreReviewVerifier(60, PreReviewVerifierTest::executeOnHost);
     }
