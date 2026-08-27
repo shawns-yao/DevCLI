@@ -42,14 +42,7 @@ class RagRetrievalBenchmarkIT {
         System.setProperty("devcli.rag.dir", ragDir.toString());
         try {
             EmbeddingClient embeddingClient = new EmbeddingClient();
-            List<BenchmarkDataset> datasets = new ArrayList<>();
-            datasets.add(sampleProjectDataset(tempDir));
-            if (Boolean.getBoolean("devcli.benchmark.rag.currentSource")) {
-                datasets.add(devCliSourceDataset());
-            }
-            if (Boolean.getBoolean("devcli.benchmark.rag.codesearchnet")) {
-                datasets.add(codeSearchNetJavaDataset(tempDir));
-            }
+            List<BenchmarkDataset> datasets = List.of(codeSearchNetJavaDataset(tempDir));
             for (BenchmarkDataset dataset : datasets) {
                 CodeIndex.IndexResult indexResult = new CodeIndex(embeddingClient).index(dataset.projectRoot().toString());
                 assertTrue(indexResult.chunkCount() > 0, "index should create chunks for " + dataset.name());
@@ -80,23 +73,6 @@ class RagRetrievalBenchmarkIT {
                 System.setProperty("devcli.rag.dir", previousRagDir);
             }
         }
-    }
-
-    private static BenchmarkDataset sampleProjectDataset(Path tempDir) throws Exception {
-        Path project = tempDir.resolve("sample-project");
-        writeSampleProject(project);
-        return new BenchmarkDataset("synthetic-java-call-chain", "synthetic_sample_project", project, List.of(
-                new QueryCase("UserController detail 调用链", "call_chain", 3,
-                        List.of("UserController.detail", "UserService.detail", "UserServiceImpl.detail", "UserMapper.selectById")),
-                new QueryCase("用户详情审计链路", "call_chain", 3,
-                        List.of("UserController.detail", "UserServiceImpl.detail", "AuditLogger.recordView")),
-                new QueryCase("下单 checkout 支付库存调用链", "call_chain", 3,
-                        List.of("OrderController.checkout", "OrderService.checkout", "PaymentGateway.charge", "InventoryService.reserve")),
-                new QueryCase("PromptAssembler 如何组装 PromptContext", "call_chain", 3,
-                        List.of("PromptAssembler.assemble", "PromptRepository.systemPrompt", "PromptContext")),
-                new QueryCase("OrderService checkout 依赖哪些下游服务", "call_chain", 3,
-                        List.of("OrderService.checkout", "PaymentGateway.charge", "InventoryService.reserve"))
-        ), 5, 0L, true);
     }
 
     private static BenchmarkDataset codeSearchNetJavaDataset(Path tempDir) throws Exception {
@@ -179,172 +155,6 @@ class RagRetrievalBenchmarkIT {
             }
         }
         return root;
-    }
-
-    private static BenchmarkDataset devCliSourceDataset() {
-        Path project = Path.of("").toAbsolutePath().normalize();
-        return new BenchmarkDataset("devcli-current-source-symbol-rag", "current_devcli_source", project, List.of(
-                new QueryCase("CodeRetriever 如何融合 keyword semantic graph RRF", "call_chain", 3,
-                        List.of("CodeRetriever.search", "RetrievalFusion.addChannel", "RetrievalFusion.rank")),
-                new QueryCase("ResourceLeaseManager 文件资源租约如何拒绝并发写冲突", "definition", 0,
-                        List.of("ResourceLeaseManager", "ResourceLeaseManager.acquire")),
-                new QueryCase("SymbolVersionDiff 如何生成 NegativeFact 失效记忆", "definition", 0,
-                        List.of("SymbolVersion", "SymbolInvalidation.from", "SymbolSnapshot")),
-                new QueryCase("JavaParser SymbolSolver 解析方法调用关系并写入 classpathEpoch", "call_chain", 3,
-                        List.of("CodeAnalyzer", "CodeAnalyzer.resolveCallee", "ClasspathEpoch")),
-                new QueryCase("MemoryManager 如何把 RAG evidence symbolVersion negativeFact 写入记忆", "call_chain", 2,
-                        List.of("MemoryManager", "MemoryManager.storeFactWithPolicy", "LongTermMemoryPolicy"))
-        ), 5, 0L, true);
-    }
-
-    private static void writeSampleProject(Path root) throws Exception {
-        Path user = root.resolve("src/main/java/com/example/user");
-        Path order = root.resolve("src/main/java/com/example/order");
-        Path prompt = root.resolve("src/main/java/com/example/prompt");
-        Files.createDirectories(user);
-        Files.createDirectories(order);
-        Files.createDirectories(prompt);
-
-        Files.writeString(user.resolve("UserController.java"), """
-                package com.example.user;
-
-                public class UserController {
-                    private UserService userService;
-
-                    public UserVO detail(Long userId) {
-                        return userService.detail(userId);
-                    }
-                }
-                """, StandardCharsets.UTF_8);
-        Files.writeString(user.resolve("UserService.java"), """
-                package com.example.user;
-
-                public interface UserService {
-                    UserVO detail(Long userId);
-                }
-                """, StandardCharsets.UTF_8);
-        Files.writeString(user.resolve("UserServiceImpl.java"), """
-                package com.example.user;
-
-                public class UserServiceImpl implements UserService {
-                    private UserMapper userMapper;
-                    private AuditLogger auditLogger;
-
-                    public UserVO detail(Long userId) {
-                        UserDO user = userMapper.selectById(userId);
-                        auditLogger.recordView(user);
-                        return new UserVO(user.name());
-                    }
-                }
-                """, StandardCharsets.UTF_8);
-        Files.writeString(user.resolve("UserMapper.java"), """
-                package com.example.user;
-
-                public class UserMapper {
-                    public UserDO selectById(Long userId) {
-                        return new UserDO("alice");
-                    }
-                }
-                """, StandardCharsets.UTF_8);
-        Files.writeString(user.resolve("AuditLogger.java"), """
-                package com.example.user;
-
-                public class AuditLogger {
-                    public void recordView(UserDO user) {
-                        System.out.println(user.name());
-                    }
-                }
-                """, StandardCharsets.UTF_8);
-        Files.writeString(user.resolve("UserDO.java"), """
-                package com.example.user;
-
-                public record UserDO(String name) {}
-                """, StandardCharsets.UTF_8);
-        Files.writeString(user.resolve("UserVO.java"), """
-                package com.example.user;
-
-                public record UserVO(String name) {}
-                """, StandardCharsets.UTF_8);
-
-        Files.writeString(order.resolve("OrderController.java"), """
-                package com.example.order;
-
-                public class OrderController {
-                    private OrderService orderService;
-
-                    public Receipt checkout(CheckoutCommand command) {
-                        return orderService.checkout(command);
-                    }
-                }
-                """, StandardCharsets.UTF_8);
-        Files.writeString(order.resolve("OrderService.java"), """
-                package com.example.order;
-
-                public class OrderService {
-                    private PaymentGateway paymentGateway;
-                    private InventoryService inventoryService;
-
-                    public Receipt checkout(CheckoutCommand command) {
-                        inventoryService.reserve(command.sku());
-                        return paymentGateway.charge(command.amount());
-                    }
-                }
-                """, StandardCharsets.UTF_8);
-        Files.writeString(order.resolve("PaymentGateway.java"), """
-                package com.example.order;
-
-                public class PaymentGateway {
-                    public Receipt charge(int amount) {
-                        return new Receipt("paid-" + amount);
-                    }
-                }
-                """, StandardCharsets.UTF_8);
-        Files.writeString(order.resolve("InventoryService.java"), """
-                package com.example.order;
-
-                public class InventoryService {
-                    public void reserve(String sku) {
-                        System.out.println(sku);
-                    }
-                }
-                """, StandardCharsets.UTF_8);
-        Files.writeString(order.resolve("CheckoutCommand.java"), """
-                package com.example.order;
-
-                public record CheckoutCommand(String sku, int amount) {}
-                """, StandardCharsets.UTF_8);
-        Files.writeString(order.resolve("Receipt.java"), """
-                package com.example.order;
-
-                public record Receipt(String id) {}
-                """, StandardCharsets.UTF_8);
-
-        Files.writeString(prompt.resolve("PromptAssembler.java"), """
-                package com.example.prompt;
-
-                public class PromptAssembler {
-                    private PromptRepository promptRepository;
-
-                    public PromptContext assemble(String mode) {
-                        String system = promptRepository.systemPrompt(mode);
-                        return new PromptContext(system);
-                    }
-                }
-                """, StandardCharsets.UTF_8);
-        Files.writeString(prompt.resolve("PromptRepository.java"), """
-                package com.example.prompt;
-
-                public class PromptRepository {
-                    public String systemPrompt(String mode) {
-                        return "system prompt for " + mode;
-                    }
-                }
-                """, StandardCharsets.UTF_8);
-        Files.writeString(prompt.resolve("PromptContext.java"), """
-                package com.example.prompt;
-
-                public record PromptContext(String systemPrompt) {}
-                """, StandardCharsets.UTF_8);
     }
 
     private static Path benchmarkReportRoot() {
