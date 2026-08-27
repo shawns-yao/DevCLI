@@ -143,14 +143,12 @@ final class ReviewCoordinator {
     boolean shouldAcceptAfterRecoverableFailure(AgentOrchestrator.ExecutionStep step,
                                                 String issues,
                                                 boolean hardCheckExecuted) {
-        return canDegradeReviewerFailure(
-                finalIntegrationStep.test(step), isRecoverableReviewerFailure(issues), hardCheckExecuted);
+        return canDegradeReviewerFailure(isRecoverableReviewerFailure(issues), hardCheckExecuted);
     }
 
-    static boolean canDegradeReviewerFailure(boolean finalIntegration,
-                                             boolean recoverableFailure,
+    static boolean canDegradeReviewerFailure(boolean recoverableFailure,
                                              boolean hardCheckExecuted) {
-        return recoverableFailure && (hardCheckExecuted || finalIntegration);
+        return recoverableFailure && hardCheckExecuted;
     }
 
     private boolean isRecoverableReviewerFailure(String content) {

@@ -276,11 +276,10 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    void reviewerFailureDegradationShouldRequireHardCheckForRegularSteps() {
-        assertFalse(ReviewCoordinator.canDegradeReviewerFailure(false, true, false));
-        assertTrue(ReviewCoordinator.canDegradeReviewerFailure(false, true, true));
-        assertTrue(ReviewCoordinator.canDegradeReviewerFailure(true, true, false));
-        assertFalse(ReviewCoordinator.canDegradeReviewerFailure(false, false, true));
+    void reviewerFailureDegradationShouldRequireHardCheckForEveryStep() {
+        assertFalse(ReviewCoordinator.canDegradeReviewerFailure(true, false));
+        assertTrue(ReviewCoordinator.canDegradeReviewerFailure(true, true));
+        assertFalse(ReviewCoordinator.canDegradeReviewerFailure(false, true));
     }
 
     @Test
