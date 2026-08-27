@@ -2,6 +2,28 @@
 
 > 评测历史说明：下方 2026-07 至 2026-08 的自建 Agent、Saga、记忆、压缩、并发和合成 RAG 记录仅用于开发过程审计，相关测试与结果文件已退役，不得作为当前 benchmark 结果。正式评测以 `docs/benchmark-evaluation.md` 的公开集合计划和官方评分器为准。
 
+## 2026-08-27 收敛 AgentOrchestrator 职责
+
+- 状态：已完成
+- 日期：`2026-08-27`
+- 已实现：将评审、checkpoint 恢复策略、Planner 计划治理、运行状态、Worker 执行和上下文/结果叙事分别收敛到 `ReviewCoordinator`、`CheckpointCoordinator`、`PlanCoordinator`、`OrchestrationRunState`、`StepExecutionCoordinator` 与 `OrchestrationNarrative`
+- 效果：`AgentOrchestrator` 从 2622 行降到 943 行；执行协调器 764 行，其他新增模块均低于 450 行；`AgentOrchestrator` 仅保留团队装配、配置传播和 `run/resume` 顶层流程
+- 影响范围：Multi-Agent Planner/Worker/Reviewer、checkpoint v8 恢复、隔离工作区和 PatchSet 提交、编排上下文与最终汇总
+- 验证：主代码编译通过；`AgentOrchestratorTest` 90 项通过；`mvn -q -Pquick -DskipTests=false test` 本轮生成 221 份 Surefire 报告，共 1663 项，0 失败、0 错误、0 跳过，Maven 退出码 0
+- 未验证：未运行全量测试；未启动 CLI，未调用真实 LLM、Docker 或跨进程 checkpoint 恢复
+- 剩余风险：兼容测试仍通过少量 `AgentOrchestrator` 委托方法访问新模块，后续可在测试迁移完成后删除这些内部兼容入口
+
+## 2026-08-27 移除 Side-Git 自研对象 GC，改用 JGit auto-gc
+
+- 状态：已完成
+- 日期：`2026-08-27`
+- 背景：独立 Side-Git 快照仓库原以 `SideGitObjectGc`（遍历 objects、算 refs 可达集、手删松散对象）+ `SnapshotGcPolicy`（阈值/间隔）回收裁剪历史后的不可达对象，属于在 Git 之上重造 `git gc`
+- 已实现：删除 `SideGitObjectGc`、`SnapshotGcPolicy`；`SnapshotConfig` 移除 4 个 GC 字段与 `DEVCLI_SNAPSHOT_GC_*` 旋钮；`SideGitManager` 在裁剪后调用 JGit `autoGC`，由原生阈值决定是否后台维护，避免每次裁剪都完整重打包
+- 影响范围：snapshot 包、快照测试、`.env.example`、`AGENTS.md`、`README.md`、`docs/agents-reference.md`
+- 验证：`mvn -o -DskipTests compile` 通过；`SideGitManagerTest` 3 项全绿（恢复/异步/裁剪）；`mvn -Pquick` 共 1663 项，0 失败、0 错误、0 跳过
+- 未验证：未在真实大仓库观察 auto-gc 的触发频率与长期回收效果
+- 剩余风险：JGit 使用默认 prune 宽限期，刚产生的不可达对象不保证当次立即物理删除；磁盘占用是最终收敛，不是严格即时上限
+
 ## 2026-08-27 沙箱分级第一阶段
 
 - 状态：已完成本阶段
@@ -9,7 +31,7 @@
 - 已实现：命令执行新增显式 `DOCKER | HOST_WARN` 模式；默认仍使用 Docker 且不可用时失败关闭，不进行自动主机回退
 - 已实现：`HOST_WARN` 仅允许 Maven 离线执行 `clean/validate/compile/test-compile/test/package/verify`、`javac` 和只读 Git；拒绝任意 Maven 插件、发布阶段、其他运行时、网络工具、命令串、管道、重定向和写入型 Git，并在工具结果及 Reviewer 前展示主机风险提示
 - 影响范围：统一命令执行服务、Pre-Review、Reviewer 前置展示、Shell 工具配置、环境配置示例和架构说明
-- 验证：沙箱模式、白名单绕过、Pre-Review 风险提示等限定回归通过；`mvn -q -Pquick -DskipTests=false test` 本轮生成 222 份 Surefire 报告，共 1669 项，0 失败、0 错误、0 跳过，Maven 退出码 0
+- 验证：沙箱模式、白名单绕过、Pre-Review 风险提示等限定回归通过；最近一次 `mvn -q -Pquick -DskipTests=false test` 生成 221 份 Surefire 报告，共 1663 项，0 失败、0 错误、0 跳过，Maven 退出码 0
 - 文档：已同步 `.env.example`、`AGENTS.md`、`README.md`、`docs/agents-reference.md`、`docs/architecture-convergence-design.md` 和 `docs/benchmark-evaluation.md`
 - 未验证：未启动交互 CLI，未调用真实 LLM/MCP，未验证真实 Docker，也未执行真实 `/plan + HOST_WARN` 端到端流程
 - 剩余风险：`HOST_WARN` 不是操作系统级沙箱，POM 已声明插件仍可能在主机产生副作用；完整三档沙箱、通用语言生态白名单和高风险逐次 Docker 档尚未实现
@@ -21,7 +43,7 @@
 - 已实现：Execution Trace 已覆盖 ReAct、Plan task、Team Worker/Reviewer 以及临时隔离 Agent 路径；`AgentOrchestrator.setAdditionalEventSink()` 现在会立即传播到已创建的 Planner、Worker 池和 Reviewer，后续隔离实例继续通过 `configureSubAgent()` 注入
 - 已实现：新增 `OrchestrationTaskRunner`，集中承担 `AgentOrchestrator` 创建、Reviewer client 创建、运行期依赖注入以及 `run/resume` 分发；`Main` 保留交互提示和计划评审展示，用户可见编排语义不变
 - 影响范围：`AgentOrchestrator`、`SubAgent`、`Main`、CLI 编排测试、Trace 测试
-- 验证：针对性回归通过；本轮 Quick 最新生成的 222 份 Surefire 报告共 1662 项，0 失败、0 错误、0 跳过，Maven 退出码 0；旧报告中保留 2026-08-15 benchmark 的 1 条历史失败，不计入本轮结果；`git diff --check` 通过
+- 验证：针对性回归通过；本轮 Quick 最新生成的 221 份 Surefire 报告共 1663 项，0 失败、0 错误、0 跳过，Maven 退出码 0；旧报告中保留 2026-08-15 benchmark 的 1 条历史失败，不计入本轮结果；`git diff --check` 通过
 - 未验证：未启动交互 CLI，未调用真实 LLM/MCP，未做 Ctrl+C、worktree 残留和跨进程并发端到端验证
 - 剩余风险：Trace 当前仍是同一 `runId` 下的平面时间线，尚未形成 `agentId/stepId` 父子 Trace 树；Cancellation Tree 验收不属于本阶段；本阶段未提交、未推送
 
@@ -453,9 +475,9 @@
 - 来源：长会话下 turn 级快照持续增长，`devcli.snapshot.max` 之前只限制展示/查询数量，没有真正裁剪 side-history
 - 影响范围：`src/main/java/com/devcli/snapshot/SideGitManager.java`、`src/test/java/com/devcli/snapshot/SideGitManagerTest.java`、`README.md`、`AGENTS.md`、`docs/agents-reference.md`
 - 已实现：每次新建快照后按 `SnapshotConfig.maxSnapshots` 重写 Side-Git 历史，只保留最新 N 条快照；新增测试覆盖超过保留上限时旧快照被裁剪
-- 后续实现（2026-07-13）：裁剪计数持久化后按阈值或最小间隔触发有界回收；关闭 JGit 仓库句柄后扫描 refs 可达集合，只删除不可达松散对象，不在每次快照时执行完整 GC；超时或删除失败保留累计计数等待重试
-- 验证建议：`mvn -Dtest=SideGitManagerTest,SnapshotGcPolicyTest -DskipTests=false test`
-- 风险：当前只回收不可达松散对象，不重打包可达对象和既有 pack；单次回收受时间上限约束，大仓库可能需要多次触发完成
+- 后续实现（2026-08-27）：删除自研对象遍历与持久化 GC 策略，裁剪后仅调用 JGit `autoGC`，由原生阈值决定是否后台维护
+- 验证建议：`mvn -Dtest=SideGitManagerTest -DskipTests=false test`
+- 风险：JGit 默认 prune 宽限期内会保留新产生的不可达对象，磁盘占用不会随历史裁剪立即下降
 
 ## 2026-07-09 独立 grep_code 精确检索工具
 

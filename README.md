@@ -752,7 +752,7 @@ LLM tool call
 - 参数不合法时不会进入审批，更不会执行。
 - 用户不能批准策略层已经拒绝的操作。
 - 文件写入和命令执行会留下审计记录。
-- Side-Git snapshot 可用于回滚最近 turn 的文件改动，并按保留上限自动裁剪旧快照；累计裁剪达到阈值或超过最小间隔后，会在时间上限内回收不可达松散对象。
+- Side-Git snapshot 可用于回滚最近 turn 的文件改动，并按保留上限自动裁剪旧快照；裁剪后由 JGit `autoGC` 按原生阈值决定是否后台维护。
 
 ## Renderer And Interaction
 
@@ -803,7 +803,7 @@ mvn test -DskipTests=false
 
 ```text
 src/main/java/com/devcli/
-├── agent/       Agent, PlanExecuteAgent, PlanTaskBatchExecutor, PlanTaskExecutionResult, SubAgent, AgentOrchestrator, MultiAgentBatchExecutor
+├── agent/       Agent, PlanExecuteAgent, SubAgent, AgentOrchestrator, PlanCoordinator, ReviewCoordinator, CheckpointCoordinator, StepExecutionCoordinator, OrchestrationRunState, OrchestrationNarrative
 ├── cli/         Main, CliCommandParser
 ├── context/     ContextProfile, ContextMode, TokenUsageFormatter
 ├── memory/      MemoryManager, SessionMemory, LongTermMemory, CompactionSummaryCache, RuleContext

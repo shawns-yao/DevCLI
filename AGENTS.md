@@ -55,6 +55,8 @@ mvn test -DskipTests=false                  # 全量回归
 
 Multi-Agent 中 Planner 负责拆解 DAG，Worker 负责实现子任务，Reviewer 先审计划语义闭环，再在硬检查通过后审查真实产物。
 
+`AgentOrchestrator` 只保留团队装配、配置传播和 `run/resume` 顶层流程；计划生成与 DAG 预处理由 `PlanCoordinator` 承担，评审门禁由 `ReviewCoordinator` 承担，checkpoint 迁移与对账由 `CheckpointCoordinator` 承担，Worker 调度、重试、隔离工作区和 PatchSet 归并由 `StepExecutionCoordinator` 承担，可变运行态集中在 `OrchestrationRunState`，上下文与终态报告由 `OrchestrationNarrative` 生成。
+
 Plan 的任务适配由 `PlanTaskBatchExecutor` 负责，Team 的 Worker 适配由 `MultiAgentBatchExecutor` 负责；两者把冲突波次交给 `OrchestrationWaveExecutor`，共用有界并发、异常归属、独立输出缓冲与稳定顺序归并。任务结果及有界摘要由 `PlanTaskExecutionResult` 统一承载；Worker 池、公平锁、Pre-Review、Reviewer、角色记忆和 checkpoint 恢复拓扑仍只属于 Team。
 
 Plan 与 Multi-Agent 的 DAG 就绪判断和图结构校验统一使用 `ExecutionGraph`：`Task` 与 `ExecutionStep` 都实现只读 `ExecutionNode`，普通节点只在依赖全部完成后执行，最终集成节点可在依赖进入完成或失败终态后执行；缺失依赖和环会在执行前拒绝。两类节点和 checkpoint 共用 `ExecutionArtifact`，状态、输出、摘要、修改资源、错误、尝试次数和时间戳不再分散存储。Planner 必须输出 `acceptance_criteria`；每条标准必须声明 `test_signal`、`verification_method=TOOL|HUMAN`、`verifier` 和 `applies_to`，目标只能引用有效 DAG 节点或 `FINAL`。普通节点只注入自己的验收点，Final integration 重新检查全部验收点。Team 在确定性预检后使用独立、无工具的 Reviewer 上下文检查原始需求到节点和验收标准的覆盖；critical/high 标准必须给出反例输入和预期失败信号。`DEVCLI_TEAM_REVIEWER_PROVIDER` / `DEVCLI_TEAM_REVIEWER_MODEL` 可指定独立评审模型，显式配置不可用时失败关闭；未配置时兼容沿用主模型。语义拒绝进入 Planner 有界修复，评审协议损坏则失败关闭；通过后才进入用户执行、补充重规划或取消。Reviewer 执行期再用 `criteria_results` 逐条验证真实产物；TOOL 标准的声明验证器必须在本轮真实成功工具调用中出现，人工标准不能伪装为工具通过。验收点 `severity` 会随计划和 checkpoint 固化；critical/high 自动验收点失败或缺少覆盖时强制不通过。
@@ -81,7 +83,7 @@ Final integration 只做入口/API/默认参数/跨模块联动胶水；普通�
 
 失败步骤支持有界在位重做（默认 1 次）：失败步骤保持原 id/依赖在 DAG 原位换思路重做，redo 用尽后保持 FAILED；最终结果显式输出 Reviewer 重试、原位重做、最后失败原因、checkpoint 和人工处理选项。ReAct、Plan task、SubAgent 与 Orchestrator 的终态失败统一由 `FailureFeedback` 输出“原因 + 分类 + 操作建议 + 下一步动作”，固定提供重试、人工接手、接受部分结果和回滚；执行内核另发出 `failure.guidance` 强类型事件供 Runtime 审计与投影。checkpoint 协议版本 8 保存共享 `ExecutionArtifact`、验收方式、验证器、适用节点、pending PatchSet 写前日志、稳定 Planner/Worker/Reviewer 身份、步骤分配、单调消息游标、有界且按步骤归属的 AttemptDigest、已消耗的重做次数和重做失败现场；应用前记录 before/after 哈希与原文件备份，恢复时在项目提交锁内按最终哈希提升 COMPLETED、继续 PENDING 或自动回滚。恢复优先重建 checkpoint 中的 Worker 拓扑并保持原步骤绑定，沿用原重做额度，并按上下文 schema 版本注入最近摘要和当前步骤的失败尝试；不持久化完整 SubAgent 对话对象图。旧协议缺失适用节点时迁移为 `FINAL`，缺失验证字段时迁移为人工验收；没有可执行验收标准的未完成 checkpoint 拒绝恢复。对账保存失败、回滚不完整或身份拓扑损坏时停止 resume；高于当前版本的 checkpoint 明确报告不兼容。计划、依赖、验收点、执行产物和恢复元数据原子写入 `~/.devcli/checkpoints/`，全部成功后删除；resume 不恢复完整 `SessionMemory`。
 
-Side-Git 快照按 `devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX` 保留最近快照；每次新建快照后会重写 side-history，只保留最新 N 条。裁剪累计达到阈值或超过最小间隔后，会在时间上限内回收不可达松散对象；默认阈值 100、间隔 24 小时、上限 30 秒，可通过 `DEVCLI_SNAPSHOT_GC_ENABLED`、`DEVCLI_SNAPSHOT_GC_PRUNED_THRESHOLD`、`DEVCLI_SNAPSHOT_GC_MIN_INTERVAL_HOURS`、`DEVCLI_SNAPSHOT_GC_MAX_SECONDS` 调整。
+Side-Git 快照按 `devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX` 保留最近快照；每次新建快照后重写 side-history，只保留最新 N 条；裁剪后调用 JGit `autoGC`，由其原生阈值决定是否后台维护，不再自研对象 GC，也无相关调优项。
 
 副作用横向信息流：write_file/execute_command 等副作用工具的证据在 `SessionMemory.EvidenceJournal` 中按高重要性保留；普通读取优先压缩或淘汰，失败压缩成 AttemptDigest，使后续步骤持续看到本任务改过哪些文件和已经排除的方案。
 
@@ -106,7 +108,7 @@ MCP 动态工具：`mcp__{server}__{tool}`（+ resources 虚拟工具）
 
 ```
 src/main/java/com/devcli/
-├── agent/       Agent.java, PlanExecuteAgent.java, PlanTaskBatchExecutor.java, PlanTaskExecutionResult.java, SubAgent.java, AgentOrchestrator.java, MultiAgentBatchExecutor.java, PlanTaskWorkspaceExecutor.java, WorkspaceCommitCoordinator.java
+├── agent/       Agent.java, PlanExecuteAgent.java, SubAgent.java, AgentOrchestrator.java, PlanCoordinator.java, ReviewCoordinator.java, CheckpointCoordinator.java, StepExecutionCoordinator.java, OrchestrationRunState.java, OrchestrationNarrative.java
 ├── cli/         Main.java, CliCommandParser.java, PlanReviewInputParser.java
 ├── browser/     BrowserSession, BrowserGuard, SensitivePagePolicy
 ├── llm/         AnthropicClient, GLMClient, DeepSeekClient, StepClient, KimiClient, OpenAiClient

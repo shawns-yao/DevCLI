@@ -27,7 +27,7 @@ For the primary entry point, see `/AGENTS.md`.
 
 ### Snapshot Config
 
-系统属性 > 环境变量 > 默认值：`devcli.snapshot.enabled`(true) / `devcli.snapshot.max`(50，自动保留最近 N 条快照) / `devcli.snapshot.excludes`(.git,.devcli/snapshots,target,node_modules,dist,.idea,*.class,*.jar) / `devcli.snapshot.dir`(~/.devcli/snapshots) / `devcli.snapshot.gc.enabled`(true) / `devcli.snapshot.gc.pruned.threshold`(100) / `devcli.snapshot.gc.min.interval.hours`(24) / `devcli.snapshot.gc.max.seconds`(30)
+系统属性 > 环境变量 > 默认值：`devcli.snapshot.enabled`(true) / `devcli.snapshot.max`(50，自动保留最近 N 条快照) / `devcli.snapshot.excludes`(.git,.devcli/snapshots,target,node_modules,dist,.idea,*.class,*.jar) / `devcli.snapshot.dir`(~/.devcli/snapshots)
 
 ### Embedding Config
 
@@ -227,8 +227,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - side-git 在 ~/.devcli/snapshots/ 维护独立仓库（JGit，不依赖系统 git）
 - pre-turn 同步，post-turn 异步
 - 每次新建快照后按 `devcli.snapshot.max` 重写 side-history，只保留最新 N 条快照
-- 裁剪数量持久化到 Side-Git 仓库内；达到阈值或超过最小间隔后，关闭仓库句柄再扫描所有 refs 的可达对象，只删除不可达松散对象，不重打包可达对象
-- GC 有独立时间上限；超时或删除失败时保留累计计数，后续快照继续重试，避免每次快照执行重型回收
+- 裁剪后调用 JGit `autoGC`，由其原生 loose object / pack 阈值决定是否后台维护；不再手写对象遍历，也不在每次裁剪时强制完整重打包
 - revert_turn 纳入 HITL/AuditLog，恢复前先创建 pre-restore 快照
 
 ### Prompt Layering (Phase 19)
@@ -298,7 +297,7 @@ ReAct 主循环 / 对话历史 / 工具调用与结果回灌
 规划后执行 / 计划审阅 / DAG 状态推进 / 失败重规划；冲突分波、并行调度和顺序输出归并委托给 `PlanTaskBatchExecutor`，结果摘要由 `PlanTaskExecutionResult` 统一生成，任务能力范围、隔离工作区、资源租约和 PatchSet 生命周期委托给 `PlanTaskWorkspaceExecutor`
 
 ### AgentOrchestrator.java
-Plan 编排策略 / 三角色管理 / 按依赖推进 / 审查重试；资源冲突分波和 Worker 协调委托给 `MultiAgentBatchExecutor`，通用并发与输出归并委托给 `OrchestrationWaveExecutor`，PatchSet、checkpoint 写前日志、终态持久化和恢复对账委托给 `WorkspaceCommitCoordinator`
+Plan 顶层流程 / 三角色生命周期 / 配置传播 / `run` 与 `resume` 入口。Planner 修复和 DAG 预处理委托 `PlanCoordinator`，评审门禁委托 `ReviewCoordinator`，checkpoint 恢复策略和 PatchSet 对账委托 `CheckpointCoordinator`，Worker 调度、重试、隔离工作区和归并委托 `StepExecutionCoordinator`；可变状态集中在 `OrchestrationRunState`，上下文和终态报告由 `OrchestrationNarrative` 生成
 
 ### AgentExecutionEngine.java
 ReAct / Plan task / SubAgent 共用循环；统一取消和预算检查、LLM 调用、assistant/tool 消息协议、结构化工具错误记录与 IOException 出口；路径差异通过 Delegate 钩子注入
@@ -385,10 +384,6 @@ EMBEDDING_BASE_URL=http://localhost:11434
 # DEVCLI_SNAPSHOT_MAX=50
 # DEVCLI_SNAPSHOT_EXCLUDES=.git,.devcli/snapshots,target,node_modules,dist,.idea,*.class,*.jar
 # DEVCLI_SNAPSHOT_DIR=/Users/yourname/.devcli/snapshots
-# DEVCLI_SNAPSHOT_GC_ENABLED=true
-# DEVCLI_SNAPSHOT_GC_PRUNED_THRESHOLD=100
-# DEVCLI_SNAPSHOT_GC_MIN_INTERVAL_HOURS=24
-# DEVCLI_SNAPSHOT_GC_MAX_SECONDS=30
 # DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS=60
 # DEVCLI_TUI=true
 ```
