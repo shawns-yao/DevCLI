@@ -33,7 +33,7 @@ ReAct 主循环、Plan 多 Agent 编排、MCP 协议客户端、上下文压缩�
 
 - ReAct 主循环与统一 `/plan` 编排入口；Plan 固定使用 Planner、Worker、Reviewer 协作链路，串行或并行由 DAG 依赖与资源冲突决定。
 - RAG（检索增强生成）：JavaParser 切分、SQLite 向量存储、关键词召回、代码关系图谱、RRF（倒数排名融合）与 CrossEncoderReranker（交叉编码器重排）。
-- 三种生命周期：当前线程 `conversationHistory + RollingSummary`、当前任务 `SessionMemory`、跨任务 `LongTermMemory`；含 Token 预算治理、作用域召回、可重放晋升队列和隔离 Curator。
+- 三层记忆：`conversationHistory + RollingSummary` 管理当前线程上下文，`SessionMemory` 管理当前任务状态与证据，`LongTermMemory` 保存跨任务稳定事实；支持 Token 预算、作用域召回、持久晋升队列和隔离 Curator。
 - MCP（Model Context Protocol）：手写 JSON-RPC 2.0 客户端，支持 stdio 与 Streamable HTTP，动态注册工具与 resources。
 - Skill：jar 内置、用户级与项目级三层加载，`load_skill` 按需展开，allowedTools 白名单约束后续工具调用。
 - 安全模型：HITL（人工审批）、路径围栏、命令快速拒绝与 JSONL 审计链。
@@ -70,7 +70,7 @@ DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、�
 
 - `ToolRegistry（工具注册表）`：统一管理内置工具、MCP 动态工具和 resource 读取工具；工具调用通过分阶段中间件执行取消检查、存在性检查、Skill 权限、JSON Schema 参数校验、HITL、策略、审计和结果尺寸治理。内置 Provider 直接返回带状态、错误码和重试语义的结构化结果，命令非零退出、参数错误、策略拒绝、超时和取消不再依赖文本识别。
 - `RAG（检索增强生成）`：用 JavaParser 切分 Java 代码，结合 SQLite 向量存储、关键词召回、代码关系图谱、RRF（倒数排名融合）、symbol-aware boost（符号感知加权）和 CrossEncoderReranker（交叉编码器重排），把相关类、方法、调用链注入模型上下文。
-- `Memory（记忆）`：区分对话历史、工作记忆、长期记忆和强约束记忆。长期记忆写入前经过规则化写入策略，避免把临时闲聊、敏感信息或低复用事实写入持久层。
+- `Memory（记忆）`：按线程上下文、任务工作状态和跨任务事实分层。九类上下文信息由六段 `RollingSummary` 与 `SessionMemory` 中的待办任务、当前工作、下一步动作共同提供；长期事实通过显式保存或隔离 Curator 晋升进入 SQLite。
 - `Prompt（提示词分层）`：base、personality、mode、approval、project_context、skills、context_mgmt、handoff 分层组装，支持 jar 内置、用户级和项目级覆盖。
 - `Skill（技能）`：`load_skill` 按需加载完整指引；已加载 Skill 的允许工具白名单会限制后续工具调用，压缩后恢复保留 context、allowedTools 和内容摘要。
 - `MCP（Model Context Protocol）`：支持 stdio / streamable HTTP MCP server，动态加载工具和 resources，并把 MCP server 状态、日志、重启能力暴露给 CLI。
@@ -111,10 +111,10 @@ Main
 关键边界：
 
 - 所有内置 LLM Provider 使用统一 `LlmException` 错误模型，区分认证、限流、过载、超时、网络、参数、上下文超限、内容过滤、服务端、响应格式和主动取消。限流、过载、超时、网络和 5xx 按指数退避与 jitter 有界重试；已取消请求和已经输出流式内容的请求不重试，避免重复正文或工具调用。SubAgent 会把标准错误码和 `retryable` 标记保留到编排层，瞬时故障判断不依赖具体网络错误文案。
-- `ConversationHistoryCompactor（对话历史压缩器）` 是治理 LLM messages 窗口的唯一压缩点；压缩分两层：第 0 层 `microcompact` 先处理单条超大消息，扛不住再走 LLM 摘要（首次 Map-Reduce，后续为六段式生命周期增量操作）。六段摘要不保存待办、当前工作或下一步，这些运行状态只来自 `SessionMemory`；旧九段摘要仍可解析，但三个旧任务状态段会被丢弃。摘要提交到 history 前会经过运行时语义守卫；默认每 5 次成功压缩执行生命周期 GC，不再二次压缩旧摘要。
+- `ConversationHistoryCompactor（对话历史压缩器）` 按 Token 预算治理 LLM messages 窗口。`microcompact` 处理单条超大消息；首次摘要使用 Map-Reduce，后续通过生命周期增量操作维护六段 `RollingSummary`：主要请求与意图、关键技术概念、文件和代码、踩过的坑和修复、问题解决过程、逐条用户消息。摘要提交前经过运行时语义守卫，默认每 5 次成功压缩执行一次生命周期 GC。
 - 本地 `@path` 和 MCP resource 在展开阶段按剩余 Token 预算选择内联或不可变快照引用；内容型请求由程序强制回读，后续“里面/该文件/附件”等跨轮追问复用最近引用。元数据问题不强制读取；错误路径、读取失败或快照哈希变化达到两次后失败关闭。
-- `SessionMemory（工作记忆）` 是当前任务共享运行投影，通过统一、幂等的事件入口维护 WorkState 和 EvidenceJournal；ReAct、Plan 与 Team 都使用 taskId 轮换，Prompt 使用单一硬 Token 预算。
-- `LongTermMemory（长期记忆）` 只保存跨任务稳定事实。显式配置独立 Curator 后，任务结束会把脱敏、限长的必要子集写入 SQLite 晋升队列，再由空工具、无旧记忆的隔离 Curator 输出 `SAVE / CONFIRM / SKIP`；未配置 Curator 时跳过自动晋升，不创建孤儿作业。除模型推理传输外，它没有 Web、MCP、Skill、文件、命令或子 Agent 入口。检索先按 `scope_type/scope_key` 隔离，再融合关键词与向量；只有实际注入 Turn Context 的条目才更新 `recallCount/lastRecalledAt`，使用频率只对近似同分项提供最高 1% 的微调，新鲜度优先使用最近召回时间。策略 TTL 在真实召回后滑动续期，显式固定到期时间不续期；到期先软归档，不在检索时物理删除。
+- `SessionMemory（工作记忆）` 是当前任务共享运行投影，通过统一、幂等的事件入口维护 WorkState、EvidenceJournal、待办任务、当前工作和下一步动作；ReAct、Plan 与 Team 使用 taskId 轮换，并按角色与 Token 预算生成上下文视图。
+- `LongTermMemory（长期记忆）` 保存跨任务稳定事实。任务结束时，脱敏且限长的任务快照先写入 SQLite 晋升队列，再由空工具、无历史记忆的隔离 Curator 输出 `SAVE / CONFIRM / SKIP`。检索按 `scope_type/scope_key` 隔离并融合关键词与向量结果；实际注入 Turn Context 后更新 `recallCount` 和 `lastRecalledAt`。策略 TTL 随真实召回续期，固定到期时间保持不变，到期条目进入软归档。
 - `PathGuard（路径围栏）` 负责限制文件访问不逃逸项目根。
 - `ToolEffect + ToolAccessScope（工具副作用能力）` 由执行管线强制：非隔离分析任务只获得只读能力，隔离任务才允许项目写入和主机命令；MCP 缺失只读注解或声明 destructive/openWorld 时按外部副作用处理。工具参数先转换为稳定语义指纹，字段顺序、查询大小写、Unicode 等价字符和冗余空白不再绕过停滞检测；正则 pattern 保持大小写敏感，避免错误缓存命中；成功的只读结果会短期缓存，任何副作用执行都会清空缓存。
 - `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 并行执行时拦截 `write_file`，同一文件只能被一个运行中步骤写入；并行工具线程会继承步骤租约归属，任务结束后释放租约。`ToolRegistry` 托管共享后台清理器，project fork 复用同一线程，最后一个注册表关闭后停止；周期可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
@@ -455,6 +455,9 @@ Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个
 | `/memory` | 查看记忆状态 |
 | `/memory organize` | 生成长期记忆整理计划，不修改记忆 |
 | `/memory organize apply` | 应用程序判定为低风险的整理项 |
+| `/memory pending` | 查看等待人工确认的长期记忆候选 |
+| `/memory confirm <id>` | 确认并保存长期记忆候选 |
+| `/memory reject <id>` | 拒绝长期记忆候选 |
 | `/memory clear` | 清空长期记忆 |
 | `/save <fact>` | 保存长期事实 |
 | `/save --pin <fact>` | 保存强约束事实，每轮全量注入 |
@@ -498,6 +501,7 @@ Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个
 | `web_search` | 搜索互联网 |
 | `web_fetch` | 抓取已知 URL 并提取正文 |
 | `save_memory` | 保存长期记忆 |
+| `confirm_memory` | 确认或拒绝敏感长期记忆候选 |
 | `list_memory` | 只读列出长期记忆 |
 | `revert_turn` | 回滚最近 turn 的改动 |
 | `mcp__{server}__{tool}` | MCP server 动态工具 |
@@ -519,15 +523,48 @@ Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个
 
 ## Memory
 
-DevCLI 按生命周期分三层：
+DevCLI 的记忆系统覆盖九类上下文信息：
 
-- `conversationHistory + RollingSummary（短期上下文）`：按 Token 预算保留当前线程消息；六段摘要只保存有损历史背景，不复制任务状态。
-- `SessionMemory（工作记忆）`：只服务当前任务。WorkState 保存目标、计划、步骤、用户约束、根因、修改文件、测试状态和下一步动作；EvidenceJournal 按重要性增量合并，并在统一 Token 预算内渲染。
-- `LongTermMemory（长期记忆）`：跨任务稳定事实，SQLite 是唯一事实源，向量库只是召回索引。
+- `RollingSummary` 保存六类历史背景：主要请求与意图、关键技术概念、文件和代码、踩过的坑和修复、问题解决过程、逐条用户消息。
+- `SessionMemory` 保存三类实时任务信息：待办任务、当前工作、下一步动作。
+
+三层存储分别承担不同生命周期：
+
+| 层级 | 存储 | 内容 | 生命周期 |
+| --- | --- | --- | --- |
+| 短期上下文 | `conversationHistory + RollingSummary` | 当前线程原始消息与六段历史摘要 | 当前线程 |
+| 工作记忆 | `SessionMemory` | WorkState、EvidenceJournal、待办任务、当前工作、下一步动作 | 当前任务 |
+| 长期记忆 | `LongTermMemory` | 用户偏好、项目约定、稳定事实、决策、流程和经验 | 跨任务持久化 |
+
+### 短期上下文
+
+- 原始消息与摘要共同受 Token 预算控制。
+- 单条超大消息先由 `microcompact` 处理。
+- 首次摘要使用 Map-Reduce，后续按主题、生命周期、重要性、修订号和证据引用增量维护。
+- 生命周期 GC 负责合并、覆盖、过期和裁剪摘要条目。
+
+### 工作记忆
+
+- WorkState 保存目标、计划、步骤状态、用户约束、根因、修改文件和测试状态。
+- EvidenceJournal 保存工具证据、修改资源和失败尝试摘要，并按重要性与 Token 预算裁剪。
+- Planner、Worker、Reviewer 从同一任务投影读取各自需要的视图。
+- 事件携带 agent、step、逻辑序列和 `context_epoch`，用于幂等处理、来源校验和迟到证据拒绝。
+
+### 长期记忆
+
+- SQLite 保存事实主体、作用域、证据、修订关系、生命周期和召回统计，是长期记忆事实源。
+- 向量库保存可重建的语义索引；关键词检索可独立工作。
+- 任务结束时，`TaskMemorySnapshot` 将脱敏、限长的必要信息写入 `MemoryPromotionQueue`。
+- `IsolatedMemoryCurator` 只读取本次任务快照，不加载工具、MCP、Skill、文件、命令、网络工具、历史记忆或子 Agent。
+- Curator 输出 `SAVE`、`CONFIRM` 或 `SKIP`；`CONFIRM` 候选通过 `/memory pending`、`/memory confirm <id>` 和 `/memory reject <id>` 处理。
+- 项目与仓库事实按 `scope_type/scope_key` 隔离；全局事实和用户偏好可以跨项目召回。
+- 只有真正注入模型上下文的条目才增加 `recallCount` 并更新 `lastRecalledAt`。
+- 使用频率只对相关度接近的结果提供最高 1% 的排序微调。
+- 策略生成的 FACT/FEEDBACK 使用滑动 TTL；固定到期时间保持不变；到期条目进入软归档。
 
 相邻规则系统不属于记忆层：
 
-- `RuleContext`：加载 `DEVCLI.md` 和 `/rule add` 的强约束并每轮注入；`/rule list` 和 `/rule remove` 负责管理。旧 pinned facts 只显示为待分类项，避免把稳定事实误迁为规则。
+- `RuleContext`：加载 `DEVCLI.md` 和 `/rule add` 的强约束并每轮注入；`/rule list` 和 `/rule remove` 负责管理。待分类的 pinned facts 单独展示，不进入规则注入。
 - RAG 检索默认把 keyword / semantic / graph、RRF、rerank、最终选择和降级状态写入本机 JSONL 审计记录，不保存代码正文。普通 CLI 会话归档默认关闭；启用后 ReAct 保存脱敏模型消息，Plan / Team 保存顶层输入输出，不保存图片正文与 reasoning，并按保留期限自动清理。
 
 保存长期事实：
@@ -542,15 +579,15 @@ DevCLI 按生命周期分三层：
 /save --pin 默认用简体中文回答
 ```
 
-长期记忆写入策略：
+长期记忆写入：
 
 - 用户明确执行 `/save` 或调用 `save_memory` 时，低敏稳定事实按显式写入协议保存；如果内容仍然包含明显临时或低复用信号，策略返回确认态。
-- 个人偏好、项目约定、常用路径、长期身份属性通过 `reason_code` 记录可解释写入原因，不再依赖未校准的小数打分。
-- 普通用户消息不会绕过任务晋升协议直接落库；显式配置独立 Curator 后，任务结束的 Curator 只看当前任务脱敏快照，不读取旧记忆；未配置时不创建待处理队列。
+- 个人偏好、项目约定、常用路径和长期身份属性通过 `reason_code` 记录写入原因。
+- 普通用户消息通过任务晋升协议筛选；独立 Curator 只读取当前任务的脱敏快照。
 - 当信息涉及 token、密码、手机号、地址等敏感内容时，默认要求确认或跳过。
 - “今天临时这样做”“这次先用某个文件名”等低复用信息只留在当前任务的 `SessionMemory`。
 - Curator 判断不确定时写入 `AWAITING_CONFIRMATION`，使用 `/memory pending`、`/memory confirm <id>` 或 `/memory reject <id>` 非阻塞处理。
-- 命中主题键（如 JSON 库选型）的新事实写入时，同主题旧事实自动失效、检索不再召回，避免被推翻的旧设定继续误导模型；抽不到主题则退回追加不覆盖。
+- 命中主题键（如 JSON 库选型）的新事实写入时，同主题当前事实进入软失效并建立修订关系；没有主题键的事实按独立条目保存。
 
 ## RAG
 
