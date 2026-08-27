@@ -277,10 +277,10 @@ class AgentOrchestratorTest {
 
     @Test
     void reviewerFailureDegradationShouldRequireHardCheckForRegularSteps() {
-        assertFalse(AgentOrchestrator.canDegradeReviewerFailure(false, true, false));
-        assertTrue(AgentOrchestrator.canDegradeReviewerFailure(false, true, true));
-        assertTrue(AgentOrchestrator.canDegradeReviewerFailure(true, true, false));
-        assertFalse(AgentOrchestrator.canDegradeReviewerFailure(false, false, true));
+        assertFalse(ReviewCoordinator.canDegradeReviewerFailure(false, true, false));
+        assertTrue(ReviewCoordinator.canDegradeReviewerFailure(false, true, true));
+        assertTrue(ReviewCoordinator.canDegradeReviewerFailure(true, true, false));
+        assertFalse(ReviewCoordinator.canDegradeReviewerFailure(false, false, true));
     }
 
     @Test
@@ -936,8 +936,8 @@ class AgentOrchestratorTest {
                 new SubAgent.ToolEvidence("write_file", com.devcli.tool.ToolStatus.SUCCESS,
                         "已写入 src/OrderService.java")));
 
-        String summary = AgentOrchestrator.buildTrustedStepSummary(
-                step, evidence, new AgentOrchestrator.ReviewDecision(true, "", false, true));
+        String summary = ReviewCoordinator.buildTrustedStepSummary(
+                step, evidence, new ReviewCoordinator.ReviewDecision(true, "", false, true));
 
         assertTrue(summary.contains("summary_source=ORCHESTRATOR"), summary);
         assertTrue(summary.contains("review=APPROVED"), summary);
@@ -2567,9 +2567,10 @@ class AgentOrchestratorTest {
 
     private static AgentCheckpoint.RecoveryState invokeRestoreAgentTopology(
             AgentOrchestrator orchestrator, AgentCheckpoint checkpoint) throws Exception {
-        Field checkpointField = AgentOrchestrator.class.getDeclaredField("checkpoint");
-        checkpointField.setAccessible(true);
-        checkpointField.set(orchestrator, checkpoint);
+        Field stateField = AgentOrchestrator.class.getDeclaredField("runState");
+        stateField.setAccessible(true);
+        OrchestrationRunState runState = (OrchestrationRunState) stateField.get(orchestrator);
+        runState.setCheckpoint(checkpoint);
         Method method = AgentOrchestrator.class.getDeclaredMethod("restoreAgentTopology", AgentCheckpoint.class);
         method.setAccessible(true);
         return (AgentCheckpoint.RecoveryState) method.invoke(orchestrator, checkpoint);
