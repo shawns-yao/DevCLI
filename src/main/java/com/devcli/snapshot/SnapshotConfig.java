@@ -12,11 +12,7 @@ public record SnapshotConfig(
         boolean enabled,
         Path snapshotsRoot,
         int maxSnapshots,
-        List<String> excludes,
-        boolean gcEnabled,
-        int gcPrunedThreshold,
-        int gcMinIntervalHours,
-        int gcMaxSeconds
+        List<String> excludes
 ) {
     public SnapshotConfig {
         snapshotsRoot = snapshotsRoot == null
@@ -24,9 +20,6 @@ public record SnapshotConfig(
                 : snapshotsRoot.toAbsolutePath().normalize();
         maxSnapshots = Math.max(1, maxSnapshots);
         excludes = excludes == null ? List.of() : List.copyOf(excludes);
-        gcPrunedThreshold = Math.max(1, gcPrunedThreshold);
-        gcMinIntervalHours = Math.max(1, gcMinIntervalHours);
-        gcMaxSeconds = Math.max(1, gcMaxSeconds);
     }
 
     private static final List<String> DEFAULT_EXCLUDES = List.of(
@@ -50,30 +43,11 @@ public record SnapshotConfig(
                 "devcli.snapshot.max", "DEVCLI_SNAPSHOT_MAX", 50, 1, Integer.MAX_VALUE);
         List<String> excludes = mergeExcludes(ConfigResolver.stringValue(
                 "devcli.snapshot.excludes", "DEVCLI_SNAPSHOT_EXCLUDES", ""));
-        boolean gcEnabled = ConfigResolver.booleanValue(
-                "devcli.snapshot.gc.enabled", "DEVCLI_SNAPSHOT_GC_ENABLED", true);
-        int gcThreshold = ConfigResolver.intValue(
-                "devcli.snapshot.gc.pruned.threshold",
-                "DEVCLI_SNAPSHOT_GC_PRUNED_THRESHOLD", 100, 1, Integer.MAX_VALUE);
-        int gcIntervalHours = ConfigResolver.intValue(
-                "devcli.snapshot.gc.min.interval.hours",
-                "DEVCLI_SNAPSHOT_GC_MIN_INTERVAL_HOURS", 24, 1, Integer.MAX_VALUE);
-        int gcMaxSeconds = ConfigResolver.intValue(
-                "devcli.snapshot.gc.max.seconds",
-                "DEVCLI_SNAPSHOT_GC_MAX_SECONDS", 30, 1, Integer.MAX_VALUE);
-        return new SnapshotConfig(enabled, root, max, excludes,
-                gcEnabled, gcThreshold, gcIntervalHours, gcMaxSeconds);
-    }
-
-    public SnapshotConfig(boolean enabled, Path snapshotsRoot, int maxSnapshots,
-                          List<String> excludes) {
-        this(enabled, snapshotsRoot, maxSnapshots, excludes,
-                true, 100, 24, 30);
+        return new SnapshotConfig(enabled, root, max, excludes);
     }
 
     public SnapshotConfig withEnabled(boolean enabled) {
-        return new SnapshotConfig(enabled, snapshotsRoot, maxSnapshots, excludes,
-                gcEnabled, gcPrunedThreshold, gcMinIntervalHours, gcMaxSeconds);
+        return new SnapshotConfig(enabled, snapshotsRoot, maxSnapshots, excludes);
     }
 
     private static List<String> mergeExcludes(String configured) {

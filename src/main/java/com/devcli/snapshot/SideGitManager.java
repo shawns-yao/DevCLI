@@ -7,6 +7,7 @@ import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectInserter;
 import org.eclipse.jgit.lib.ObjectLoader;
+import org.eclipse.jgit.lib.NullProgressMonitor;
 import org.eclipse.jgit.lib.PersonIdent;
 import org.eclipse.jgit.lib.RefUpdate;
 import org.eclipse.jgit.lib.Repository;
@@ -25,7 +26,6 @@ import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.PathMatcher;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -34,7 +34,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicInteger;
 
 public class SideGitManager {
     private static final Logger log = LoggerFactory.getLogger(SideGitManager.class);
@@ -43,10 +42,6 @@ public class SideGitManager {
     private final Path projectRoot;
     private final SnapshotConfig config;
     private final Path gitDir;
-    private final SnapshotGcPolicy gcPolicy;
-    private final SideGitObjectGc objectGc = new SideGitObjectGc();
-    private final AtomicInteger gcRunCount = new AtomicInteger();
-    private volatile String lastGcError = "";
 
     public SideGitManager(Path projectRoot) {
         this(projectRoot, SnapshotConfig.fromEnvironment());
@@ -59,7 +54,6 @@ public class SideGitManager {
                 .resolve(hash(parentKey(this.projectRoot)))
                 .resolve(hash(this.projectRoot.toString()))
                 .resolve(".git");
-        this.gcPolicy = new SnapshotGcPolicy(this.gitDir, this.config);
     }
 
     public synchronized TurnSnapshot preTurnSnapshot(String turnId, String summary) throws IOException, GitAPIException {
@@ -79,8 +73,6 @@ public class SideGitManager {
         if (!config.enabled()) {
             return null;
         }
-        TurnSnapshot snapshot;
-        int pruned;
         try (Git git = openGit()) {
             git.add().addFilepattern(".").call();
             git.add().setUpdate(true).addFilepattern(".").call();
@@ -92,11 +84,12 @@ public class SideGitManager {
                     .setCommitter(SNAPSHOT_IDENT)
                     .setMessage(message)
                     .call();
-            pruned = pruneSnapshotsIfNeeded(git);
-            snapshot = toSnapshot(commit);
+            int pruned = pruneSnapshotsIfNeeded(git);
+            if (pruned > 0) {
+                autoCollectGarbage(git);
+            }
+            return toSnapshot(commit);
         }
-        maybeCollectGarbage(pruned);
-        return snapshot;
     }
 
     public synchronized List<TurnSnapshot> listSnapshots(int limit) throws IOException, GitAPIException {
@@ -201,14 +194,6 @@ public class SideGitManager {
 
     public SnapshotConfig config() {
         return config;
-    }
-
-    int gcRunCount() {
-        return gcRunCount.get();
-    }
-
-    String lastGcError() {
-        return lastGcError;
     }
 
     private Git openGit() throws IOException, GitAPIException {
@@ -358,31 +343,16 @@ public class SideGitManager {
         return false;
     }
 
-    private void maybeCollectGarbage(int prunedSnapshots) {
-        if (prunedSnapshots <= 0 || !config.gcEnabled()) {
-            return;
-        }
-        Instant now = Instant.now();
+    /**
+     * 淘汰快照会重写线性历史、产生不可达对象；交给 JGit 的 auto-gc 阈值决定是否维护，
+     * 避免每次裁剪都执行完整重打包。失败只记录，不影响快照主流程。
+     */
+    private void autoCollectGarbage(Git git) {
         try {
-            if (!gcPolicy.recordPrunedAndShouldRun(prunedSnapshots, now)) {
-                return;
-            }
-            SideGitObjectGc.Result result = objectGc.collect(
-                    gitDir, Duration.ofSeconds(config.gcMaxSeconds()));
-            if (result.timedOut() || result.failedDeletes() > 0) {
-                lastGcError = "timedOut=" + result.timedOut()
-                        + ", failedDeletes=" + result.failedDeletes()
-                        + ", deleted=" + result.deletedLooseObjects();
-                log.warn("Side-Git 垃圾回收未完整结束，删除失败 {}，保留累计计数等待后续重试",
-                        result.failedDeletes());
-                return;
-            }
-            gcPolicy.markCompleted(Instant.now());
-            gcRunCount.incrementAndGet();
-            lastGcError = "";
+            git.getRepository().autoGC(NullProgressMonitor.INSTANCE);
         } catch (Exception e) {
-            lastGcError = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-            log.warn("Side-Git 垃圾回收失败，保留累计计数等待后续重试: {}", e.getMessage());
+            log.warn("Side-Git auto-gc 未完成，不影响快照: {}",
+                    e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
         }
     }
 
