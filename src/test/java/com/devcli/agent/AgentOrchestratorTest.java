@@ -95,6 +95,33 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    void additionalEventSinkShouldPropagateToExistingAgentsImmediately() throws Exception {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+        com.devcli.runtime.event.RunEventSink sink = event -> { };
+
+        orchestrator.setAdditionalEventSink(sink);
+
+        assertSame(sink, additionalEventSink(field(orchestrator, "planner")));
+        @SuppressWarnings("unchecked")
+        List<SubAgent> workers = (List<SubAgent>) field(orchestrator, "workers");
+        assertFalse(workers.isEmpty());
+        for (SubAgent worker : workers) {
+            assertSame(sink, additionalEventSink(worker));
+        }
+        assertSame(sink, additionalEventSink(field(orchestrator, "reviewer")));
+    }
+
+    private static Object field(Object target, String name) throws Exception {
+        Field field = target.getClass().getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(target);
+    }
+
+    private static Object additionalEventSink(Object subAgent) throws Exception {
+        return field(subAgent, "additionalEventSink");
+    }
+
+    @Test
     void resolvePlannerRepairAttemptsRejectsInvalidExplicitValues() {
         String previous = System.getProperty("devcli.team.planner.repair.max.attempts");
         try {

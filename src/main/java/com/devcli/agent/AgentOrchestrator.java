@@ -77,6 +77,8 @@ public class AgentOrchestrator {
     private String currentUserTask = "";
     private Supplier<String> externalContextSupplier = () -> "";
     private Supplier<String> ruleContextSupplier = () -> "";
+    private volatile com.devcli.runtime.event.RunEventSink additionalEventSink =
+            com.devcli.runtime.event.RunEventSink.NO_OP;
     private com.devcli.skill.SkillRegistry skillRegistry;
     private com.devcli.skill.SkillContextBuffer skillContextBuffer;
     private final TraceRecorder traceRecorder = new TraceRecorder();
@@ -500,6 +502,19 @@ public class AgentOrchestrator {
         agent.setPostToolInstructionSupplier(memoryManager::drainCurrentStateConflictInstruction);
         agent.setSkillRegistry(skillRegistry);
         agent.setSkillContextBuffer(skillContextBuffer == null ? null : skillContextBuffer.copy());
+        agent.setAdditionalEventSink(additionalEventSink);
+    }
+
+    /**
+     * 注入额外结构化事件出口（如 Execution Trace 落盘），透传给全部 Planner/Worker/Reviewer；
+     * 与各 SubAgent 自身流式渲染 sink 并列，不替代渲染。
+     */
+    public void setAdditionalEventSink(com.devcli.runtime.event.RunEventSink sink) {
+        this.additionalEventSink = sink == null
+                ? com.devcli.runtime.event.RunEventSink.NO_OP : sink;
+        planner.setAdditionalEventSink(this.additionalEventSink);
+        workers.forEach(worker -> worker.setAdditionalEventSink(this.additionalEventSink));
+        reviewer.setAdditionalEventSink(this.additionalEventSink);
     }
 
     private record PlanGenerationResult(AgentMessage message, List<ExecutionStep> steps,
@@ -2025,6 +2040,9 @@ public class AgentOrchestrator {
             out.println("   反馈: " + preReview.feedback() + "\n");
             return new ReviewDecision(false, preReview.feedback(), false,
                     preReview.hardCheckExecuted());
+        }
+        if (!preReview.feedback().isBlank()) {
+            out.println(preReview.feedback() + "\n");
         }
 
         out.println("🔍 " + reviewer.getName() + " 正在审查步骤 [" + step.id() + "] 的结果...");

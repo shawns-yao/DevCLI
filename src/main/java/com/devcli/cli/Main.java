@@ -109,6 +109,8 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public class Main {
     private static final Logger log = LoggerFactory.getLogger(Main.class);
+    private static final com.devcli.trace.RunEventTraceSink TRACE_SINK =
+            new com.devcli.trace.RunEventTraceSink();
     private static final String VERSION = "16.1.0";
     private static final String ENV_FILE = ".env";
     private static final String LOG_DIR_PROPERTY = "devcli.log.dir";
@@ -315,6 +317,8 @@ public class Main {
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
             reactAgent.setMemoryCuratorClient(
                     LlmClientFactory.create(llmClient.getProviderName(), config));
+            // Execution Trace：结构化运行事件自动落 ~/.devcli/traces，/trace 查看。
+            reactAgent.setRunEventSink(TRACE_SINK);
             AgentSessionRuntime reactSession = AgentSessionRuntime.adoptOwned(
                     reactAgent, Path.of(reactAgent.getToolRegistry().getProjectPath()));
             RuntimeThreadStore cliRunStore = RuntimeCommandLauncher.openRuntimeStore();
@@ -479,11 +483,30 @@ public class Main {
                         ui.println();
                         continue;
                     }
+                    case MEMORY_EXPORT -> {
+                        java.util.List<com.devcli.memory.MemoryEntry> entries =
+                                reactAgent.getMemoryManager().getLongTermMemory().getAll();
+                        String markdown = com.devcli.memory.MemoryAuditReport
+                                .render(entries, java.time.Instant.now());
+                        try {
+                            java.nio.file.Path auditFile = com.devcli.memory.LongTermMemory
+                                    .resolveMemoryDir().resolve("memory-audit.md");
+                            java.nio.file.Files.createDirectories(auditFile.getParent());
+                            java.nio.file.Files.writeString(auditFile, markdown,
+                                    java.nio.charset.StandardCharsets.UTF_8);
+                            ui.println("已导出 " + entries.size() + " 条长期记忆到 " + auditFile);
+                            ui.println("只读审计快照，不会回写记忆库；删除条目用 /memory forget <id>。\n");
+                        } catch (java.io.IOException e) {
+                            ui.println("导出记忆审计快照失败：" + e.getMessage() + "\n");
+                        }
+                        continue;
+                    }
                     case MEMORY_STATUS -> {
                         ui.println("📋 记忆系统状态：");
                         ui.println(reactAgent.getMemoryManager().getSystemStatus());
                         ui.println(ruleContext.getStatusSummary());
                         ui.println("   /memory organize - 生成长期记忆整理计划");
+                        ui.println("   /memory export - 导出可读 Markdown 审计快照");
                         ui.println("   /memory organize apply - 应用低风险整理项");
                         ui.println("   /memory pending - 查看待确认的记忆候选");
                         ui.println("   /memory confirm <id> - 接受待确认候选");
@@ -706,6 +729,15 @@ public class Main {
                         printRestoreCommand(ui, reactAgent.getToolRegistry().getSnapshotService(), command.payload());
                         continue;
                     }
+                    case TRACE -> {
+                        com.devcli.trace.TraceQuery traceQuery = new com.devcli.trace.TraceQuery();
+                        if ("list".equalsIgnoreCase(command.payload())) {
+                            ui.println(traceQuery.renderList(10));
+                        } else {
+                            ui.println(traceQuery.renderRun(command.payload()));
+                        }
+                        continue;
+                    }
                     case MCP_LIST -> {
                         ui.println(mcpServerManager.formatStatus());
                         ui.println();
@@ -917,17 +949,17 @@ public class Main {
                 if (orchestrationProfile != null) {
                     snapshotMode = orchestrationProfile.snapshotMode();
                     LlmClient activeClient = llmClient;
-                    runTask = () -> runOrchestratedTask(
-                            activeClient,
+                    OrchestrationTaskRunner orchestrationTaskRunner = new OrchestrationTaskRunner(
                             config,
                             reactAgent,
-                            lineReader,
-                            ui,
                             mcpServerManager,
                             ruleContext,
                             skillRegistry,
                             skillContextBuffer,
-                            taskInput);
+                            createTeamPlanReviewHandler(lineReader, ui),
+                            TRACE_SINK,
+                            ui);
+                    runTask = () -> orchestrationTaskRunner.run(activeClient, taskInput);
                 } else {
                     snapshotMode = "react";
                     runTask = () -> reactSession.runInCurrentContext(taskInput).output();
@@ -1023,18 +1055,6 @@ public class Main {
         );
     }
 
-    private static AgentOrchestrator createUnifiedPlanAgent(LlmClient llmClient,
-                                                            LlmClient reviewerClient,
-                                                            Agent reactAgent,
-                                                            LineReader lineReader, PrintStream out) {
-        out.println("📋 使用 Plan 模式\n");
-        AgentOrchestrator orchestrator = new AgentOrchestrator(
-                llmClient, reviewerClient, reactAgent.getToolRegistry(),
-                reactAgent.getMemoryManager(), out);
-        orchestrator.setPlanReviewHandler(createTeamPlanReviewHandler(lineReader, out));
-        return orchestrator;
-    }
-
     private static AgentOrchestrator.TeamPlanReviewHandler createTeamPlanReviewHandler(
             LineReader lineReader, PrintStream out) {
         return request -> {
@@ -1072,45 +1092,13 @@ public class Main {
         return text.toString().trim();
     }
 
-    private static String runOrchestratedTask(LlmClient llmClient,
-                                              DevCliConfig config,
-                                              Agent reactAgent,
-                                              LineReader lineReader,
-                                              PrintStream out,
-                                              McpServerManager mcpServerManager,
-                                              RuleContext ruleContext,
-                                              SkillRegistry skillRegistry,
-                                              SkillContextBuffer skillContextBuffer,
-                                              String taskInput) {
-        LlmClient reviewerClient = LlmClientFactory.createTeamReviewer(config, llmClient);
-        AgentOrchestrator orchestrator = createUnifiedPlanAgent(
-                llmClient, reviewerClient, reactAgent, lineReader, out);
-        orchestrator.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
-        orchestrator.setRuleContextSupplier(ruleContext::renderForPrompt);
-        orchestrator.setSkillSystem(skillRegistry, skillContextBuffer);
-        String resumeId = parsePlanResumeId(taskInput);
-        return resumeId == null
-                ? orchestrator.run(taskInput)
-                : orchestrator.resume(resumeId.isBlank() ? null : resumeId);
-    }
-
     /**
      * 解析 Plan 的 resume 子命令：
      * "resume" → ""（恢复最近 checkpoint）；"resume orch-xxxx" → "orch-xxxx"；
      * 其他输入 → null（按普通任务文本走 run）。
      */
     static String parsePlanResumeId(String taskInput) {
-        if (taskInput == null) {
-            return null;
-        }
-        String trimmed = taskInput.trim();
-        if (trimmed.equalsIgnoreCase("resume")) {
-            return "";
-        }
-        if (trimmed.regionMatches(true, 0, "resume ", 0, 7)) {
-            return trimmed.substring(7).trim();
-        }
-        return null;
+        return OrchestrationTaskRunner.parseResumeId(taskInput);
     }
 
     private static AgentTurnInbox.Item pollPendingAgentPrompt(AgentTurnInbox inbox) {
@@ -1708,6 +1696,9 @@ public class Main {
                 new SlashCommandHint("/session clear", "/session clear", "清空当前上下文并保留旧树"),
                 new SlashCommandHint("/branch", "/branch", "/session 的兼容别名"),
                 new SlashCommandHint("/restore ", "/restore <N>", "恢复到最近第 N 个 pre-turn 快照"),
+                new SlashCommandHint("/trace", "/trace", "查看最近一次运行的执行追踪"),
+                new SlashCommandHint("/trace list", "/trace list", "列出最近运行"),
+                new SlashCommandHint("/trace ", "/trace <runId>", "查看指定运行时间线"),
                 new SlashCommandHint("/index", "/index", "索引当前代码库"),
                 new SlashCommandHint("/index ", "/index [路径]", "索引指定路径代码库"),
                 new SlashCommandHint("/search ", "/search <查询>", "语义检索代码"),
@@ -1716,6 +1707,7 @@ public class Main {
                 new SlashCommandHint("/history clear", "/history clear", "清空本机输入历史和会话归档"),
                 new SlashCommandHint("/context", "/context", "查看上下文和记忆状态"),
                 new SlashCommandHint("/memory", "/memory", "查看记忆状态"),
+                new SlashCommandHint("/memory export", "/memory export", "导出可读 Markdown 记忆审计快照"),
                 new SlashCommandHint("/memory organize", "/memory organize", "生成长期记忆整理计划"),
                 new SlashCommandHint("/memory organize apply", "/memory organize apply", "应用低风险整理项"),
                 new SlashCommandHint("/memory clear", "/memory clear", "清空长期记忆"),

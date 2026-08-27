@@ -17,6 +17,7 @@ final class CliCommandParser {
         ORCHESTRATE,
         SWITCH_HITL,
         MEMORY_STATUS,
+        MEMORY_EXPORT,
         MEMORY_ORGANIZE,
         MEMORY_PENDING,
         MEMORY_CONFIRM,
@@ -52,7 +53,8 @@ final class CliCommandParser {
         SKILL_RELOAD,
         CONFIG,
         SESSION,
-        BRANCH
+        BRANCH,
+        TRACE
     }
 
     record ParsedCommand(CommandType type, String payload, OrchestrationProfile orchestrationProfile) {
@@ -143,6 +145,11 @@ final class CliCommandParser {
 
         if (trimmed.equalsIgnoreCase("/hitl")) {
             return new ParsedCommand(CommandType.SWITCH_HITL, null);
+        }
+
+        if (trimmed.equalsIgnoreCase("/memory export")
+                || trimmed.equalsIgnoreCase("/mem export")) {
+            return new ParsedCommand(CommandType.MEMORY_EXPORT, null);
         }
 
         if (trimmed.equalsIgnoreCase("/memory") || trimmed.equalsIgnoreCase("/mem")) {
@@ -278,6 +285,14 @@ final class CliCommandParser {
 
         if (trimmed.regionMatches(true, 0, "/restore ", 0, 9)) {
             return new ParsedCommand(CommandType.RESTORE_SNAPSHOT, trimmed.substring(9).trim());
+        }
+
+        if (trimmed.equalsIgnoreCase("/trace")) {
+            return new ParsedCommand(CommandType.TRACE, "latest");
+        }
+
+        if (trimmed.regionMatches(true, 0, "/trace ", 0, 7)) {
+            return new ParsedCommand(CommandType.TRACE, trimmed.substring(7).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/browser")) {

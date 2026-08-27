@@ -155,6 +155,8 @@ public class SubAgent {
             new AtomicReference<>(new ExecutionEvidenceAccumulator());
     private String currentSkillActivationText = "";
     private String recoveryContext = "";
+    private volatile com.devcli.runtime.event.RunEventSink additionalEventSink =
+            com.devcli.runtime.event.RunEventSink.NO_OP;
 
     public SubAgent(String name, AgentRole role, LlmClient llmClient, ToolRegistry toolRegistry) {
         this.name = name;
@@ -177,6 +179,15 @@ public class SubAgent {
     public void setRecoveryContext(String recoveryContext) {
         // 恢复状态属于任务级内容，随当轮快照进入任务消息，不再触碰 system prompt
         this.recoveryContext = recoveryContext == null ? "" : recoveryContext.trim();
+    }
+
+    /**
+     * 注入额外结构化事件出口（如 Execution Trace 落盘），与 SubAgent 自身流式渲染 sink
+     * 并列组合，不替代渲染；null 时回到 NO_OP。
+     */
+    public void setAdditionalEventSink(com.devcli.runtime.event.RunEventSink sink) {
+        this.additionalEventSink = sink == null
+                ? com.devcli.runtime.event.RunEventSink.NO_OP : sink;
     }
 
     /**
@@ -527,6 +538,12 @@ public class SubAgent {
                     @Override
                     public LlmClient.StreamListener streamListener() {
                         return streamRenderer;
+                    }
+
+                    @Override
+                    public com.devcli.runtime.event.RunEventSink eventSink() {
+                        return com.devcli.runtime.event.RunEventSink.composite(
+                                additionalEventSink, streamRenderer);
                     }
 
                     @Override
@@ -1122,11 +1139,17 @@ public class SubAgent {
      * "content 开始后又追加 reasoning"的场景：迟到的 reasoning 会被累积到 lateReasoning，
      * 在 finish() 时以"🧠 补充思考"独立展示，避免混入结果区。
      */
-    private static final class SubAgentStreamRenderer implements LlmClient.StreamListener {
+    private static final class SubAgentStreamRenderer
+            implements LlmClient.StreamListener, com.devcli.runtime.event.RunEventSink {
         private final AgentStreamPresenter delegate;
 
         private SubAgentStreamRenderer(String agentName, AgentRole role, PrintStream out) {
             this.delegate = AgentStreamPresenter.subAgent(agentName, role, out);
+        }
+
+        @Override
+        public void emit(com.devcli.runtime.event.RunEvent event) {
+            delegate.emit(event);
         }
 
         @Override

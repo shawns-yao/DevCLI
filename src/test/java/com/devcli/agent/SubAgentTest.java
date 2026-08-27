@@ -206,6 +206,26 @@ class SubAgentTest {
     }
 
     @Test
+    void additionalEventSinkShouldReceiveStructuredEvents() {
+        // 编排路径注入的额外 sink（Execution Trace）必须收到 SubAgent 的结构化事件
+        ScriptedStreamClient llm = new ScriptedStreamClient(listener ->
+                listener.onContentDelta("完成"));
+        SubAgent worker = new SubAgent("trace-worker", AgentRole.WORKER, llm, new ToolRegistry());
+        java.util.List<com.devcli.runtime.event.RunEvent> received = new java.util.ArrayList<>();
+        worker.setAdditionalEventSink(received::add);
+
+        worker.execute(AgentMessage.task("orchestrator", "任务"),
+                new java.io.PrintStream(new java.io.ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+
+        assertFalse(received.isEmpty(), "注入 sink 应收到结构化事件");
+        // SubAgent 层从 execution.state 起，不发 turn.started；断言至少收到一个结构诊断事件
+        assertTrue(received.stream().anyMatch(e ->
+                        "execution.state".equals(e.type()) || "model.usage".equals(e.type())),
+                "应收到 execution.state/model.usage: "
+                        + received.stream().map(com.devcli.runtime.event.RunEvent::type).toList());
+    }
+
+    @Test
     void shouldPrintFreshHeadingsAcrossToolIterations() {
         // 两轮迭代：第一轮 content + tool_call（narration），第二轮纯 content（final answer）
         // resetBetweenIterations 被调用后，第二轮应该重新打印「执行思考」和「执行输出」标题
