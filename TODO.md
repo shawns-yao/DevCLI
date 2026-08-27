@@ -1,5 +1,30 @@
 # TODO
 
+> 评测历史说明：下方 2026-07 至 2026-08 的自建 Agent、Saga、记忆、压缩、并发和合成 RAG 记录仅用于开发过程审计，相关测试与结果文件已退役，不得作为当前 benchmark 结果。正式评测以 `docs/benchmark-evaluation.md` 的公开集合计划和官方评分器为准。
+
+## 2026-08-27 沙箱分级第一阶段
+
+- 状态：已完成本阶段
+- 日期：`2026-08-27`
+- 已实现：命令执行新增显式 `DOCKER | HOST_WARN` 模式；默认仍使用 Docker 且不可用时失败关闭，不进行自动主机回退
+- 已实现：`HOST_WARN` 仅允许 Maven 离线执行 `clean/validate/compile/test-compile/test/package/verify`、`javac` 和只读 Git；拒绝任意 Maven 插件、发布阶段、其他运行时、网络工具、命令串、管道、重定向和写入型 Git，并在工具结果及 Reviewer 前展示主机风险提示
+- 影响范围：统一命令执行服务、Pre-Review、Reviewer 前置展示、Shell 工具配置、环境配置示例和架构说明
+- 验证：沙箱模式、白名单绕过、Pre-Review 风险提示等限定回归通过；`mvn -q -Pquick -DskipTests=false test` 本轮生成 222 份 Surefire 报告，共 1669 项，0 失败、0 错误、0 跳过，Maven 退出码 0
+- 文档：已同步 `.env.example`、`AGENTS.md`、`README.md`、`docs/agents-reference.md`、`docs/architecture-convergence-design.md` 和 `docs/benchmark-evaluation.md`
+- 未验证：未启动交互 CLI，未调用真实 LLM/MCP，未验证真实 Docker，也未执行真实 `/plan + HOST_WARN` 端到端流程
+- 剩余风险：`HOST_WARN` 不是操作系统级沙箱，POM 已声明插件仍可能在主机产生副作用；完整三档沙箱、通用语言生态白名单和高风险逐次 Docker 档尚未实现
+
+## 2026-08-27 Execution Trace 全路径与编排职责拆分
+
+- 状态：已完成本阶段
+- 日期：`2026-08-27`
+- 已实现：Execution Trace 已覆盖 ReAct、Plan task、Team Worker/Reviewer 以及临时隔离 Agent 路径；`AgentOrchestrator.setAdditionalEventSink()` 现在会立即传播到已创建的 Planner、Worker 池和 Reviewer，后续隔离实例继续通过 `configureSubAgent()` 注入
+- 已实现：新增 `OrchestrationTaskRunner`，集中承担 `AgentOrchestrator` 创建、Reviewer client 创建、运行期依赖注入以及 `run/resume` 分发；`Main` 保留交互提示和计划评审展示，用户可见编排语义不变
+- 影响范围：`AgentOrchestrator`、`SubAgent`、`Main`、CLI 编排测试、Trace 测试
+- 验证：针对性回归通过；本轮 Quick 最新生成的 222 份 Surefire 报告共 1662 项，0 失败、0 错误、0 跳过，Maven 退出码 0；旧报告中保留 2026-08-15 benchmark 的 1 条历史失败，不计入本轮结果；`git diff --check` 通过
+- 未验证：未启动交互 CLI，未调用真实 LLM/MCP，未做 Ctrl+C、worktree 残留和跨进程并发端到端验证
+- 剩余风险：Trace 当前仍是同一 `runId` 下的平面时间线，尚未形成 `agentId/stepId` 父子 Trace 树；Cancellation Tree 验收不属于本阶段；本阶段未提交、未推送
+
 ## 2026-08-27 Java AST 方法级并行冲突治理
 
 - 状态：已完成
@@ -195,7 +220,7 @@
 - 状态：已实现并通过限定回归
 - 已实现：原文尾部从固定轮次近似策略收紧为严格 token 预算；user 边界超预算时继续前移，单条大消息无法切分时保留头尾并落盘可恢复引用；SessionMemory 支持前缀预摘要增量复用；默认每 5 次成功压缩执行一次摘要重建；压缩阈值扣除当前工具定义和输出预留
 - 验证：`ConversationHistoryCompactorTest`、`ContextProfileTest`、`TokenBudgetTest` 共 47 项通过；Maven 全量回归通过
-- 未验证：优化后的 256k 真实模型评测连续两次在探活阶段收到空 assistant response，测试按协议跳过；旧 93.3% 只保留为 2026-08-10 基线，不能声称已被本次实现重新验证
+- 未验证：优化后的 256k 真实模型评测连续两次在探活阶段收到空 assistant response，测试按协议跳过；旧自建保真率结果已退役，不能作为当前 benchmark 结果
 - 影响范围：ConversationHistoryCompactor、ContextProfile、TokenBudget、ReAct、Plan、SubAgent 的请求前压缩阈值
 - 剩余风险：Provider 原生 tokenizer 与本地估算可能存在偏差；周期性重建无法恢复既没有摘要也没有落盘引用的历史内容
 
@@ -208,15 +233,13 @@
 - 影响范围：上下文压缩摘要模型、增量更新协议、周期治理、摘要文档
 - 剩余风险：模型提出的主题键质量会影响同主题合并；结构化摘要受保护事实过多时允许暂时超过字符上限并告警
 
-## 2026-08-09 四项简历实验重测
+## 2026-08-09 四项简历实验重测（已退役）
 
-- 状态：四项均已进入真实模型执行；并发、压缩、长期记忆已形成有效报告，Saga 多智能体形成有效单侧结果，但同轮单 Agent 连续因模型链路未完整结束而无法形成有效配对
-- 多智能体协作：`gpt-5.6-terra` 最新运行中，多智能体完整结束并通过 30/30；单 Agent 产物通过 28/30，但 LLM 链路未完整结束，因此该轮不能计算有效模式差值，历史 27/30 对 30/30 不再代表本轮结果
-- 上下文压缩：使用 `gpt-5.6-terra` 和 256k 上下文窗口执行；每轮先用单条低于 microcompact 阈值的确定性对话消息把历史重新增长到 80% 阈值，再由正式 `Agent.run` 通过 `Agent.maybeCompactHistory` 自动压缩，连续完成 5 轮；30 条固定事实保留 28 条，自动问答保真率 93.3%；当前仍是自动 QA + 预声明关键词判定，未完成人工复核
-- 长期记忆：对抗型评测执行 120 次写入决策、50 个跨会话检索场景、10 个过期场景和 25 轮噪声；写入准确率 100%、Recall@5 82.0%、上下文注入命中率 62.0%、召回到注入传递率 75.6%、过期过滤率 100%；同主题更新仅 1/10 召回成功，高相似干扰 10/10 召回但 0/10 通过最终注入验收
-- Agent 并发与状态一致性：5 类任务 × 3 个纠偏时间点 × 3 次重复，共完成 45 个真实 Runtime API 案例；旧 turn 在新 turn 启动后的残留事件为 0，42/45 完整观察到纠偏标记，3 个案例未观察到新响应标记
-- 影响范围：真实 LLM 评测入口、OpenAI-compatible 空工具调用响应兼容、上下文压缩和长期记忆评测报告
-- 下一步：修复同主题更新召回和高相似记忆注入；补充压缩人工复核；Saga 需要取得单 Agent 与多智能体均完整结束的同轮配对结果
+- 状态：已取消；仅保留历史审计，不再作为当前 benchmark
+- 怎么做：曾使用项目自建的多智能体、上下文压缩、长期记忆和 Runtime 并发场景，调用真实模型并按项目内置规则统计结果
+- 历史结果：结果文件和对应测试入口已删除；历史数字统一归档至 `docs/benchmark-evaluation.md`，不再写入当前任务状态
+- 为什么废弃：题目、数据、验收和评分器均由项目自行维护，重复次数与配对控制不足，无法作为公开能力证据；正式评测改用公开数据集及其官方 harness/evaluator
+- 影响范围：真实 LLM 评测入口、旧结果文件和简历指标
 
 ## 2026-08-09 CodeSearchNet RAG 评测重构
 
@@ -341,27 +364,15 @@
 
 ## 2026-07-14 Multi-Agent 计划协议与空结果可靠性
 
-- 状态：代码与针对性测试已实现，完整 5 任务已复跑；交付可靠性仍未达标
-- 来源：Agent 受控评测中单 Agent 成功率 20%，Planner/Worker/Reviewer 成功率 0%；主要失败来自 Planner 非 JSON 输出、空工作区纯检查步骤阻塞实现，以及 Worker 最终文本为空。首次修复后真实复跑确认 Planner 已生成直接实现步骤，但 Worker 连续两次只描述准备写入、没有调用工具，仍被空结果阻断
-- 影响范围：Multi-Agent 编排、Planner 与 Worker 协议守卫、SubAgent 单次执行证据、角色提示词、受控 Agent benchmark、配置模板、README、AGENTS、详细架构文档和 Agent 测试
-- 已实现：Planner 支持从前后说明中提取完整 JSON；解析失败、DAG 无效或阻塞性空工作区纯检查步骤触发有界协议修复；修复请求携带原始任务、失败原因、无效输出预览和固定 schema；空工作区检查必须并入实现步骤；Worker 空文本但存在结构化成功工具证据时合成有界摘要进入 Reviewer；没有成功证据时追加一次强制执行协议，并按步骤类型指定首轮工具，FILE_WRITE / INTEGRATION 选择 `write_file`，COMMAND 选择 `execute_command`，其他类型选择 `list_dir`；Anthropic 与 OpenAI-compatible 均映射为命名工具选择；FILE_WRITE / INTEGRATION 步骤在成功 `write_file` 批次后直接以结构化证据结束 Worker，强制修复中的指定工具采用同一规则，不再发起收尾 LLM 请求，失败时才恢复 AUTO 纠正；Provider 忽略命名工具选择时追加一次严格 JSON 工具信封请求，只接受目标工具、对象参数和无尾随内容的完整 JSON，并继续走原工具安全管线；SubAgent 错误保留标准错误码和 retryable 标记；Pre-Review 区分跳过与硬检查实际通过，Reviewer 可重试故障或达到默认 2 轮上限时只有后者允许普通步骤降级接受；受控 benchmark 不暴露 execute_command，并把 Pre-Review 编译交给运行后的隐藏验证器，避免 Docker daemon 状态污染模型指标，生产沙箱策略不变
-- 已验证：覆盖说明文本包裹 JSON、非 JSON 修复、合法 JSON 中阻塞性检查步骤修复、成功工具证据放行、失败工具证据可见、空结果强制工具修复、修复后仍无证据保持失败、文件写入步骤成功批次后结束、命名工具成功后单轮结束、失败后继续纠正、步骤类型映射、严格工具信封解析与拒绝规则、两类 Provider 请求体映射、Reviewer 轮数边界以及 Planner / Worker 提示词约束；2026-07-16 完整复跑中，单 Agent 0/5、隐藏检查平均完成率 0%；Planner/Worker/Reviewer 0/5、隐藏检查平均完成率 27.33%，其中 logops 9/10、ordermvc 7/15
-- 已补强（2026-07-16）：OpenAI 兼容流式工具调用同时支持标准增量、累积快照和完整字段重复发送，避免工具名与 JSON 参数重复拼接；Krill AI `gpt-5.5` 完整 5 任务复跑中，单 Agent 成功 3/5、隐藏检查平均完成率 94%，Planner/Worker/Reviewer 成功 1/5、平均完成率 76%
-- 已实现（2026-07-16）：新增订单履约 Saga 协作评测场景，预置只读公共契约，将库存、支付、配送、通知、审计拆为五个独立模块，并把履约编排设为最终集成步骤；单 Agent 与 Planner/Worker/Reviewer 使用同一任务说明、工具边界和隐藏验证器；测试工具白名单在隔离 ToolRegistry fork 中保持，避免 Worker 重新获得 `execute_command`
-- 实验目的：验证 Multi-Agent 是否只在具备明确模块边界、可并行子任务和最终集成依赖的任务上取得收益，避免继续使用单文件 CLI 任务得出不适用的结论
-- 实验变量：自变量只有执行模式，分别为单 Agent 与 Planner/Worker/Reviewer；控制变量包括同一 `gpt-5.5` 模型、同一 Provider、同一只读契约、同一初始空工作区、同一任务说明、同一工具白名单、同一 JDK 编译器、同一隐藏检查和相互独立的运行目录
-- 实验流程：每种模式复制相同的 `SagaContracts.java` 到独立工作区；单 Agent 首轮强制读取契约后完成全部模块；Multi-Agent 由 Planner 生成 DAG，库存、支付、配送、通知、审计五个实现步骤可并行，履约编排依赖前五步，Reviewer 在最终集成前逐项审查；模型结束后再由模型不可见的外部验证器编译源码并通过隔离类加载器执行行为检查
-- 工具控制：两种模式都只暴露 `read_file`、`write_file`、`list_dir`，不暴露 `execute_command`；工具限制必须随 Multi-Agent 隔离工作区 fork 继承，避免 Docker、本机命令和环境状态污染模型能力指标
-- 验收设计：隐藏检查共 30 项，其中架构约束 3 项、库存 4 项、支付 4 项、配送 4 项、通知 3 项、审计 2 项、正常履约 4 项、失败补偿 3 项、幂等 2 项、并发 1 项
-- 架构验收：公共契约 SHA-256 必须保持不变；六个指定实现类必须位于允许包目录并实现对应接口；五个服务必须同时提供 public 无参构造器和 FailureSwitch 构造器，履约编排必须提供五服务依赖构造器
-- 模块验收：库存检查可用库存预留、库存不足拒绝、重复预留幂等和释放；支付检查授权引用、授权状态、重复授权幂等和退款；配送检查配送引用、活动状态、重复创建幂等和取消；通知检查成功与失败通知各最多一次及故障注入；审计检查事件顺序、订单隔离和故障注入
-- 流程验收：正常路径必须执行库存预留、支付授权、创建配送、成功通知，并保留对应资源状态；审计顺序必须包含 NEW、INVENTORY_RESERVED、PAYMENT_AUTHORIZED、SHIPMENT_CREATED、COMPLETED
-- 补偿验收：支付授权失败必须释放库存；配送创建失败必须退款并释放库存；成功通知失败必须按配送取消、支付退款、库存释放的逆序补偿；失败路径只能发送一次失败通知并返回 FAILED
-- 幂等与并发验收：相同请求重复执行不能重复产生副作用；相同幂等键必须复用首次结果；同一请求并发执行时所有调用返回 COMPLETED，库存、支付、配送和成功通知各只产生一次有效副作用
-- 计分规则：完成率为隐藏检查通过数除以 30；只有 LLM 调用完成且 30/30 才记为任务成功；同时记录端到端耗时。契约变更、工具白名单失效、使用被禁止工具或外部环境进入评分链路时，该轮结果作废
-- 已验证（2026-07-16）：Krill AI `gpt-5.5` 单次有效运行中，单 Agent 通过 27/30（90.0%，192.8 秒），Planner/Worker/Reviewer 通过 30/30（100.0%，725.1 秒），正确率提升 10 个百分点，耗时为 3.76 倍；单 Agent 未通过退款后活动授权清理、取消后活动配送清理和幂等键冲突处理；首次运行因隔离 fork 丢失白名单而允许 Worker 看到 `execute_command`，该轮作废且不纳入统计
-- 未完成：Saga 结果目前只有 1 次有效运行，尚不具备统计稳定性；现有 CLI 任务中 Multi-Agent 在 incidentops 仅通过 2/10，角色链路仍会放大语义偏差，Reviewer 平均耗时过长。Krill AI 端点仍会重复发送完整 content，并对部分公开长上下文样本触发安全拦截；需要完成 content 快照兼容后重新运行 LongBench/RULER
-- 风险：阻塞性检查识别当前采用窄范围语义规则，覆盖空工作区、项目结构、目录和文件存在性；复杂自然语言计划仍依赖修复请求中的模型服从性。强制执行协议只有 1 次，避免无限消耗；最终结果仍必须经过 Pre-Review 与 Reviewer，只有硬检查实际通过且 Reviewer 属于可重试故障时允许安全降级
+- 状态：代码与针对性测试已实现；其中自建受控评测部分已退役
+- 来源：早期受控评测暴露 Planner 非 JSON、空工作区检查阻塞实现和 Worker 空结果等协议问题，促成后续协议守卫与结构化证据改造
+- 影响范围：Multi-Agent 编排、Planner 与 Worker 协议守卫、SubAgent 单次执行证据、角色提示词、配置模板、README、AGENTS、详细架构文档和 Agent 测试
+- 已实现：Planner 输出解析、DAG 校验与有界协议修复；Worker 结构化工具证据、强制工具执行和空结果处理；OpenAI-compatible 流式工具调用兼容；Pre-Review 与 Reviewer 硬检查边界；SubAgent 错误码和重试标记
+- 已验证：上述协议守卫、工具信封、Provider 映射、Reviewer 轮数和提示词约束均有定向测试覆盖
+- 历史自建评测：曾包含受控 Agent、订单 Saga、工具白名单和隐藏验收器等实验设计；测试入口、契约资源和结果文件已删除，历史方法与结果仅保留在 `docs/benchmark-evaluation.md`
+- 历史结果：早期自建场景的单次结果、失败比例和 Saga 数字已移入 `docs/benchmark-evaluation.md` 历史归档；对应 benchmark 测试和结果文件已删除，不再作为当前能力结论
+- 未完成：公开 Agent、RAG、Memory、LongBench 和 RULER 适配仍按 `docs/benchmark-evaluation.md` 计划逐项接入；每个公开集合先运行一个样本，随后再决定是否扩大样本量
+- 风险：复杂自然语言计划仍依赖修复请求中的模型服从性；公开集合适配需继续遵守官方数据、版本和评分器边界
 
 ## 2026-07-13 运行时可靠性与记忆治理补强
 

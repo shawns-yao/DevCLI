@@ -184,7 +184,7 @@ Reviewer FAIL / 取消 / 崩溃
 
 ### 4.6 Reviewer：证据门禁
 
-**现状**：三层浮点评分（任一 <0.6 或 functional<1.0 驳回）；Pre-Review 硬检查（test-compile/ javac，强制 Docker）；TOOL 证据要求本轮真实成功调用。
+**第一阶段实施前现状**：三层浮点评分（任一 <0.6 或 functional<1.0 驳回）；Pre-Review 硬检查（test-compile/ javac，强制 Docker）；TOOL 证据要求本轮真实成功调用。
 
 **目标**：
 
@@ -292,7 +292,7 @@ CODE-182: repo + commit + file + symbol + lineRange + contentHash + embedding
 
 ### 4.11 沙箱、HITL 与策略：分级而非全有/全无
 
-**现状**：隔离任务 execute_command 与 Pre-Review 强制 Docker、不可用即失败、禁回退主机；Windows 用户无 Docker Desktop 时 `/plan` 整条不可用。
+**第一阶段实施前现状**：隔离任务 execute_command 与 Pre-Review 强制 Docker、不可用即失败、禁回退主机；Windows 用户无 Docker Desktop 时 `/plan` 整条不可用。
 
 **目标（ToolEffect 五级 × 三档执行）**：
 
@@ -309,6 +309,8 @@ CODE-182: repo + commit + file + symbol + lineRange + contentHash + embedding
 - MCP readOnly 注解默认不可信的策略保留。
 
 **最终效果**：安全性按操作风险分级而非一刀切；个人用户开箱即用，团队/高风险场景可一键拉到 Docker 强隔离。
+
+**第一阶段实现（2026-08-27）**：新增 `DOCKER | HOST_WARN` 显式模式，默认仍为 `DOCKER` 且不自动回退。`HOST_WARN` 先只覆盖 Java 项目闭环：Maven 自动追加离线参数且只接受 `clean/validate/compile/test-compile/test/package/verify`，另允许 `javac` 和只读 Git；任意 Maven 插件、发布阶段、命令串、管道、重定向、网络工具、写入型 Git 与其他运行时继续拒绝。工具结果和 Pre-Review 均展示风险提示。完整三档执行、通用语言生态白名单和高风险逐次 Docker 档仍未完成。
 
 ---
 
@@ -406,11 +408,11 @@ Run.cancel()
 
 ### 4.18 评测体系
 
-**现状**：接入 CodeSearchNet Java / SWE-bench Lite / LongMemEval / LongBench / RULER；自建 Saga 受控场景（单 Agent 27/30 vs 多 Agent 30/30，单次结果）。
+**现状**：接入 CodeSearchNet Java / SWE-bench Lite / LongMemEval / LongBench / RULER；旧自建 Saga 只在 `docs/benchmark-evaluation.md` 历史归档中保留，不再作为正式结果。
 
 **目标**：
 
-- 单次观测升级为可引用结论：Saga 场景 ≥5 次重复，报告均值/区间/耗时倍数；补"同模型 vs 异模型 Reviewer""writeSet 静态补边命中率""worktree 合并冲突率"三项工程指标。
+- 公开 benchmark 先完成单样本官方链路验证，再按固定版本、原始任务和配对条件扩展运行；自建 Saga 不再进入正式统计。
 - RAG 指标（Recall@5/MRR/nDCG）随 4.9 存储模型变更重跑一次对比。
 - SWE-bench 坚持官方 Docker harness，resolved 才算数。
 

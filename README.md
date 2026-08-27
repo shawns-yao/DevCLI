@@ -17,13 +17,7 @@ ReAct 主循环、Plan 多 Agent 编排、MCP 协议客户端、上下文压缩�
 | 语言与构建 | Java 17 + Maven，产出单一可执行 jar |
 | 迭代 | 230 次提交（2026-04 起） |
 
-三项量化结果：
-
-- **上下文成本**：修正 system prompt 易变段导致的前缀缓存失效后，13 轮迭代会话的可复用前缀占比由 29.4% 提升到 87.3%，未命中输入下降约 5.5 倍（基于内置 token 估算器的结构性测算，非计费账单）。
-- **检索质量**：CodeSearchNet Java 公开集 50 条样本上 Recall@5 1.0000、MRR@5 0.9900、nDCG@5 0.9926。
-- **协作模式对照**：单 Agent 与 Planner/Worker/Reviewer 的优劣随任务可拆分性反转。不可拆分的短 CLI 任务上单 Agent 通过 3/5、协作模式 1/5；可拆分的订单履约 Saga 多模块场景上协作模式通过 30/30、单 Agent 27/30，代价是 3.76 倍耗时。
-
-评测使用固定版本公开数据集与受控任务，公开集与项目内任务分开报告。部分场景样本量较小，只用于验证链路与方法，不外推为榜单成绩；完整方法、命令与适用边界见 [Benchmark Evaluation](#benchmark-evaluation)。
+量化评测以公开数据集和官方评分器为准。旧的项目内 CLI、订单 Saga、Checkout、记忆、压缩、并发和合成 RAG 结果已退役，只保留在 [Benchmark Evaluation](docs/benchmark-evaluation.md) 的历史归档中，不作为当前能力或简历数字。
 
 安装与启动见 [Install](#install) 与 [Startup](#startup)。
 
@@ -423,7 +417,7 @@ Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个
 
 并行 Worker 数量默认 `2`，可通过 `DEVCLI_TEAM_WORKERS` 环境变量或 `-Ddevcli.team.workers` 系统属性调整（取值夹在 `[1, 8]`，非法值回退默认）。同一依赖批次内相互独立的步骤由 `MultiAgentBatchExecutor` 按 Worker 池大小并行执行；涉及相同写资源的步骤先分入不同执行波次，同一 Worker 通过公平锁避免历史竞争。`OrchestrationWaveExecutor` 统一使用有界线程池、异常归属、独立输出缓冲和稳定顺序归并。每个 Plan 执行波次会记录 `peakConcurrency`、墙钟耗时、步骤累计耗时和 `parallelismFactor` 到 trace，便于用真实任务计算并行利用率和加速效果。同批次使用冻结的 ForkContext，批次内步骤不会读取其他并行步骤中途产生的上下文；确有数据依赖的步骤必须通过 DAG dependency 进入后续波次。任务文本、流式状态、修改文件、摘要与错误统一封装为 `PlanTaskExecutionResult`。Reviewer 默认最多执行 2 轮，通常对应“读取证据 + 输出 JSON 审查”，可通过 `DEVCLI_TEAM_REVIEWER_MAX_ITERATIONS` 或 `-Ddevcli.team.reviewer.max.iterations` 调整到 `[1, 8]`；达到上限视为可恢复 Reviewer 故障，普通步骤仍要求 Pre-Review 硬检查实际通过才可降级。
 
-隔离工作区默认开启，可通过 `DEVCLI_WORKSPACE_ISOLATION_ENABLED=false` 或 `-Ddevcli.workspace.isolation.enabled=false` 临时关闭；默认目录为项目下的 `Temp/devcli-workspaces`，可用 `-Ddevcli.workspace.dir=/path/to/workspaces` 覆盖。物化后端默认 `auto`：项目根是 Git 仓库时使用原生 worktree，共享 Git 对象并叠加当前工作区状态；非 Git 目录优先使用文件系统级写时复制。Linux 使用强制 reflink，现代 Windows 只在 ReFS 上启用系统块克隆；能力探测失败、克隆失败或内容校验不一致时清理部分结果并回退复制。可通过 `DEVCLI_WORKSPACE_BACKEND=git|cow|copy|auto` 显式选择。worktree 物化后会删除排除目录和符号链接，关闭时通过 Git 注销，崩溃残留元数据在后续创建前 prune。创建前会清理超过 24 小时且没有活动文件租约的孤儿目录，TTL 可用 `DEVCLI_WORKSPACE_ORPHAN_TTL_HOURS` 或 `-Ddevcli.workspace.orphan.ttl.hours` 调整。复制等待默认最多 300 秒，可用 `DEVCLI_WORKSPACE_COPY_TIMEOUT_SECONDS` 调整；超时或中断会取消复制线程，不再无限等待。隔离任务的 `execute_command` 和 Pre-Review 强制进入 Docker，使用无网络、只读根文件系统、能力清空和资源上限；Docker 不可用时明确失败，不回退主机。默认镜像为 `maven:3.9.9-eclipse-temurin-17`，必须提前拉取，可通过 `DEVCLI_COMMAND_SANDBOX_IMAGE` 覆盖；其他技术栈应配置包含所需工具的镜像。写时复制后端设计见 `docs/filesystem-cow-workspace-design.md`。
+隔离工作区默认开启，可通过 `DEVCLI_WORKSPACE_ISOLATION_ENABLED=false` 或 `-Ddevcli.workspace.isolation.enabled=false` 临时关闭；默认目录为项目下的 `Temp/devcli-workspaces`，可用 `-Ddevcli.workspace.dir=/path/to/workspaces` 覆盖。物化后端默认 `auto`：项目根是 Git 仓库时使用原生 worktree，共享 Git 对象并叠加当前工作区状态；非 Git 目录优先使用文件系统级写时复制。Linux 使用强制 reflink，现代 Windows 只在 ReFS 上启用系统块克隆；能力探测失败、克隆失败或内容校验不一致时清理部分结果并回退复制。可通过 `DEVCLI_WORKSPACE_BACKEND=git|cow|copy|auto` 显式选择。worktree 物化后会删除排除目录和符号链接，关闭时通过 Git 注销，崩溃残留元数据在后续创建前 prune。创建前会清理超过 24 小时且没有活动文件租约的孤儿目录，TTL 可用 `DEVCLI_WORKSPACE_ORPHAN_TTL_HOURS` 或 `-Ddevcli.workspace.orphan.ttl.hours` 调整。复制等待默认最多 300 秒，可用 `DEVCLI_WORKSPACE_COPY_TIMEOUT_SECONDS` 调整；超时或中断会取消复制线程，不再无限等待。隔离任务的 `execute_command` 和 Pre-Review 默认进入 Docker，使用无网络、只读根文件系统、能力清空和资源上限；Docker 不可用时默认失败关闭。Windows 裸机可显式设置 `DEVCLI_COMMAND_SANDBOX_MODE=HOST_WARN` 或 `-Ddevcli.command.sandbox.mode=HOST_WARN`，此模式不会自动回退，仅允许 Maven 离线执行 `clean/validate/compile/test-compile/test/package/verify`、`javac` 和只读 Git 子命令，拒绝命令行指定的任意 Maven 插件、发布阶段、命令串、管道、重定向、网络工具和写入型 Git 操作，并在工具结果和 Pre-Review 前输出风险提示。`HOST_WARN` 不是操作系统级沙箱，项目 POM 已绑定的插件仍可能产生主机副作用。默认镜像为 `maven:3.9.9-eclipse-temurin-17`，必须提前拉取，可通过 `DEVCLI_COMMAND_SANDBOX_IMAGE` 覆盖。写时复制后端设计见 `docs/filesystem-cow-workspace-design.md`。
 
 失败恢复采用「在位重做」而非平行重规划：失败步骤保持原 id/依赖在 DAG 原位换思路重做（默认 1 次，带上次失败反馈），恢复始终长在原 DAG 上、通过依赖关系看到已完成成果。Reviewer 重试和 redo 用尽后保持失败终态，最终结果显式列出失败步骤、两类额度、最后原因、checkpoint ID 和人工处理选项，不自动改写整张图。协议版本 8 固化验收方式、验证器和适用节点，并恢复原 Worker 绑定、消息游标、有界失败尝试摘要、重做次数和失败现场；恢复注入按步骤隔离，避免把其他 Worker 排除的方案错配到当前步骤。旧协议缺失适用节点时迁移为 `FINAL`；缺失验证方式时迁移为人工验收。保存失败、回滚不完整、身份拓扑损坏或未来协议版本都会停止 resume。
 
@@ -455,6 +449,7 @@ Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个
 | `/memory` | 查看记忆状态 |
 | `/memory organize` | 生成长期记忆整理计划，不修改记忆 |
 | `/memory organize apply` | 应用程序判定为低风险的整理项 |
+| `/memory export` | 导出可读 Markdown 记忆审计快照（只读，不回写） |
 | `/memory pending` | 查看等待人工确认的长期记忆候选 |
 | `/memory confirm <id>` | 确认并保存长期记忆候选 |
 | `/memory reject <id>` | 拒绝长期记忆候选 |
@@ -469,6 +464,7 @@ Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个
 | `/policy` | 查看策略层状态 |
 | `/audit [N]` | 查看最近 N 条审计日志 |
 | `/snapshot` | 查看 Side-Git 快照状态 |
+| `/trace [list\|<runId>]` | 查看最近一次运行的结构化执行追踪（默认）、最近运行列表或指定 run 时间线 |
 | `/browser connect` | 连接可复用 Chrome 会话 |
 | `/session status` | 查看当前持久会话与分支 |
 | `/session tree` | 查看持久会话树 |
@@ -775,11 +771,11 @@ plain renderer 适合 CI、日志或不支持 ANSI 的终端。Lanterna 不再�
 
 ## Benchmark Evaluation
 
-项目提供 RAG、Agent、Memory 和 Context Compression / Long Context 四类量化评测。公开集合已接入 CodeSearchNet Java、SWE-bench Lite、LongMemEval Oracle Cleaned、LongBench v1 和 RULER v1；固定版本、SHA-256、许可、原始文件边界和官方 harness 记录在 `Config/public-benchmarks.json` 与数据清单中。项目内受控任务继续独立报告，禁止与公开集合结果混算。受控 Agent benchmark 不暴露 `execute_command`，统一由隐藏验证器在 Agent 运行后编译并执行行为检查；另有订单履约 Saga 协作场景，以六个模块和 30 项隐藏检查比较单 Agent 与 Planner/Worker/Reviewer 的拆解、集成、补偿、幂等和并发能力。SWE-bench 则输出官方 predictions JSONL，并由 Linux Docker 中的官方 harness 执行真实测试。
+项目提供 RAG、Agent、Memory 和 Context Compression / Long Context 四类量化评测。正式结果只接受公开数据集原始任务、固定版本、SHA-256、官方 harness/evaluator 和完整原始报告。公开集合接入状态与复现边界见 `docs/benchmark-evaluation.md`；历史自建测试不再作为正式评测入口。
 
 评测原始报告默认写入 `target/benchmark-reports/` 和 `target/agent-benchmark/`。聚合器会生成可提交的 JSON、CSV 与数据清单到 `Data/processed/` 和 `Data/manifest/`。完整方法、命令、基线结果和适用边界见 `docs/benchmark-evaluation.md`。
 
-2026-07-13 的 50 条 CodeSearchNet Java 样本结果：Recall@5 1.0000、MRR@5 0.9900、nDCG@5 0.9926；Memory 写入准确率 96.0%、Recall@5 91.7%；2026-08-10 的压缩基线在 256k 上下文窗口达到 80% 阈值后连续完成 5 轮自动压缩，30 条固定事实自动问答保真率 93.3%（28/30，尚未人工复核；2026-08-11 优化后复跑因端点空响应跳过，尚未重新验证）。2026-07-16 公开集合首轮链路验证中，LongMemEval Oracle Cleaned 3 条 normalized answer hit 为 66.7%（代理指标），LongBench v1 6 条官方子集平均为 66.7%，RULER v1 4K NIAH 3 条为 100%；这些小样本不能外推为完整榜单成绩。同日完成 5 个受控 Agent 任务复跑：单 Agent 任务成功率 0/5、隐藏检查平均完成率 0%；Planner/Worker/Reviewer 任务成功率 0/5、隐藏检查平均完成率 27.33%，其中 logops 9/10、ordermvc 7/15，其余任务未形成可验收交付物。该结果只用于暴露执行协议与模型服从性问题，不代表稳定的成功率水平。SWE-bench Lite 单样本已生成预测，但补丁只包含复现脚本；官方 harness 因 Ubuntu 软件源连续返回 503，尚未形成有效 resolved 结果。针对 OpenAI 兼容端点重复发送完整工具调用字段的问题，流式聚合器已兼容完整快照与标准增量分片。Krill AI `gpt-5.5` 完整 5 任务复跑中，单 Agent 成功 3/5、隐藏检查平均完成率 94%，Planner/Worker/Reviewer 成功 1/5、平均完成率 76%；当前 CLI 样本显示单 Agent 更稳定。新增 Saga 协作场景的单次有效运行中，单 Agent 通过 27/30（90.0%，192.8 秒），Planner/Worker/Reviewer 通过 30/30（100.0%，725.1 秒），说明可拆分模块和最终集成任务出现 10 个百分点正确率收益，但耗时为 3.76 倍，且单次结果不能外推。公开长上下文运行中 LongMemEval 代理命中率为 66.7%、RULER 为 100%，但端点仍重复发送完整 content，导致 `8` 聚合为 `88` 等错误；同时 4/12 次调用触发服务端安全拦截，因此 LongBench 16.7% 与 RULER 展示值暂不能作为正常模型成绩。
+历史 benchmark 数字已从 README 移除。旧测试的方法、结果和废弃原因统一记录在 `docs/benchmark-evaluation.md` 的“历史自建评测归档”章节；新会话不得将其当作当前结果。
 
 ## Tests
 
