@@ -27,6 +27,21 @@ import static org.junit.jupiter.api.Assertions.*;
 class SubAgentTest {
 
     @Test
+    void reviewerIterationLimitDefaultsToDocumentedTwoRounds() {
+        String previous = System.getProperty("devcli.team.reviewer.max.iterations");
+        try {
+            System.clearProperty("devcli.team.reviewer.max.iterations");
+            assertEquals(2, SubAgent.resolveReviewerMaxIterations());
+        } finally {
+            if (previous == null) {
+                System.clearProperty("devcli.team.reviewer.max.iterations");
+            } else {
+                System.setProperty("devcli.team.reviewer.max.iterations", previous);
+            }
+        }
+    }
+
+    @Test
     void reviewerIterationLimitShouldRejectInvalidExplicitValues() {
         String previous = System.getProperty("devcli.team.reviewer.max.iterations");
         try {

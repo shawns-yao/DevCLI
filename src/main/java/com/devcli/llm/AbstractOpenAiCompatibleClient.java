@@ -1,5 +1,6 @@
 package com.devcli.llm;
 
+import com.devcli.config.ConfigResolver;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -10,9 +11,13 @@ import okio.BufferedSource;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
 public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
+
+    static final String HTTP_PROTOCOL_PROPERTY = "devcli.llm.http.protocol";
+    static final String HTTP_PROTOCOL_ENV = "DEVCLI_LLM_HTTP_PROTOCOL";
 
     protected static final ObjectMapper mapper = new ObjectMapper();
 
@@ -25,7 +30,22 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
             .readTimeout(readTimeoutSeconds("devcli.llm.read.timeout.seconds", 300), TimeUnit.SECONDS)
             .writeTimeout(readTimeoutSeconds("devcli.llm.write.timeout.seconds", 60), TimeUnit.SECONDS)
             .callTimeout(readTimeoutSeconds("devcli.llm.call.timeout.seconds", 600), TimeUnit.SECONDS)
+            .protocols(resolveProtocols(ConfigResolver.stringValue(
+                    HTTP_PROTOCOL_PROPERTY, HTTP_PROTOCOL_ENV, "AUTO")))
             .build();
+
+    static List<Protocol> resolveProtocols(String configured) {
+        String mode = configured == null || configured.isBlank()
+                ? "AUTO"
+                : configured.trim().toUpperCase(Locale.ROOT).replace('-', '_').replace('.', '_');
+        return switch (mode) {
+            case "AUTO" -> List.of(Protocol.HTTP_2, Protocol.HTTP_1_1);
+            case "HTTP_1_1", "HTTP11" -> List.of(Protocol.HTTP_1_1);
+            default -> throw new IllegalArgumentException(
+                    "非法配置 " + HTTP_PROTOCOL_PROPERTY + "/" + HTTP_PROTOCOL_ENV
+                            + "=" + configured + "，必须为 AUTO 或 HTTP_1_1");
+        };
+    }
 
     private static long readTimeoutSeconds(String key, long defaultValue) {
         String raw = System.getProperty(key);

@@ -253,7 +253,7 @@ KIMI_MODEL=kimi-k2.6
 
 未显式切换时默认使用 `anthropic` provider；运行时可用 `/model` 切换已配置的 provider。
 
-统一重试默认最多 3 次，初始退避 500ms、上限 8s、jitter 0.2，可通过 `DEVCLI_LLM_RETRY_MAX_ATTEMPTS`、`DEVCLI_LLM_RETRY_INITIAL_DELAY_MS`、`DEVCLI_LLM_RETRY_MAX_DELAY_MS`、`DEVCLI_LLM_RETRY_JITTER_RATIO` 调整。
+统一重试默认最多 3 次，初始退避 500ms、上限 8s、jitter 0.2，可通过 `DEVCLI_LLM_RETRY_MAX_ATTEMPTS`、`DEVCLI_LLM_RETRY_INITIAL_DELAY_MS`、`DEVCLI_LLM_RETRY_MAX_DELAY_MS`、`DEVCLI_LLM_RETRY_JITTER_RATIO` 调整。OpenAI-compatible 请求默认使用 `AUTO` 协商 HTTP/2 与 HTTP/1.1；仅当兼容网关存在 stream reset 等协议问题时，设置 `DEVCLI_LLM_HTTP_PROTOCOL=HTTP_1_1` 或 `-Ddevcli.llm.http.protocol=HTTP_1_1`，非法值在启动时拒绝。
 
 长期记忆 TTL 可通过 `DEVCLI_MEMORY_TTL_DAYS` 设置统一值，或使用 `DEVCLI_MEMORY_TTL_FACT_DAYS`、`DEVCLI_MEMORY_TTL_FEEDBACK_DAYS`、`DEVCLI_MEMORY_TTL_SUMMARY_DAYS` 按类型覆盖。只读工具缓存默认 128 条、30 秒，可通过 `DEVCLI_TOOL_RESULT_CACHE_MAX_ENTRIES` 和 `DEVCLI_TOOL_RESULT_CACHE_TTL_SECONDS` 调整。
 

@@ -70,7 +70,7 @@ Worker 完成正常工具循环后才生成 PatchSet；未解决的写入/命令
 
 ### LLM HTTP Timeout Config
 
-系统属性 > 默认值：`devcli.llm.connect.timeout.seconds`(60) / `devcli.llm.read.timeout.seconds`(300) / `devcli.llm.write.timeout.seconds`(60) / `devcli.llm.call.timeout.seconds`(600)
+系统属性 > 默认值：`devcli.llm.connect.timeout.seconds`(60) / `devcli.llm.read.timeout.seconds`(300) / `devcli.llm.write.timeout.seconds`(60) / `devcli.llm.call.timeout.seconds`(600)。OpenAI-compatible 默认 `devcli.llm.http.protocol=AUTO` 协商 HTTP/2 与 HTTP/1.1，兼容异常网关时可显式设为 `HTTP_1_1`；环境变量为 `DEVCLI_LLM_HTTP_PROTOCOL`。
 
 SSE 流式下 readTimeout 是两次 read 间最大间隔，GLM-5.1 生成大段 reasoning 时可能长时间静默，所以放宽到 300 秒。
 
