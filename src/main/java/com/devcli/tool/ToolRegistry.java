@@ -94,6 +94,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private SkillContextBuffer skillContextBuffer;
     private final ThreadLocal<SkillContextBuffer> skillContextBufferOverride = new ThreadLocal<>();
     private final ThreadLocal<ToolAccessScope> toolAccessScope = new ThreadLocal<>();
+    private final ThreadLocal<DelegateTaskTool.Handler> delegationHandler = new ThreadLocal<>();
+    private boolean delegatedChild;
     private final ResourceLeaseManager resourceLeaseManager = new ResourceLeaseManager();
     /**
      * 过期写入屏障：租约只在步骤执行期内防并发写，跨步骤的 read-modify-write 版本过期由它兜。
@@ -169,6 +171,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         new SkillToolProvider().register(this);
         toolSearchProvider.register(this);
         new SnapshotToolProvider().register(this);
+        registerTool(DelegateTaskTool.definition(this));
     }
 
     /**
@@ -258,6 +261,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         fork.bindContextVersionLedger(contextVersionLedger, contextProjectRoot);
         fork.setProjectPath(root.toString());
         fork.contextProfile = contextProfile;
+        fork.delegatedChild = delegatedChild;
         fork.browserGuard = browserGuard;
         fork.browserConnector = browserConnector;
         fork.memorySaver = memorySaver;
@@ -405,6 +409,35 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public ToolAccessScope currentToolAccessScope() {
         ToolAccessScope current = toolAccessScope.get();
         return current == null ? ToolAccessScope.FULL : current;
+    }
+
+    public <T> T runWithDelegation(DelegateTaskTool.Handler handler, java.util.function.Supplier<T> action) {
+        DelegateTaskTool.Handler previous = delegationHandler.get();
+        if (handler == null) delegationHandler.remove();
+        else delegationHandler.set(handler);
+        try {
+            return action.get();
+        } finally {
+            if (previous == null) delegationHandler.remove();
+            else delegationHandler.set(previous);
+        }
+    }
+
+    ToolOutput executeDelegation(Map<String, String> arguments, ToolExecutionContext context) {
+        DelegateTaskTool.Handler handler = delegationHandler.get();
+        return handler == null
+                ? ToolOutput.rejected(ToolErrorCode.CAPABILITY_DENIED,
+                        "只有主 Agent 的活动运行可以委派；子 Agent 不允许递归委派")
+                : handler.execute(arguments, context);
+    }
+
+    /** 子 Agent 只能接收父 Agent 显式传递的记忆，不能遍历父会话的记忆或继续派生。 */
+    public void restrictForDelegation() {
+        delegatedChild = true;
+    }
+
+    private boolean restrictedInDelegation(String toolName) {
+        return delegatedChild && (DelegateTaskTool.NAME.equals(toolName) || "list_memory".equals(toolName));
     }
 
     public <T> T runWithResourceLease(String stepId, java.util.function.Supplier<T> action) {
@@ -607,6 +640,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public List<Tool> searchableTools() {
         ToolAccessScope scope = currentToolAccessScope();
         return tools.values().stream()
+                .filter(tool -> !DelegateTaskTool.NAME.equals(tool.name()) || delegationHandler.get() != null)
+                .filter(tool -> !restrictedInDelegation(tool.name()))
                 .filter(tool -> scope.permits(tool.effect()))
                 .toList();
     }
@@ -616,8 +651,9 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public boolean activateToolDefinition(String toolName) { return activateMcpToolDefinition(toolName); }
     @Override
     public long toolCatalogVersion() {
-        return toolCatalogVersion.get() * ToolAccessScope.values().length
-                + currentToolAccessScope().ordinal();
+        return (toolCatalogVersion.get() * ToolAccessScope.values().length
+                + currentToolAccessScope().ordinal()) * 4 + (delegationHandler.get() == null ? 0 : 1)
+                + (delegatedChild ? 2 : 0);
     }
 
     /**
@@ -724,6 +760,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     private boolean isToolDefinitionVisible(String toolName) {
+        if (restrictedInDelegation(toolName)) return false;
+        if (DelegateTaskTool.NAME.equals(toolName)) return delegationHandler.get() != null;
         return !mcpTools.containsKey(toolName) || activatedMcpToolDefinitions.contains(toolName);
     }
 
@@ -1005,7 +1043,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         executionPipeline.register(ToolExecutionPipeline.Stage.CAPABILITY, (context, chain) -> {
             Tool tool = tools.get(context.name());
             ToolAccessScope scope = currentToolAccessScope();
-            if (tool != null && !scope.permits(tool.effect())) {
+            if (tool != null && (!scope.permits(tool.effect()) || restrictedInDelegation(context.name()))) {
                 return ToolOutput.rejected(ToolErrorCode.CAPABILITY_DENIED,
                         "工具能力被当前执行范围拒绝: " + context.name()
                                 + " (scope=" + scope + ", effect=" + tool.effect() + ")");
@@ -1026,6 +1064,14 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         });
         executionPipeline.register(ToolExecutionPipeline.Stage.AUDIT, this::executeWithAudit);
         executionPipeline.register(ToolExecutionPipeline.Stage.POLICY, (context, chain) -> {
+            if ((delegatedChild || currentToolAccessScope() != ToolAccessScope.FULL)
+                    && "read_tool_result".equals(context.name())) {
+                JsonNode arguments = context.attribute(PIPELINE_PARSED_ARGUMENTS, JsonNode.class);
+                if (!ToolResultArtifactStore.belongsToCurrentRun(arguments.path("result_ref").asText())) {
+                    return ToolOutput.rejected(ToolErrorCode.CAPABILITY_DENIED,
+                            "子 Agent 只能读取本次子任务生成的工具结果；其他证据必须由父 Agent 显式提供");
+                }
+            }
             if (mcpTools.containsKey(context.name())) {
                 BrowserCheckResult browserCheck = checkBrowserTool(
                         context.name(), context.argumentsJson(), false);
@@ -1264,6 +1310,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         int parallelism = Math.min(invocations.size(), MAX_PARALLEL_TOOLS);
         SkillContextBuffer activeSkillBuffer = activeSkillContextBuffer();
         ToolAccessScope activeAccessScope = currentToolAccessScope();
+        DelegateTaskTool.Handler activeDelegation = delegationHandler.get();
         String activeResourceLeaseStep = resourceLeaseStep.get();
         ExecutorService executor = Executors.newFixedThreadPool(parallelism, r -> {
             Thread thread = new Thread(r, "devcli-tool-executor");
@@ -1282,8 +1329,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                         : upstream.childToken())
                 .toList();
         long batchStartedAt = System.nanoTime();
-        long batchDeadlineNanos = deadlineAfterSeconds(
-                batchStartedAt, toolBatchTimeoutSeconds);
+        long batchDeadlineNanos = deadlineAfterSeconds(batchStartedAt, toolBatchTimeoutSeconds);
         boolean restoreInterrupt = false;
 
         try {
@@ -1291,14 +1337,18 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
             for (int i = 0; i < invocations.size(); i++) {
                 ToolInvocation invocation = invocations.get(i);
                 CancellationToken callToken = callTokens.get(i);
-                futures.add(executor.submit(() -> executeInvocation(
+                long invocationDeadline = activeDelegation != null && DelegateTaskTool.NAME.equals(invocation.name())
+                        ? deadlineAfterSeconds(batchStartedAt,
+                                Math.max(toolBatchTimeoutSeconds, toolTimeoutSeconds(invocation.name())))
+                        : batchDeadlineNanos;
+                futures.add(executor.submit(() -> runWithDelegation(activeDelegation, () -> executeInvocation(
                         invocation,
                         callToken,
-                        batchDeadlineNanos,
+                        invocationDeadline,
                         deadlineExecutor,
                         activeSkillBuffer,
                         activeAccessScope,
-                        activeResourceLeaseStep)));
+                        activeResourceLeaseStep))));
             }
 
             List<ToolExecutionResult> results = new ArrayList<>();
@@ -1534,7 +1584,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
         static ToolEffect builtIn(String name) {
             return switch (name == null ? "" : name) {
-                case "read_file", "list_dir", "search_code", "grep_code",
+                case "read_file", "read_tool_result", "list_dir", "search_code", "grep_code",
                         "web_search", "web_fetch", "list_memory", "search_tools",
                         "browser_status" -> READ_ONLY;
                 case "load_skill" -> LOCAL_CONTEXT;

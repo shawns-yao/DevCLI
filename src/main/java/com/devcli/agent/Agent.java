@@ -79,11 +79,21 @@ public class Agent implements AutoCloseable {
     }
 
     Agent(LlmClient llmClient, ToolRegistry toolRegistry, boolean ownsToolRegistry) {
+        this(llmClient, toolRegistry, ownsToolRegistry, new MemoryManager(llmClient));
+    }
+
+    /** 允许嵌入方选择记忆存储，委派不会额外创建持久记忆实例。 */
+    public Agent(LlmClient llmClient, ToolRegistry toolRegistry, MemoryManager memoryManager) {
+        this(llmClient, toolRegistry, false, memoryManager);
+    }
+
+    private Agent(LlmClient llmClient, ToolRegistry toolRegistry, boolean ownsToolRegistry,
+                  MemoryManager memoryManager) {
         this.llmClient = llmClient;
         this.toolRegistry = toolRegistry;
         this.ownsToolRegistry = ownsToolRegistry;
         this.conversationHistory = new ArrayList<>();
-        this.memoryManager = new MemoryManager(llmClient);
+        this.memoryManager = java.util.Objects.requireNonNull(memoryManager, "memoryManager");
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
         AgentRuntimeSupport.configureCompactor(
                 historyCompactor,
@@ -262,7 +272,11 @@ public class Agent implements AutoCloseable {
 
         // 主退出条件 = LLM 自己决定（不再调用工具就返回）；
         // budget 仅在 token 用尽 / 检测到死循环 / 超出硬轮数时兜底。
-        return new AgentExecutionEngine<String>(
+        LlmClient primaryClient = llmClient;
+        DelegationSession delegation = new DelegationSession(toolRegistry,
+                role -> com.devcli.llm.LlmClientFactory.createDelegatedAgent(primaryClient, role),
+                budget, conversationHistory.get(0).content(), runEventSink);
+        return toolRegistry.runWithDelegation(delegation, () -> new AgentExecutionEngine<String>(
                 llmClient, budget, HookLifecycle.load(toolRegistry), contextReferenceRegistry).run(
                 new AgentExecutionEngine.Delegate<>() {
                     @Override
@@ -493,7 +507,7 @@ public class Agent implements AutoCloseable {
                         return "❌ " + FailureFeedback.fromReason(
                                 "调用 LLM 失败: " + error.getMessage()).render();
                     }
-                });
+                }));
     }
 
     private static final class TurnExecutionMetrics {

@@ -239,11 +239,17 @@ final class AgentExecutionEngine<R> {
                 return delegate.budgetExceeded(exitReason, budget);
             }
 
-            int iteration = budget.beginIteration();
+            int iteration = budget.tryBeginIteration();
+            if (iteration == 0) continue;
             if (hookLifecycle != null) {
                 hookLifecycle.startTurn(iteration);
             }
             delegate.beforeIteration(iteration, budget);
+            // 压缩或并行子任务可能在准备期间耗尽 Token；已预留的轮数不重复检查。
+            if (delegate.isCancelled()
+                    || (long) budget.totalInputTokens() + budget.totalOutputTokens() >= budget.tokenBudget()) {
+                continue;
+            }
 
             try {
                 emitState(eventSink, RunEvent.ExecutionState.THINKING,

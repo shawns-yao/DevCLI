@@ -100,7 +100,9 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                 .post(body)
                 .build();
 
-        try (Response response = SHARED_HTTP_CLIENT.newCall(request).execute()) {
+        okhttp3.Call call = SHARED_HTTP_CLIENT.newCall(request);
+        try (var cancellation = SamplingRequestCoordinator.onCurrentCancel(call::cancel);
+             Response response = call.execute()) {
             ResponseBody responseBodyObj = response.body();
             if (!response.isSuccessful()) {
                 String errorBody = responseBodyObj != null ? responseBodyObj.string() : "无响应体";

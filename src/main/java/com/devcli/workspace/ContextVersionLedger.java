@@ -47,7 +47,8 @@ public final class ContextVersionLedger {
         ResourceVersion current = currentByResource.computeIfAbsent(resourceKey,
                 ignored -> readVersion(authoritativePath, generation.get(), false));
         observedByScope.computeIfAbsent(scope, ignored -> new ConcurrentHashMap<>())
-                .put(resourceKey, new Observation(snapshot, current.generation(), false));
+                .compute(resourceKey, (key, previous) -> previous != null && previous.localModified()
+                        ? previous : new Observation(snapshot, current.generation(), false));
         clearCodeEvidence(scope, resourceKey);
         Set<String> pending = pendingRefreshByScope.get(scope);
         if (pending != null) pending.remove(resourceKey);
@@ -60,7 +61,8 @@ public final class ContextVersionLedger {
         ResourceVersion current = currentByResource.computeIfAbsent(resourceKey,
                 ignored -> version(snapshot, authoritativePath, generation.get(), false));
         observedByScope.computeIfAbsent(scope, ignored -> new ConcurrentHashMap<>())
-                .put(resourceKey, new Observation(snapshot, current.generation(), false));
+                .compute(resourceKey, (key, previous) -> previous != null && previous.localModified()
+                        ? previous : new Observation(snapshot, current.generation(), false));
         clearCodeEvidence(scope, resourceKey);
         Set<String> pending = pendingRefreshByScope.get(scope);
         if (pending != null) pending.remove(resourceKey);

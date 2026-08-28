@@ -1,6 +1,7 @@
 package com.devcli.llm;
 
 import com.devcli.runtime.CancellationToken;
+import com.devcli.runtime.CancellationContext;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -23,10 +24,11 @@ public final class SamplingRequestCoordinator {
     public RequestScope begin(String requestId) {
         String normalizedId = normalizeRequestId(requestId);
         RequestScope previous = CURRENT.get();
+        CancellationToken parentToken = CancellationContext.current();
         ActiveRequest request = new ActiveRequest(
                 normalizedId,
                 UUID.randomUUID().toString(),
-                new CancellationToken(),
+                parentToken == null ? new CancellationToken() : parentToken.childToken(),
                 Thread.currentThread());
         ActiveRequest replaced = activeRequests.put(normalizedId, request);
         if (replaced != null) {
@@ -63,11 +65,19 @@ public final class SamplingRequestCoordinator {
 
     public static boolean isCurrentCancelled() {
         RequestScope scope = CURRENT.get();
-        return scope != null && scope.isCancelled();
+        return CancellationContext.isCancelled() || (scope != null && scope.isCancelled());
+    }
+
+    /** 请求执行和流式读取期间注册底层传输取消，不依赖线程中断唤醒 socket。 */
+    public static CancellationToken.Registration onCurrentCancel(Runnable action) {
+        RequestScope scope = CURRENT.get();
+        CancellationToken token = scope == null ? CancellationContext.current() : scope.cancellationToken();
+        return token == null ? CancellationToken.Registration.NO_OP : token.onCancel(ignored -> action.run());
     }
 
     private void close(RequestScope scope) {
         activeRequests.remove(scope.request.requestId, scope.request);
+        scope.request.token.close();
         if (CURRENT.get() == scope) {
             RequestScope previous = scope.previous;
             while (previous != null && previous.closed.get()) {

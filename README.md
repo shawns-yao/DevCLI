@@ -25,7 +25,7 @@ ReAct 主循环、Plan 多 Agent 编排、MCP 协议客户端、上下文压缩�
 
 **已实现**
 
-- ReAct 主循环与统一 `/plan` 编排入口；Plan 固定使用 Planner、Worker、Reviewer 协作链路，串行或并行由 DAG 依赖与资源冲突决定。
+- 默认主 Agent 按需调用独立子 Agent；显式 `/plan` 保留 Planner、Worker、Reviewer DAG 编排，串行或并行由依赖与资源冲突决定。
 - RAG（检索增强生成）：JavaParser 切分、SQLite 向量存储、关键词召回、代码关系图谱、RRF（倒数排名融合）与 CrossEncoderReranker（交叉编码器重排）。
 - 三层记忆：`conversationHistory + RollingSummary` 管理当前线程上下文，`SessionMemory` 管理当前任务状态与证据，`LongTermMemory` 保存跨任务稳定事实；支持 Token 预算、作用域召回、持久晋升队列和隔离 Curator。
 - MCP（Model Context Protocol）：手写 JSON-RPC 2.0 客户端，支持 stdio 与 Streamable HTTP，动态注册工具与 resources。
@@ -57,7 +57,7 @@ ReAct 主循环、Plan 多 Agent 编排、MCP 协议客户端、上下文压缩�
 
 DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、代码仓库、记忆、审批、终端交互”串成一个本地开发工作流。顶层控制流只有默认 ReAct 与显式 Plan 两类；系统不根据任务内容静默切换：
 
-- `ReAct`：默认模式。模型边思考边选择工具，工具结果会回灌到下一轮推理，适合阅读代码、定位问题、执行命令、做小范围修改。
+- `ReAct`：默认主 Agent 边执行边选择工具，也可通过 `delegate_task` 委派 explorer、planner、worker、reviewer。是否委派、何时汇总由主模型决定，不强制经过固定三角色流水线；主 Agent 负责最终验收。
 - `Plan`：通过 `/plan` 进入。Planner 生成 DAG 和可验证验收标准，计划 Reviewer 先检查语义闭环，Worker 在隔离工作区执行节点，Pre-Review 做硬验证，产物 Reviewer 根据真实证据验收；只有审查通过且 PatchSet 无冲突时才修改主项目。节点串行或并行由 DAG 就绪状态和资源冲突分波决定，不再由用户选择配置。
 
 围绕这些路径，DevCLI 提供以下能力：
@@ -87,7 +87,8 @@ DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、�
 
 ```text
 Main
-├── Agent                  # 默认 ReAct
+├── Agent                  # 默认主 Agent，直接执行或按需委派
+│   └── DelegationSession  # 独立上下文、角色能力、共享预算、隔离工作区
 └── AgentOrchestrator      # /plan；Planner / Worker / Reviewer
     ├── ExecutionGraph             # DAG 校验与就绪节点
     ├── MultiAgentBatchExecutor    # Worker 分配、资源分波与公平锁

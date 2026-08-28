@@ -108,7 +108,9 @@ public class AnthropicClient implements LlmClient {
                 .post(body);
         applyAuthHeader(requestBuilder);
 
-        try (Response response = HTTP_CLIENT.newCall(requestBuilder.build()).execute()) {
+        okhttp3.Call call = HTTP_CLIENT.newCall(requestBuilder.build());
+        try (var cancellation = SamplingRequestCoordinator.onCurrentCancel(call::cancel);
+             Response response = call.execute()) {
             ResponseBody responseBody = response.body();
             if (!response.isSuccessful()) {
                 String errorBody = responseBody != null ? responseBody.string() : "无响应体";

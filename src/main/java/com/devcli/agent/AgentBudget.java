@@ -49,14 +49,16 @@ public class AgentBudget {
     private final Deque<String> recentToolSignatures = new ArrayDeque<>();
     private final Deque<String> recentToolErrorSignatures = new ArrayDeque<>();
     private int iteration;
-    private int totalInputTokens;
-    private int totalOutputTokens;
-    private int totalCachedInputTokens;
+    private final SharedUsage usage;
     private boolean stagnant;
     private boolean repeatedToolError;
     private String repeatedToolErrorSignature = "";
 
     public AgentBudget(int tokenBudget, int stagnationWindow, int hardMaxIterations) {
+        this(tokenBudget, stagnationWindow, hardMaxIterations, new SharedUsage());
+    }
+
+    private AgentBudget(int tokenBudget, int stagnationWindow, int hardMaxIterations, SharedUsage usage) {
         if (tokenBudget <= 0) {
             throw new IllegalArgumentException("tokenBudget must be positive");
         }
@@ -69,6 +71,19 @@ public class AgentBudget {
         this.tokenBudget = tokenBudget;
         this.stagnationWindow = stagnationWindow;
         this.hardMaxIterations = hardMaxIterations;
+        this.usage = usage;
+    }
+
+    /** 子循环独立检测重复动作，但不能通过委派重置父任务的 Token 和总轮数。 */
+    public AgentBudget fork() {
+        return new AgentBudget(tokenBudget, stagnationWindow, hardMaxIterations, usage);
+    }
+
+    private static final class SharedUsage {
+        int inputTokens;
+        int outputTokens;
+        int cachedInputTokens;
+        int iterations;
     }
 
     public static AgentBudget fromSystemProperties() {
@@ -88,7 +103,16 @@ public class AgentBudget {
 
     /** 进入新一轮迭代，返回当前轮次（从 1 开始）。 */
     public int beginIteration() {
-        return ++iteration;
+        synchronized (usage) {
+            usage.iterations++;
+            return ++iteration;
+        }
+    }
+
+    int tryBeginIteration() {
+        synchronized (usage) {
+            return check() == ExitReason.WITHIN_BUDGET ? beginIteration() : 0;
+        }
     }
 
     public void recordTokens(int inputTokens, int outputTokens) {
@@ -96,9 +120,11 @@ public class AgentBudget {
     }
 
     public void recordTokens(int inputTokens, int outputTokens, int cachedInputTokens) {
-        this.totalInputTokens += Math.max(0, inputTokens);
-        this.totalOutputTokens += Math.max(0, outputTokens);
-        this.totalCachedInputTokens += Math.max(0, cachedInputTokens);
+        synchronized (usage) {
+            usage.inputTokens += Math.max(0, inputTokens);
+            usage.outputTokens += Math.max(0, outputTokens);
+            usage.cachedInputTokens += Math.max(0, cachedInputTokens);
+        }
     }
 
     /**
@@ -185,11 +211,13 @@ public class AgentBudget {
         if (repeatedToolError) {
             return ExitReason.REPEATED_TOOL_ERROR;
         }
-        if (totalInputTokens + totalOutputTokens >= tokenBudget) {
-            return ExitReason.TOKEN_BUDGET_EXCEEDED;
-        }
-        if (iteration >= hardMaxIterations) {
-            return ExitReason.HARD_ITERATION_LIMIT;
+        synchronized (usage) {
+            if ((long) usage.inputTokens + usage.outputTokens >= tokenBudget) {
+                return ExitReason.TOKEN_BUDGET_EXCEEDED;
+            }
+            if (usage.iterations >= hardMaxIterations) {
+                return ExitReason.HARD_ITERATION_LIMIT;
+            }
         }
         return ExitReason.WITHIN_BUDGET;
     }
@@ -199,15 +227,15 @@ public class AgentBudget {
     }
 
     public int totalInputTokens() {
-        return totalInputTokens;
+        synchronized (usage) { return usage.inputTokens; }
     }
 
     public int totalOutputTokens() {
-        return totalOutputTokens;
+        synchronized (usage) { return usage.outputTokens; }
     }
 
     public int totalCachedInputTokens() {
-        return totalCachedInputTokens;
+        synchronized (usage) { return usage.cachedInputTokens; }
     }
 
     public int tokenBudget() {
@@ -227,7 +255,7 @@ public class AgentBudget {
             case WITHIN_BUDGET -> "未触发兜底条件";
             case TOKEN_BUDGET_EXCEEDED -> String.format(Locale.ROOT,
                     "Token 预算已用尽（%d / %d），任务被强制收尾",
-                    totalInputTokens + totalOutputTokens, tokenBudget);
+                    (long) totalInputTokens() + totalOutputTokens(), tokenBudget);
             case STAGNATION_DETECTED -> String.format(Locale.ROOT,
                     "检测到连续 %d 轮重复的工具调用，疑似死循环，已强制收尾",
                     stagnationWindow);

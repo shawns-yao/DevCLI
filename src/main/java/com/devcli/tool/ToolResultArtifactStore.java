@@ -111,6 +111,19 @@ public final class ToolResultArtifactStore {
         return root.toAbsolutePath().normalize();
     }
 
+    /** 子运行只能恢复自己生成的结果；父运行仍可恢复历史上下文中的引用。 */
+    static boolean belongsToCurrentRun(String artifactRef) {
+        if (CancellationContext.currentRun() == null) return false;
+        try {
+            Path root = rootDirectory();
+            Path runDir = controlledResolve(root, sanitize(currentRunId())).toRealPath();
+            Path file = controlledResolve(root, artifactRef).toRealPath();
+            return runDir.startsWith(root.toRealPath()) && file.getParent().equals(runDir);
+        } catch (IOException | IllegalArgumentException e) {
+            return false;
+        }
+    }
+
     private static void writeHashSidecar(Path target, String sha256) throws IOException {
         Path sidecar = target.resolveSibling(target.getFileName() + ".sha256");
         Path temp = Files.createTempFile(target.getParent(), ".tool-result-hash-", ".tmp");

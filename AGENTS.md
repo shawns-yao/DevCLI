@@ -53,6 +53,12 @@ mvn test -DskipTests=false                  # 全量回归
 | ReAct | `Agent.java` | 默认模式 |
 | Plan 编排 | `AgentOrchestrator.java` | `/plan` |
 
+默认 ReAct 是主 Agent 按需委派模式：`delegate_task(role, task, context)` 由 `DelegationSession` 装配独立 `AgentExecutionEngine` 循环，不进入固定 DAG。explorer/planner/reviewer 只读，worker 使用已有 `WorkspaceExecutionSession`、命令沙箱、资源租约和 PatchSet 版本检查；工作循环正常结束且没有未解决的副作用工具失败后归并，主 Agent 负责最终验收。显式 `/plan` 的既有计划评审、硬检查和 checkpoint 流程保持不变。
+
+委派只继承冻结的 system 规则与 Skill 快照、显式 task/context，不复制父会话、长期记忆召回或兄弟消息。子 Agent 不能委派、遍历长期记忆、访问外部副作用工具或恢复其他运行的工具结果；可读取项目内文件，非逐文件权限沙箱。父子共享 Token 和总轮数预算，重复动作/错误按各自循环检测。每批最多并行 4 个工具，子任务默认 32 轮/300 秒，支持 `DEVCLI_DELEGATE_MAX_ITERATIONS` / `DEVCLI_DELEGATE_TIMEOUT_SECONDS`。取消向下传递到工具与 Anthropic/OpenAI-compatible HTTP 请求；未提交的子工作区产物不应用，已越过提交检查点的原子补丁不因取消自动回滚。
+
+`DEVCLI_DELEGATE_<ROLE>_PROVIDER/MODEL` 可配置四类角色的独立模型；未配置时复用当前主模型，显式配置不可用则返回失败，不静默替换。角色指引复用 `PromptRepository`，路径 `modes/delegate-<role>.md`，允许用户和项目级覆盖，但提示词不能放宽工具权限。详见 `docs/agents-reference.md`。
+
 Multi-Agent 中 Planner 负责拆解 DAG，Worker 负责实现子任务，Reviewer 先审计划语义闭环，再在硬检查通过后审查真实产物。
 
 `AgentOrchestrator` 只保留团队装配、配置传播和 `run/resume` 顶层流程；计划生成与 DAG 预处理由 `PlanCoordinator` 承担，评审门禁由 `ReviewCoordinator` 承担，checkpoint 迁移与对账由 `CheckpointCoordinator` 承担，Worker 调度、重试、隔离工作区和 PatchSet 归并由 `StepExecutionCoordinator` 承担，可变运行态集中在 `OrchestrationRunState`，上下文与终态报告由 `OrchestrationNarrative` 生成。

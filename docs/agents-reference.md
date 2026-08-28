@@ -8,6 +8,31 @@ For the primary entry point, see `/AGENTS.md`.
 
 ## Configuration Reading Orders
 
+### Default Agent Delegation
+
+默认入口由主 Agent 使用 `delegate_task` 按需调用子 Agent；它不是 `/plan` 的替代命令，也不预先构造 DAG。复用执行内核、现有工具并行池、审批锁、隔离工作区和补丁提交服务，没有第二套调度框架。
+
+| 角色 | 可用能力 | 上下文 |
+| --- | --- | --- |
+| explorer / planner / reviewer | 只读工具和本地 Skill 上下文 | system 规则快照、Skill 快照、显式 task/context、自己的工具结果 |
+| worker | 以上能力，加隔离项目修改和受限命令 | 同上；不自动继承父会话或长期记忆 |
+| 主 Agent | 保留原有工具及委派能力，负责最终验收 | 自己的会话、子任务有界报告和已归并文件清单 |
+
+子 Agent 不能递归委派、直接读写长期记忆或执行外部副作用。`search_tools` 与最终执行管线同时过滤权限，不能通过猜测工具名绕过；MCP 继续使用已有信任策略。项目内代码可读取，不将任务描述中的文件范围冒充操作系统级访问隔离。`read_tool_result` 仅允许受限运行读取本运行生成的结果，主 Agent 可以恢复历史结果。子任务的完整消息不混入父历史，不另存为可恢复 checkpoint。
+
+Worker 完成正常工具循环后才生成 PatchSet；未解决的写入/命令失败、模型失败、预算退出、超时和提交前取消均不应用产物。版本冲突返回结构化失败，不覆盖主项目的并发修改。修改已开始原子提交后，取消不自动撤销已提交补丁；父任务可使用既有快照回滚。成功报告只代表委派执行和归并成功，不等于业务验收通过。默认委派不强制运行 `/plan` 的 Pre-Review/Reviewer 门禁，主 Agent 必须检查实际产物和验证证据。
+
+所有新参数按系统属性 > 进程环境变量 > 默认值读取；不自动导出 `.env`：
+
+- `devcli.delegate.<role>.provider/model` / `DEVCLI_DELEGATE_<ROLE>_PROVIDER/MODEL`：四种角色独立配置，未设置复用本轮主模型；显式无效配置失败，不静默换模型。凭据仍由现有 `DevCliConfig` 读取。
+- `devcli.delegate.max.iterations` / `DEVCLI_DELEGATE_MAX_ITERATIONS`：每个子循环默认 32 轮，范围 `[1,100]`。
+- `devcli.delegate.timeout.seconds` / `DEVCLI_DELEGATE_TIMEOUT_SECONDS`：每次委派默认 300 秒，范围 `[1,3600]`，从工具批次提交时开始计算，包含排队。只延长委派调用，不改变同批普通工具的时限。
+- 父子共享 `devcli.react.token.budget` 和 `devcli.react.hard.max.iterations`；子上下文摘要调用同样计入 Token 和总调用轮数。每个循环独立检测重复工具和重复错误，重新委派不能重置总预算。并行中的模型响应可能让 Token 使用超出阈值，后续调用会停止；不是按最坏响应预扣费的硬成本配额。
+
+子取消令牌连接父工具调用；Anthropic 和全部 OpenAI-compatible 客户端在取消时关闭底层 HTTP Call，不仅依赖线程中断。外部不合作的工具仍须等待其清理结束，不能将超时描述为能强杀任意主机代码。生命周期以 `delegation.started/tools/completed` 事件及 `child_id` 记录，子执行终态不覆盖父运行终态。
+
+角色指引使用已有 `PromptRepository`：内置 `prompts/modes/delegate-<role>.md`，可由 `~/.devcli/prompts/modes/`、项目 `.devcli/prompts/modes/` 覆盖；覆盖文本不改变工具权限和预算。
+
 ### API Key
 
 1. `~/.devcli/config.json` 中对应 provider 的 `apiKey`

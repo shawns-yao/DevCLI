@@ -2,6 +2,21 @@
 
 > 评测历史说明：下方 2026-07 至 2026-08 的自建 Agent、Saga、记忆、压缩、并发和合成 RAG 记录仅用于开发过程审计，相关测试与结果文件已退役，不得作为当前 benchmark 结果。正式评测以 `docs/benchmark-evaluation.md` 的公开集合计划和官方评分器为准。
 
+## 2026-08-28 默认主 Agent 按需委派
+
+- 状态：已完成代码实现与限定回归；真实模型效果验收未完成
+- 日期：`2026-08-28`
+- 已实现：默认 `Agent` 通过 `delegate_task` 调用独立子循环，按 explorer/planner/worker/reviewer 配置模型与指引；不固定经过三角色流水线，显式 `/plan` 保持原流程
+- 已实现：父子上下文和工具能力隔离、禁止递归与直接访问长期记忆、工具结果按运行归属读取；Worker 复用隔离工作区、审批、命令沙箱、资源租约与 PatchSet 版本检查，失败或提交前取消不回写
+- 已实现：父子共享 Token/总轮数，子任务独立重复动作/错误熔断、32 轮与 300 秒默认上限；取消传递到工具和两类模型 HTTP 传输；子生命周期不覆盖父运行终态
+- 同步修复：隔离 Worker 重读自己的修改不再覆盖原始版本基线；普通工具的批次时限不因委派而放宽；上下文准备耗尽共享 Token 后不再追加主模型请求
+- 影响范围：`Agent`、`DelegationSession`、`AgentBudget`、`AgentExecutionEngine`、`DelegateTaskTool`、`ToolRegistry`、`ToolResultArtifactStore`、`ContextVersionLedger`、`LlmClientFactory`、`SamplingRequestCoordinator`、Anthropic/OpenAI-compatible 客户端及对应测试
+- 文档：同步 `AGENTS.md`、`README.md`、`docs/agents-reference.md`、`.env.example`、默认与四种委派角色 prompt
+- 验证：21 个测试类中的 136 项限定回归通过，0 失败、0 错误、0 跳过；`mvn -DskipTests package -q` 通过。测试使用脚本模型、内存记忆替身、临时文件与本地 HTTP 桩；未调用真实模型或数据库
+- 未验证：完整测试套件、真实模型/工具兼容性、实际 Docker 命令、交互 CLI、生产负载和正式公开 benchmark；编排回归仅覆盖无数据库的图结构与补丁合同，未运行完整 Team 集成测试
+- 剩余风险：子任务成功不等于业务验收通过，主 Agent 仍负责验收；并发在途响应可使 Token 略超阈值，非硬计费配额；不合作工具不能由线程取消强杀；提交临界区已开始的原子补丁不因取消自动回滚；默认委派没有持久子任务恢复
+- 基线：不修改冻结测试基线；本轮未提交、未推送
+
 ## 2026-08-27 收敛 AgentOrchestrator 职责
 
 - 状态：已完成

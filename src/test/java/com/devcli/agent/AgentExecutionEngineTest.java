@@ -27,6 +27,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class AgentExecutionEngineTest {
 
     @Test
+    void doesNotCallModelWhenPreparationExhaustsTheSharedTokenBudget() {
+        ScriptedClient client = new ScriptedClient(List.of());
+        AgentBudget budget = new AgentBudget(100, 3, 10);
+        RecordingDelegate delegate = new RecordingDelegate() {
+            @Override public void beforeIteration(int iteration, AgentBudget current) {
+                current.fork().recordTokens(100, 0);
+            }
+        };
+        new AgentExecutionEngine<String>(client, budget).run(delegate);
+        assertTrue(client.toolChoices.isEmpty());
+        assertEquals(AgentBudget.ExitReason.TOKEN_BUDGET_EXCEEDED, budget.check());
+    }
+
+    @Test
     void ownsTheSharedLlmToolLoopAndMessageProtocol() {
         LlmClient.ToolCall call = new LlmClient.ToolCall(
                 "call_1", new LlmClient.ToolCall.Function("read_file", "{\"path\":\"a.txt\"}"));
