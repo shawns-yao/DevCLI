@@ -73,7 +73,7 @@ class DefaultCommandExecutionServiceTest {
         List<String> command = DefaultCommandExecutionService.dockerCommand(
                 new CommandExecutionService.Request("id", project, 30, true), config);
 
-        assertEquals(List.of("--user", "1000:1000"), command.subList(1, 3));
+        assertEquals(List.of("run", "--user", "1000:1000"), command.subList(1, 4));
     }
 
     @Test

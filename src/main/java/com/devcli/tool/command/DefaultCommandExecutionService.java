@@ -89,8 +89,8 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
                 "--workdir", "/workspace",
                 config.image(), "sh", "-lc", request.command()));
         if (config.user() != null && !config.user().isBlank()) {
-            command.add(1, config.user());
-            command.add(1, "--user");
+            command.add(2, config.user());
+            command.add(2, "--user");
         }
         return command;
     }
