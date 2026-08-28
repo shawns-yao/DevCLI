@@ -32,10 +32,17 @@ public final class PatchSet {
 
     public record FileChange(String relativePath, ChangeType type,
                              String beforeHash, String afterHash, byte[] content,
-                             Boolean executable) {
+                             FileModeSnapshot beforeMode, FileModeSnapshot afterMode) {
         public FileChange(String relativePath, ChangeType type,
                           String beforeHash, String afterHash, byte[] content) {
-            this(relativePath, type, beforeHash, afterHash, content, null);
+            this(relativePath, type, beforeHash, afterHash, content, null, null);
+        }
+
+        public FileChange(String relativePath, ChangeType type,
+                          String beforeHash, String afterHash, byte[] content,
+                          Boolean executable) {
+            this(relativePath, type, beforeHash, afterHash, content,
+                    null, FileModeSnapshot.executableOnly(executable));
         }
 
         public FileChange {
@@ -51,6 +58,11 @@ public final class PatchSet {
         @Override
         public byte[] content() {
             return content.clone();
+        }
+
+        /** 兼容旧调用方；新代码应使用 afterMode。 */
+        public Boolean executable() {
+            return afterMode == null ? null : afterMode.executable();
         }
     }
 
@@ -122,6 +134,7 @@ public final class PatchSet {
         List<String> conflicts = new ArrayList<>();
         Map<Path, byte[]> originals = new LinkedHashMap<>();
         Map<Path, Boolean> existed = new LinkedHashMap<>();
+        Map<Path, FileModeSnapshot> originalModes = new LinkedHashMap<>();
 
         try {
             for (FileChange change : changes) {
@@ -150,8 +163,14 @@ public final class PatchSet {
                     conflicts.add(change.relativePath());
                     continue;
                 }
+                if (regularFile && change.beforeMode() != null
+                        && !change.beforeMode().matches(target)) {
+                    conflicts.add(change.relativePath());
+                    continue;
+                }
                 existed.put(target, regularFile);
                 originals.put(target, regularFile ? Files.readAllBytes(target) : new byte[0]);
+                originalModes.put(target, regularFile ? FileModeSnapshot.capture(target) : null);
             }
             if (!conflicts.isEmpty()) {
                 conflicts.sort(String::compareTo);
@@ -167,6 +186,11 @@ public final class PatchSet {
                     }
                     if (change.type() == ChangeType.DELETE) {
                         Files.deleteIfExists(target);
+                    } else if (change.type() == ChangeType.MODIFY
+                            && change.beforeHash().equals(change.afterHash())) {
+                        if (change.afterMode() != null) {
+                            change.afterMode().apply(target);
+                        }
                     } else {
                         Files.createDirectories(target.getParent());
                         if (hasUnsafePathEntry(root, target)) {
@@ -183,8 +207,8 @@ public final class PatchSet {
                             } catch (IOException atomicFailure) {
                                 Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
                             }
-                            if (change.executable() != null) {
-                                target.toFile().setExecutable(change.executable(), false);
+                            if (change.afterMode() != null) {
+                                change.afterMode().apply(target);
                             }
                         } finally {
                             Files.deleteIfExists(temporary);
@@ -194,7 +218,7 @@ public final class PatchSet {
                 }
                 return ApplyResult.success(applied);
             } catch (Exception applyFailure) {
-                List<String> rollbackFailures = rollback(originals, existed);
+                List<String> rollbackFailures = rollback(originals, existed, originalModes);
                 String error = applyFailure.getMessage() == null
                         ? applyFailure.getClass().getSimpleName()
                         : applyFailure.getMessage();
@@ -205,7 +229,8 @@ public final class PatchSet {
         }
     }
 
-    private static List<String> rollback(Map<Path, byte[]> originals, Map<Path, Boolean> existed) {
+    private static List<String> rollback(Map<Path, byte[]> originals, Map<Path, Boolean> existed,
+                                         Map<Path, FileModeSnapshot> originalModes) {
         List<String> failures = new ArrayList<>();
         List<Path> paths = new ArrayList<>(originals.keySet());
         paths.sort(Comparator.comparingInt(Path::getNameCount).reversed());
@@ -214,6 +239,10 @@ public final class PatchSet {
                 if (Boolean.TRUE.equals(existed.get(path))) {
                     Files.createDirectories(path.getParent());
                     Files.write(path, originals.get(path));
+                    FileModeSnapshot originalMode = originalModes.get(path);
+                    if (originalMode != null) {
+                        originalMode.apply(path);
+                    }
                 } else {
                     try {
                         Files.deleteIfExists(path);

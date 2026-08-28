@@ -21,18 +21,21 @@ public final class IsolatedWorkspace implements AutoCloseable {
     private final Path workspaceBase;
     private final Path workspacePath;
     private final Map<String, String> baselineHashes;
+    private final Map<String, FileModeSnapshot> baselineModes;
     private final WorkspaceCleanupPolicy.Lease lease;
     private final WorkspaceBackend backend;
     private boolean closed;
 
     private IsolatedWorkspace(Path projectRoot, Path workspaceBase,
                               Path workspacePath, Map<String, String> baselineHashes,
+                              Map<String, FileModeSnapshot> baselineModes,
                               WorkspaceCleanupPolicy.Lease lease,
                               WorkspaceBackend backend) {
         this.projectRoot = projectRoot;
         this.workspaceBase = workspaceBase;
         this.workspacePath = workspacePath;
         this.baselineHashes = Map.copyOf(baselineHashes);
+        this.baselineModes = Map.copyOf(baselineModes);
         this.lease = lease;
         this.backend = backend;
     }
@@ -77,7 +80,9 @@ public final class IsolatedWorkspace implements AutoCloseable {
             WorkspaceBackend.Materialization materialization =
                     backend.materialize(root, base, workspace);
             return new IsolatedWorkspace(root, base, workspace,
-                    materialization.baselineHashes(), lease, backend);
+                    materialization.baselineHashes(),
+                    captureModes(workspace, materialization.baselineHashes().keySet()),
+                    lease, backend);
         } catch (IOException | RuntimeException e) {
             try {
                 backend.cleanup(root, base, workspace);
@@ -125,13 +130,17 @@ public final class IsolatedWorkspace implements AutoCloseable {
                 seen.add(relativePath);
                 String beforeHash = baselineHashes.getOrDefault(
                         relativePath, PatchSet.MISSING_HASH);
+                FileModeSnapshot beforeMode = baselineModes.get(relativePath);
+                FileModeSnapshot afterMode = FileModeSnapshot.capture(file);
                 String observedHash = PatchSet.hash(file);
-                if (beforeHash.equals(observedHash)) {
+                if (beforeHash.equals(observedHash)
+                        && java.util.Objects.equals(beforeMode, afterMode)) {
                     return FileVisitResult.CONTINUE;
                 }
                 byte[] content = Files.readAllBytes(file);
                 String contentHash = PatchSet.hash(content);
-                if (beforeHash.equals(contentHash)) {
+                if (beforeHash.equals(contentHash)
+                        && java.util.Objects.equals(beforeMode, afterMode)) {
                     return FileVisitResult.CONTINUE;
                 }
                 PatchSet.ChangeType type = PatchSet.MISSING_HASH.equals(beforeHash)
@@ -139,7 +148,7 @@ public final class IsolatedWorkspace implements AutoCloseable {
                         : PatchSet.ChangeType.MODIFY;
                 changes.add(new PatchSet.FileChange(
                         relativePath, type, beforeHash, contentHash, content,
-                        Files.isExecutable(file)));
+                        beforeMode, afterMode));
                 return FileVisitResult.CONTINUE;
             }
         });
@@ -148,7 +157,8 @@ public final class IsolatedWorkspace implements AutoCloseable {
             if (!seen.contains(baseline.getKey())) {
                 changes.add(new PatchSet.FileChange(
                         baseline.getKey(), PatchSet.ChangeType.DELETE,
-                        baseline.getValue(), PatchSet.MISSING_HASH, new byte[0]));
+                        baseline.getValue(), PatchSet.MISSING_HASH, new byte[0],
+                        baselineModes.get(baseline.getKey()), null));
             }
         }
         return new PatchSet(changes);
@@ -156,6 +166,18 @@ public final class IsolatedWorkspace implements AutoCloseable {
 
     private static Path normalize(Path path) {
         return WorkspacePathPolicy.normalize(path);
+    }
+
+    private static Map<String, FileModeSnapshot> captureModes(
+            Path workspace, Set<String> relativePaths) throws IOException {
+        Map<String, FileModeSnapshot> modes = new java.util.HashMap<>();
+        for (String relativePath : relativePaths) {
+            FileModeSnapshot mode = FileModeSnapshot.capture(workspace.resolve(relativePath));
+            if (mode != null) {
+                modes.put(relativePath, mode);
+            }
+        }
+        return modes;
     }
 
     private static String sanitize(String stepId) {

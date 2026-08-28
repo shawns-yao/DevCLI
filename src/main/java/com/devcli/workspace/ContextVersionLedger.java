@@ -272,7 +272,8 @@ public final class ContextVersionLedger {
             }
             changes.add(new PatchSet.FileChange(
                     change.relativePath(), change.type(), currentHash,
-                    PatchSet.hash(mergedContent), mergedContent, change.executable()));
+                    PatchSet.hash(mergedContent), mergedContent,
+                    captureMode(target), change.afterMode()));
             mergedResources.add(resourceKey);
         }
         return new AstRebase(new PatchSet(changes), Set.copyOf(mergedResources));
@@ -303,7 +304,8 @@ public final class ContextVersionLedger {
                 continue;
             }
             changes.add(new PatchSet.FileChange(change.relativePath(), change.type(),
-                    currentHash, change.afterHash(), change.content(), change.executable()));
+                    currentHash, change.afterHash(), change.content(),
+                    captureMode(target), change.afterMode()));
         }
         return new PatchSet(changes);
     }
@@ -312,6 +314,14 @@ public final class ContextVersionLedger {
         for (PatchSet.FileChange change : patchSet.changes()) {
             Path target = projectRoot.resolve(change.relativePath()).normalize();
             publishWrite(scope, normalizeKey(change.relativePath()), target, readContent(target));
+        }
+    }
+
+    private static FileModeSnapshot captureMode(Path path) {
+        try {
+            return FileModeSnapshot.capture(path);
+        } catch (IOException ignored) {
+            return null;
         }
     }
 

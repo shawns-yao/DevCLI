@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.devcli.plan.ExecutionArtifact;
 import com.devcli.plan.ExecutionGraph;
+import com.devcli.workspace.FileModeSnapshot;
 import com.devcli.workspace.PatchSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,7 +46,7 @@ public class AgentCheckpoint {
         .enable(SerializationFeature.INDENT_OUTPUT);
     /** 步骤 result 落盘上限：buildStepContext 注入依赖结果最多 800 字符，8KB 足够保真。 */
     public static final int MAX_SUMMARY_LENGTH = 8 * 1024;
-    public static final int CURRENT_PROTOCOL_VERSION = 8;
+    public static final int CURRENT_PROTOCOL_VERSION = 9;
     private static final int MAX_AGENT_SUMMARY_LENGTH = 2 * 1024;
     private static final int MAX_ATTEMPT_DIGESTS = 32;
     private static final int MAX_ATTEMPT_DIGEST_LENGTH = 1_024;
@@ -129,7 +130,14 @@ public class AgentCheckpoint {
 
     public record PendingPatchEntry(String relativePath, PatchSet.ChangeType type,
                                     String beforeHash, String afterHash,
-                                    boolean backupPresent) {
+                                    boolean backupPresent,
+                                    FileModeSnapshot beforeMode,
+                                    FileModeSnapshot afterMode) {
+        public PendingPatchEntry(String relativePath, PatchSet.ChangeType type,
+                                 String beforeHash, String afterHash,
+                                 boolean backupPresent) {
+            this(relativePath, type, beforeHash, afterHash, backupPresent, null, null);
+        }
     }
 
     public record PendingPatchCommit(String stepId, List<PendingPatchEntry> entries,
@@ -463,6 +471,9 @@ public class AgentCheckpoint {
                 if (!currentHash.equals(change.beforeHash())) {
                     throw new IOException("PatchSet 写前日志前置版本冲突: " + change.relativePath());
                 }
+                if (!modeMatches(target, change.beforeMode())) {
+                    throw new IOException("PatchSet 写前日志前置权限冲突: " + change.relativePath());
+                }
                 boolean backupPresent = !PatchSet.isMissingHash(change.beforeHash());
                 if (backupPresent) {
                     Path backup = resolveSafe(journal, change.relativePath());
@@ -472,7 +483,8 @@ public class AgentCheckpoint {
                 }
                 entries.add(new PendingPatchEntry(
                         change.relativePath(), change.type(), change.beforeHash(),
-                        change.afterHash(), backupPresent));
+                        change.afterHash(), backupPresent,
+                        change.beforeMode(), change.afterMode()));
             }
             ExecutionArtifact intended = intendedArtifact == null
                     ? ExecutionArtifact.pending(stepId)
@@ -517,9 +529,12 @@ public class AgentCheckpoint {
             boolean allBefore = true;
             boolean allAfter = true;
             for (PendingPatchEntry entry : pending.entries()) {
-                String current = currentHash(resolveSafe(root, entry.relativePath()));
-                allBefore &= current.equals(entry.beforeHash());
-                allAfter &= current.equals(entry.afterHash());
+                Path target = resolveSafe(root, entry.relativePath());
+                String current = currentHash(target);
+                allBefore &= current.equals(entry.beforeHash())
+                        && modeMatches(target, entry.beforeMode());
+                allAfter &= current.equals(entry.afterHash())
+                        && modeMatches(target, entry.afterMode());
             }
 
             if (allAfter) {
@@ -581,9 +596,14 @@ public class AgentCheckpoint {
                 } else {
                     Files.deleteIfExists(target);
                 }
+                if (entry.backupPresent() && entry.beforeMode() != null) {
+                    entry.beforeMode().apply(target);
+                }
                 String restored = currentHash(target);
                 if (!restored.equals(entry.beforeHash())) {
                     failures.add(entry.relativePath() + ": 回滚后哈希不匹配");
+                } else if (!modeMatches(target, entry.beforeMode())) {
+                    failures.add(entry.relativePath() + ": 回滚后权限不匹配");
                 }
             } catch (Exception e) {
                 failures.add(entry.relativePath() + ": "
@@ -1026,6 +1046,17 @@ public class AgentCheckpoint {
 
     public void setFailedArtifacts(Map<String, StepArtifact> failedArtifacts) {
         this.failedArtifacts = failedArtifacts == null ? new HashMap<>() : failedArtifacts;
+    }
+
+    private static boolean modeMatches(Path path, FileModeSnapshot expected) {
+        if (expected == null) {
+            return true;
+        }
+        try {
+            return expected.matches(path);
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     public Map<String, Integer> getRedoCounts() {

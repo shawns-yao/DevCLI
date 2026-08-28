@@ -77,7 +77,7 @@ DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、�
 - `AgentExecutionEngine（执行引擎）`：ReAct、Plan task 和 SubAgent 共用同一套取消、预算、LLM 调用、工具消息回灌和异常控制流程；每次模型采样具有稳定请求标识和独立取消边界，重复请求会替换并取消旧请求。
 - `ExecutionGraph（执行图）`：Plan 与 Multi-Agent 共用依赖就绪判断、最终集成调度、缺失依赖和环检测，避免两条编排路径各自实现 DAG 规则。
 - `OrchestrationProfile + OrchestrationWaveExecutor（编排配置与波次执行器）`：公开 Plan 固定启用 Worker、Reviewer 和 checkpoint；波次执行器按 DAG 与资源冲突使用有界线程池，并统一异常归属、独立输出缓冲与稳定顺序归并。STANDARD 仅保留为内部兼容实现，不再进入 CLI 路由。
-- `ExecutionArtifact（执行产物）`：Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用状态、输出、摘要、修改资源、错误、尝试次数与时间戳；checkpoint 协议版本 8 额外保存验收方式、验证器和适用节点，并保存 PatchSet 写前日志、稳定子代理身份、步骤分配、消息游标、有界失败尝试摘要和已消耗的在位重做额度，拒绝未来版本。
+- `ExecutionArtifact（执行产物）`：Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用状态、输出、摘要、修改资源、错误、尝试次数与时间戳；checkpoint 协议版本 9 额外保存验收方式、验证器和适用节点，并保存 PatchSet 写前日志、文件权限、稳定子代理身份、步骤分配、消息游标、有界失败尝试摘要和已消耗的在位重做额度，拒绝未来版本。
 - `Workspace + PatchSet（隔离工作区与补丁集）`：副作用任务通过可替换后端物化隔离目录；Git 仓库默认使用原生 worktree 并叠加当前脏文件、删除文件、未跟踪及被忽略文件（常见 `.env`、凭据和密钥文件会过滤），非 Git 目录优先使用文件系统级写时复制，不支持时回退有界复制；PatchSet 逐文件流式哈希，只把变更文件内容载入内存，并校验内容哈希、保留可执行标记；JVM 公平锁与跨进程文件锁共同串行化补丁预检、应用、Git worktree 元数据操作和 checkpoint 终态。
 - `Image Input`：支持 `@image:` 本地路径、file URL 和剪贴板图片，图片会做尺寸、格式和大小处理后进入模型输入。
 
@@ -113,7 +113,7 @@ Main
 - `PathGuard（路径围栏）` 负责限制文件访问不逃逸项目根。
 - `ToolEffect + ToolAccessScope（工具副作用能力）` 由执行管线强制：非隔离分析任务只获得只读能力，隔离任务才允许项目写入和主机命令；MCP 缺失只读注解或声明 destructive/openWorld 时按外部副作用处理。工具参数先转换为稳定语义指纹，字段顺序、查询大小写、Unicode 等价字符和冗余空白不再绕过停滞检测；正则 pattern 保持大小写敏感，避免错误缓存命中；成功的只读结果会短期缓存，任何副作用执行都会清空缓存。
 - `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 并行执行时拦截 `write_file` / `edit_file`，同一文件只能被一个运行中步骤写入；并行工具线程会继承步骤租约归属，任务结束后释放租约。`ToolRegistry` 托管共享后台清理器，project fork 复用同一线程，最后一个注册表关闭后停止；周期可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
-- `PatchSet（补丁集）` 是隔离结果进入主项目的唯一文件回写边界：JVM 公平锁和 `~/.devcli/locks/project-commit/` 下的跨进程文件锁覆盖预检、应用和 checkpoint 终态；构建阶段流式计算哈希，未变化文件不读取完整内容。协议版本 8 在应用前保存目标哈希与原文件备份，并保存验收元数据及适用节点、原步骤对应 Worker/Reviewer 身份、按步骤归属的有界 AttemptDigest、在位重做次数和失败现场；恢复时按最终哈希提升完成、继续待执行或自动回滚，同时保持原步骤分配和原重做额度。Reviewer 拒绝、任务失败、用户取消、前置哈希冲突、非普通文件覆盖或路径/链接逃逸都会阻止整批应用。
+- `PatchSet（补丁集）` 是隔离结果进入主项目的唯一文件回写边界：JVM 公平锁和 `~/.devcli/locks/project-commit/` 下的跨进程文件锁覆盖预检、应用和 checkpoint 终态；构建阶段流式计算哈希，内容和权限都未变化的文件不读取完整内容。协议版本 9 在应用前保存目标哈希、POSIX rwx 权限与原文件备份，并保存验收元数据及适用节点、原步骤对应 Worker/Reviewer 身份、按步骤归属的有界 AttemptDigest、在位重做次数和失败现场；恢复时按最终内容与权限提升完成、继续待执行或自动回滚，同时保持原步骤分配和原重做额度。Reviewer 拒绝、任务失败、用户取消、前置内容或权限冲突、非普通文件覆盖或路径/链接逃逸都会阻止整批应用。
 - `CommandGuard（命令防线）` 是危险命令快速拒绝层，不替代 HITL 和路径策略。
 - `HitlToolRegistry（审批工具注册表）` 位于真实工具执行前，保证危险操作先经过审批和策略判定。
 
@@ -420,7 +420,7 @@ Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个
 
 隔离工作区默认开启，可通过 `DEVCLI_WORKSPACE_ISOLATION_ENABLED=false` 或 `-Ddevcli.workspace.isolation.enabled=false` 临时关闭；默认目录为项目下的 `Temp/devcli-workspaces`，可用 `-Ddevcli.workspace.dir=/path/to/workspaces` 覆盖。物化后端默认 `auto`：项目根是 Git 仓库时使用原生 worktree，共享 Git 对象并叠加当前工作区状态；非 Git 目录优先使用文件系统级写时复制。Linux 使用强制 reflink，现代 Windows 只在 ReFS 上启用系统块克隆；能力探测失败、克隆失败或内容校验不一致时清理部分结果并回退复制。可通过 `DEVCLI_WORKSPACE_BACKEND=git|cow|copy|auto` 显式选择。worktree 物化后会删除排除目录和符号链接，关闭时通过 Git 注销，崩溃残留元数据在后续创建前 prune。创建前会清理超过 24 小时且没有活动文件租约的孤儿目录，TTL 可用 `DEVCLI_WORKSPACE_ORPHAN_TTL_HOURS` 或 `-Ddevcli.workspace.orphan.ttl.hours` 调整。复制等待默认最多 300 秒，可用 `DEVCLI_WORKSPACE_COPY_TIMEOUT_SECONDS` 调整；超时或中断会取消复制线程，不再无限等待。隔离任务的 `execute_command` 和 Pre-Review 默认进入 Docker，使用无网络、只读根文件系统、能力清空和资源上限；Docker 不可用时默认失败关闭。Windows 裸机可显式设置 `DEVCLI_COMMAND_SANDBOX_MODE=HOST_WARN` 或 `-Ddevcli.command.sandbox.mode=HOST_WARN`，此模式不会自动回退，仅允许 Maven 离线执行 `clean/validate/compile/test-compile/test/package/verify`、`javac` 和只读 Git 子命令，拒绝命令行指定的任意 Maven 插件、发布阶段、命令串、管道、重定向、网络工具和写入型 Git 操作，并在工具结果和 Pre-Review 前输出风险提示。`HOST_WARN` 不是操作系统级沙箱，项目 POM 已绑定的插件仍可能产生主机副作用。默认镜像为 `maven:3.9.9-eclipse-temurin-17`，必须提前拉取，可通过 `DEVCLI_COMMAND_SANDBOX_IMAGE` 覆盖。写时复制后端设计见 `docs/filesystem-cow-workspace-design.md`。
 
-失败恢复采用「在位重做」而非平行重规划：失败步骤保持原 id/依赖在 DAG 原位换思路重做（默认 1 次，带上次失败反馈），恢复始终长在原 DAG 上、通过依赖关系看到已完成成果。Reviewer 重试和 redo 用尽后保持失败终态，最终结果显式列出失败步骤、两类额度、最后原因、checkpoint ID 和人工处理选项，不自动改写整张图。协议版本 8 固化验收方式、验证器和适用节点，并恢复原 Worker 绑定、消息游标、有界失败尝试摘要、重做次数和失败现场；恢复注入按步骤隔离，避免把其他 Worker 排除的方案错配到当前步骤。旧协议缺失适用节点时迁移为 `FINAL`；缺失验证方式时迁移为人工验收。保存失败、回滚不完整、身份拓扑损坏或未来协议版本都会停止 resume。
+失败恢复采用「在位重做」而非平行重规划：失败步骤保持原 id/依赖在 DAG 原位换思路重做（默认 1 次，带上次失败反馈），恢复始终长在原 DAG 上、通过依赖关系看到已完成成果。Reviewer 重试和 redo 用尽后保持失败终态，最终结果显式列出失败步骤、两类额度、最后原因、checkpoint ID 和人工处理选项，不自动改写整张图。协议版本 9 固化验收方式、验证器和适用节点，并恢复原 Worker 绑定、消息游标、有界失败尝试摘要、重做次数、失败现场与 PatchSet 文件权限；恢复注入按步骤隔离，避免把其他 Worker 排除的方案错配到当前步骤。旧协议缺失适用节点时迁移为 `FINAL`；缺失验证方式时迁移为人工验收。保存失败、回滚不完整、身份拓扑损坏或未来协议版本都会停止 resume。
 
 常见任务写法：
 

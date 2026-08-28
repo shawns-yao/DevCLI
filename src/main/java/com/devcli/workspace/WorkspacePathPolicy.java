@@ -48,9 +48,7 @@ final class WorkspacePathPolicy {
                 || name.endsWith(".pem")
                 || name.endsWith(".key")
                 || name.equals("credentials.json")
-                || name.equals("service-account.json")
-                || name.contains("secret")
-                || name.contains("credential");
+                || name.equals("service-account.json");
     }
 
     static String relativePath(Path root, Path file) {
