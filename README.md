@@ -108,7 +108,7 @@ Main
 - `ConversationHistoryCompactor（对话历史压缩器）` 按 Token 预算治理 LLM messages 窗口。`microcompact` 处理单条超大消息；首次摘要使用 Map-Reduce，后续通过生命周期增量操作维护六段 `RollingSummary`：主要请求与意图、关键技术概念、文件和代码、踩过的坑和修复、问题解决过程、逐条用户消息。摘要提交前经过运行时语义守卫，默认每 5 次成功压缩执行一次生命周期 GC。
 - 本地 `@path` 和 MCP resource 在展开阶段按剩余 Token 预算选择内联或不可变快照引用；内容型请求由程序强制回读，后续“里面/该文件/附件”等跨轮追问复用最近引用。元数据问题不强制读取；错误路径、读取失败或快照哈希变化达到两次后失败关闭。
 - `SessionMemory（工作记忆）` 是当前任务共享运行投影，通过统一、幂等的事件入口维护 WorkState、EvidenceJournal、待办任务、当前工作和下一步动作；ReAct、Plan 与 Team 使用 taskId 轮换，并按角色与 Token 预算生成上下文视图。
-- `LongTermMemory（长期记忆）` 保存跨任务稳定事实。任务结束时，脱敏且限长的任务快照先写入 SQLite 晋升队列，再由空工具、无历史记忆的隔离 Curator 输出 `SAVE / CONFIRM / SKIP`。检索按 `scope_type/scope_key` 隔离并融合关键词与向量结果；实际注入 Turn Context 后更新 `recallCount` 和 `lastRecalledAt`。策略 TTL 随真实召回续期，固定到期时间保持不变，到期条目进入软归档。
+- `LongTermMemory（长期记忆）` 保存跨任务稳定事实。任务结束时，脱敏且限长的任务快照先写入 SQLite 晋升队列，再由空工具、无历史记忆的隔离 Curator 输出 `SAVE / CONFIRM / SKIP`。自动 `SAVE` 必须为 HIGH 且能解析出快照原文，落库为 `CURATED`；人工确认后为 `REVIEWED`。检索按 `scope_type/scope_key` 隔离并融合关键词与向量结果；实际注入只更新召回观测，用户确认或同值重复显式保存才刷新新鲜度并分档延长 TTL。来源原文以脱敏快照和 SHA-256 固化，不依赖原会话保留。
 - `PathGuard（路径围栏）` 负责限制文件访问不逃逸项目根。
 - `ToolEffect + ToolAccessScope（工具副作用能力）` 由执行管线强制：非隔离分析任务只获得只读能力，隔离任务才允许项目写入和主机命令；MCP 缺失只读注解或声明 destructive/openWorld 时按外部副作用处理。工具参数先转换为稳定语义指纹，字段顺序、查询大小写、Unicode 等价字符和冗余空白不再绕过停滞检测；正则 pattern 保持大小写敏感，避免错误缓存命中；成功的只读结果会短期缓存，任何副作用执行都会清空缓存。
 - `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 并行执行时拦截 `write_file`，同一文件只能被一个运行中步骤写入；并行工具线程会继承步骤租约归属，任务结束后释放租约。`ToolRegistry` 托管共享后台清理器，project fork 复用同一线程，最后一个注册表关闭后停止；周期可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
@@ -554,9 +554,8 @@ DevCLI 的记忆系统覆盖九类上下文信息：
 - `IsolatedMemoryCurator` 只读取本次任务快照，不加载工具、MCP、Skill、文件、命令、网络工具、历史记忆或子 Agent。
 - Curator 输出 `SAVE`、`CONFIRM` 或 `SKIP`；`CONFIRM` 候选通过 `/memory pending`、`/memory confirm <id>` 和 `/memory reject <id>` 处理。
 - 项目与仓库事实按 `scope_type/scope_key` 隔离；全局事实和用户偏好可以跨项目召回。
-- 只有真正注入模型上下文的条目才增加 `recallCount` 并更新 `lastRecalledAt`。
-- 使用频率只对相关度接近的结果提供最高 1% 的排序微调。
-- 策略生成的 FACT/FEEDBACK 使用滑动 TTL；固定到期时间保持不变；到期条目进入软归档。
+- 只有真正注入模型上下文的条目才增加 `recallCount` 并更新 `lastRecalledAt`；这两个字段只用于观测，不参与续期、刷新新鲜度或使用次数提权。
+- 初始 TTL 固定；用户确认、同值重复显式保存等强验证信号累计 `validatedUseCount`，并按使用档位延长 TTL；到期条目进入软归档。
 
 相邻规则系统不属于记忆层：
 

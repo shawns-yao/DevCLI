@@ -78,6 +78,18 @@ class MemoryPromotionPipelineTest {
     }
 
     @Test
+    void snapshotResolvesDurableSourceExcerptWithoutConversationHistory() {
+        TaskMemorySnapshot snapshot = snapshot("task-source");
+
+        assertEquals("修复构建流程", snapshot.sourceExcerpt("request").orElseThrow());
+        assertEquals("已完成", snapshot.sourceExcerpt("result").orElseThrow());
+        assertEquals("修复构建流程", snapshot.sourceExcerpt("state:goal").orElseThrow());
+        assertEquals("execute_command: mvn test 通过",
+                snapshot.sourceExcerpt("evidence:1").orElseThrow());
+        assertTrue(snapshot.sourceExcerpt("history:old").isEmpty());
+    }
+
+    @Test
     void isolatedCuratorRejectsInventedProvenanceAndUnknownScope() {
         LlmClient inventedReference = new StubClient(new AtomicReference<>(), new AtomicReference<>(), """
                 {"action":"SAVE","kind":"FACT","content":"可复用事实",\
@@ -169,8 +181,14 @@ class MemoryPromotionPipelineTest {
             assertTrue(pipeline.processNext());
             assertEquals(MemoryPromotionQueue.State.COMMITTED,
                     queue.find(savedJob).orElseThrow().state());
-            assertTrue(memory.getAll().stream()
-                    .anyMatch(entry -> entry.getContent().contains("不要在主机运行")));
+            MemoryEntry saved = memory.getAll().stream()
+                    .filter(entry -> entry.getContent().contains("不要在主机运行"))
+                    .findFirst().orElseThrow();
+            assertEquals(MemoryEntry.MemoryKind.LESSON, saved.getKind());
+            assertEquals(MemoryEvidence.ReviewState.CURATED, saved.getEvidence().reviewState());
+            assertEquals("execute_command: mvn test 通过", saved.getEvidence().sourceQuote());
+            assertEquals("task-save", saved.getMetadata().get("source_task_id"));
+            assertFalse(saved.getMetadata().getOrDefault("source_quote_sha256", "").isBlank());
 
             MemoryCurator confirm = ignored -> new IsolatedMemoryCurator.Decision(
                     IsolatedMemoryCurator.Action.CONFIRM, "PREFERENCE", "以后都跳过测试",
@@ -184,6 +202,54 @@ class MemoryPromotionPipelineTest {
             assertTrue(confirmPipeline.confirm(confirmJob, true, ""));
             assertEquals(MemoryPromotionQueue.State.COMMITTED,
                     queue.find(confirmJob).orElseThrow().state());
+            MemoryEntry confirmed = memory.getAll().stream()
+                    .filter(entry -> entry.getContent().equals("以后都跳过测试"))
+                    .findFirst().orElseThrow();
+            assertEquals(MemoryEntry.MemoryKind.PREFERENCE, confirmed.getKind());
+            assertEquals(MemoryEvidence.ReviewState.REVIEWED, confirmed.getEvidence().reviewState());
+            assertEquals(1, confirmed.getValidatedUseCount());
+        }
+    }
+
+    @Test
+    void lowConfidenceSaveIsDowngradedToConfirmation() {
+        try (LongTermMemory memory = new LongTermMemory(tempDir.toFile());
+             MemoryPromotionQueue queue = new MemoryPromotionQueue(tempDir)) {
+            MemoryCurator curator = ignored -> new IsolatedMemoryCurator.Decision(
+                    IsolatedMemoryCurator.Action.SAVE, "FACT", "项目使用 Java 17",
+                    "PROJECT", "project-a", "MEDIUM", List.of("request"), "模型不确定");
+            MemoryPromotionPipeline pipeline = new MemoryPromotionPipeline(queue, curator, memory);
+            String jobId = pipeline.enqueue(snapshot("task-medium"));
+
+            assertTrue(pipeline.processNext());
+
+            assertEquals(MemoryPromotionQueue.State.AWAITING_CONFIRMATION,
+                    queue.find(jobId).orElseThrow().state());
+            assertEquals(0, memory.size());
+        }
+    }
+
+    @Test
+    void sourceExcerptSurvivesPromotionQueueDeletionAndReload() {
+        String memoryId;
+        try (LongTermMemory memory = new LongTermMemory(tempDir.toFile());
+             MemoryPromotionQueue queue = new MemoryPromotionQueue(tempDir)) {
+            MemoryCurator curator = ignored -> new IsolatedMemoryCurator.Decision(
+                    IsolatedMemoryCurator.Action.SAVE, "PROCEDURE", "构建命令是 mvn test",
+                    "PROJECT", "project-a", "HIGH", List.of("evidence:1"), "可复用流程");
+            MemoryPromotionPipeline pipeline = new MemoryPromotionPipeline(queue, curator, memory);
+            String jobId = pipeline.enqueue(snapshot("task-durable-source"));
+
+            assertTrue(pipeline.processNext());
+            memoryId = queue.find(jobId).orElseThrow().resultRef();
+            queue.deleteAllJobs();
+        }
+
+        try (LongTermMemory reloaded = new LongTermMemory(tempDir.toFile())) {
+            MemoryEntry entry = reloaded.retrieve(memoryId).orElseThrow();
+            assertEquals("execute_command: mvn test 通过", entry.getEvidence().sourceQuote());
+            assertEquals("task-durable-source", entry.getMetadata().get("source_task_id"));
+            assertEquals("SNAPSHOT", entry.getMetadata().get("source_availability"));
         }
     }
 

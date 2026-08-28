@@ -78,15 +78,17 @@ public record MemoryEvidence(
             case LOW -> 0.75;
             case UNSPECIFIED -> 0.85;
         };
-        double reviewWeight = reviewState == ReviewState.REVIEWED ? 1.0 : 0.85;
+        double reviewWeight = switch (reviewState) {
+            case REVIEWED -> 1.0;
+            case CURATED, UNREVIEWED -> 0.85;
+            case REJECTED -> 0.0;
+        };
         return confidenceWeight * reviewWeight;
     }
 
     private static Confidence enforceConfidenceEvidence(Confidence confidence, String sourceQuote) {
-        if (confidence == Confidence.HIGH && sourceQuote.length() < 5) {
-            confidence = Confidence.MEDIUM;
-        }
-        if (confidence == Confidence.MEDIUM && sourceQuote.isBlank()) {
+        if ((confidence == Confidence.HIGH || confidence == Confidence.MEDIUM)
+                && sourceQuote.isBlank()) {
             confidence = Confidence.LOW;
         }
         return confidence;
@@ -136,6 +138,7 @@ public record MemoryEvidence(
 
     public enum ReviewState {
         REVIEWED,
+        CURATED,
         UNREVIEWED,
         REJECTED;
 

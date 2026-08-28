@@ -9,7 +9,7 @@ import java.util.Map;
  * 记忆条目 - Memory 系统的基础数据单元
  */
 public class MemoryEntry {
-    public static final int CURRENT_SCHEMA_VERSION = 4;
+    public static final int CURRENT_SCHEMA_VERSION = 5;
 
     private final String id;
     private final String content;
@@ -35,6 +35,12 @@ public class MemoryEntry {
     private final long recallCount;
     /** 最近一次真正注入模型上下文的时间；null 表示从未使用。 */
     private final Instant lastRecalledAt;
+    /** 长期记忆的语义分类；与存储用途 MemoryType 分离。 */
+    private final MemoryKind kind;
+    /** 被用户确认、重复显式保存或工具同值验证的次数。 */
+    private final long validatedUseCount;
+    /** 最近一次有效验证时间；普通 Prompt 召回不更新。 */
+    private final Instant lastValidatedAt;
 
     public enum MemoryType {
         CONVERSATION,  // 对话记忆
@@ -42,6 +48,20 @@ public class MemoryEntry {
         SUMMARY,       // 摘要记忆
         TOOL_RESULT,    // 工具执行结果
         FEEDBACK       // 用户反馈（正面 / 负面确认）
+    }
+
+    public enum MemoryKind {
+        FACT, PREFERENCE, PROCEDURE, LESSON, DECISION;
+
+        static MemoryKind from(Map<String, String> metadata) {
+            String value = metadata == null ? "" : metadata.getOrDefault("memory_kind",
+                    metadata.getOrDefault("memory_type", ""));
+            try {
+                return valueOf(value.trim().toUpperCase(java.util.Locale.ROOT));
+            } catch (IllegalArgumentException ignored) {
+                return FACT;
+            }
+        }
     }
 
     public MemoryEntry(String id, String content, MemoryType type, Map<String, String> metadata, int tokenCount) {
@@ -87,6 +107,17 @@ public class MemoryEntry {
                        String subject, boolean active, String supersededBy,
                        int schemaVersion, int revision, Instant expiresAt,
                        MemoryEvidence evidence, long recallCount, Instant lastRecalledAt) {
+        this(id, content, type, timestamp, metadata, tokenCount, subject, active, supersededBy,
+                schemaVersion, revision, expiresAt, evidence, recallCount, lastRecalledAt,
+                null, 0, null);
+    }
+
+    public MemoryEntry(String id, String content, MemoryType type, Instant timestamp,
+                       Map<String, String> metadata, int tokenCount,
+                       String subject, boolean active, String supersededBy,
+                       int schemaVersion, int revision, Instant expiresAt,
+                       MemoryEvidence evidence, long recallCount, Instant lastRecalledAt,
+                       MemoryKind kind, long validatedUseCount, Instant lastValidatedAt) {
         this.id = id;
         this.content = content;
         this.type = type;
@@ -103,6 +134,9 @@ public class MemoryEntry {
         this.evidence = evidence == null ? MemoryEvidence.legacy(this.metadata) : evidence;
         this.recallCount = Math.max(0, recallCount);
         this.lastRecalledAt = lastRecalledAt;
+        this.kind = kind == null ? MemoryKind.from(this.metadata) : kind;
+        this.validatedUseCount = Math.max(0, validatedUseCount);
+        this.lastValidatedAt = lastValidatedAt;
     }
 
     public String getId() { return id; }
@@ -120,6 +154,9 @@ public class MemoryEntry {
     public MemoryEvidence getEvidence() { return evidence; }
     public long getRecallCount() { return recallCount; }
     public Instant getLastRecalledAt() { return lastRecalledAt; }
+    public MemoryKind getKind() { return kind; }
+    public long getValidatedUseCount() { return validatedUseCount; }
+    public Instant getLastValidatedAt() { return lastValidatedAt; }
 
     public boolean isRecallable() {
         return active && evidence.isRecallable()
@@ -152,7 +189,15 @@ public class MemoryEntry {
     public MemoryEntry withRecallAt(Instant recalledAt) {
         return new MemoryEntry(id, content, type, timestamp, metadata, tokenCount,
                 subject, active, supersededBy, CURRENT_SCHEMA_VERSION, revision, expiresAt,
-                evidence, recallCount + 1, recalledAt == null ? Instant.now() : recalledAt);
+                evidence, recallCount + 1, recalledAt == null ? Instant.now() : recalledAt,
+                kind, validatedUseCount, lastValidatedAt);
+    }
+
+    public MemoryEntry withValidatedAt(Instant validatedAt) {
+        Instant effectiveTime = validatedAt == null ? Instant.now() : validatedAt;
+        return new MemoryEntry(id, content, type, timestamp, metadata, tokenCount,
+                subject, active, supersededBy, CURRENT_SCHEMA_VERSION, revision, expiresAt,
+                evidence, recallCount, lastRecalledAt, kind, validatedUseCount + 1, effectiveTime);
     }
 
     MemoryEntry copy(String nextSubject, boolean nextActive, String nextSupersededBy,
@@ -167,7 +212,8 @@ public class MemoryEntry {
         return new MemoryEntry(id, content, type, timestamp,
                 nextMetadata == null ? metadata : nextMetadata, tokenCount,
                 nextSubject, nextActive, nextSupersededBy, CURRENT_SCHEMA_VERSION,
-                nextRevision, nextExpiresAt, nextEvidence, recallCount, lastRecalledAt);
+                nextRevision, nextExpiresAt, nextEvidence, recallCount, lastRecalledAt,
+                kind, validatedUseCount, lastValidatedAt);
     }
 
     /**

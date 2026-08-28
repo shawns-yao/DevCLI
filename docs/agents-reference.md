@@ -97,7 +97,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 压缩边界 `<compact_boundary>` 记录已加载 Skill、RAG epoch、MCP 工具快照和压缩后恢复入口状态；RAG epoch 合并当前会话已命中证据与当前项目全局索引版本，MCP 工具快照包含 server 工具数量、schema 指纹和生命周期版本
 - 普通用户消息不直接写长期记忆。显式配置独立 Curator 后，任务完成先持久化脱敏、限长的 `TaskMemorySnapshot`，再由空工具、无旧记忆的 `IsolatedMemoryCurator` 输出 `SAVE / CONFIRM / SKIP`；未配置时跳过自动晋升，不创建无人消费的队列作业。除模型推理传输外不提供 Web、MCP、Skill、文件、命令或子 Agent 入口；待确认候选通过 `/memory pending|confirm|reject` 处理
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；显式保存请求如果内容仍然明显临时或低复用，需要确认而不是直接落库；与 SessionMemory 关键事件语义重复的长期记忆在 prompt 注入时会被抑制
-- 长期检索先按 `scope_type/scope_key` 过滤，再融合关键词、向量、新鲜度和最高 1% 的近似同分使用加权；只有实际注入 Turn Context 才批量更新 `recallCount/lastRecalledAt`，并以最近真实召回时间刷新新鲜度。策略生成的 FACT/FEEDBACK TTL 使用滑动续期，显式固定到期时间不续期；到期后先软归档
+- 长期检索先按 `scope_type/scope_key` 过滤，再融合关键词、向量和新鲜度；实际注入 Turn Context 只批量更新 `recallCount/lastRecalledAt` 作为观测，不刷新新鲜度、不续期、不按召回次数提权。新鲜度以 `lastValidatedAt` 为优先年龄锚点；用户确认、同值重复显式保存等强验证信号累计 `validatedUseCount` 并分档延长 TTL；到期后先软归档
 - RAG 检索审计按 JSONL 保存各召回通道、RRF、rerank、最终结果和降级状态，不保存代码正文；普通 CLI 会话归档默认关闭，启用后 ReAct 保存脱敏模型消息，Plan / Team 保存顶层输入输出，并按配置期限清理
 - 用户显式要求忽略记忆（如“别管记忆”“忽略记忆”）时，本会话不注入长期记忆、通用 SessionMemory 和角色裁剪后的 SessionMemory
 - 反馈类长期记忆按 `FEEDBACK` 类型落库，不混入普通 `FACT`
@@ -398,7 +398,7 @@ EMBEDDING_BASE_URL=http://localhost:11434
 
 `MemoryOrganizer` 通过 `/memory organize` 生成结构化整理计划，通过 `/memory organize apply` 应用低风险合并。库存最多携带 100 条可召回记忆，每条正文限制 300 字符并编码为 JSON 数据；解析失败最多修复一次。模型只能提出 KEEP、MERGE、REVIEW、REJECT 候选，程序重新校验来源标识、类型、主题、审核状态、覆盖范围和计划置信度。只有同主题、同类型、全部 UNREVIEWED、覆盖该主题全部可召回条目且计划置信度不低于 0.9 的 MERGE 可以自动应用；其余候选只在本次运行报告中标记为需要人工复核，或由策略拒绝；当前不持久化复核队列。
 
-`MemoryEntry` 持久化 `schemaVersion`、`revision`、`expiresAt`、`expiry_mode`、`recallCount`、`lastRecalledAt` 和结构化 `MemoryEvidence`。证据字段包括 confidence、sourceQuote、reasoning、reviewState、conflictsWith；HIGH 置信度至少需要 5 字符 sourceQuote，MEDIUM 需要非空 sourceQuote，否则构造时自动降级。新写入条目使用 schema 4：按类型策略生成的 FACT/FEEDBACK 到期时间标记为 `SLIDING`，只有真实 Prompt 注入才续期；调用方显式传入的到期时间标记为 `FIXED`，召回不会延长。旧 schema 的 FACT/FEEDBACK 在首次召回时迁移为滑动续期。显式写入默认 REVIEWED，策略候选按证据协议审核；REJECTED 条目保留审计，但从关键词检索、语义检索和 Prompt 注入中排除。LongTermMemory 在检索、读取、计数和类型筛选前把到期条目软归档，保留 SQLite 事实与向量索引供审计和恢复，不做检索期物理删除。显式 subject 内容变化以及配置赋值、默认值、当前值、设置值和正反使用声明等可解析冲突会记录结构化 conflictsWith，同时保留 `conflict_detected/conflict_with` 兼容 metadata；旧条软删除，新条 revision 递增；相同主题同值的可确定改写自动去重。
+`MemoryEntry` schema 5 持久化 `revision`、一等字段 `MemoryKind`、`expiresAt/expiry_mode`、`recallCount/lastRecalledAt`、`validatedUseCount/lastValidatedAt` 和结构化 `MemoryEvidence`。`MemoryKind` 的 FACT/PREFERENCE/PROCEDURE/LESSON/DECISION 与存储用途 `MemoryType` 分离，旧条目从 metadata 兼容迁移。证据字段包括 confidence、sourceQuote、reasoning、reviewState、conflictsWith；HIGH/MEDIUM 需要非空真实快照原文，否则降级。自动晋升还必须为 HIGH 且来源引用能在任务快照中解析，落库状态为 `CURATED`；人工确认后为 `REVIEWED`。来源正文、任务标识、捕获时间和 SHA-256 随记忆固化，即使原会话删除仍可审计。初始 TTL 固定；普通 Prompt 召回只记录观测，只有用户确认或同值重复显式保存等强验证信号才按累计次数延长 TTL。REJECTED 条目保留审计，但从关键词检索、语义检索和 Prompt 注入中排除。LongTermMemory 在检索、读取、计数和类型筛选前把到期条目软归档，保留 SQLite 事实与向量索引供审计和恢复，不做检索期物理删除。显式 subject 内容变化以及配置赋值、默认值、当前值、设置值和正反使用声明等可解析冲突会记录结构化 conflictsWith，同时保留 `conflict_detected/conflict_with` 兼容 metadata；旧条软删除，新条 revision 递增；相同主题同值的可确定改写自动去重。
 
 `ToolInvocationFingerprint` 对 JSON 对象字段排序，统一查询字段大小写、Unicode NFKC 等价字符、冗余空白和路径分隔符；正则 pattern 保持大小写敏感，避免相似但不等价调用共享缓存。AgentBudget 使用该指纹判断语义重复；ToolRegistry 只缓存成功、无图片的 READ_ONLY 结果，默认 128 条、30 秒。项目路径切换或任何非只读工具进入执行阶段时清空缓存，禁止把副作用前的陈旧读取跨状态复用。
 

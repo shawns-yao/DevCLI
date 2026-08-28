@@ -14,19 +14,18 @@ final class MemoryFreshnessPolicy {
         long halfLifeDays = halfLifeDays(entry.getType());
         if (halfLifeDays <= 0) return 1D;
         Instant current = now == null ? Instant.now() : now;
-        Instant ageAnchor = entry.getLastRecalledAt() != null
-                && entry.getLastRecalledAt().isAfter(entry.getTimestamp())
-                ? entry.getLastRecalledAt()
+        Instant ageAnchor = entry.getLastValidatedAt() != null
+                && entry.getLastValidatedAt().isAfter(entry.getTimestamp())
+                ? entry.getLastValidatedAt()
                 : entry.getTimestamp();
         double ageDays = Math.max(0D,
                 Duration.between(ageAnchor, current).toMillis() / 86_400_000D);
         return Math.pow(0.5D, ageDays / halfLifeDays);
     }
 
-    /** 使用频率只做近似同分项微调，不能盖过语义相关度；新记忆没有冷启动惩罚。 */
+    /** 普通召回只用于观测，不能因为反复进入 Prompt 而自我强化。 */
     static double usageBoost(MemoryEntry entry) {
-        if (entry == null || entry.getRecallCount() <= 0) return 1D;
-        return 1D + Math.min(0.01D, Math.log1p(entry.getRecallCount()) * 0.002D);
+        return 1D;
     }
 
     static long halfLifeDays(MemoryEntry.MemoryType type) {

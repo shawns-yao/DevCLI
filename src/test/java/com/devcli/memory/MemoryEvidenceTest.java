@@ -50,6 +50,20 @@ class MemoryEvidenceTest {
     }
 
     @Test
+    void curatedMemoryIsRecallableWithoutPretendingToBeReviewed() {
+        MemoryEvidence evidence = new MemoryEvidence(
+                MemoryEvidence.Confidence.HIGH,
+                "结果",
+                "task_curator",
+                MemoryEvidence.ReviewState.CURATED,
+                List.of());
+
+        assertEquals(MemoryEvidence.Confidence.HIGH, evidence.confidence());
+        assertTrue(evidence.isRecallable());
+        assertTrue(evidence.retrievalWeight() < 1.0);
+    }
+
+    @Test
     void rejectedMemoryIsNotRecallableAndConflictsAreDeduplicated() {
         MemoryEvidence evidence = new MemoryEvidence(
                 MemoryEvidence.Confidence.LOW,

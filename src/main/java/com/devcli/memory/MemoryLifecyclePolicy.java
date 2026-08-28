@@ -10,6 +10,7 @@ final class MemoryLifecyclePolicy {
     static final String EXPIRY_MODE_METADATA = "expiry_mode";
     static final String EXPIRY_MODE_SLIDING = "SLIDING";
     static final String EXPIRY_MODE_FIXED = "FIXED";
+    static final String EXPIRY_MODE_VALIDATED = "VALIDATED";
 
     private MemoryLifecyclePolicy() {
     }
@@ -19,18 +20,13 @@ final class MemoryLifecyclePolicy {
         Map<String, String> metadata = new HashMap<>(entry.getMetadata());
         Instant expiresAt = entry.getExpiresAt();
         if (expiresAt != null) {
-            metadata.putIfAbsent(EXPIRY_MODE_METADATA,
-                    entry.getSchemaVersion() < MemoryEntry.CURRENT_SCHEMA_VERSION
-                            && supportsSlidingExpiry(entry.getType())
-                            ? EXPIRY_MODE_SLIDING
-                            : EXPIRY_MODE_FIXED);
+            if (!EXPIRY_MODE_VALIDATED.equals(metadata.get(EXPIRY_MODE_METADATA))) {
+                metadata.put(EXPIRY_MODE_METADATA, EXPIRY_MODE_FIXED);
+            }
         } else {
             expiresAt = expiresAt(entry.getType(), now);
             if (expiresAt != null) {
-                metadata.putIfAbsent(EXPIRY_MODE_METADATA,
-                        supportsSlidingExpiry(entry.getType())
-                                ? EXPIRY_MODE_SLIDING
-                                : EXPIRY_MODE_FIXED);
+                metadata.put(EXPIRY_MODE_METADATA, EXPIRY_MODE_FIXED);
             }
         }
         return entry.withLifecycle(entry.getRevision(), expiresAt, Map.copyOf(metadata));
@@ -39,12 +35,22 @@ final class MemoryLifecyclePolicy {
     static MemoryEntry recordRecall(MemoryEntry entry, Instant recalledAt) {
         Instant effectiveTime = recalledAt == null ? Instant.now() : recalledAt;
         MemoryEntry initialized = initializeExpiration(entry, effectiveTime);
-        MemoryEntry recalled = initialized.withRecallAt(effectiveTime);
-        if (!EXPIRY_MODE_SLIDING.equals(initialized.getMetadata().get(EXPIRY_MODE_METADATA))) {
-            return recalled;
-        }
-        return recalled.withLifecycle(recalled.getRevision(),
-                expiresAt(recalled.getType(), effectiveTime), recalled.getMetadata());
+        return initialized.withRecallAt(effectiveTime);
+    }
+
+    static MemoryEntry recordValidated(MemoryEntry entry, Instant validatedAt) {
+        Instant effectiveTime = validatedAt == null ? Instant.now() : validatedAt;
+        MemoryEntry validated = initializeExpiration(entry, effectiveTime).withValidatedAt(effectiveTime);
+        long baseDays = ttlDays(validated.getType());
+        if (baseDays <= 0) return validated;
+        long multiplier = validated.getValidatedUseCount() >= 7 ? 4
+                : validated.getValidatedUseCount() >= 3 ? 3 : 2;
+        Instant extended = effectiveTime.plus(Duration.ofDays(baseDays * multiplier));
+        Instant current = validated.getExpiresAt();
+        Instant next = current == null || extended.isAfter(current) ? extended : current;
+        Map<String, String> metadata = new HashMap<>(validated.getMetadata());
+        metadata.put(EXPIRY_MODE_METADATA, EXPIRY_MODE_VALIDATED);
+        return validated.withLifecycle(validated.getRevision(), next, Map.copyOf(metadata));
     }
 
     static Instant expiresAt(MemoryEntry.MemoryType type, Instant createdAt) {
@@ -66,12 +72,6 @@ final class MemoryLifecyclePolicy {
                 "DEVCLI_MEMORY_TTL_" + suffix.toUpperCase(Locale.ROOT) + "_DAYS");
         String common = configured("devcli.memory.ttl.days", "DEVCLI_MEMORY_TTL_DAYS");
         return parse(specific, parse(common, fallback));
-    }
-
-    private static boolean supportsSlidingExpiry(MemoryEntry.MemoryType type) {
-        MemoryEntry.MemoryType effective = type == null ? MemoryEntry.MemoryType.FACT : type;
-        return effective == MemoryEntry.MemoryType.FACT
-                || effective == MemoryEntry.MemoryType.FEEDBACK;
     }
 
     private static String configured(String property, String environment) {

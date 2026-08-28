@@ -93,18 +93,7 @@ public final class IsolatedMemoryCurator implements MemoryCurator {
     }
 
     private static boolean validSourceRef(TaskMemorySnapshot snapshot, String reference) {
-        if ("request".equals(reference) || "result".equals(reference)) return true;
-        if (reference.startsWith("state:")) {
-            return snapshot.workState().containsKey(reference.substring("state:".length()));
-        }
-        if (!reference.startsWith("evidence:")) return false;
-        try {
-            int index = Integer.parseInt(reference.substring("evidence:".length()));
-            int size = snapshot.evidenceSummaries().size();
-            return (index >= 0 && index < size) || (index >= 1 && index <= size);
-        } catch (NumberFormatException ignored) {
-            return false;
-        }
+        return snapshot.sourceExcerpt(reference).isPresent();
     }
 
     private static String normalized(JsonNode root, String field) {

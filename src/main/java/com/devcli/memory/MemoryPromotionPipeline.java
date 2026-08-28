@@ -4,8 +4,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -46,7 +49,17 @@ public final class MemoryPromotionPipeline {
             switch (decision.action()) {
                 case SKIP -> queue.markSkipped(job.id(), decision.reason());
                 case CONFIRM -> queue.markAwaitingConfirmation(job.id(), JSON.writeValueAsString(decision));
-                case SAVE -> save(job, decision);
+                case SAVE -> {
+                    if (autoSaveEligible(job.snapshot(), decision)) {
+                        save(job, decision, MemoryEvidence.ReviewState.CURATED, false);
+                    } else {
+                        IsolatedMemoryCurator.Decision pending = new IsolatedMemoryCurator.Decision(
+                                IsolatedMemoryCurator.Action.CONFIRM, decision.kind(), decision.content(),
+                                decision.scopeType(), decision.scopeKey(), decision.confidence(),
+                                decision.sourceRefs(), "auto_save_requires_high_confidence_and_evidence");
+                        queue.markAwaitingConfirmation(job.id(), JSON.writeValueAsString(pending));
+                    }
+                }
             }
             return true;
         } catch (Exception error) {
@@ -74,28 +87,36 @@ public final class MemoryPromotionPipeline {
                     IsolatedMemoryCurator.Action.SAVE, original.kind(), content,
                     original.scopeType(), original.scopeKey(), "HIGH",
                     original.sourceRefs(), "user_confirmed");
-            return save(job, confirmed);
+            return save(job, confirmed, MemoryEvidence.ReviewState.REVIEWED, true);
         } catch (Exception error) {
             queue.markFailedRetryable(jobId, truncate(error.getMessage(), 500));
             return false;
         }
     }
 
-    private boolean save(MemoryPromotionQueue.Job job, IsolatedMemoryCurator.Decision decision) {
+    private boolean save(MemoryPromotionQueue.Job job, IsolatedMemoryCurator.Decision decision,
+                         MemoryEvidence.ReviewState reviewState, boolean validated) {
         return queue.commitIfState(job.id(), java.util.Set.of(job.state()),
-                () -> persist(job, decision));
+                () -> persist(job, decision, reviewState, validated));
     }
 
-    private String persist(MemoryPromotionQueue.Job job, IsolatedMemoryCurator.Decision decision) {
+    private String persist(MemoryPromotionQueue.Job job, IsolatedMemoryCurator.Decision decision,
+                           MemoryEvidence.ReviewState reviewState, boolean validated) {
         String memoryId = "memory-" + job.id().replace("promotion-", "");
         String scopeType = normalizedScopeType(decision.scopeType());
         String scopeKey = trustedScopeKey(job.snapshot(), decision, scopeType);
+        String sourceRef = decision.sourceRefs().stream()
+                .filter(ref -> job.snapshot().sourceExcerpt(ref).isPresent())
+                .findFirst().orElse("");
+        String sourceQuote = sourceRef.isBlank() ? ""
+                : job.snapshot().sourceExcerpt(sourceRef).orElse("");
         MemoryEntry equivalent = longTermMemory.getAll().stream()
                 .filter(MemoryEntry::isRecallable)
                 .filter(entry -> entry.getContent().equals(decision.content()))
                 .filter(entry -> sameScope(entry, scopeType, scopeKey))
                 .findFirst().orElse(null);
         if (equivalent != null) {
+            if (validated) longTermMemory.recordValidated(equivalent.getId(), Instant.now());
             return equivalent.getId();
         }
         Map<String, String> metadata = new HashMap<>();
@@ -106,10 +127,14 @@ public final class MemoryPromotionPipeline {
         metadata.put(MemoryWriteProtocol.META_SCOPE,
                 "GLOBAL".equals(metadata.get("scope_type")) ? "global" : scopeKey);
         metadata.put("source_refs", String.join(",", decision.sourceRefs()));
+        metadata.put("source_ref", sourceRef);
+        metadata.put("source_task_id", job.snapshot().taskId());
+        metadata.put("source_captured_at", job.snapshot().capturedAt().toString());
+        metadata.put("source_availability", "SNAPSHOT");
+        metadata.put("source_quote_sha256", sha256(sourceQuote));
         metadata.put("curator_confidence", decision.confidence());
         MemoryEvidence evidence = new MemoryEvidence(confidence(decision.confidence()),
-                decision.sourceRefs().isEmpty() ? "" : decision.sourceRefs().getFirst(),
-                decision.reason(), MemoryEvidence.ReviewState.REVIEWED, List.of());
+                sourceQuote, decision.reason(), reviewState, List.of());
         MemoryEntry entry = new MemoryEntry(memoryId, decision.content(), MemoryEntry.MemoryType.FACT,
                 Instant.now(), Map.copyOf(metadata), MemoryEntry.estimateTokens(decision.content()),
                 MemorySubjectExtractor.extract(decision.content(), metadata), true, "",
@@ -118,8 +143,29 @@ public final class MemoryPromotionPipeline {
         if (longTermMemory.retrieve(memoryId).isEmpty()) {
             throw new IllegalStateException("curated memory was not persisted");
         }
-        committedListener.accept(entry);
+        if (validated && !longTermMemory.recordValidated(memoryId, Instant.now())) {
+            throw new IllegalStateException("confirmed memory validation was not persisted");
+        }
+        MemoryEntry committed = longTermMemory.retrieve(memoryId)
+                .orElseThrow(() -> new IllegalStateException("curated memory disappeared after persistence"));
+        committedListener.accept(committed);
         return memoryId;
+    }
+
+    private static boolean autoSaveEligible(TaskMemorySnapshot snapshot,
+                                            IsolatedMemoryCurator.Decision decision) {
+        return "HIGH".equals(decision.confidence())
+                && decision.sourceRefs().stream().anyMatch(ref -> snapshot.sourceExcerpt(ref).isPresent());
+    }
+
+    private static String sha256(String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest((value == null ? "" : value).getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (Exception error) {
+            throw new IllegalStateException("SHA-256 unavailable", error);
+        }
     }
 
     private static String trustedScopeKey(TaskMemorySnapshot snapshot,

@@ -65,7 +65,7 @@
 - 日期：`2026-08-27`
 - 已实现：短期上下文统一由 `conversationHistory + 六段 RollingSummary` 按 Token 预算治理；待办、当前工作和下一步只保存在当前任务的 `SessionMemory`，不再复制进摘要
 - 已实现：普通用户消息不再直接自动落库；任务晋升使用脱敏、限长的 `TaskMemorySnapshot`、SQLite `MemoryPromotionQueue` 和全隔离 `IsolatedMemoryCurator`。未配置独立 Curator 时跳过自动晋升，不产生无人消费的队列作业；`CONFIRM` 通过持久状态和 `/memory pending|confirm|reject` 非阻塞处理
-- 已实现：长期记忆以 SQLite 为事实源、向量索引为可选召回通道；增加项目作用域、`recallCount`、`lastRecalledAt`、最高 1% 使用微调、最近召回新鲜度锚点和滑动 TTL。策略 FACT/FEEDBACK 在真实 Prompt 注入后续期，显式固定到期时间保持不变，到期只软归档
+- 已实现：长期记忆以 SQLite 为事实源、向量索引为可选召回通道；增加项目作用域与召回观测。2026-08-28 修订为：普通召回不续期、不刷新新鲜度、不按次数提权；用户确认、同值重复显式保存等强验证信号累计验证次数并分档延长 TTL，到期只软归档
 - 已实现：晋升队列支持崩溃租约回收、清空闸门、来源与作用域校验；Curator 不继承旧记忆，不提供工具、MCP、Skill、文件、命令、网络工具或子 Agent 入口，仅保留独立模型传输
 - 影响范围：上下文压缩、SessionMemory、长期记忆存储与检索、任务结束生命周期、CLI/Runtime 装配、记忆命令、测试和架构文档
 - 验证：记忆模块限定回归通过；`mvn -q -DskipTests=false test` 本轮新生成 228 份 Surefire 报告，共 1719 项，0 失败、0 错误、6 项按条件跳过，退出码 0。OpenCode Go `deepseek-v4-flash` 真实 Curator 用例通过；60 场景真实记忆评测的写入准确率、低价值拦截率、Recall@5、Prompt 注入命中率和召回到注入转化率均为 100%，生成 60 条记忆与 60 个向量

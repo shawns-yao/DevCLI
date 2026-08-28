@@ -124,7 +124,7 @@ class MemoryWriteProtocolTest {
     }
 
     @Test
-    void freshnessUsesLastActualRecallAsItsAgeAnchor() {
+    void freshnessUsesValidationInsteadOfRecallAsItsAgeAnchor() {
         Instant now = Instant.now();
         MemoryEntry neverRecalled = new MemoryEntry("never", "project.version=1",
                 MemoryEntry.MemoryType.FACT, now.minus(Duration.ofDays(240)), Map.of(), 1);
@@ -132,9 +132,16 @@ class MemoryWriteProtocolTest {
                 MemoryEntry.MemoryType.FACT, now.minus(Duration.ofDays(240)), Map.of(), 1,
                 "", true, "", MemoryEntry.CURRENT_SCHEMA_VERSION, 1, null,
                 MemoryEvidence.legacy(Map.of()), 5, now.minus(Duration.ofDays(1)));
+        MemoryEntry recentlyValidated = new MemoryEntry("validated", "project.version=1",
+                MemoryEntry.MemoryType.FACT, now.minus(Duration.ofDays(240)), Map.of(), 1,
+                "", true, "", MemoryEntry.CURRENT_SCHEMA_VERSION, 1, null,
+                MemoryEvidence.legacy(Map.of()), 5, now.minus(Duration.ofDays(1)),
+                MemoryEntry.MemoryKind.FACT, 1, now.minus(Duration.ofDays(1)));
 
-        assertTrue(MemoryFreshnessPolicy.weight(recentlyRecalled, now)
-                > MemoryFreshnessPolicy.weight(neverRecalled, now));
+        assertEquals(MemoryFreshnessPolicy.weight(neverRecalled, now),
+                MemoryFreshnessPolicy.weight(recentlyRecalled, now), 0.000001);
+        assertTrue(MemoryFreshnessPolicy.weight(recentlyValidated, now)
+                > MemoryFreshnessPolicy.weight(recentlyRecalled, now));
     }
 
     @Test

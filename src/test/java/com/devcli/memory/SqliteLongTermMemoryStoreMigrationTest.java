@@ -50,6 +50,9 @@ class SqliteLongTermMemoryStoreMigrationTest {
             assertTrue(old.getSupersededBy().isBlank());
             assertEquals(MemoryEvidence.Confidence.UNSPECIFIED, old.getEvidence().confidence());
             assertEquals(MemoryEvidence.ReviewState.REVIEWED, old.getEvidence().reviewState());
+            assertEquals(MemoryEntry.MemoryKind.FACT, old.getKind());
+            assertEquals(0, old.getValidatedUseCount());
+            assertNull(old.getLastValidatedAt());
             assertTrue(old.getEvidence().sourceQuote().isBlank());
             assertTrue(old.getEvidence().conflictsWith().isEmpty());
         }

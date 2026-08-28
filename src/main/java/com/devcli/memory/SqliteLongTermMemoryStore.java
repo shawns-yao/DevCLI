@@ -98,6 +98,9 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
                             conflicts_with_json TEXT NOT NULL DEFAULT '[]',
                             recall_count INTEGER NOT NULL DEFAULT 0,
                             last_recalled_at_ms INTEGER,
+                            memory_kind TEXT NOT NULL DEFAULT 'FACT',
+                            validated_use_count INTEGER NOT NULL DEFAULT 0,
+                            last_validated_at_ms INTEGER,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
                         """);
@@ -115,6 +118,9 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
                 addColumnIfMissing(stmt, "conflicts_with_json", "TEXT NOT NULL DEFAULT '[]'");
                 addColumnIfMissing(stmt, "recall_count", "INTEGER NOT NULL DEFAULT 0");
                 addColumnIfMissing(stmt, "last_recalled_at_ms", "INTEGER");
+                addColumnIfMissing(stmt, "memory_kind", "TEXT NOT NULL DEFAULT 'FACT'");
+                addColumnIfMissing(stmt, "validated_use_count", "INTEGER NOT NULL DEFAULT 0");
+                addColumnIfMissing(stmt, "last_validated_at_ms", "INTEGER");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_memory_facts_type ON memory_facts(type)");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_memory_facts_subject_active "
                         + "ON memory_facts(subject, active)");
@@ -143,8 +149,9 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
              ResultSet rs = stmt.executeQuery(
                      "SELECT id, content, type, timestamp_ms, metadata_json, token_count, "
                              + "subject, active, superseded_by, schema_version, revision, expires_at_ms, "
-                             + "confidence, source_quote, evidence_reasoning, review_state, conflicts_with_json "
-                             + ", recall_count, last_recalled_at_ms "
+                              + "confidence, source_quote, evidence_reasoning, review_state, conflicts_with_json "
+                              + ", recall_count, last_recalled_at_ms, memory_kind, "
+                              + "validated_use_count, last_validated_at_ms "
                              + "FROM memory_facts ORDER BY timestamp_ms ASC")) {
             while (rs.next()) {
                 MemoryEntry entry = parseRow(rs);
@@ -165,8 +172,9 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
                 INSERT INTO memory_facts(id, content, type, timestamp_ms, metadata_json, token_count,
                                          subject, active, superseded_by, schema_version, revision, expires_at_ms,
                                          confidence, source_quote, evidence_reasoning, review_state,
-                                         conflicts_with_json, recall_count, last_recalled_at_ms)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                         conflicts_with_json, recall_count, last_recalled_at_ms,
+                                         memory_kind, validated_use_count, last_validated_at_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     content = excluded.content,
                     type = excluded.type,
@@ -185,7 +193,10 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
                     review_state = excluded.review_state,
                     conflicts_with_json = excluded.conflicts_with_json,
                     recall_count = excluded.recall_count,
-                    last_recalled_at_ms = excluded.last_recalled_at_ms
+                    last_recalled_at_ms = excluded.last_recalled_at_ms,
+                    memory_kind = excluded.memory_kind,
+                    validated_use_count = excluded.validated_use_count,
+                    last_validated_at_ms = excluded.last_validated_at_ms
                 """;
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setString(1, entry.getId());
@@ -215,6 +226,13 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
                 ps.setObject(19, null);
             } else {
                 ps.setLong(19, entry.getLastRecalledAt().toEpochMilli());
+            }
+            ps.setString(20, entry.getKind().name());
+            ps.setLong(21, entry.getValidatedUseCount());
+            if (entry.getLastValidatedAt() == null) {
+                ps.setObject(22, null);
+            } else {
+                ps.setLong(22, entry.getLastValidatedAt().toEpochMilli());
             }
             ps.executeUpdate();
             return true;
@@ -263,21 +281,13 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
             try (PreparedStatement ps = connection.prepareStatement("""
                     UPDATE memory_facts
                     SET recall_count = recall_count + 1,
-                        last_recalled_at_ms = ?,
-                        expires_at_ms = ?,
-                        metadata_json = ?
+                        last_recalled_at_ms = ?
                     WHERE id = ?
                     """)) {
                 for (MemoryEntry entry : recalledEntries) {
                     Instant recalledAt = entry.getLastRecalledAt();
                     ps.setLong(1, (recalledAt == null ? Instant.now() : recalledAt).toEpochMilli());
-                    if (entry.getExpiresAt() == null) {
-                        ps.setObject(2, null);
-                    } else {
-                        ps.setLong(2, entry.getExpiresAt().toEpochMilli());
-                    }
-                    ps.setString(3, metadataToJson(entry.getMetadata()));
-                    ps.setString(4, entry.getId());
+                    ps.setString(2, entry.getId());
                     if (ps.executeUpdate() != 1) {
                         connection.rollback();
                         return false;
@@ -285,7 +295,7 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
                 }
                 connection.commit();
                 return true;
-            } catch (SQLException | JsonProcessingException error) {
+            } catch (SQLException error) {
                 connection.rollback();
                 log.warn("recordRecall failed: {}", error.getMessage());
                 return false;
@@ -379,9 +389,15 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
             long recallCount = rs.getLong("recall_count");
             long lastRecalledAtMillis = rs.getLong("last_recalled_at_ms");
             Instant lastRecalledAt = rs.wasNull() ? null : Instant.ofEpochMilli(lastRecalledAtMillis);
+            MemoryEntry.MemoryKind kind = metadata.containsKey("memory_kind")
+                    ? MemoryEntry.MemoryKind.from(metadata)
+                    : MemoryEntry.MemoryKind.valueOf(rs.getString("memory_kind"));
+            long validatedUseCount = rs.getLong("validated_use_count");
+            long lastValidatedAtMillis = rs.getLong("last_validated_at_ms");
+            Instant lastValidatedAt = rs.wasNull() ? null : Instant.ofEpochMilli(lastValidatedAtMillis);
             return new MemoryEntry(id, content, type, timestamp, metadata, tokenCount,
                     subject, active, supersededBy, schemaVersion, revision, expiresAt, evidence,
-                    recallCount, lastRecalledAt);
+                    recallCount, lastRecalledAt, kind, validatedUseCount, lastValidatedAt);
         } catch (IllegalArgumentException e) {
             log.warn("Skip corrupted row in memory_facts: {}", e.getMessage());
             return null;

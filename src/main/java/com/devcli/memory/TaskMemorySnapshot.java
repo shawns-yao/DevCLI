@@ -6,6 +6,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /** 可重放的任务完成快照；只包含 Curator 判断所需的必要子集。 */
 public record TaskMemorySnapshot(String taskId, String scopeKey, String userRequest,
@@ -54,6 +55,32 @@ public record TaskMemorySnapshot(String taskId, String scopeKey, String userRequ
         return new TaskMemorySnapshot(taskId, scopeKey,
                 SensitiveDataRedactor.redact(userRequest), SensitiveDataRedactor.redact(finalResult),
                 state, evidence, Instant.now());
+    }
+
+    /**
+     * 解析 Curator 声明的来源引用并返回快照内的真实脱敏摘录。
+     * 摘录随晋升作业持久化，不依赖原会话继续存在。
+     */
+    public Optional<String> sourceExcerpt(String reference) {
+        if (reference == null || reference.isBlank()) return Optional.empty();
+        if ("request".equals(reference)) return nonBlank(userRequest);
+        if ("result".equals(reference)) return nonBlank(finalResult);
+        if (reference.startsWith("state:")) {
+            return nonBlank(workState.get(reference.substring("state:".length())));
+        }
+        if (!reference.startsWith("evidence:")) return Optional.empty();
+        try {
+            int declared = Integer.parseInt(reference.substring("evidence:".length()));
+            int index = declared == 0 ? 0 : declared - 1;
+            if (index < 0 || index >= evidenceSummaries.size()) return Optional.empty();
+            return nonBlank(evidenceSummaries.get(index));
+        } catch (NumberFormatException ignored) {
+            return Optional.empty();
+        }
+    }
+
+    private static Optional<String> nonBlank(String value) {
+        return value == null || value.isBlank() ? Optional.empty() : Optional.of(value);
     }
 
     private static String normalize(String value) {

@@ -443,6 +443,19 @@ public class LongTermMemory implements Memory, AutoCloseable {
         return true;
     }
 
+    /** 记录强验证信号并按验证次数分级延长有效期；普通召回不得调用。 */
+    public synchronized boolean recordValidated(String id, Instant validatedAt) {
+        if (id == null || id.isBlank()) return false;
+        archiveExpired();
+        MemoryEntry existing = entries.get(id);
+        if (existing == null || !existing.isRecallable()) return false;
+        MemoryEntry updated = MemoryLifecyclePolicy.recordValidated(existing, validatedAt);
+        boolean persisted = store.upsert(updated);
+        if (!persisted && persistentStore) return false;
+        entries.put(id, updated);
+        return true;
+    }
+
     private MemoryEntry findDuplicateContent(MemoryEntry entry) {
         int hash = entry.getContent().hashCode();
         if (!contentHashes.contains(hash)) {

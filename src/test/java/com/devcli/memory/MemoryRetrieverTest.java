@@ -296,4 +296,19 @@ class MemoryRetrieverTest {
 
         assertEquals("relevant", ranked.getFirst().entry().getId());
     }
+
+    @Test
+    void promptRecallDoesNotRefreshFreshnessWeight() {
+        java.time.Instant old = java.time.Instant.now().minus(java.time.Duration.ofDays(120));
+        MemoryEntry untouched = new MemoryEntry("untouched", "旧事实一", MemoryEntry.MemoryType.FACT,
+                old, Map.of(), 10, "", true, "", MemoryEntry.CURRENT_SCHEMA_VERSION, 1, null,
+                MemoryEvidence.legacy(Map.of()), 0, null);
+        MemoryEntry repeatedlyRecalled = new MemoryEntry("recalled", "旧事实二", MemoryEntry.MemoryType.FACT,
+                old, Map.of(), 10, "", true, "", MemoryEntry.CURRENT_SCHEMA_VERSION, 1, null,
+                MemoryEvidence.legacy(Map.of()), 100, java.time.Instant.now());
+
+        assertEquals(MemoryFreshnessPolicy.weight(untouched, java.time.Instant.now()),
+                MemoryFreshnessPolicy.weight(repeatedlyRecalled, java.time.Instant.now()), 0.001);
+        assertEquals(1.0, MemoryFreshnessPolicy.usageBoost(repeatedlyRecalled));
+    }
 }

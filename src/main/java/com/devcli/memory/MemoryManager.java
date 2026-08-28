@@ -612,6 +612,16 @@ public class MemoryManager implements AutoCloseable {
             effectiveMetadata.put("redacted", "true");
             effectiveMetadata.put("redacted_types", redaction.removedTypesCsv());
         }
+        if ("explicit".equalsIgnoreCase(effectiveMetadata.getOrDefault("source", ""))) {
+            MemoryEntry existing = longTermMemory.getAll().stream()
+                    .filter(MemoryEntry::isRecallable)
+                    .filter(entry -> entry.getContent().equals(safeFact))
+                    .findFirst().orElse(null);
+            if (existing != null) {
+                longTermMemory.recordValidated(existing.getId(), Instant.now());
+                return existing.getId();
+            }
+        }
         String subject = MemorySubjectExtractor.extract(safeFact, effectiveMetadata);
         if (!subject.isBlank()) {
             effectiveMetadata.put(MemoryWriteProtocol.META_SUBJECT_SOURCE,

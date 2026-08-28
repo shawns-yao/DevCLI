@@ -681,6 +681,26 @@ class MemoryManagerTest {
     }
 
     @Test
+    void repeatedExplicitSaveValidatesExistingMemoryAndExtendsRetention() {
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager memoryManager = new MemoryManager(
+                     new StubGLMClient(List.of()), 32768, 128000, longTermMemory)) {
+            String fact = "用户默认使用简体中文短句回答";
+            MemoryManager.StoreResult first = memoryManager.storeFactWithPolicy(fact, true);
+            MemoryEntry initial = longTermMemory.retrieve(first.id()).orElseThrow();
+            Instant initialExpiry = initial.getExpiresAt();
+
+            MemoryManager.StoreResult second = memoryManager.storeFactWithPolicy(fact, true);
+            MemoryEntry validated = longTermMemory.retrieve(first.id()).orElseThrow();
+
+            assertEquals(first.id(), second.id());
+            assertEquals(1, longTermMemory.size());
+            assertEquals(1, validated.getValidatedUseCount());
+            assertTrue(validated.getExpiresAt().isAfter(initialExpiry));
+        }
+    }
+
+    @Test
     void sensitiveDebugMemoryShouldOfferASecretFreeSaveChoice() {
         try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
              MemoryManager memoryManager = new MemoryManager(
