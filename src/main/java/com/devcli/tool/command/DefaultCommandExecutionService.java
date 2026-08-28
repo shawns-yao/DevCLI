@@ -17,6 +17,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.UUID;
 
 public final class DefaultCommandExecutionService implements CommandExecutionService {
     public static final String SANDBOX_MODE_PROPERTY = "devcli.command.sandbox.mode";
@@ -69,12 +71,17 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
     }
 
     static List<String> dockerCommand(Request request, Config config) {
+        return dockerCommand(request, config, newContainerName());
+    }
+
+    static List<String> dockerCommand(Request request, Config config, String containerName) {
         String mount = "type=bind,src=" + request.projectRoot()
                 + ",dst=/workspace";
         List<String> command = new ArrayList<>();
         command.add(config.dockerBinary());
         command.addAll(List.of(
                 "run", "--rm",
+                "--name", containerName,
                 "--pull", "never",
                 "--network", "none",
                 "--cap-drop", "ALL",
@@ -93,6 +100,14 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
             command.add(2, "--user");
         }
         return command;
+    }
+
+    static List<String> dockerCleanupCommand(Config config, String containerName) {
+        return List.of(config.dockerBinary(), "rm", "-f", containerName);
+    }
+
+    private static String newContainerName() {
+        return "devcli-run-" + UUID.randomUUID().toString().replace("-", "");
     }
 
     interface Backend {
@@ -115,17 +130,25 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
 
         @Override
         public Result execute(Request request) {
-            return runProcess(dockerCommand(request, config), request, true);
+            String containerName = newContainerName();
+            return runProcess(dockerCommand(request, config, containerName), request, true,
+                    () -> removeDockerContainer(config, containerName));
         }
     }
 
     private static Result runProcess(List<String> command, Request request, boolean sandbox) {
+        return runProcess(command, request, sandbox, () -> { });
+    }
+
+    private static Result runProcess(List<String> command, Request request, boolean sandbox,
+                                     Runnable externalCleanup) {
         ExecutorService outputReader = Executors.newSingleThreadExecutor(task -> {
             Thread thread = new Thread(task, "devcli-command-output");
             thread.setDaemon(true);
             return thread;
         });
         Process process = null;
+        Runnable termination = () -> { };
         CancellationToken.Registration cancellationRegistration =
                 CancellationToken.Registration.NO_OP;
         try {
@@ -135,17 +158,18 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
             builder.redirectErrorStream(true);
             process = builder.start();
             Process running = process;
+            termination = termination(running, externalCleanup);
             cancellationRegistration = request.executionContext().cancellationToken()
                     .onCancel(ignored -> signalProcessTree(running));
             Future<String> output = outputReader.submit(() -> readOutput(running));
             if (!process.waitFor(request.timeoutSeconds(), TimeUnit.SECONDS)) {
-                terminateProcessTree(process);
+                termination.run();
                 output.cancel(true);
                 return Result.timedOut("命令执行超时（" + request.timeoutSeconds()
                         + "秒），已强制终止");
             }
             if (request.executionContext().cancellation().isPresent()) {
-                terminateProcessTree(process);
+                termination.run();
                 output.cancel(true);
                 return cancellationResult(request);
             }
@@ -158,19 +182,19 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             if (process != null) {
-                terminateProcessTree(process);
+                termination.run();
             }
             return request.executionContext().cancellation().isPresent()
                     ? cancellationResult(request)
                     : Result.cancelled("用户取消了此次工具调用");
         } catch (CancellationException e) {
             if (process != null) {
-                terminateProcessTree(process);
+                termination.run();
             }
             return cancellationResult(request);
         } catch (IOException e) {
             if (process != null) {
-                terminateProcessTree(process);
+                termination.run();
             }
             if (sandbox) {
                 throw new IllegalStateException(
@@ -179,7 +203,7 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
             throw new IllegalStateException("命令进程启动失败: " + e.getMessage(), e);
         } catch (Exception e) {
             if (process != null) {
-                terminateProcessTree(process);
+                termination.run();
             }
             if (e instanceof RuntimeException runtimeException) {
                 throw runtimeException;
@@ -250,9 +274,15 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
         List<ProcessHandle> descendants = process.toHandle().descendants().toList();
         signalProcessTree(process, descendants);
         try {
-            process.onExit().join();
+            try {
+                process.waitFor(3, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                restoreInterrupt = true;
+            }
             for (ProcessHandle descendant : descendants) {
-                descendant.onExit().join();
+                if (descendant.isAlive()) {
+                    descendant.destroyForcibly();
+                }
             }
         } finally {
             if (restoreInterrupt) {
@@ -280,16 +310,48 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
     private static void awaitOutputReader(ExecutorService outputReader) {
         boolean restoreInterrupt = Thread.interrupted();
         try {
-            while (!outputReader.isTerminated()) {
-                try {
-                    outputReader.awaitTermination(1, TimeUnit.DAYS);
-                } catch (InterruptedException e) {
-                    restoreInterrupt = true;
-                }
+            try {
+                outputReader.awaitTermination(3, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                restoreInterrupt = true;
             }
         } finally {
             if (restoreInterrupt) {
                 Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private static Runnable termination(Process process, Runnable externalCleanup) {
+        AtomicBoolean invoked = new AtomicBoolean();
+        return () -> {
+            if (!invoked.compareAndSet(false, true)) {
+                return;
+            }
+            try {
+                terminateProcessTree(process);
+            } finally {
+                externalCleanup.run();
+            }
+        };
+    }
+
+    private static void removeDockerContainer(Config config, String containerName) {
+        Process cleanup = null;
+        try {
+            cleanup = new ProcessBuilder(dockerCleanupCommand(config, containerName))
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+            if (!cleanup.waitFor(5, TimeUnit.SECONDS)) {
+                cleanup.destroyForcibly();
+            }
+        } catch (IOException e) {
+            // Docker 客户端仍会在 finally 中终止；容器运行时不可用时无法继续清理。
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            if (cleanup != null) {
+                cleanup.destroyForcibly();
             }
         }
     }

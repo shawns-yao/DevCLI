@@ -64,6 +64,22 @@ class DefaultCommandExecutionServiceTest {
     }
 
     @Test
+    void dockerCommandAssignsDeterministicNameForForcedCleanup(@TempDir Path project) {
+        DefaultCommandExecutionService.Config config =
+                DefaultCommandExecutionService.Config.resolve(new Properties(), Map.of());
+
+        List<String> command = DefaultCommandExecutionService.dockerCommand(
+                new CommandExecutionService.Request("mvn test", project, 30, true),
+                config, "devcli-run-fixed");
+
+        int nameOption = command.indexOf("--name");
+        assertTrue(nameOption > 0, command.toString());
+        assertEquals("devcli-run-fixed", command.get(nameOption + 1));
+        assertEquals(List.of("docker", "rm", "-f", "devcli-run-fixed"),
+                DefaultCommandExecutionService.dockerCleanupCommand(config, "devcli-run-fixed"));
+    }
+
+    @Test
     void dockerCommandCanRunAsExplicitNonRootUser(@TempDir Path project) {
         Properties properties = new Properties();
         properties.setProperty(DefaultCommandExecutionService.SANDBOX_USER_PROPERTY, "1000:1000");
