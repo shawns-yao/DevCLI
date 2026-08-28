@@ -10,6 +10,9 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -116,6 +119,41 @@ class ToolCapabilityTest {
                                         "{\"path\":\"second.txt\",\"content\":\"x\"}")))));
 
         assertEquals(2, registry.consumeStepModifiedFiles("step-1").size());
+    }
+
+    @Test
+    void parallelToolBatchSerializesSideEffectExecutions() {
+        try (ToolRegistry registry = new ToolRegistry()) {
+            AtomicInteger active = new AtomicInteger();
+            AtomicInteger peak = new AtomicInteger();
+            CountDownLatch bothEntered = new CountDownLatch(2);
+            ToolRegistry.ToolExecutor mutation = args -> {
+                int current = active.incrementAndGet();
+                peak.accumulateAndGet(current, Math::max);
+                bothEntered.countDown();
+                try {
+                    bothEntered.await(500, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    active.decrementAndGet();
+                }
+                return "ok";
+            };
+            registry.registerTool(new ToolRegistry.Tool(
+                    "mutate_a", "mutation a", JsonNodeFactory.instance.objectNode(), mutation,
+                    ToolRegistry.ToolEffect.PROJECT_MUTATION));
+            registry.registerTool(new ToolRegistry.Tool(
+                    "mutate_b", "mutation b", JsonNodeFactory.instance.objectNode(), mutation,
+                    ToolRegistry.ToolEffect.PROJECT_MUTATION));
+
+            List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
+                    new ToolRegistry.ToolInvocation("a", "mutate_a", "{}"),
+                    new ToolRegistry.ToolInvocation("b", "mutate_b", "{}")));
+
+            assertTrue(results.stream().allMatch(result -> result.status() == ToolStatus.SUCCESS));
+            assertEquals(1, peak.get(), "同一批次的副作用工具不得并行执行");
+        }
     }
 
     @Test

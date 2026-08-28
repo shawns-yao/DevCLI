@@ -1290,11 +1290,29 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     /**
-     * 并行执行同一轮 LLM 返回的多个工具调用。
+     * 叶子副作用工具（写文件 / 命令 / 外部变更）进程内串行锁。
      *
-     * 结果按传入顺序返回，调用方可以安全地按原 tool_call 顺序回灌消息历史。
-     * 如果某个工具超过批次超时仍未返回，会取消任务并返回超时结果；已完成工具不受影响。
+     * <p>资源租约按 stepId 判定，同一并行批次共享 stepId 时重入放行，拦不住“同一轮两个 write_file
+     * 写同一文件”或“write_file 与 execute_command 同改一文件”。此锁在 ToolRegistry 实例内把叶子
+     * 副作用串行化，只读工具不加锁、继续并行；跨进程一致性仍由项目锁 / PatchSet beforeHash 承担。</p>
      */
+    private final java.util.concurrent.locks.ReentrantLock sideEffectSerializeLock =
+            new java.util.concurrent.locks.ReentrantLock(true);
+
+    /** 叶子副作用工具需要工作区级串行；delegate_task 是编排工具，其子操作各自加锁，这里不持锁以防跨线程自锁。 */
+    private boolean isSerializedSideEffect(String toolName) {
+        if (DelegateTaskTool.NAME.equals(toolName)) {
+            return false;
+        }
+        ToolEffect effect = toolEffect(toolName);
+        return effect != ToolEffect.READ_ONLY && effect != ToolEffect.LOCAL_CONTEXT;
+    }
+
+    /**
+     * 并行执行同一轮 LLM 返回的多个工具调用。
+     * 只读工具并行，叶子副作用工具在当前 ToolRegistry 内串行；结果保持原始顺序。
+     */
+
     public List<ToolExecutionResult> executeTools(List<ToolInvocation> invocations) {
         ToolResultSizeManager.resetTurnBudget();
         if (invocations == null || invocations.isEmpty()) {
@@ -1426,10 +1444,39 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
             }
             java.util.concurrent.atomic.AtomicReference<ToolOutput> output =
                     new java.util.concurrent.atomic.AtomicReference<>(ToolOutput.text(""));
+            boolean serializeSideEffect = isSerializedSideEffect(invocation.name());
             runWithToolAccess(activeAccessScope, () ->
                     runWithResourceLease(activeResourceLeaseStep, () -> {
-                        runWithSkillContextBuffer(activeSkillBuffer,
-                                () -> output.set(executeToolOutput(invocation, executionContext)));
+                        if (!serializeSideEffect) {
+                            runWithSkillContextBuffer(activeSkillBuffer,
+                                    () -> output.set(executeToolOutput(invocation, executionContext)));
+                            return null;
+                        }
+                        // 叶子副作用：工作区级公平锁串行，避免同一并行批次竞态同一资源
+                        boolean locked;
+                        try {
+                            long remainingNanos = executionContext.remainingNanos();
+                            if (remainingNanos == Long.MAX_VALUE) {
+                                sideEffectSerializeLock.lockInterruptibly();
+                                locked = true;
+                            } else {
+                                locked = sideEffectSerializeLock.tryLock(remainingNanos, TimeUnit.NANOSECONDS);
+                            }
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw new java.util.concurrent.CancellationException("等待副作用串行锁时被中断");
+                        }
+                        if (!locked) {
+                            throw new ResourceLeaseException("另一处写入正在修改工作区，本次写入排队超时，请缩小并行写入或重试");
+                        }
+                        try {
+                            runWithSkillContextBuffer(activeSkillBuffer,
+                                    () -> output.set(executeToolOutput(invocation, executionContext)));
+                        } finally {
+                            if (sideEffectSerializeLock.isHeldByCurrentThread()) {
+                                sideEffectSerializeLock.unlock();
+                            }
+                        }
                         return null;
                     }));
             if (callToken.cancellation().isPresent()) {
