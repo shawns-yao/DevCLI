@@ -113,6 +113,59 @@ class TeamPlanReviewProtocolTest {
     }
 
     @Test
+    void acceptsValidReviewJsonSurroundedByModelExplanation() {
+        TeamPlanReviewProtocol.Evaluation result = TeamPlanReviewProtocol.evaluate("""
+                评审结论如下，证据字段包含花括号：
+                {
+                  "approved": true,
+                  "summary": "计划覆盖完整",
+                  "requirement_coverage": [
+                    {"requirement":"默认参数","status":"covered","step_ids":["step_1"],"criterion_ids":["AC-01"]}
+                  ],
+                  "criteria_reviews": [
+                    {"id":"AC-01","clear":true,"verifiable":true,"scope_valid":true,"evidence":"检查 {nested} 字符串"}
+                  ],
+                  "issues": []
+                }
+                以上为本次评审结果。
+                """, List.of("AC-01"), Set.of("step_1"));
+
+        assertTrue(result.protocolValid(), result.issues());
+        assertTrue(result.approved(), result.issues());
+    }
+
+    @Test
+    void skipsInvalidBalancedObjectBeforeValidReviewJson() {
+        TeamPlanReviewProtocol.Evaluation result = TeamPlanReviewProtocol.evaluate("""
+                前置示例 {not-json}
+                {
+                  "approved": true,
+                  "summary": "计划覆盖完整",
+                  "requirement_coverage": [
+                    {"requirement":"默认参数","status":"covered","step_ids":["step_1"],"criterion_ids":["AC-01"]}
+                  ],
+                  "criteria_reviews": [
+                    {"id":"AC-01","clear":true,"verifiable":true,"scope_valid":true,"evidence":"工具可验证"}
+                  ],
+                  "issues": []
+                }
+                """, List.of("AC-01"), Set.of("step_1"));
+
+        assertTrue(result.protocolValid(), result.issues());
+        assertTrue(result.approved(), result.issues());
+    }
+
+    @Test
+    void rejectsExplanationWithoutAValidReviewObject() {
+        TeamPlanReviewProtocol.Evaluation result = TeamPlanReviewProtocol.evaluate(
+                "评审失败，只有示例 {not-json}，没有结果对象", List.of("AC-01"), Set.of("step_1"));
+
+        assertFalse(result.protocolValid());
+        assertFalse(result.approved());
+        assertTrue(result.issues().contains("JSON"), result.issues());
+    }
+
+    @Test
     void highSeverityCriterionRequiresAConcreteCounterexample() {
         String review = """
                 {

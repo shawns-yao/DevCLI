@@ -36,7 +36,10 @@ final class TeamPlanReviewProtocol {
             return new Evaluation(false, false, "", "计划评审结果为空");
         }
         try {
-            JsonNode root = MAPPER.readTree(clean(content));
+            JsonNode root = parseReviewRoot(MAPPER, clean(content));
+            if (root == null) {
+                return new Evaluation(false, false, "", "计划评审输出不是有效 JSON");
+            }
             String summary = root.path("summary").asText("");
             List<String> problems = new ArrayList<>();
             validateRequirementCoverage(root.path("requirement_coverage"),
@@ -191,6 +194,38 @@ final class TeamPlanReviewProtocol {
             });
         }
         return result;
+    }
+
+    private static JsonNode parseReviewRoot(ObjectMapper mapper, String cleaned) {
+        if (cleaned == null || cleaned.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode direct = mapper.readTree(cleaned);
+            if (direct != null && direct.isObject()) {
+                return direct;
+            }
+        } catch (Exception ignored) {
+            // 不是独立 JSON 文档，继续按平衡括号扫描（评审模型可能在 JSON 前后附带说明文字）。
+        }
+        for (int start = 0; start < cleaned.length(); start++) {
+            if (cleaned.charAt(start) != '{') {
+                continue;
+            }
+            String candidate = TeamPlannerProtocol.extractBalancedJsonObject(cleaned, start);
+            if (candidate == null) {
+                continue;
+            }
+            try {
+                JsonNode root = mapper.readTree(candidate);
+                if (root != null && root.isObject() && root.has("approved")) {
+                    return root;
+                }
+            } catch (Exception ignored) {
+                // 当前平衡对象不是合法 JSON，继续查找后续对象。
+            }
+        }
+        return null;
     }
 
     private static String clean(String content) {

@@ -140,7 +140,7 @@ final class TeamPlannerProtocol {
                 previewOutput(invalidOutput));
     }
 
-    private static String extractBalancedJsonObject(String source, int start) {
+    static String extractBalancedJsonObject(String source, int start) {
         int depth = 0;
         boolean inString = false;
         boolean escaped = false;
