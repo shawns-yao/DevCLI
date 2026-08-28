@@ -506,6 +506,17 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         }
     }
 
+    /** 评测 / 受限运行入口：只保留显式允许的工具，包含当前未激活或暂时不可见的工具。 */
+    public synchronized void retainTools(Set<String> allowedToolNames) {
+        Set<String> allowed = allowedToolNames == null ? Set.of() : Set.copyOf(allowedToolNames);
+        boolean changed = tools.keySet().removeIf(name -> !allowed.contains(name));
+        if (changed) {
+            mcpTools.keySet().removeIf(name -> !allowed.contains(name));
+            activatedMcpToolDefinitions.removeIf(name -> !allowed.contains(name));
+            invalidateToolSearchIndex();
+        }
+    }
+
     @Override
     public Path resolveSafePath(String path) { return pathGuard.resolveSafe(path); }
     @Override

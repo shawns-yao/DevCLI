@@ -113,6 +113,11 @@ mvn -q "-Dtest=SweBenchLiteAgentBenchmarkIT" -DskipTests=false `
   "-Ddevcli.benchmark.swebench.mode=single" test
 ```
 
+`SweBenchDriver` 的 `solo` / `delegate` / `plan` 对照只改变编排方式。三种模式统一使用
+`read_file`、`write_file`、`edit_file`、`list_dir`、`grep_code`、`execute_command` 和
+`read_tool_result` 白名单，并关闭长期记忆注入；`delegate` 仅额外开放 `delegate_task`。
+驱动不开放 `search_code`，避免本机残留索引成为未记录变量。新增工具不会自动进入评测面。
+
 使用固定 Dockerfile 构建 Linux 官方 harness 后，可追加 `-Ddevcli.benchmark.swebench.evaluate=true`。Windows Python 缺少 `resource` 模块，不能直接运行官方 harness；必须使用 Linux Docker 或 Linux 主机。
 
 若 Java 访问 HuggingFace 需要本地代理，应额外传入标准 JVM `https.proxyHost` 和 `https.proxyPort` 参数。报告默认写入 `target/benchmark-reports/`；旧的跨自建任务聚合器已删除，公开 benchmark 后续按各自官方结果格式单独汇总。
