@@ -352,6 +352,15 @@ class ToolRegistryTest {
                 return "result-" + name;
             }
         };
+        com.fasterxml.jackson.databind.node.ObjectNode parameters =
+                new com.fasterxml.jackson.databind.ObjectMapper().createObjectNode();
+        parameters.put("type", "object");
+        registry.registerTool(new ToolRegistry.Tool(
+                "first", "first read", parameters, args -> "unused",
+                ToolRegistry.ToolEffect.READ_ONLY));
+        registry.registerTool(new ToolRegistry.Tool(
+                "second", "second read", parameters, args -> "unused",
+                ToolRegistry.ToolEffect.READ_ONLY));
 
         List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
                 new ToolRegistry.ToolInvocation("call_1", "first", "{}"),
@@ -380,6 +389,12 @@ class ToolRegistryTest {
                 return "result-" + name;
             }
         };
+        registry.registerTool(new ToolRegistry.Tool(
+                "slow", "slow read", JsonNodeFactory.instance.objectNode(),
+                args -> "unused", ToolRegistry.ToolEffect.READ_ONLY));
+        registry.registerTool(new ToolRegistry.Tool(
+                "fast", "fast read", JsonNodeFactory.instance.objectNode(),
+                args -> "unused", ToolRegistry.ToolEffect.READ_ONLY));
 
         List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
                 new ToolRegistry.ToolInvocation("call_1", "slow", "{}"),
@@ -408,10 +423,10 @@ class ToolRegistryTest {
         };
         registry.registerTool(new ToolRegistry.Tool(
                 "slow", "slow tool", JsonNodeFactory.instance.objectNode(),
-                args -> "slow", ToolRegistry.ToolEffect.builtIn("slow"), 1));
+                args -> "slow", ToolRegistry.ToolEffect.READ_ONLY, 1));
         registry.registerTool(new ToolRegistry.Tool(
-                "fast", "fast tool", JsonNodeFactory.instance.objectNode(),
-                args -> "fast"));
+                "fast", "fast tool", JsonNodeFactory.instance.objectNode(), args -> "fast",
+                ToolRegistry.ToolEffect.READ_ONLY));
 
         List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
                 new ToolRegistry.ToolInvocation("call_1", "slow", "{}"),
