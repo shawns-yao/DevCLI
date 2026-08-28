@@ -43,7 +43,7 @@ public class HitlToolRegistry extends ToolRegistry {
                                  ToolExecutionPipeline.Chain chain) {
         String name = context.name();
         String argumentsJson = context.argumentsJson();
-        if (!hitlHandler.isEnabled() || !ApprovalPolicy.requiresApproval(name)) {
+        if (!hitlHandler.isEnabled() || !requiresApproval(name)) {
             return chain.proceed(context);
         }
 

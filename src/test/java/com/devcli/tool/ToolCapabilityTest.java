@@ -44,7 +44,7 @@ class ToolCapabilityTest {
     }
 
     @Test
-    void isolatedProjectScopeRejectsOpenWorldMcpButAllowsProjectWrite(@TempDir Path tempDir) {
+    void isolatedProjectScopeRejectsOpenWorldMcpButAllowsProjectWrite(@TempDir Path tempDir) throws Exception {
         ToolRegistry registry = new ToolRegistry();
         registry.setProjectPath(tempDir.toString());
         McpToolDescriptor descriptor = descriptor("dangerous",
@@ -56,6 +56,11 @@ class ToolCapabilityTest {
                     "write_file", "{\"path\":\"allowed.txt\",\"content\":\"ok\"}");
             assertTrue(write.isSuccess(), write.text());
 
+            ToolOutput edit = registry.executeToolOutput(
+                    "edit_file",
+                    "{\"path\":\"allowed.txt\",\"old_string\":\"ok\",\"new_string\":\"edited\"}");
+            assertTrue(edit.isSuccess(), edit.text());
+
             ToolOutput browserConnect = registry.executeToolOutput("browser_connect", "{}");
             assertEquals(ToolStatus.REJECTED, browserConnect.status());
             assertEquals(ToolErrorCode.CAPABILITY_DENIED, browserConnect.errorCode());
@@ -66,7 +71,7 @@ class ToolCapabilityTest {
             return null;
         });
 
-        assertTrue(Files.exists(tempDir.resolve("allowed.txt")));
+        assertEquals("edited", Files.readString(tempDir.resolve("allowed.txt")));
     }
 
     @Test

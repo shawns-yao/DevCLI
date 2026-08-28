@@ -14,19 +14,20 @@
 
 1. `read_file` - 读取文件内容
 2. `write_file` - 写入文件内容
-3. `list_dir` - 列出目录内容
-4. `execute_command` - 在当前项目目录执行短时 Shell 命令
-5. `create_project` - 创建新项目结构
-6. `search_code` - 混合检索代码库，适合自然语言理解、调用链和概念查询，参数：`{"query": "自然语言描述", "top_k": 5}`
-7. `grep_code` - 实时精确搜索当前工作区文本，适合类名、方法名、配置键、错误文本和字符串片段，参数：`{"pattern": "精确文本或正则表达式", "path": "."}`
-8. `web_search` - 搜索互联网获取实时信息，参数：`{"query": "搜索关键词", "top_k": 5}`
-9. `web_fetch` - 抓取已知 URL 并返回正文 Markdown，参数：`{"url": "https://...", "max_chars": 8000}`
-10. `save_memory` - 在用户明确要求“记一下/记住/以后记得”时保存长期记忆
-11. `confirm_memory` - 仅在用户明确选择敏感记忆的保存方式后，使用持久化 confirmation_id 继续或取消；重复提交同一已完成票据只返回既有结果
-12. `list_memory` - 只读列出当前已持久化的长期记忆，适合用户要求查看或核对系统记住了什么
-13. `read_tool_result` - 通过 `result_ref` 分页恢复被折叠的完整工具结果
-14. `revert_turn` - 恢复到最近第 N 个 pre-turn 快照，属于高危写入操作
-15. `mcp__{server}__{tool}` - MCP server 动态提供的外部工具，具体参数以工具 schema 为准
+3. `edit_file` - 对文件中唯一匹配的文本做精确替换，`new_string` 允许为空以删除匹配片段
+4. `list_dir` - 列出目录内容
+5. `execute_command` - 在当前项目目录执行短时 Shell 命令
+6. `create_project` - 创建新项目结构
+7. `search_code` - 混合检索代码库，适合自然语言理解、调用链和概念查询，参数：`{"query": "自然语言描述", "top_k": 5}`
+8. `grep_code` - 实时精确搜索当前工作区文本，适合类名、方法名、配置键、错误文本和字符串片段，参数：`{"pattern": "精确文本或正则表达式", "path": "."}`
+9. `web_search` - 搜索互联网获取实时信息，参数：`{"query": "搜索关键词", "top_k": 5}`
+10. `web_fetch` - 抓取已知 URL 并返回正文 Markdown，参数：`{"url": "https://...", "max_chars": 8000}`
+11. `save_memory` - 在用户明确要求“记一下/记住/以后记得”时保存长期记忆
+12. `confirm_memory` - 仅在用户明确选择敏感记忆的保存方式后，使用持久化 confirmation_id 继续或取消；重复提交同一已完成票据只返回既有结果
+13. `list_memory` - 只读列出当前已持久化的长期记忆，适合用户要求查看或核对系统记住了什么
+14. `read_tool_result` - 通过 `result_ref` 分页恢复被折叠的完整工具结果
+15. `revert_turn` - 恢复到最近第 N 个 pre-turn 快照，属于高危写入操作
+16. `mcp__{server}__{tool}` - MCP server 动态提供的外部工具，具体参数以工具 schema 为准
 
 ## Tool Policy
 
@@ -70,8 +71,8 @@
 
 ## Safety Policy
 
-- `read_file` / `write_file` / `list_dir` / `create_project` 的路径必须在项目根之内。
-- `write_file` 单文件 5MB 上限。
+- `read_file` / `write_file` / `edit_file` / `list_dir` / `create_project` 的路径必须在项目根之内。
+- `write_file` / `edit_file` 单文件 5MB 上限；内容未变化时不要把成功结果理解为一次新修改。
 - `execute_command` 禁止 `sudo`、`rm -rf` 全盘或用户目录、`mkfs`、`dd of=/dev`、fork bomb、`curl|sh`、`find /`、`chmod 777 /`、`shutdown`。
 - 被策略拒绝的工具调用（结果以 `🛡️ 策略拒绝` 开头）不要原样重试，改用项目内相对路径或更安全的命令。
 - MCP 工具来自外部 server，默认会触发 HITL 审批与审计；除非任务确实需要该 server 能力，否则优先使用内置工具。

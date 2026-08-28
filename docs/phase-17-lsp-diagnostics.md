@@ -18,9 +18,9 @@ Agent 写完代码后，不等用户手动执行 `mvn compile`，就能在下一
   - 对 `*.java` 文件运行 JavaParser 语法诊断
   - 按文件维护 pending diagnostics
   - `flushPendingDiagnostics()` 一次性返回并清空诊断
-- `ToolRegistry.write_file`
+- `ToolRegistry.write_file` / `ToolRegistry.edit_file`
   - 成功写入后触发 `runPostEditLspHook`
-  - hook 失败只记录 trace，不影响 `write_file` 工具结果
+  - hook 失败只记录 trace，不影响文件工具结果
 - `Agent` / `PlanExecuteAgent` / `SubAgent`
   - 每轮 LLM 请求前调用 `flushPendingLspDiagnostics()`
   - 有诊断时渲染给用户，并追加 `[LSP 诊断注入]` 合成 user message
@@ -49,7 +49,7 @@ DEVCLI_LSP_MAX_DIAGNOSTICS=20
 
 - 只做 Java 语法级诊断，不做完整 Maven 编译。
 - 不启动 JDT LS / rust-analyzer / pyright / gopls。
-- 不解析 `execute_command` 里的手写补丁，也不支持 `edit_file` / `apply_patch` 工具，因为当前 DevCLI 内置工具里还没有这两个工具。
+- 不解析 `execute_command` 里的手写补丁，也不支持未注册的 `apply_patch` 工具；内置 `edit_file` 与 `write_file` 共用诊断入口。
 - 多 Agent 并发时 pending diagnostics 挂在共享 `ToolRegistry` 上，下一条进入 LLM 请求的执行链会消费诊断。
 
 ## 后续增强

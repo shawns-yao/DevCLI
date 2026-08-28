@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FileToolProviderPaginationTest {
@@ -77,6 +78,22 @@ class FileToolProviderPaginationTest {
             assertTrue(output.text().contains("cde"), output.text());
             assertFalse(output.text().contains("abcdef"), output.text());
             assertTrue(output.text().contains("next_cursor=5"), output.text());
+        }
+    }
+
+    @Test
+    void readFileRejectsMixedLineAndCharacterRanges() throws Exception {
+        Files.writeString(projectRoot.resolve("mixed.txt"), "one\ntwo\nthree\n");
+
+        try (ToolRegistry registry = new ToolRegistry()) {
+            registry.setProjectPath(projectRoot.toString());
+            ToolOutput output = registry.executeToolOutput(
+                    "read_file",
+                    "{\"path\":\"mixed.txt\",\"start_line\":1,\"offset\":2}");
+
+            assertEquals(ToolStatus.REJECTED, output.status());
+            assertEquals(ToolErrorCode.INVALID_ARGUMENTS, output.errorCode());
+            assertTrue(output.text().contains("不能"), output.text());
         }
     }
 

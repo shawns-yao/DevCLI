@@ -112,7 +112,7 @@ Main
 - `LongTermMemory（长期记忆）` 保存跨任务稳定事实。任务结束时，脱敏且限长的任务快照先写入 SQLite 晋升队列，再由空工具、无历史记忆的隔离 Curator 输出 `SAVE / CONFIRM / SKIP`。自动 `SAVE` 必须为 HIGH 且能解析出快照原文，落库为 `CURATED`；人工确认后为 `REVIEWED`。检索按 `scope_type/scope_key` 隔离并融合关键词与向量结果；实际注入只更新召回观测，用户确认或同值重复显式保存才刷新新鲜度并分档延长 TTL。来源原文以脱敏快照和 SHA-256 固化，不依赖原会话保留。
 - `PathGuard（路径围栏）` 负责限制文件访问不逃逸项目根。
 - `ToolEffect + ToolAccessScope（工具副作用能力）` 由执行管线强制：非隔离分析任务只获得只读能力，隔离任务才允许项目写入和主机命令；MCP 缺失只读注解或声明 destructive/openWorld 时按外部副作用处理。工具参数先转换为稳定语义指纹，字段顺序、查询大小写、Unicode 等价字符和冗余空白不再绕过停滞检测；正则 pattern 保持大小写敏感，避免错误缓存命中；成功的只读结果会短期缓存，任何副作用执行都会清空缓存。
-- `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 并行执行时拦截 `write_file`，同一文件只能被一个运行中步骤写入；并行工具线程会继承步骤租约归属，任务结束后释放租约。`ToolRegistry` 托管共享后台清理器，project fork 复用同一线程，最后一个注册表关闭后停止；周期可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
+- `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 并行执行时拦截 `write_file` / `edit_file`，同一文件只能被一个运行中步骤写入；并行工具线程会继承步骤租约归属，任务结束后释放租约。`ToolRegistry` 托管共享后台清理器，project fork 复用同一线程，最后一个注册表关闭后停止；周期可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
 - `PatchSet（补丁集）` 是隔离结果进入主项目的唯一文件回写边界：JVM 公平锁和 `~/.devcli/locks/project-commit/` 下的跨进程文件锁覆盖预检、应用和 checkpoint 终态；构建阶段流式计算哈希，未变化文件不读取完整内容。协议版本 8 在应用前保存目标哈希与原文件备份，并保存验收元数据及适用节点、原步骤对应 Worker/Reviewer 身份、按步骤归属的有界 AttemptDigest、在位重做次数和失败现场；恢复时按最终哈希提升完成、继续待执行或自动回滚，同时保持原步骤分配和原重做额度。Reviewer 拒绝、任务失败、用户取消、前置哈希冲突、非普通文件覆盖或路径/链接逃逸都会阻止整批应用。
 - `CommandGuard（命令防线）` 是危险命令快速拒绝层，不替代 HITL 和路径策略。
 - `HitlToolRegistry（审批工具注册表）` 位于真实工具执行前，保证危险操作先经过审批和策略判定。
@@ -490,6 +490,7 @@ Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个
 |------|-------------|
 | `read_file` | 读取文件 |
 | `write_file` | 写入文件 |
+| `edit_file` | 唯一匹配替换文件片段；空替换可用于删除 |
 | `list_dir` | 列出目录 |
 | `execute_command` | 执行短时 shell 命令 |
 | `create_project` | 创建基础项目结构 |
@@ -510,7 +511,7 @@ Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个
 
 工具边界：
 
-- `read_file` / `write_file` 必须通过路径策略校验。
+- `read_file` / `write_file` / `edit_file` 必须通过路径策略校验；写入与编辑单文件上限均为 5MB，内容未变化时不会推进上下文版本。
 - `execute_command` 面向短时命令，不适合托管长期后台服务。
 - `grep_code` 是实时精确文本搜索，适合类名、方法名、配置键、错误文本和固定字符串片段；`search_code` 保持 keyword + semantic + bounded graph 混合检索，适合自然语言理解、调用链和概念查询。
 - `web_fetch` 适合已知 URL；遇到 SPA 或防爬限制时再切浏览器/MCP。

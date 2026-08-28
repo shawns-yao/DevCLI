@@ -4,7 +4,7 @@
 
 `ResourceConflictDetector` handles planner-time conflicts by splitting executable tasks into conflict-free waves. That is not enough when a Worker discovers extra files at execution time, for example changing `UserDTO.java` while the original task only mentioned `User.java`.
 
-This design adds a runtime write barrier at `ToolRegistry.write_file` so parallel Agent steps cannot physically write the same file at the same time.
+This design adds a runtime write barrier at `ToolRegistry.write_file` and `ToolRegistry.edit_file` so parallel Agent steps cannot physically write the same file at the same time.
 
 ## Non-Goals
 
@@ -22,14 +22,14 @@ Each executable step runs tools inside a resource lease context:
 ```text
 step starts
 -> ToolRegistry.runWithResourceLease(step_id, action)
--> write_file resolves PathGuard-safe absolute path
+-> write_file/edit_file resolves PathGuard-safe absolute path
 -> ResourceLeaseManager.acquireWrite(step_id, path)
 -> write allowed only if no other running step owns the same path
 -> step finishes
 -> releaseResourceLeases(step_id)
 ```
 
-If another running step already owns the file, `write_file` returns a policy rejection:
+If another running step already owns the file, the file mutation tool returns a policy rejection:
 
 ```text
 资源写入冲突: <path> 已由步骤 [step_a] 持有，当前步骤 [step_b] 不能并发写入
@@ -52,7 +52,7 @@ merge only as an explicit future recovery path
 
 Implemented now:
 
-- `write_file` write lease check.
+- `write_file` and `edit_file` write lease checks.
 - Same step may rewrite the same file.
 - Different concurrent steps cannot write the same file.
 - `/plan` task execution binds `task_id` as the lease owner.
@@ -64,7 +64,6 @@ Implemented now:
 
 Still future work:
 
-- `edit_file` patch tool, if introduced, must use the same barrier.
 - Runtime lock upgrade should be reported as structured `RESOURCE_CONFLICT`.
 - Planner should output `read_set` / `write_set`.
 - Worker writes should eventually produce `PatchSet` before applying to shared workspace.

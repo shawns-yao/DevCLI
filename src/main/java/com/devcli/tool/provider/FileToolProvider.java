@@ -80,6 +80,9 @@ public final class FileToolProvider implements ToolProvider {
                     } catch (Exception ignored) {
                         // 二进制 / 大文件 / 编码错读不出来时，前文当 null 处理（diff 退化为长度提示）
                     }
+                    if (java.util.Objects.equals(before, content)) {
+                        return ToolOutput.success("文件内容未变化，无需写入: " + path);
+                    }
                     // 过期写入屏障：本步骤读过该文件、期间内容变了，说明要基于旧版本写回，
                     // 直接写会静默覆盖对方改动。抛策略异常让模型看到可执行的恢复动作（重读后重写）。
                     WriteGateResult writeGate = context.validateWrite(activeStep, safe, before);
@@ -100,6 +103,92 @@ public final class FileToolProvider implements ToolProvider {
                     } catch (Exception e) {
                         return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
                                 "写入文件失败: " + e.getMessage(), false);
+                    }
+                },
+                -1
+        ));
+
+        context.registerTool(ToolRegistry.Tool.contextualStructured(
+                "edit_file",
+                "对已存在文件做精确字符串替换，适合小范围修改而无需重写整个文件。先用 read_file 核对原文；old_string 必须与文件逐字一致（含缩进/空白/换行）且在文件中唯一出现，new_string 为替换内容（可为空串表示删除）",
+                context.createToolParameters(
+                        new ToolParameter("path", "string", "文件路径", true),
+                        new ToolParameter("old_string", "string", "被替换的原文，必须在文件中唯一匹配", true),
+                        ToolParameter.requiredStringAllowingEmpty("new_string", "替换后的文本")
+                ),
+                (args, executionContext) -> {
+                    executionContext.throwIfCancelled();
+                    String path = args.get("path");
+                    String oldString = args.get("old_string");
+                    String newString = args.get("new_string") == null ? "" : args.get("new_string");
+                    if (oldString == null || oldString.isEmpty()) {
+                        return invalid("old_string 不能为空");
+                    }
+                    Path safe = context.resolveSafePath(path);
+                    if (!Files.exists(safe) || !Files.isRegularFile(safe)) {
+                        return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                                "文件不存在或不是普通文件，无法编辑: " + path + "（新建文件请用 write_file）", true);
+                    }
+                    long sourceBytes;
+                    try {
+                        sourceBytes = Files.size(safe);
+                    } catch (Exception e) {
+                        return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                                "读取文件大小失败: " + e.getMessage(), false);
+                    }
+                    if (sourceBytes > context.maxWriteFileBytes()) {
+                        throw new PolicyException("待编辑文件 " + sourceBytes + " 字节超过 "
+                                + (context.maxWriteFileBytes() / 1024 / 1024) + "MB 上限");
+                    }
+                    String before;
+                    try {
+                        before = Files.readString(safe);
+                    } catch (Exception e) {
+                        return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                                "读取文件失败: " + e.getMessage(), false);
+                    }
+                    int occurrences = countOccurrences(before, oldString);
+                    if (occurrences == 0) {
+                        return ToolOutput.rejected(ToolErrorCode.INVALID_ARGUMENTS,
+                                "old_string 未在文件中匹配到。请重新 read_file 核对确切文本（含缩进/空白/换行）后再编辑", true);
+                    }
+                    if (occurrences > 1) {
+                        return ToolOutput.rejected(ToolErrorCode.INVALID_ARGUMENTS,
+                                "old_string 在文件中出现 " + occurrences
+                                        + " 次，必须唯一。请带上更多前后文使其唯一，或分多次精确编辑", true);
+                    }
+                    String content = before.replace(oldString, newString);
+                    if (content.equals(before)) {
+                        return ToolOutput.success("文件内容未变化，无需写入: " + path);
+                    }
+                    int contentBytes = content.getBytes(StandardCharsets.UTF_8).length;
+                    if (contentBytes > context.maxWriteFileBytes()) {
+                        throw new PolicyException("编辑后内容 " + contentBytes + " 字节超过 "
+                                + (context.maxWriteFileBytes() / 1024 / 1024) + "MB 上限");
+                    }
+                    String activeStep = context.currentResourceLeaseStep();
+                    if (activeStep != null && !activeStep.isBlank()) {
+                        context.acquireWriteLease(activeStep, safe);
+                        if (!context.isWriteLeaseValid(activeStep, safe)) {
+                            throw new PolicyException("写入冲突: 租约已失效，文件 " + path
+                                    + " 可能正在被其他任务写入");
+                        }
+                    }
+                    WriteGateResult writeGate = context.validateWrite(activeStep, safe, before);
+                    if (!writeGate.isAllowed()) {
+                        return ToolOutput.rejected(ToolErrorCode.STALE_CONTEXT,
+                                writeGate.reason(), true);
+                    }
+                    try {
+                        executionContext.throwIfCancelled();
+                        Files.writeString(safe, content);
+                        context.recordFileWrite(path, safe, before, content, activeStep);
+                        executionContext.throwIfCancelled();
+                        return ToolOutput.success("文件已精确修改: " + path + "（唯一替换 1 处，"
+                                + oldString.length() + " -> " + newString.length() + " 字符）");
+                    } catch (Exception e) {
+                        return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                                "编辑写入失败: " + e.getMessage(), false);
                     }
                 },
                 -1
@@ -323,6 +412,16 @@ public final class FileToolProvider implements ToolProvider {
 
     private static boolean hasValue(Map<String, String> args, String name) {
         return !value(args, name).isBlank();
+    }
+
+    private static int countOccurrences(String text, String token) {
+        int count = 0;
+        int index = 0;
+        while ((index = text.indexOf(token, index)) >= 0) {
+            count++;
+            index += token.length();
+        }
+        return count;
     }
 
     private static String value(Map<String, String> args, String name) {

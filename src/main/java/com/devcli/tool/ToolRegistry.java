@@ -64,8 +64,6 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     // write_file 单次写入字节数上限。LLM 想塞超大内容时通常是误生成（重复粘贴 / hallucinate 大段日志），
     // 5MB 对常规代码生成 / 文档撰写完全够用，超过即拒，避免磁盘灌满与误覆盖。
     private static final int MAX_WRITE_FILE_BYTES = 5 * 1024 * 1024;
-    // 需要审计的内置工具（与 ApprovalPolicy 的 DANGEROUS_TOOLS 保持一致）；MCP 工具按前缀动态纳入审计。
-    private static final Set<String> AUDIT_TOOLS = Set.of("write_file", "execute_command", "create_project", "revert_turn");
     private static final String PIPELINE_PARSED_ARGUMENTS = "parsedArguments";
     private static final String PIPELINE_BROWSER_AUDIT = "browserAuditMetadata";
     private final Map<String, Tool> tools = new ConcurrentHashMap<>();
@@ -727,7 +725,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public JsonNode createToolParameters(ToolParameter... params) {
         Param[] converted = Arrays.stream(params == null ? new ToolParameter[0] : params)
                 .map(param -> new Param(param.name(), param.type(), param.description(), param.required(),
-                        param.enumValues() == null ? List.of() : param.enumValues()))
+                        param.enumValues() == null ? List.of() : param.enumValues(), param.allowEmpty()))
                 .toArray(Param[]::new);
         return createParameters(converted);
     }
@@ -743,7 +741,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
             ObjectNode prop = properties.putObject(param.name());
             prop.put("type", param.type());
             prop.put("description", param.description());
-            if ("string".equals(param.type()) && param.required()) {
+            if ("string".equals(param.type()) && param.required() && !param.allowEmpty()) {
                 prop.put("minLength", 1);
             }
             if (param.enumValues() != null && !param.enumValues().isEmpty()) {
@@ -1124,7 +1122,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     private ToolOutput executeWithAudit(ToolExecutionPipeline.Context context,
                                         ToolExecutionPipeline.Chain chain) {
-        boolean audit = shouldAudit(context.name());
+        boolean audit = requiresAudit(context.name());
         long start = System.nanoTime();
         try {
             ToolOutput output = chain.proceed(context);
@@ -1300,6 +1298,34 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     public AuditLog getAuditLog() {
         return auditLog;
+    }
+
+    public boolean requiresApproval(String name) {
+        if (name != null && name.startsWith("mcp__")) {
+            return true;
+        }
+        Optional<BuiltInToolPolicy.Policy> policy = BuiltInToolPolicy.find(name);
+        if (policy.isPresent()) {
+            return policy.get().requiresApproval();
+        }
+        Tool tool = tools.get(name);
+        return tool != null && isMaterialSideEffect(tool.effect());
+    }
+
+    public boolean requiresAudit(String name) {
+        if (name != null && name.startsWith("mcp__")) {
+            return true;
+        }
+        Optional<BuiltInToolPolicy.Policy> policy = BuiltInToolPolicy.find(name);
+        if (policy.isPresent()) {
+            return policy.get().audited();
+        }
+        Tool tool = tools.get(name);
+        return tool != null && isMaterialSideEffect(tool.effect());
+    }
+
+    private static boolean isMaterialSideEffect(ToolEffect effect) {
+        return effect != ToolEffect.READ_ONLY && effect != ToolEffect.LOCAL_CONTEXT;
     }
 
     /**
@@ -1586,10 +1612,6 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         return tools.containsKey(name);
     }
 
-    private static boolean shouldAudit(String name) {
-        return AUDIT_TOOLS.contains(name) || (name != null && name.startsWith("mcp__"));
-    }
-
     private static String mcpDescription(McpToolDescriptor descriptor) {
         String base = descriptor.description() == null || descriptor.description().isBlank()
                 ? "MCP server 提供的外部工具"
@@ -1616,14 +1638,15 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     // 记录定义
-    private record Param(String name, String type, String description, boolean required, List<String> enumValues) {
+    private record Param(String name, String type, String description, boolean required,
+                         List<String> enumValues, boolean allowEmpty) {
         private Param(String name, String type, String description, boolean required) {
-            this(name, type, description, required, List.of());
+            this(name, type, description, required, List.of(), false);
         }
 
         private Param(String name, String type, String description, boolean required, String... enumValues) {
             this(name, type, description, required,
-                    enumValues == null || enumValues.length == 0 ? List.of() : List.of(enumValues));
+                    enumValues == null || enumValues.length == 0 ? List.of() : List.of(enumValues), false);
         }
     }
 
@@ -1643,17 +1666,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         }
 
         static ToolEffect builtIn(String name) {
-            return switch (name == null ? "" : name) {
-                case "read_file", "read_tool_result", "list_dir", "search_code", "grep_code",
-                        "web_search", "web_fetch", "list_memory", "search_tools",
-                        "browser_status" -> READ_ONLY;
-                case "load_skill" -> LOCAL_CONTEXT;
-                case "write_file", "create_project", "revert_turn" -> PROJECT_MUTATION;
-                case "browser_connect", "browser_disconnect" -> EXTERNAL_MUTATION;
-                case "execute_command" -> HOST_PROCESS;
-                case "save_memory", "confirm_memory" -> EXTERNAL_MUTATION;
-                default -> EXTERNAL_MUTATION;
-            };
+            return BuiltInToolPolicy.effectOrDefault(name);
         }
     }
 

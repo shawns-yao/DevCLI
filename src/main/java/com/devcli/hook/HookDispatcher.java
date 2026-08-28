@@ -189,7 +189,7 @@ public final class HookDispatcher {
                 || !hitlRegistry.getHitlHandler().isEnabled()) {
             throw new IllegalStateException("副作用 Hook 需要启用 HITL");
         }
-        if (!ApprovalPolicy.requiresApproval(hook.tool())) {
+        if (!registry.requiresApproval(hook.tool())) {
             throw new IllegalStateException("副作用 Hook 工具没有逐次审批策略");
         }
     }

@@ -150,6 +150,22 @@ class HitlToolRegistryTest {
     }
 
     @Test
+    void editFileRequiresApprovalBeforeMutation(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("editable.txt"), "before");
+        StubHandler stub = new StubHandler(req -> ApprovalResult.reject("review edit"));
+        HitlToolRegistry registry = new HitlToolRegistry(stub);
+        registry.setProjectPath(tempDir.toString());
+
+        ToolOutput output = registry.executeToolOutput("edit_file",
+                "{\"path\":\"editable.txt\",\"old_string\":\"before\",\"new_string\":\"after\"}");
+
+        assertEquals(ToolStatus.REJECTED, output.status());
+        assertEquals(ToolErrorCode.HITL_REJECTED, output.errorCode());
+        assertEquals(1, stub.requestCount());
+        assertEquals("before", Files.readString(tempDir.resolve("editable.txt")));
+    }
+
+    @Test
     void modifiedDecisionExecutesToolWithModifiedArgs(@TempDir Path tempDir) throws Exception {
         Path original = tempDir.resolve("original.txt");
         Path modified = tempDir.resolve("modified.txt");
