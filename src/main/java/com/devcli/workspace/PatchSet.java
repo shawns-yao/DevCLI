@@ -31,7 +31,13 @@ public final class PatchSet {
     }
 
     public record FileChange(String relativePath, ChangeType type,
-                             String beforeHash, String afterHash, byte[] content) {
+                             String beforeHash, String afterHash, byte[] content,
+                             Boolean executable) {
+        public FileChange(String relativePath, ChangeType type,
+                          String beforeHash, String afterHash, byte[] content) {
+            this(relativePath, type, beforeHash, afterHash, content, null);
+        }
+
         public FileChange {
             if (relativePath == null || relativePath.isBlank()) {
                 throw new IllegalArgumentException("relativePath is required");
@@ -119,6 +125,15 @@ public final class PatchSet {
 
         try {
             for (FileChange change : changes) {
+                if (change.type() == ChangeType.DELETE) {
+                    if (!MISSING_HASH.equals(change.afterHash())) {
+                        return ApplyResult.failure("afterHash 与删除变更不一致: "
+                                + change.relativePath());
+                    }
+                } else if (!hash(change.content()).equals(change.afterHash())) {
+                    return ApplyResult.failure("afterHash 与内容不一致: "
+                            + change.relativePath());
+                }
                 Path target = resolveSafe(root, change.relativePath());
                 if (hasUnsafePathEntry(root, target)) {
                     conflicts.add(change.relativePath());
@@ -167,6 +182,9 @@ public final class PatchSet {
                                         StandardCopyOption.REPLACE_EXISTING);
                             } catch (IOException atomicFailure) {
                                 Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
+                            }
+                            if (change.executable() != null) {
+                                target.toFile().setExecutable(change.executable(), false);
                             }
                         } finally {
                             Files.deleteIfExists(temporary);

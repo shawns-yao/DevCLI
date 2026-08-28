@@ -59,6 +59,9 @@ public final class IsolatedWorkspace implements AutoCloseable {
                                     WorkspaceCleanupPolicy cleanupPolicy) throws IOException {
         Path root = normalize(projectRoot);
         Path base = normalize(workspaceBase);
+        if (root.startsWith(base)) {
+            throw new IOException("workspace base must not contain project root: " + base);
+        }
         Files.createDirectories(root);
         Files.createDirectories(base);
         cleanupPolicy.cleanup(base);
@@ -135,7 +138,8 @@ public final class IsolatedWorkspace implements AutoCloseable {
                         ? PatchSet.ChangeType.ADD
                         : PatchSet.ChangeType.MODIFY;
                 changes.add(new PatchSet.FileChange(
-                        relativePath, type, beforeHash, contentHash, content));
+                        relativePath, type, beforeHash, contentHash, content,
+                        Files.isExecutable(file)));
                 return FileVisitResult.CONTINUE;
             }
         });

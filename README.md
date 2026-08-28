@@ -78,7 +78,7 @@ DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、�
 - `ExecutionGraph（执行图）`：Plan 与 Multi-Agent 共用依赖就绪判断、最终集成调度、缺失依赖和环检测，避免两条编排路径各自实现 DAG 规则。
 - `OrchestrationProfile + OrchestrationWaveExecutor（编排配置与波次执行器）`：公开 Plan 固定启用 Worker、Reviewer 和 checkpoint；波次执行器按 DAG 与资源冲突使用有界线程池，并统一异常归属、独立输出缓冲与稳定顺序归并。STANDARD 仅保留为内部兼容实现，不再进入 CLI 路由。
 - `ExecutionArtifact（执行产物）`：Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用状态、输出、摘要、修改资源、错误、尝试次数与时间戳；checkpoint 协议版本 8 额外保存验收方式、验证器和适用节点，并保存 PatchSet 写前日志、稳定子代理身份、步骤分配、消息游标、有界失败尝试摘要和已消耗的在位重做额度，拒绝未来版本。
-- `Workspace + PatchSet（隔离工作区与补丁集）`：副作用任务通过可替换后端物化隔离目录；Git 仓库默认使用原生 worktree 并叠加当前脏文件、删除文件、未跟踪及被忽略文件，非 Git 目录优先使用文件系统级写时复制，不支持时回退有界复制；PatchSet 逐文件流式哈希，只把变更文件内容载入内存；JVM 公平锁与跨进程文件锁共同串行化补丁预检、应用和 checkpoint 终态。
+- `Workspace + PatchSet（隔离工作区与补丁集）`：副作用任务通过可替换后端物化隔离目录；Git 仓库默认使用原生 worktree 并叠加当前脏文件、删除文件、未跟踪及被忽略文件（常见 `.env`、凭据和密钥文件会过滤），非 Git 目录优先使用文件系统级写时复制，不支持时回退有界复制；PatchSet 逐文件流式哈希，只把变更文件内容载入内存，并校验内容哈希、保留可执行标记；JVM 公平锁与跨进程文件锁共同串行化补丁预检、应用、Git worktree 元数据操作和 checkpoint 终态。
 - `Image Input`：支持 `@image:` 本地路径、file URL 和剪贴板图片，图片会做尺寸、格式和大小处理后进入模型输入。
 
 ## Architecture

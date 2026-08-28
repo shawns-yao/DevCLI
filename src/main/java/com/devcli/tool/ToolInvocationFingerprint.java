@@ -68,15 +68,19 @@ public final class ToolInvocationFingerprint {
             return result;
         }
         if (node.isTextual()) {
-            String value = Normalizer.normalize(node.asText(), Normalizer.Form.NFKC)
-                    .replaceAll("\\s+", " ").trim();
+            String raw = node.asText();
             if (PATH_FIELDS.contains(fieldName)) {
-                value = normalizePath(value);
+                return TextNode.valueOf(normalizePath(
+                        Normalizer.normalize(raw, Normalizer.Form.NFKC)));
             }
             if (CASE_INSENSITIVE_FIELDS.contains(fieldName)) {
-                value = value.toLowerCase(Locale.ROOT);
+                String value = Normalizer.normalize(raw, Normalizer.Form.NFKC)
+                        .replaceAll("\\s+", " ").trim()
+                        .toLowerCase(Locale.ROOT);
+                return TextNode.valueOf(value);
             }
-            return TextNode.valueOf(value);
+            // content / pattern / command 等不透明字段必须保持精确文本，避免误触发重复调用熔断。
+            return TextNode.valueOf(raw);
         }
         return node;
     }

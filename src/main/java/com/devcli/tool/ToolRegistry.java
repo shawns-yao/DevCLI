@@ -495,6 +495,19 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         invalidateToolSearchIndex();
     }
 
+    /**
+     * 评测 / 受限运行入口：按名移除一个已注册工具（如闭卷 benchmark 禁用 web_search / save_memory）。
+     * 只影响当前 ToolRegistry 实例，默认产品路径不调用。
+     */
+    public synchronized void removeTool(String toolName) {
+        if (toolName == null || toolName.isBlank()) {
+            return;
+        }
+        if (tools.remove(toolName) != null) {
+            invalidateToolSearchIndex();
+        }
+    }
+
     @Override
     public Path resolveSafePath(String path) { return pathGuard.resolveSafe(path); }
     @Override
@@ -1300,7 +1313,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
             new java.util.concurrent.locks.ReentrantLock(true);
 
     /** 叶子副作用工具需要工作区级串行；delegate_task 是编排工具，其子操作各自加锁，这里不持锁以防跨线程自锁。 */
-    private boolean isSerializedSideEffect(String toolName) {
+    boolean isSerializedSideEffect(String toolName) {
         if (DelegateTaskTool.NAME.equals(toolName)) {
             return false;
         }

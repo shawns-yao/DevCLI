@@ -87,6 +87,37 @@ class PatchSetTest {
                 "PatchSet 不得经符号链接写出项目根目录");
     }
 
+    @Test
+    void rejectsChangeWhoseAfterHashDoesNotMatchContent(@TempDir Path tempDir) {
+        Path project = tempDir.resolve("project");
+        byte[] content = "actual".getBytes(StandardCharsets.UTF_8);
+        PatchSet patchSet = new PatchSet(List.of(new PatchSet.FileChange(
+                "file.txt", PatchSet.ChangeType.ADD, PatchSet.MISSING_HASH,
+                "not-the-content-hash", content)));
+
+        PatchSet.ApplyResult result = patchSet.apply(project);
+
+        assertFalse(result.applied());
+        assertTrue(result.error().contains("afterHash"), result.error());
+        assertFalse(Files.exists(project.resolve("file.txt")));
+    }
+
+    @Test
+    void preservesExecutableFlagWhenApplyingChange(@TempDir Path tempDir) throws Exception {
+        assumeTrue(Files.getFileStore(tempDir).supportsFileAttributeView("posix"),
+                "当前文件系统不支持 POSIX 权限");
+        Path project = Files.createDirectories(tempDir.resolve("project"));
+        byte[] content = "#!/bin/sh\n".getBytes(StandardCharsets.UTF_8);
+        PatchSet patchSet = new PatchSet(List.of(new PatchSet.FileChange(
+                "run.sh", PatchSet.ChangeType.ADD, PatchSet.MISSING_HASH,
+                PatchSet.hash(content), content, true)));
+
+        PatchSet.ApplyResult result = patchSet.apply(project);
+
+        assertTrue(result.applied());
+        assertTrue(Files.isExecutable(project.resolve("run.sh")));
+    }
+
     private static void createDirectoryLink(Path link, Path target) throws Exception {
         if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")) {
             Process process = new ProcessBuilder(

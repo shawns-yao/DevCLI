@@ -64,6 +64,19 @@ class DefaultCommandExecutionServiceTest {
     }
 
     @Test
+    void dockerCommandCanRunAsExplicitNonRootUser(@TempDir Path project) {
+        Properties properties = new Properties();
+        properties.setProperty(DefaultCommandExecutionService.SANDBOX_USER_PROPERTY, "1000:1000");
+        DefaultCommandExecutionService.Config config =
+                DefaultCommandExecutionService.Config.resolve(properties, Map.of());
+
+        List<String> command = DefaultCommandExecutionService.dockerCommand(
+                new CommandExecutionService.Request("id", project, 30, true), config);
+
+        assertEquals(List.of("--user", "1000:1000"), command.subList(1, 3));
+    }
+
+    @Test
     void configurationUsesSystemPropertyBeforeEnvironment() {
         Properties properties = new Properties();
         properties.setProperty(DefaultCommandExecutionService.SANDBOX_IMAGE_PROPERTY,

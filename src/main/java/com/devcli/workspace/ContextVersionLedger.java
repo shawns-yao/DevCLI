@@ -272,7 +272,7 @@ public final class ContextVersionLedger {
             }
             changes.add(new PatchSet.FileChange(
                     change.relativePath(), change.type(), currentHash,
-                    PatchSet.hash(mergedContent), mergedContent));
+                    PatchSet.hash(mergedContent), mergedContent, change.executable()));
             mergedResources.add(resourceKey);
         }
         return new AstRebase(new PatchSet(changes), Set.copyOf(mergedResources));
@@ -303,7 +303,7 @@ public final class ContextVersionLedger {
                 continue;
             }
             changes.add(new PatchSet.FileChange(change.relativePath(), change.type(),
-                    currentHash, change.afterHash(), change.content()));
+                    currentHash, change.afterHash(), change.content(), change.executable()));
         }
         return new PatchSet(changes);
     }

@@ -25,6 +25,8 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
     public static final String SANDBOX_IMAGE_ENV = "DEVCLI_COMMAND_SANDBOX_IMAGE";
     public static final String DOCKER_BINARY_PROPERTY = "devcli.command.sandbox.docker.binary";
     public static final String DOCKER_BINARY_ENV = "DEVCLI_COMMAND_SANDBOX_DOCKER_BINARY";
+    public static final String SANDBOX_USER_PROPERTY = "devcli.command.sandbox.user";
+    public static final String SANDBOX_USER_ENV = "DEVCLI_COMMAND_SANDBOX_USER";
     private static final String DEFAULT_SANDBOX_IMAGE = "maven:3.9.9-eclipse-temurin-17";
     private static final int MAX_COMMAND_OUTPUT_CHARS = 8_000;
 
@@ -85,9 +87,11 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
                 "--tmpfs", "/root:rw,noexec,nosuid,nodev,size=256m",
                 "--mount", mount,
                 "--workdir", "/workspace",
-                config.image(),
-                "sh", "-lc", request.command()
-        ));
+                config.image(), "sh", "-lc", request.command()));
+        if (config.user() != null && !config.user().isBlank()) {
+            command.add(1, config.user());
+            command.add(1, "--user");
+        }
         return command;
     }
 
@@ -307,7 +311,7 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
         }
     }
 
-    record Config(String dockerBinary, String image, SandboxMode mode) {
+    record Config(String dockerBinary, String image, SandboxMode mode, String user) {
         Config {
             if (dockerBinary == null || dockerBinary.isBlank()) {
                 throw new IllegalArgumentException("docker binary is required");
@@ -316,6 +320,7 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
                 throw new IllegalArgumentException("sandbox image is required");
             }
             mode = mode == null ? SandboxMode.DOCKER : mode;
+            user = user == null ? "" : user.trim();
         }
 
         static Config resolve(Properties properties, Map<String, String> environment) {
@@ -326,7 +331,9 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
                             environment.get(SANDBOX_IMAGE_ENV), DEFAULT_SANDBOX_IMAGE),
                     SandboxMode.parse(firstNonBlank(
                             properties.getProperty(SANDBOX_MODE_PROPERTY),
-                            environment.get(SANDBOX_MODE_ENV), "DOCKER")));
+                            environment.get(SANDBOX_MODE_ENV), "DOCKER")),
+                    firstNonBlank(properties.getProperty(SANDBOX_USER_PROPERTY),
+                            environment.get(SANDBOX_USER_ENV), ""));
         }
 
         private static String firstNonBlank(String first, String second, String fallback) {

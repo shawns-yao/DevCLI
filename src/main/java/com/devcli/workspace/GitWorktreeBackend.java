@@ -65,6 +65,34 @@ public final class GitWorktreeBackend implements WorkspaceBackend {
                                        Path workspacePath) throws IOException {
         Path root = WorkspacePathPolicy.normalize(projectRoot);
         Path workspace = WorkspacePathPolicy.normalize(workspacePath);
+        try {
+            return ProjectCommitCoordinator.withProjectLock(root,
+                    () -> materializeLocked(root, workspaceBase, workspace));
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("Git worktree materialization failed: " + e.getMessage(), e);
+        }
+    }
+
+    @Override
+    public void cleanup(Path projectRoot, Path workspaceBase, Path workspacePath) throws IOException {
+        Path root = WorkspacePathPolicy.normalize(projectRoot);
+        Path workspace = WorkspacePathPolicy.normalize(workspacePath);
+        try {
+            ProjectCommitCoordinator.withProjectLock(root, () -> {
+                cleanupLocked(root, workspaceBase, workspace);
+                return null;
+            });
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("Git worktree cleanup failed: " + e.getMessage(), e);
+        }
+    }
+
+    private Materialization materializeLocked(Path root, Path workspaceBase,
+                                               Path workspace) throws IOException {
         verifyRepositoryRoot(root);
         runGit(root, List.of("worktree", "prune", "--expire", "now"));
         runGit(root, List.of("worktree", "add", "--detach", "--force",
@@ -73,10 +101,11 @@ public final class GitWorktreeBackend implements WorkspaceBackend {
             overlayCurrentState(root, workspaceBase, workspace);
             removeExcludedRoots(workspace);
             removeSymbolicLinks(workspace);
+            WorkspaceSourceTree.removeSensitiveFiles(workspace);
             return new Materialization(snapshotHashes(workspace));
         } catch (IOException | RuntimeException e) {
             try {
-                cleanup(root, workspaceBase, workspace);
+                cleanupLocked(root, workspaceBase, workspace);
             } catch (IOException cleanupFailure) {
                 e.addSuppressed(cleanupFailure);
             }
@@ -84,10 +113,7 @@ public final class GitWorktreeBackend implements WorkspaceBackend {
         }
     }
 
-    @Override
-    public void cleanup(Path projectRoot, Path workspaceBase, Path workspacePath) throws IOException {
-        Path root = WorkspacePathPolicy.normalize(projectRoot);
-        Path workspace = WorkspacePathPolicy.normalize(workspacePath);
+    private void cleanupLocked(Path root, Path workspaceBase, Path workspace) throws IOException {
         IOException failure = null;
         try {
             runGit(root, List.of("worktree", "remove", "--force", workspace.toString()));
@@ -200,7 +226,8 @@ public final class GitWorktreeBackend implements WorkspaceBackend {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs)
                     throws IOException {
-                if (Files.isSymbolicLink(dir) || ".git".equals(dir.getFileName().toString())) {
+                if (Files.isSymbolicLink(dir) || ".git".equals(dir.getFileName().toString())
+                        || WorkspacePathPolicy.isSensitiveFile(source.relativize(dir))) {
                     return FileVisitResult.SKIP_SUBTREE;
                 }
                 Path relative = source.relativize(dir);
@@ -213,6 +240,9 @@ public final class GitWorktreeBackend implements WorkspaceBackend {
                     throws IOException {
                 if (attrs.isRegularFile() && !Files.isSymbolicLink(file)
                         && !".git".equals(file.getFileName().toString())) {
+                    if (WorkspacePathPolicy.isSensitiveFile(source.relativize(file))) {
+                        return FileVisitResult.CONTINUE;
+                    }
                     Path destination = target.resolve(source.relativize(file));
                     Files.createDirectories(destination.getParent());
                     Files.copy(file, destination, StandardCopyOption.REPLACE_EXISTING,

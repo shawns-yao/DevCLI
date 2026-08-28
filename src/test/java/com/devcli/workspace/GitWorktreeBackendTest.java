@@ -27,6 +27,9 @@ class GitWorktreeBackendTest {
         Files.delete(project.resolve("deleted.txt"));
         Files.writeString(project.resolve("untracked.txt"), "untracked");
         Files.writeString(project.resolve("ignored.env"), "secret");
+        Files.writeString(project.resolve(".env"), "TOKEN=secret");
+        Files.createDirectories(project.resolve("nested/.git"));
+        Files.writeString(project.resolve("nested/.git/config"), "nested-secret");
         GitWorktreeBackend backend = new GitWorktreeBackend(TimeUnit.SECONDS.toMillis(30));
 
         WorkspaceBackend.Materialization result =
@@ -36,6 +39,8 @@ class GitWorktreeBackendTest {
         assertFalse(Files.exists(workspace.resolve("deleted.txt")));
         assertEquals("untracked", Files.readString(workspace.resolve("untracked.txt")));
         assertEquals("secret", Files.readString(workspace.resolve("ignored.env")));
+        assertFalse(Files.exists(workspace.resolve(".env")));
+        assertFalse(Files.exists(workspace.resolve("nested/.git")));
         assertTrue(Files.isRegularFile(workspace.resolve(".git")));
         assertFalse(Files.isSymbolicLink(workspace.resolve("tracked-link")));
         assertEquals(PatchSet.hash(workspace.resolve("tracked.txt")),
