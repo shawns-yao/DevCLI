@@ -26,6 +26,8 @@ public final class DelegateTaskTool {
                 .put("maxLength", 16000).put("description", "明确的子任务、范围和完成条件");
         properties.putObject("context").put("type", "string").put("maxLength", 16000)
                 .put("description", "可选的必要背景与相关文件；不会自动复制父会话历史");
+        properties.putObject("upstream_report_id").put("type", "string").put("maxLength", 128)
+                .put("description", "可选的上游结构化报告 ID；由程序原样注入，不要复制报告正文");
         schema.putArray("required").add("role").add("task");
         return ToolRegistry.Tool.contextualStructured(NAME,
                 "按需委派一个独立子任务。explorer/planner/reviewer 只读；worker 在隔离工作区修改，"
