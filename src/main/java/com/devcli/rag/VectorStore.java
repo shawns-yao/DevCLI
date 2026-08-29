@@ -30,6 +30,8 @@ public class VectorStore implements AutoCloseable {
     private final Connection connection;
     private final String projectPath;
     private final String classpathEpoch;
+    private volatile AnnSnapshot annSnapshot;
+    private volatile SearchDiagnostics lastSearchDiagnostics = SearchDiagnostics.empty();
 
     public VectorStore(String projectPath) throws SQLException {
         this.projectPath = projectPath;
@@ -100,6 +102,7 @@ public class VectorStore implements AutoCloseable {
         try (Statement stmt = connection.createStatement()) {
             stmt.execute(createChunks);
             stmt.execute(createRelations);
+            addColumnIfMissing(stmt, "code_chunks", "embedding_blob", "BLOB");
             addColumnIfMissing(stmt, "code_chunks", "index_epoch", "TEXT DEFAULT 'none'");
             addColumnIfMissing(stmt, "code_chunks", "symbol_version", "TEXT DEFAULT 'none'");
             addColumnIfMissing(stmt, "code_chunks", "classpath_epoch", "TEXT DEFAULT 'none'");
@@ -149,10 +152,12 @@ public class VectorStore implements AutoCloseable {
                         name TEXT NOT NULL,
                         content TEXT NOT NULL,
                         embedding_json TEXT,
+                        embedding_blob BLOB,
                         symbol_version TEXT NOT NULL,
                         classpath_epoch TEXT NOT NULL
                     )
                     """);
+            addColumnIfMissing(stmt, "code_shadow_chunks", "embedding_blob", "BLOB");
             stmt.execute("""
                     CREATE TABLE IF NOT EXISTS code_shadow_relations (
                         project_path TEXT NOT NULL,
@@ -191,6 +196,100 @@ public class VectorStore implements AutoCloseable {
                     + "ON code_shadow_chunks(project_path, target_epoch)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_shadow_relations_project_epoch "
                     + "ON code_shadow_relations(project_path, target_epoch)");
+            initFullTextIndex(stmt);
+        }
+        migrateLegacyEmbeddings("code_chunks", "id");
+        migrateLegacyEmbeddings("code_shadow_chunks", "rowid");
+    }
+
+    private void initFullTextIndex(Statement stmt) throws SQLException {
+        if (fullTextIndexNeedsRebuild(stmt)) {
+            stmt.execute("DROP TRIGGER IF EXISTS code_chunks_fts_ai");
+            stmt.execute("DROP TRIGGER IF EXISTS code_chunks_fts_ad");
+            stmt.execute("DROP TRIGGER IF EXISTS code_chunks_fts_au");
+            stmt.execute("DROP TABLE IF EXISTS code_chunks_fts");
+            stmt.execute("DELETE FROM rag_schema_state WHERE schema_key='fts_version'");
+        }
+        stmt.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS code_chunks_fts USING fts5(
+                    project_path UNINDEXED, file_path, name, content,
+                    content='code_chunks', content_rowid='id', tokenize='trigram')
+                """);
+        stmt.execute("""
+                CREATE TRIGGER IF NOT EXISTS code_chunks_fts_ai AFTER INSERT ON code_chunks BEGIN
+                    INSERT INTO code_chunks_fts(rowid, project_path, file_path, name, content)
+                    VALUES (new.id, new.project_path, new.file_path, new.name, new.content);
+                END
+                """);
+        stmt.execute("""
+                CREATE TRIGGER IF NOT EXISTS code_chunks_fts_ad AFTER DELETE ON code_chunks BEGIN
+                    INSERT INTO code_chunks_fts(code_chunks_fts, rowid, project_path, file_path, name, content)
+                    VALUES ('delete', old.id, old.project_path, old.file_path, old.name, old.content);
+                END
+                """);
+        stmt.execute("""
+                CREATE TRIGGER IF NOT EXISTS code_chunks_fts_au AFTER UPDATE ON code_chunks BEGIN
+                    INSERT INTO code_chunks_fts(code_chunks_fts, rowid, project_path, file_path, name, content)
+                    VALUES ('delete', old.id, old.project_path, old.file_path, old.name, old.content);
+                    INSERT INTO code_chunks_fts(rowid, project_path, file_path, name, content)
+                    VALUES (new.id, new.project_path, new.file_path, new.name, new.content);
+                END
+                """);
+        stmt.execute("""
+                CREATE TABLE IF NOT EXISTS rag_schema_state (
+                    schema_key TEXT PRIMARY KEY,
+                    schema_value TEXT NOT NULL
+                )
+                """);
+        boolean rebuild;
+        try (ResultSet state = stmt.executeQuery(
+                "SELECT schema_value FROM rag_schema_state WHERE schema_key='fts_version'")) {
+            rebuild = !state.next() || !"1".equals(state.getString(1));
+        }
+        if (rebuild) {
+            stmt.execute("INSERT INTO code_chunks_fts(code_chunks_fts) VALUES('rebuild')");
+            stmt.execute("""
+                    INSERT INTO rag_schema_state(schema_key, schema_value) VALUES('fts_version', '1')
+                    ON CONFLICT(schema_key) DO UPDATE SET schema_value=excluded.schema_value
+                    """);
+        }
+    }
+
+    private boolean fullTextIndexNeedsRebuild(Statement stmt) throws SQLException {
+        try (ResultSet columns = stmt.executeQuery("PRAGMA table_info(code_chunks_fts)")) {
+            boolean exists = false;
+            boolean hasProjectPath = false;
+            while (columns.next()) {
+                exists = true;
+                if ("project_path".equalsIgnoreCase(columns.getString(2))) {
+                    hasProjectPath = true;
+                }
+            }
+            return exists && !hasProjectPath;
+        }
+    }
+
+    private void migrateLegacyEmbeddings(String table, String idColumn) throws SQLException {
+        List<LegacyEmbedding> legacy = new ArrayList<>();
+        try (Statement statement = connection.createStatement();
+             ResultSet rows = statement.executeQuery("SELECT " + idColumn
+                     + ", embedding_json FROM " + table
+                     + " WHERE embedding_blob IS NULL AND embedding_json IS NOT NULL")) {
+            while (rows.next()) {
+                legacy.add(new LegacyEmbedding(rows.getLong(1), jsonToEmbedding(rows.getString(2))));
+            }
+        }
+        if (legacy.isEmpty()) {
+            return;
+        }
+        try (PreparedStatement update = connection.prepareStatement("UPDATE " + table
+                + " SET embedding_blob = ?, embedding_json = NULL WHERE " + idColumn + " = ?")) {
+            for (LegacyEmbedding row : legacy) {
+                update.setBytes(1, VectorCodec.encode(row.vector()));
+                update.setLong(2, row.id());
+                update.addBatch();
+            }
+            update.executeBatch();
         }
     }
 
@@ -241,6 +340,7 @@ public class VectorStore implements AutoCloseable {
             ps7.executeUpdate();
             ps8.executeUpdate();
         }
+        invalidateAnnIndex();
     }
 
     /**
@@ -332,9 +432,9 @@ public class VectorStore implements AutoCloseable {
         try (PreparedStatement statement = connection.prepareStatement("""
                 INSERT INTO code_shadow_chunks (
                     project_path, target_epoch, file_path, chunk_type, name, content,
-                    embedding_json, symbol_version, classpath_epoch)
+                    embedding_json, embedding_blob, symbol_version, classpath_epoch)
                 SELECT project_path, ?, file_path, chunk_type, name, content,
-                    embedding_json, symbol_version, classpath_epoch
+                    NULL, embedding_blob, symbol_version, classpath_epoch
                 FROM code_chunks WHERE project_path = ?
                 """)) {
             statement.setString(1, targetEpoch);
@@ -380,8 +480,8 @@ public class VectorStore implements AutoCloseable {
         String sql = """
                 INSERT INTO code_shadow_chunks (
                     project_path, target_epoch, file_path, chunk_type, name, content,
-                    embedding_json, symbol_version, classpath_epoch)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    embedding_json, embedding_blob, symbol_version, classpath_epoch)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
                 """;
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             for (CodeChunkEntry entry : entries == null ? List.<CodeChunkEntry>of() : entries) {
@@ -394,7 +494,7 @@ public class VectorStore implements AutoCloseable {
                 statement.setString(4, entry.chunk.chunkType());
                 statement.setString(5, entry.chunk.name());
                 statement.setString(6, entry.chunk.content());
-                statement.setString(7, embeddingToJson(entry.embedding));
+                statement.setBytes(7, VectorCodec.encode(entry.embedding));
                 statement.setString(8, snapshot.symbolVersion());
                 statement.setString(9, snapshot.classpathEpoch());
                 statement.addBatch();
@@ -471,6 +571,7 @@ public class VectorStore implements AutoCloseable {
             clearDirtyFiles();
             deleteShadowIndex(build.targetEpoch());
             connection.commit();
+            invalidateAnnIndex();
             return true;
         } catch (SQLException e) {
             connection.rollback();
@@ -484,9 +585,9 @@ public class VectorStore implements AutoCloseable {
     private void copyShadowChunksToActive(String targetEpoch) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 INSERT INTO code_chunks (
-                    project_path, file_path, chunk_type, name, content, embedding_json,
+                    project_path, file_path, chunk_type, name, content, embedding_json, embedding_blob,
                     index_epoch, symbol_version, classpath_epoch)
-                SELECT project_path, file_path, chunk_type, name, content, embedding_json,
+                SELECT project_path, file_path, chunk_type, name, content, NULL, embedding_blob,
                     target_epoch, symbol_version, classpath_epoch
                 FROM code_shadow_chunks WHERE project_path = ? AND target_epoch = ?
                 """)) {
@@ -839,9 +940,9 @@ public class VectorStore implements AutoCloseable {
 
     public void insertChunks(List<CodeChunkEntry> entries, String indexEpoch) throws SQLException {
         String sql = """
-                INSERT INTO code_chunks (project_path, file_path, chunk_type, name, content, embedding_json,
+                INSERT INTO code_chunks (project_path, file_path, chunk_type, name, content, embedding_json, embedding_blob,
                     index_epoch, symbol_version, classpath_epoch)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
                 """;
         // Bug #1 残留修复：检测是否在外层事务中，避免嵌套事务提前 commit
         boolean autoCommit = connection.getAutoCommit();
@@ -863,7 +964,7 @@ public class VectorStore implements AutoCloseable {
                 ps.setString(3, entry.chunk.chunkType());
                 ps.setString(4, entry.chunk.name());
                 ps.setString(5, entry.chunk.content());
-                ps.setString(6, embeddingToJson(entry.embedding));
+                ps.setBytes(6, VectorCodec.encode(entry.embedding));
                 ps.setString(7, snapshot.indexEpoch());
                 ps.setString(8, snapshot.symbolVersion());
                 ps.setString(9, snapshot.classpathEpoch());
@@ -873,6 +974,7 @@ public class VectorStore implements AutoCloseable {
             if (manageTransaction) {
                 connection.commit();
             }
+            invalidateAnnIndex();
         } catch (SQLException e) {
             if (manageTransaction) {
                 connection.rollback();
@@ -933,67 +1035,73 @@ public class VectorStore implements AutoCloseable {
      * 语义检索：根据查询向量返回最相似的 TopK 代码块
      */
     public List<SearchResult> search(float[] queryEmbedding, int topK) throws SQLException {
-        String sql = """
-                SELECT file_path, chunk_type, name, content, embedding_json, index_epoch, symbol_version, classpath_epoch
-                FROM code_chunks WHERE project_path = ?
-                """;
-        List<SearchResult> candidates = new ArrayList<>();
-
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            ps.setString(1, projectPath);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    String embeddingJson = rs.getString("embedding_json");
-                    if (embeddingJson == null || embeddingJson.isEmpty()) {
-                        continue;
-                    }
-                    float[] embedding = jsonToEmbedding(embeddingJson);
-                    double similarity = cosineSimilarity(queryEmbedding, embedding);
-                    candidates.add(searchResult(
-                            rs.getString("file_path"),
-                            rs.getString("chunk_type"),
-                            rs.getString("name"),
-                            rs.getString("content"),
-                            similarity,
-                            rs.getString("index_epoch"),
-                            rs.getString("symbol_version"),
-                            rs.getString("classpath_epoch")
-                    ));
+        if (queryEmbedding == null || queryEmbedding.length == 0 || topK <= 0) {
+            return List.of();
+        }
+        long started = System.nanoTime();
+        AnnSnapshot snapshot = ensureAnnSnapshot();
+        List<SearchResult> results = new ArrayList<>();
+        if (snapshot.index() != null) {
+            for (AnnVectorIndex.Neighbor neighbor : snapshot.index().search(queryEmbedding, topK)) {
+                IndexedChunk chunk = snapshot.chunks().get(neighbor.id());
+                if (chunk != null) {
+                    results.add(indexedSearchResult(chunk, neighbor.similarity()));
                 }
             }
+            lastSearchDiagnostics = new SearchDiagnostics("HNSW", "NONE", snapshot.chunks().size(),
+                    elapsedMillis(started), false, "");
+        } else {
+            for (IndexedChunk chunk : snapshot.chunks().values()) {
+                results.add(indexedSearchResult(chunk, cosineSimilarity(queryEmbedding, chunk.vector())));
+            }
+            results.sort((left, right) -> Double.compare(right.similarity(), left.similarity()));
+            if (results.size() > topK) {
+                results = new ArrayList<>(results.subList(0, topK));
+            }
+            lastSearchDiagnostics = new SearchDiagnostics("EXACT_FALLBACK", "NONE", snapshot.chunks().size(),
+                    elapsedMillis(started), true, snapshot.degradationReason());
         }
-
-        // 按相似度降序排序，取 TopK
-        candidates.sort((a, b) -> Double.compare(b.similarity(), a.similarity()));
-        List<SearchResult> topResults = candidates.size() > topK
-                ? new ArrayList<>(candidates.subList(0, topK)) : candidates;
-        return refreshExternalChanges(topResults);
+        return refreshExternalChanges(results);
     }
 
     /**
      * 根据关键词检索代码块（不经过 Embedding，用于精确匹配类名/方法名）
      */
     public List<SearchResult> searchByKeyword(String keyword) throws SQLException {
-        // Bug #17 修复：添加 ORDER BY，优先返回名称匹配的结果
-        String sql = """
-                SELECT file_path, chunk_type, name, content, index_epoch, symbol_version, classpath_epoch FROM code_chunks
-                WHERE project_path = ? AND (name LIKE ? ESCAPE '\\'
-                    OR file_path LIKE ? ESCAPE '\\'
-                    OR content LIKE ? ESCAPE '\\')
-                ORDER BY
-                    CASE WHEN name LIKE ? ESCAPE '\\' THEN 1 ELSE 2 END,
-                    name
+        if (keyword == null || keyword.isBlank()) {
+            return List.of();
+        }
+        long started = System.nanoTime();
+        boolean useFts = keyword.codePointCount(0, keyword.length()) >= 3;
+        String sql = useFts ? """
+                SELECT c.file_path, c.chunk_type, c.name, c.content,
+                       c.index_epoch, c.symbol_version, c.classpath_epoch
+                FROM code_chunks_fts
+                JOIN code_chunks c ON c.id = code_chunks_fts.rowid
+                WHERE code_chunks_fts MATCH ? AND c.project_path = ?
+                ORDER BY bm25(code_chunks_fts, 0.0, 1.0, 3.0, 1.0), c.name
+                LIMIT 200
+                """ : """
+                SELECT file_path, chunk_type, name, content, index_epoch, symbol_version, classpath_epoch
+                FROM code_chunks
+                WHERE project_path = ? AND (name = ? OR name LIKE ? ESCAPE '\\' OR file_path LIKE ? ESCAPE '\\')
+                ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END, name
+                LIMIT 200
                 """;
         List<SearchResult> results = new ArrayList<>();
-        String escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
-        String pattern = "%" + escaped + "%";
 
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            ps.setString(1, projectPath);
-            ps.setString(2, pattern);
-            ps.setString(3, pattern);
-            ps.setString(4, pattern);
-            ps.setString(5, pattern); // ORDER BY 条件
+            if (useFts) {
+                ps.setString(1, ftsPhrase(keyword));
+                ps.setString(2, projectPath);
+            } else {
+                String escaped = escapeLike(keyword);
+                ps.setString(1, projectPath);
+                ps.setString(2, keyword);
+                ps.setString(3, escaped + "%");
+                ps.setString(4, "%/" + escaped + "%");
+                ps.setString(5, keyword);
+            }
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     results.add(searchResult(
@@ -1009,6 +1117,8 @@ public class VectorStore implements AutoCloseable {
                 }
             }
         }
+        lastSearchDiagnostics = new SearchDiagnostics("NONE", useFts ? "FTS5_TRIGRAM" : "BTREE_PREFIX",
+                results.size(), elapsedMillis(started), false, "");
         return mergeDirtyKeywordCandidates(keyword, refreshExternalChanges(results));
     }
 
@@ -1198,16 +1308,76 @@ public class VectorStore implements AutoCloseable {
         }
     }
 
-    private double cosineSimilarity(float[] a, float[] b) {
-        return VectorMath.cosineSimilarity(a, b);
+    private synchronized AnnSnapshot ensureAnnSnapshot() throws SQLException {
+        long generation = currentIndexGeneration();
+        AnnSnapshot current = annSnapshot;
+        if (current != null && current.generation() == generation) {
+            return current;
+        }
+
+        List<AnnVectorIndex.Entry> vectors = new ArrayList<>();
+        Map<Long, IndexedChunk> chunks = new LinkedHashMap<>();
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT id, file_path, chunk_type, name, content, embedding_blob, embedding_json,
+                       index_epoch, symbol_version, classpath_epoch
+                FROM code_chunks
+                WHERE project_path = ? AND (embedding_blob IS NOT NULL OR embedding_json IS NOT NULL)
+                ORDER BY id
+                """)) {
+            statement.setString(1, projectPath);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    long id = rows.getLong("id");
+                    byte[] blob = rows.getBytes("embedding_blob");
+                    float[] vector = blob == null
+                            ? jsonToEmbedding(rows.getString("embedding_json"))
+                            : VectorCodec.decode(blob);
+                    vectors.add(new AnnVectorIndex.Entry(id, vector));
+                    chunks.put(id, new IndexedChunk(
+                            rows.getString("file_path"), rows.getString("chunk_type"),
+                            rows.getString("name"), rows.getString("content"), vector,
+                            rows.getString("index_epoch"), rows.getString("symbol_version"),
+                            rows.getString("classpath_epoch")));
+                }
+            }
+        }
+
+        AnnVectorIndex index = null;
+        String degradationReason = "";
+        try {
+            index = AnnVectorIndex.build(vectors);
+        } catch (RuntimeException failure) {
+            degradationReason = "HNSW_BUILD_FAILED: " + failure.getMessage();
+            log.warn("HNSW 索引构建失败，显式降级为精确检索: {}", failure.getMessage());
+        }
+        AnnSnapshot built = new AnnSnapshot(generation, index, Map.copyOf(chunks), degradationReason);
+        annSnapshot = built;
+        return built;
     }
 
-    private String embeddingToJson(float[] embedding) {
-        try {
-            return mapper.writeValueAsString(embedding);
-        } catch (JsonProcessingException e) {
-            throw new RuntimeException("向量序列化失败", e);
-        }
+    private synchronized void invalidateAnnIndex() {
+        annSnapshot = null;
+    }
+
+    private SearchResult indexedSearchResult(IndexedChunk chunk, double similarity) throws SQLException {
+        return searchResult(chunk.filePath(), chunk.chunkType(), chunk.name(), chunk.content(), similarity,
+                chunk.indexEpoch(), chunk.symbolVersion(), chunk.classpathEpoch());
+    }
+
+    private static String ftsPhrase(String keyword) {
+        return "\"" + keyword.strip().replace("\"", "\"\"") + "\"";
+    }
+
+    private static String escapeLike(String value) {
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+    }
+
+    private static long elapsedMillis(long startedNanos) {
+        return Math.max(0L, (System.nanoTime() - startedNanos) / 1_000_000L);
+    }
+
+    private double cosineSimilarity(float[] a, float[] b) {
+        return VectorMath.cosineSimilarity(a, b);
     }
 
     private float[] jsonToEmbedding(String json) {
@@ -1220,6 +1390,7 @@ public class VectorStore implements AutoCloseable {
 
     @Override
     public void close() throws SQLException {
+        invalidateAnnIndex();
         if (connection != null && !connection.isClosed()) {
             connection.close();
         }
@@ -1482,6 +1653,38 @@ public class VectorStore implements AutoCloseable {
      * 带向量的代码块条目
      */
     public record CodeChunkEntry(CodeChunk chunk, float[] embedding) {}
+
+    private record LegacyEmbedding(long id, float[] vector) {
+    }
+
+    private record IndexedChunk(String filePath, String chunkType, String name, String content,
+                                float[] vector, String indexEpoch, String symbolVersion,
+                                String classpathEpoch) {
+    }
+
+    private record AnnSnapshot(long generation, AnnVectorIndex index,
+                               Map<Long, IndexedChunk> chunks, String degradationReason) {
+    }
+
+    public SearchDiagnostics lastSearchDiagnostics() {
+        return lastSearchDiagnostics;
+    }
+
+    public record SearchDiagnostics(String vectorBackend, String keywordBackend,
+                                    int indexedVectors, long latencyMillis,
+                                    boolean degraded, String degradationReason) {
+        public SearchDiagnostics {
+            vectorBackend = blankToDefault(vectorBackend, "NONE");
+            keywordBackend = blankToDefault(keywordBackend, "NONE");
+            indexedVectors = Math.max(0, indexedVectors);
+            latencyMillis = Math.max(0L, latencyMillis);
+            degradationReason = degradationReason == null ? "" : degradationReason;
+        }
+
+        static SearchDiagnostics empty() {
+            return new SearchDiagnostics("NONE", "NONE", 0, 0, false, "");
+        }
+    }
 
     public enum ShadowIndexMode {
         FULL,

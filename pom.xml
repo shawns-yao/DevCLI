@@ -86,6 +86,13 @@
             <version>3.49.1.0</version>
         </dependency>
 
+        <!-- 进程内代码向量近似最近邻索引 -->
+        <dependency>
+            <groupId>com.github.jelmerk</groupId>
+            <artifactId>hnswlib-core</artifactId>
+            <version>1.2.1</version>
+        </dependency>
+
         <!-- Java AST 解析 -->
         <dependency>
             <groupId>com.github.javaparser</groupId>
