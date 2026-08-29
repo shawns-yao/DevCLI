@@ -42,7 +42,7 @@ class SkillIndexFormatterTest {
     }
 
     @Test
-    void capsAtTwentySkillsPreservingRegistryOrder() {
+    void usesBudgetInsteadOfFixedTwentySkillCap() {
         List<Skill> many = new ArrayList<>();
         for (int i = 0; i < 25; i++) {
             many.add(mockSkill(String.format("skill-%02d", i), "desc " + i, Skill.Source.USER));
@@ -51,7 +51,7 @@ class SkillIndexFormatterTest {
         String out = SkillIndexFormatter.format(many);
         assertTrue(out.contains("zz-hot"));
         assertTrue(out.contains("skill-18"));
-        assertFalse(out.contains("skill-19"), "超过 20 个时应保留 Registry 给出的前 20 个");
+        assertTrue(out.contains("skill-19"), "相关 skill 不应仅因固定数量上限而不可见");
     }
 
     @Test
@@ -62,6 +62,24 @@ class SkillIndexFormatterTest {
         String truncated = SkillIndexFormatter.truncateByCodepoint(s, 2);
         assertTrue(truncated.startsWith("中文"));
         assertTrue(truncated.endsWith("..."));
+    }
+
+    @Test
+    void indexBudgetIsTokenBasedAndAllowsReloadAfterCompaction() {
+        List<Skill> skills = List.of(
+                mockSkill("alpha", "A ".repeat(200), Skill.Source.USER),
+                mockSkill("beta", "B ".repeat(200), Skill.Source.USER));
+
+        String small = SkillIndexFormatter.format(skills, 80);
+        String large = SkillIndexFormatter.format(skills, 500);
+
+        assertTrue(com.devcli.memory.MemoryEntry.estimateTokens(small) <= 90, small);
+        assertTrue(large.length() > small.length());
+        assertTrue(large.contains("可以再次调用 load_skill"), large);
+        assertFalse(large.contains("一次足够"), large);
+        SkillIndexFormatter.FormatResult result = SkillIndexFormatter.formatWithMetrics(skills, 80);
+        assertTrue(result.omittedCount() > 0);
+        assertTrue(result.estimatedTokens() <= 80);
     }
 
     private static Skill mockSkill(String name, String desc, Skill.Source source) {

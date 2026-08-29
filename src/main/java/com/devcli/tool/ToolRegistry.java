@@ -304,6 +304,11 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         return contextProfile;
     }
 
+    @Override
+    public ContextProfile contextProfile() {
+        return contextProfile;
+    }
+
     public void setBrowserGuard(BrowserGuard browserGuard) {
         this.browserGuard = browserGuard;
     }

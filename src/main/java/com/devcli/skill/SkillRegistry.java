@@ -32,6 +32,10 @@ public final class SkillRegistry {
     private final Map<String, Skill> skillsByName = new LinkedHashMap<>();
     private final Map<String, Integer> usageCounts = new LinkedHashMap<>();
     private final List<String> warnings = new ArrayList<>();
+    private long selectionRuns;
+    private long renderedSkills;
+    private long omittedSkills;
+    private long loadCount;
 
     public SkillRegistry(Path builtinCacheRoot, Path userSkillsDir, Path projectSkillsDir, SkillStateStore stateStore) {
         this.builtinCacheRoot = builtinCacheRoot;
@@ -79,15 +83,14 @@ public final class SkillRegistry {
 
     public synchronized List<Skill> enabledSkillsForText(String text, String projectRoot) {
         List<String> paths = SkillPathMatcher.extractPaths(text, projectRoot);
-        if (paths.isEmpty()) {
-            return enabledSkills().stream()
-                    .filter(skill -> skill.paths().isEmpty())
-                    .toList();
-        }
         return enabledSkills().stream()
-                .filter(skill -> skill.paths().isEmpty()
-                        || paths.stream().anyMatch(path ->
-                        skill.paths().stream().anyMatch(pattern -> matchesPath(pattern, path))))
+                .filter(skill -> skill.paths().isEmpty() || (!paths.isEmpty()
+                        && paths.stream().anyMatch(path -> skill.paths().stream()
+                        .anyMatch(pattern -> matchesPath(pattern, path)))))
+                .sorted(Comparator
+                        .<Skill>comparingInt(skill -> relevanceScore(skill, text, paths))
+                        .reversed()
+                        .thenComparing(usageThenNameComparator()))
                 .toList();
     }
 
@@ -96,6 +99,7 @@ public final class SkillRegistry {
             return;
         }
         usageCounts.merge(name, 1, Integer::sum);
+        loadCount++;
     }
 
     public synchronized int usageCount(String name) {
@@ -118,6 +122,16 @@ public final class SkillRegistry {
 
     public synchronized List<String> warnings() {
         return List.copyOf(warnings);
+    }
+
+    public synchronized void recordIndexRender(int rendered, int omitted) {
+        selectionRuns++;
+        renderedSkills += Math.max(0, rendered);
+        omittedSkills += Math.max(0, omitted);
+    }
+
+    public synchronized SelectionMetrics selectionMetrics() {
+        return new SelectionMetrics(selectionRuns, renderedSkills, omittedSkills, loadCount);
     }
 
     public SkillStateStore stateStore() {
@@ -257,6 +271,34 @@ public final class SkillRegistry {
                 .thenComparing(Skill::name);
     }
 
+    private int relevanceScore(Skill skill, String text, List<String> paths) {
+        String query = normalizeSearchText(text);
+        if (query.isBlank()) return 0;
+        String name = normalizeSearchText(skill.name().replace('-', ' '));
+        String description = normalizeSearchText(skill.description());
+        String tags = normalizeSearchText(String.join(" ", skill.tags()));
+        int score = 0;
+        if (!name.isBlank() && query.contains(name)) score += 40;
+        for (String token : query.split("\\s+")) {
+            if (token.length() < 2) continue;
+            if (name.contains(token)) score += 12;
+            if (tags.contains(token)) score += 8;
+            if (description.contains(token)) score += 5;
+        }
+        if (!skill.paths().isEmpty() && paths.stream().anyMatch(path -> skill.paths().stream()
+                .anyMatch(pattern -> matchesPath(pattern, path)))) {
+            score += 60;
+        }
+        return score;
+    }
+
+    private static String normalizeSearchText(String value) {
+        if (value == null) return "";
+        return value.toLowerCase(java.util.Locale.ROOT)
+                .replaceAll("[^\\p{L}\\p{N}]+", " ")
+                .trim();
+    }
+
     private static boolean matchesPath(String pattern, String path) {
         if (pattern == null || pattern.isBlank() || path == null || path.isBlank()) {
             return false;
@@ -302,5 +344,9 @@ public final class SkillRegistry {
         }
         regex.append('$');
         return regex.toString();
+    }
+
+    public record SelectionMetrics(long selectionRuns, long renderedSkills,
+                                   long omittedSkills, long loadCount) {
     }
 }

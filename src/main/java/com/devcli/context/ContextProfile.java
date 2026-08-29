@@ -23,6 +23,8 @@ public record ContextProfile(
         double compressionTriggerRatio,
         int shortTermMemoryBudget,
         int memoryContextTokens,
+        int skillIndexTokens,
+        int skillBodyTokens,
         boolean mcpResourceIndexEnabled,
         boolean promptCachingSupported,
         String promptCacheMode,
@@ -44,6 +46,8 @@ public record ContextProfile(
                 DEFAULT_COMPRESSION_TRIGGER_RATIO,
                 shortTermBudget(window),
                 memoryContextTokens(window),
+                skillIndexTokens(window),
+                skillBodyTokens(window),
                 window >= MCP_RESOURCE_INDEX_MIN_WINDOW,
                 llmClient != null && llmClient.supportsPromptCaching(),
                 llmClient == null ? "none" : llmClient.promptCacheMode(),
@@ -60,6 +64,8 @@ public record ContextProfile(
                 DEFAULT_COMPRESSION_TRIGGER_RATIO,
                 shortTerm,
                 memoryContextTokens(window),
+                skillIndexTokens(window),
+                skillBodyTokens(window),
                 window >= MCP_RESOURCE_INDEX_MIN_WINDOW,
                 false,
                 "none",
@@ -101,6 +107,7 @@ public record ContextProfile(
                 + " | 压缩阈值: " + compressionTriggerTokens() + " tokens (≤" + (int) (compressionTriggerRatio * 100)
                 + "% 或预留 " + outputReserveTokens + " 输出)"
                 + " | 短期记忆预算: " + shortTermMemoryBudget
+                + " | Skill 索引/正文预算: " + skillIndexTokens + "/" + skillBodyTokens
                 + " | MCP resource 索引: " + (mcpResourceIndexEnabled ? "on" : "off")
                 + " | prompt cache: " + promptCacheMode;
     }
@@ -116,5 +123,13 @@ public record ContextProfile(
 
     private static int memoryContextTokens(int window) {
         return Math.max(500, Math.min(5_000, window / 200));
+    }
+
+    private static int skillIndexTokens(int window) {
+        return Math.max(256, Math.min(2_048, window / 200));
+    }
+
+    private static int skillBodyTokens(int window) {
+        return Math.max(1_024, Math.min(8_192, window / 50));
     }
 }

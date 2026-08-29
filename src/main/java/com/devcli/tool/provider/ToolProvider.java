@@ -87,6 +87,10 @@ public interface ToolProvider {
 
         com.devcli.skill.SkillContextBuffer activeSkillContextBuffer();
 
+        default com.devcli.context.ContextProfile contextProfile() {
+            return com.devcli.context.ContextProfile.from(null);
+        }
+
         com.devcli.snapshot.SnapshotService snapshotService();
 
         List<ToolRegistry.Tool> searchableTools();

@@ -58,8 +58,11 @@ final class AgentRuntimeSupport {
             return "";
         }
         try {
-            return SkillIndexFormatter.format(skillRegistry.enabledSkillsForText(
-                    activationText, toolRegistry.getProjectPath()));
+            SkillIndexFormatter.FormatResult result = SkillIndexFormatter.formatWithMetrics(
+                    skillRegistry.enabledSkillsForText(activationText, toolRegistry.getProjectPath()),
+                    toolRegistry.getContextProfile().skillIndexTokens());
+            skillRegistry.recordIndexRender(result.includedCount(), result.omittedCount());
+            return result.text();
         } catch (Exception e) {
             log.warn("Failed to build skill index", e);
             return "";

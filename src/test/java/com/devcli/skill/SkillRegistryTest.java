@@ -203,6 +203,30 @@ class SkillRegistryTest {
     }
 
     @Test
+    void taskRelevanceOutranksHistoricalUsage(@TempDir Path tempDir) throws IOException {
+        Path user = tempDir.resolve("user");
+        writeSkill(user, "frontend-helper", "React component styling", "v0");
+        writeSkill(user, "database-migration", "PostgreSQL schema migration", "v0");
+        SkillRegistry registry = new SkillRegistry(null, user, null,
+                new SkillStateStore(tempDir.resolve("skills.json")));
+        registry.reload();
+        registry.recordUsage("frontend-helper");
+        registry.recordUsage("frontend-helper");
+
+        List<String> selected = registry.enabledSkillsForText(
+                        "prepare a PostgreSQL database migration", tempDir.toString()).stream()
+                .map(Skill::name)
+                .toList();
+
+        assertEquals("database-migration", selected.getFirst());
+        registry.recordIndexRender(1, selected.size() - 1);
+        SkillRegistry.SelectionMetrics metrics = registry.selectionMetrics();
+        assertEquals(1, metrics.selectionRuns());
+        assertEquals(1, metrics.renderedSkills());
+        assertEquals(selected.size() - 1, metrics.omittedSkills());
+    }
+
+    @Test
     void skipsFileWithMalformedFrontmatterButContinues(@TempDir Path tempDir) throws IOException {
         Path user = tempDir.resolve("user");
         Files.createDirectories(user.resolve("good"));
