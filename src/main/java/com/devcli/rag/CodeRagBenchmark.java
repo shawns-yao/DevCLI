@@ -36,6 +36,7 @@ public class CodeRagBenchmark {
         int requiredHits = 0;
         int relevantHits = 0;
         double reciprocalRank = 0.0;
+        double dcg = 0.0;
         List<String> hitTargets = new ArrayList<>();
         List<String> missingTargets = new ArrayList<>();
 
@@ -52,15 +53,46 @@ public class CodeRagBenchmark {
             }
         }
 
-        for (VectorStore.SearchResult result : retrieved.stream().limit(topK).toList()) {
-            if (matchesAny(result, benchmarkCase.allTargets())) {
+        List<VectorStore.SearchResult> ranked = retrieved.stream().limit(Math.max(0, topK)).toList();
+        for (int i = 0; i < ranked.size(); i++) {
+            int gain = relevanceGrade(ranked.get(i), benchmarkCase);
+            if (gain > 0) {
                 relevantHits++;
+                dcg += (Math.pow(2, gain) - 1.0) / log2(i + 2);
             }
         }
 
         double recall = required.isEmpty() ? 1.0 : requiredHits / (double) required.size();
         double precision = topK <= 0 ? 0.0 : relevantHits / (double) Math.min(topK, Math.max(retrieved.size(), 1));
-        return new CaseResult(benchmarkCase.name(), recall, precision, reciprocalRank, hitTargets, missingTargets);
+        double idealDcg = idealDcg(benchmarkCase, topK);
+        double ndcg = idealDcg == 0.0 ? 0.0 : dcg / idealDcg;
+        return new CaseResult(benchmarkCase.name(), recall, precision, reciprocalRank, ndcg,
+                hitTargets, missingTargets);
+    }
+
+    private int relevanceGrade(VectorStore.SearchResult result, BenchmarkCase benchmarkCase) {
+        if (benchmarkCase.mustHave().stream().anyMatch(target -> target.matches(result))) return 3;
+        if (benchmarkCase.shouldHave().stream().anyMatch(target -> target.matches(result))) return 2;
+        if (benchmarkCase.niceToHave().stream().anyMatch(target -> target.matches(result))) return 1;
+        return 0;
+    }
+
+    private double idealDcg(BenchmarkCase benchmarkCase, int topK) {
+        int slots = Math.min(Math.max(0, topK), benchmarkCase.allTargets().size());
+        List<Integer> gains = new ArrayList<>();
+        gains.addAll(benchmarkCase.mustHave().stream().map(ignored -> 3).toList());
+        gains.addAll(benchmarkCase.shouldHave().stream().map(ignored -> 2).toList());
+        gains.addAll(benchmarkCase.niceToHave().stream().map(ignored -> 1).toList());
+        gains.sort(java.util.Comparator.reverseOrder());
+        double ideal = 0.0;
+        for (int i = 0; i < Math.min(slots, gains.size()); i++) {
+            ideal += (Math.pow(2, gains.get(i)) - 1.0) / log2(i + 2);
+        }
+        return ideal;
+    }
+
+    private double log2(int value) {
+        return Math.log(value) / Math.log(2.0);
     }
 
     private int rankOf(ExpectedTarget target, List<VectorStore.SearchResult> retrieved) {
@@ -115,9 +147,14 @@ public class CodeRagBenchmark {
             double recallAtK,
             double precisionAtK,
             double reciprocalRank,
+            double ndcgAtK,
             List<String> hitTargets,
             List<String> missingTargets
     ) {
+        public CaseResult(String name, double recallAtK, double precisionAtK, double reciprocalRank,
+                          List<String> hitTargets, List<String> missingTargets) {
+            this(name, recallAtK, precisionAtK, reciprocalRank, 0.0, hitTargets, missingTargets);
+        }
     }
 
     public record BenchmarkReport(
@@ -125,16 +162,23 @@ public class CodeRagBenchmark {
             double recallAtK,
             double precisionAtK,
             double mrr,
+            double ndcgAtK,
             List<CaseResult> cases
     ) {
+        public BenchmarkReport(int caseCount, double recallAtK, double precisionAtK, double mrr,
+                               List<CaseResult> cases) {
+            this(caseCount, recallAtK, precisionAtK, mrr, 0.0, cases);
+        }
+
         private static BenchmarkReport from(List<CaseResult> cases) {
             if (cases == null || cases.isEmpty()) {
-                return new BenchmarkReport(0, 0.0, 0.0, 0.0, List.of());
+                return new BenchmarkReport(0, 0.0, 0.0, 0.0, 0.0, List.of());
             }
             double recall = cases.stream().mapToDouble(CaseResult::recallAtK).average().orElse(0.0);
             double precision = cases.stream().mapToDouble(CaseResult::precisionAtK).average().orElse(0.0);
             double mrr = cases.stream().mapToDouble(CaseResult::reciprocalRank).average().orElse(0.0);
-            return new BenchmarkReport(cases.size(), recall, precision, mrr, List.copyOf(cases));
+            double ndcg = cases.stream().mapToDouble(CaseResult::ndcgAtK).average().orElse(0.0);
+            return new BenchmarkReport(cases.size(), recall, precision, mrr, ndcg, List.copyOf(cases));
         }
     }
 }

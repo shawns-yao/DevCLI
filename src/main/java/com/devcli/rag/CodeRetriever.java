@@ -39,11 +39,25 @@ public class CodeRetriever implements AutoCloseable {
     private RetrievalAudit lastAudit = RetrievalAudit.empty();
 
     public CodeRetriever(String projectPath) throws SQLException {
-        this(projectPath, new EmbeddingClient(), new CrossEncoderReranker());
+        this(projectPath, new EmbeddingClient(), defaultReranker());
     }
 
     public CodeRetriever(String projectPath, EmbeddingClient embeddingClient) throws SQLException {
-        this(projectPath, embeddingClient, new CrossEncoderReranker());
+        this(projectPath, embeddingClient, defaultReranker());
+    }
+
+    private static CodeReranker defaultReranker() {
+        String backend = System.getProperty("devcli.rag.rerank.backend");
+        if (backend == null || backend.isBlank()) {
+            backend = System.getenv("DEVCLI_RAG_RERANK_BACKEND");
+        }
+        if ("remote".equalsIgnoreCase(backend) || "cross_encoder".equalsIgnoreCase(backend)) {
+            return new CrossEncoderReranker();
+        }
+        if ("none".equalsIgnoreCase(backend) || "disabled".equalsIgnoreCase(backend)) {
+            return new NoopCodeReranker();
+        }
+        return new LocalCodeReranker();
     }
 
     public CodeRetriever(String projectPath, EmbeddingClient embeddingClient, CodeReranker reranker) throws SQLException {
@@ -112,12 +126,13 @@ public class CodeRetriever implements AutoCloseable {
             return results;
         }
         RetrievalFusion fusion = new RetrievalFusion();
+        RetrievalScoringProfile scoring = RetrievalScoringProfile.forMode(options.mode());
 
         switch (options.mode()) {
-            case DEFINITION, CONFIG -> searchPreciseFirst(query, topK, fusion);
-            case ERROR_TRACE -> searchErrorTrace(query, topK, options, fusion);
-            case CALL_CHAIN -> searchCallChain(query, topK, options, fusion);
-            case AUTO, GENERAL -> searchGeneral(query, topK, options, fusion);
+            case DEFINITION, CONFIG -> searchPreciseFirst(query, topK, fusion, scoring);
+            case ERROR_TRACE -> searchErrorTrace(query, topK, options, fusion, scoring);
+            case CALL_CHAIN -> searchCallChain(query, topK, options, fusion, scoring);
+            case AUTO, GENERAL -> searchGeneral(query, topK, options, fusion, scoring);
         }
 
         List<VectorStore.SearchResult> fused = fusion.rank(query, Math.max(topK * 3, topK));
@@ -152,35 +167,39 @@ public class CodeRetriever implements AutoCloseable {
         return lastAudit;
     }
 
-    private void searchGeneral(String query, int topK, CodeSearchOptions options, RetrievalFusion fusion) throws Exception {
+    private void searchGeneral(String query, int topK, CodeSearchOptions options, RetrievalFusion fusion,
+                               RetrievalScoringProfile scoring) throws Exception {
         List<VectorStore.SearchResult> semantic = safeSemanticResults(query, topK);
         List<VectorStore.SearchResult> keyword = keywordResults(query);
-        fusion.addChannel("semantic", semantic, 1.0);
-        fusion.addChannel("keyword", keyword, 1.15);
-        addGraphResults(options.graphDepth(), fusion, semantic, keyword);
+        fusion.addChannel("semantic", semantic, scoring.semanticWeight());
+        fusion.addChannel("keyword", keyword, scoring.keywordWeight());
+        addGraphResults(options.graphDepth(), fusion, semantic, keyword, scoring.graphWeight());
     }
 
-    private void searchCallChain(String query, int topK, CodeSearchOptions options, RetrievalFusion fusion) throws Exception {
+    private void searchCallChain(String query, int topK, CodeSearchOptions options, RetrievalFusion fusion,
+                                 RetrievalScoringProfile scoring) throws Exception {
         List<VectorStore.SearchResult> semantic = safeSemanticResults(query, topK);
         List<VectorStore.SearchResult> keyword = keywordResults(query);
-        fusion.addChannel("semantic", semantic, 1.0);
-        fusion.addChannel("keyword", keyword, 1.20);
-        addGraphResults(options.graphDepth(), fusion, semantic, keyword);
+        fusion.addChannel("semantic", semantic, scoring.semanticWeight());
+        fusion.addChannel("keyword", keyword, scoring.keywordWeight());
+        addGraphResults(options.graphDepth(), fusion, semantic, keyword, scoring.graphWeight());
     }
 
-    private void searchErrorTrace(String query, int topK, CodeSearchOptions options, RetrievalFusion fusion) throws Exception {
+    private void searchErrorTrace(String query, int topK, CodeSearchOptions options, RetrievalFusion fusion,
+                                  RetrievalScoringProfile scoring) throws Exception {
         List<VectorStore.SearchResult> keyword = keywordResults(query);
         List<VectorStore.SearchResult> semantic = safeSemanticResults(query, topK);
-        fusion.addChannel("keyword", keyword, 1.30);
-        fusion.addChannel("semantic", semantic, 0.90);
-        addGraphResults(options.graphDepth(), fusion, keyword, semantic);
+        fusion.addChannel("keyword", keyword, scoring.keywordWeight());
+        fusion.addChannel("semantic", semantic, scoring.semanticWeight());
+        addGraphResults(options.graphDepth(), fusion, keyword, semantic, scoring.graphWeight());
     }
 
-    private void searchPreciseFirst(String query, int topK, RetrievalFusion fusion) throws Exception {
+    private void searchPreciseFirst(String query, int topK, RetrievalFusion fusion,
+                                    RetrievalScoringProfile scoring) throws Exception {
         List<VectorStore.SearchResult> keyword = keywordResults(query);
-        fusion.addChannel("keyword", keyword, 1.35);
+        fusion.addChannel("keyword", keyword, scoring.keywordWeight());
         if (keyword.size() < Math.max(topK, 5)) {
-            fusion.addChannel("semantic", safeSemanticResults(query, topK), 0.75);
+            fusion.addChannel("semantic", safeSemanticResults(query, topK), scoring.semanticWeight());
         }
     }
 
@@ -233,10 +252,11 @@ public class CodeRetriever implements AutoCloseable {
 
     private void addGraphResults(int graphDepth, RetrievalFusion fusion,
                                  List<VectorStore.SearchResult> first,
-                                 List<VectorStore.SearchResult> second) throws SQLException {
+                                 List<VectorStore.SearchResult> second,
+                                 double graphWeight) throws SQLException {
         if (graphDepth > 0) {
             List<VectorStore.SearchResult> graph = expandGraphNeighbors(seedResults(first, second), graphDepth);
-            fusion.addChannel("graph", graph, 0.85);
+            fusion.addChannel("graph", graph, graphWeight);
         }
     }
 
