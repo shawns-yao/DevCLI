@@ -14,6 +14,7 @@ class SkillFrontmatterParserTest {
         String input = """
                 ---
                 name: web-access
+                description: web access guide
                 version: "1.0.0"
                 ---
                 body content
@@ -39,7 +40,7 @@ class SkillFrontmatterParserTest {
                 """;
         SkillFrontmatterParser.ParseResult r = SkillFrontmatterParser.parse(input);
         Object desc = r.frontmatter().get("description");
-        assertEquals("第一行 第二行", desc);
+        assertEquals("第一行\n第二行\n", desc);
     }
 
     @Test
@@ -55,6 +56,23 @@ class SkillFrontmatterParserTest {
         @SuppressWarnings("unchecked")
         List<String> tags = (List<String>) r.frontmatter().get("tags");
         assertEquals(List.of("web", "browser", "fetch"), tags);
+    }
+
+    @Test
+    void parsesQuotedArrayItemsContainingCommaAndColon() {
+        String input = """
+                ---
+                name: quoted-array
+                description: parser test
+                tags: ["C,C", "key:value"]
+                ---
+                body
+                """;
+
+        SkillFrontmatterParser.ParseResult result = SkillFrontmatterParser.parse(input);
+
+        assertTrue(result.valid(), result.warnings().toString());
+        assertEquals(List.of("C,C", "key:value"), result.frontmatter().get("tags"));
     }
 
     @Test
@@ -104,8 +122,8 @@ class SkillFrontmatterParserTest {
                 body
                 """;
         SkillFrontmatterParser.ParseResult r = SkillFrontmatterParser.parse(input);
-        assertTrue(r.warnings().stream().anyMatch(w -> w.contains("嵌套对象")));
-        assertEquals("foo", r.frontmatter().get("name"));
+        assertFalse(r.valid());
+        assertTrue(r.warnings().stream().anyMatch(w -> w.contains("不支持") || w.contains("metadata")));
     }
 
     @Test
@@ -127,5 +145,28 @@ class SkillFrontmatterParserTest {
         SkillFrontmatterParser.ParseResult r = SkillFrontmatterParser.parse(input);
         assertEquals("foo", r.frontmatter().get("name"));
         assertEquals("", r.body());
+    }
+
+    @Test
+    void rejectsUnknownFieldsAndInvalidSchema() {
+        SkillFrontmatterParser.ParseResult unknown = SkillFrontmatterParser.parse("""
+                ---
+                name: example
+                description: valid
+                surprise: true
+                ---
+                body
+                """);
+        SkillFrontmatterParser.ParseResult wrongType = SkillFrontmatterParser.parse("""
+                ---
+                name: example
+                description: valid
+                allowedTools: read_file
+                ---
+                body
+                """);
+
+        assertFalse(unknown.valid());
+        assertFalse(wrongType.valid());
     }
 }

@@ -45,7 +45,8 @@ public final class SkillIndexFormatter {
                 : "\n任务匹配时调用 load_skill(name)，需要时可再次加载。\n";
         int included = 0;
         for (Skill skill : enabled) {
-            String desc = truncateByCodepoint(skill.description().trim(), MAX_DESCRIPTION_CODEPOINTS);
+            String desc = truncateByCodepoint(
+                    skill.description().replaceAll("\\s+", " ").trim(), MAX_DESCRIPTION_CODEPOINTS);
             String line = "- **" + skill.name() + "**：" + desc + '\n';
             if (MemoryEntry.estimateTokens(sb + line + footer) > safeBudget) {
                 continue;

@@ -203,6 +203,9 @@ public final class SkillRegistry {
             warnings.add(skillMd + ": " + w);
             System.err.println("⚠️ Skill " + skillMd + " frontmatter: " + w);
         }
+        if (!parsed.valid()) {
+            return null;
+        }
 
         Map<String, Object> fm = parsed.frontmatter();
         String name = stringField(fm, "name");

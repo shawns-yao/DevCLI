@@ -241,8 +241,8 @@ class SkillRegistryTest {
         SkillRegistry registry = new SkillRegistry(null, user, null, state);
         registry.reload();
 
-        // bad skill 没有 frontmatter，name 退化为目录名 "bad"，仍能加载（Spec 中无 frontmatter 仅 warning）
-        assertEquals(2, registry.allSkills().size());
+        assertEquals(1, registry.allSkills().size());
+        assertEquals("good", registry.allSkills().getFirst().name());
     }
 
     private static void writeSkill(Path root, String name, String desc, String version) throws IOException {
