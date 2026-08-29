@@ -24,6 +24,7 @@ final class PlanCoordinator {
     private static final ObjectMapper mapper = new ObjectMapper();
     private static final int MAX_PLANNER_STEPS = 5;
     private static final double FINAL_INTEGRATION_FAILURE_RATIO_LIMIT = 0.5;
+    private static final int MAX_PLAN_REVIEW_PROTOCOL_REPAIRS = 1;
 
     record GenerationResult(AgentMessage message,
                             List<AgentOrchestrator.ExecutionStep> steps,
@@ -133,8 +134,27 @@ final class PlanCoordinator {
         if (review.type() == AgentMessage.Type.ERROR) {
             return new TeamPlanReviewProtocol.Evaluation(false, false, "", review.content());
         }
+        TeamPlanReviewProtocol.Evaluation evaluation = evaluatePlanReview(review.content());
+        for (int attempt = 1;
+             !evaluation.protocolValid() && attempt <= MAX_PLAN_REVIEW_PROTOCOL_REPAIRS;
+             attempt++) {
+            out.println("⚠️ 计划语义评审协议无效，正在请求结构化修复 (" + attempt
+                    + "/" + MAX_PLAN_REVIEW_PROTOCOL_REPAIRS + ")...\n");
+            review = reviewer.executePlanReview(
+                    AgentMessage.task("orchestrator",
+                            buildPlanReviewProtocolRepairPrompt(review.content())), out);
+            if (review.type() == AgentMessage.Type.ERROR) {
+                return new TeamPlanReviewProtocol.Evaluation(
+                        false, false, "", review.content());
+            }
+            evaluation = evaluatePlanReview(review.content());
+        }
+        return evaluation;
+    }
+
+    private TeamPlanReviewProtocol.Evaluation evaluatePlanReview(String content) {
         return TeamPlanReviewProtocol.evaluate(
-                review.content(),
+                content,
                 runState.acceptanceCriteria().stream().map(AcceptanceCriterion::id).toList(),
                 runState.planStepIds(),
                 runState.acceptanceCriteria().stream()
@@ -142,6 +162,18 @@ final class PlanCoordinator {
                                 || "high".equalsIgnoreCase(criterion.severity()))
                         .map(AcceptanceCriterion::id)
                         .collect(Collectors.toUnmodifiableSet()));
+    }
+
+    private String buildPlanReviewProtocolRepairPrompt(String invalidOutput) {
+        return """
+                计划语义评审协议修复。
+                上次输出不是合法评审 JSON。保持原评审结论和事实，不重新规划，不调用工具。
+                只输出一个完整 JSON 对象，必须包含 approved、summary、requirement_coverage、criteria_reviews、counterexamples、issues。
+                禁止 Markdown、前置解释和后置说明。
+
+                上次无效输出：
+                %s
+                """.formatted(Objects.toString(invalidOutput, ""));
     }
 
     private String validateGeneratedPlan(List<AgentOrchestrator.ExecutionStep> steps,
@@ -195,11 +227,19 @@ final class PlanCoordinator {
             for (JsonNode stepNode : stepsNode) {
                 String originalId = stepNode.path("id").asText();
                 String newId = "step_" + stepIndex++;
+                String declaredType = stepNode.path("type").asText("COMMAND")
+                        .trim().toUpperCase(Locale.ROOT);
+                String description = stepNode.path("description").asText();
+                String typeIssue = TeamPlannerProtocol.validateDeclaredStep(
+                        declaredType, description);
+                if (typeIssue != null) {
+                    return rejectPlan(typeIssue + ": " + originalId);
+                }
                 idMapping.put(originalId, newId);
                 steps.add(AgentOrchestrator.ExecutionStep.pending(
                         newId,
-                        stepNode.path("description").asText(),
-                        stepNode.path("type").asText("COMMAND"),
+                        description,
+                        declaredType,
                         List.of()));
             }
             stepIndex = 1;

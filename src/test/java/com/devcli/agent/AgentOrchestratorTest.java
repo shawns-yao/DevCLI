@@ -327,6 +327,36 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    void shouldRejectUnknownPlannerStepType() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+
+        List<AgentOrchestrator.ExecutionStep> steps = orchestrator.parsePlan("""
+                {
+                  "steps": [
+                    {"id":"s1","description":"执行任意动作","type":"SHELL","dependencies":[]}
+                  ]
+                }
+                """);
+
+        assertTrue(steps.isEmpty());
+    }
+
+    @Test
+    void shouldRejectReadOnlyDiscoveryStepMislabeledAsFileWrite() {
+        AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
+
+        List<AgentOrchestrator.ExecutionStep> steps = orchestrator.parsePlan("""
+                {
+                  "steps": [
+                    {"id":"s1","description":"读取 Node.java 并检查现有实现","type":"FILE_WRITE","dependencies":[]}
+                  ]
+                }
+                """);
+
+        assertTrue(steps.isEmpty());
+    }
+
+    @Test
     void shouldRejectAcceptanceCriteriaWithoutVerificationContract() {
         AgentOrchestrator orchestrator = new AgentOrchestrator(new GLMClient("test-key"));
 
@@ -745,10 +775,54 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    void shouldFailClosedWhenPlanReviewerReturnsMalformedProtocol(@TempDir Path tempDir) {
-        AtomicInteger workerCalls = new AtomicInteger();
+    void shouldRepairMalformedPlanReviewerProtocolOnce(@TempDir Path tempDir) {
+        AtomicInteger reviewCalls = new AtomicInteger();
         Function<String, LlmClient.ChatResponse> dispatcher = body -> {
             if (body.contains("计划语义评审")) {
+                return response(reviewCalls.incrementAndGet() == 1 ? "not-json" : """
+                        {"approved":true,"summary":"协议修复后通过","requirement_coverage":[
+                          {"requirement":"实现功能","status":"covered","step_ids":["step_1"],"criterion_ids":["AC-01"]}
+                        ],"criteria_reviews":[
+                          {"id":"AC-01","clear":true,"verifiable":true,"scope_valid":true,"evidence":"list_dir 可验证"}
+                        ],"counterexamples":[
+                          {"criterion_id":"AC-01","input":"目标目录不存在","expected_failure_signal":"list_dir 返回不存在","step_ids":["step_1"]}
+                        ],"issues":[]}
+                        """);
+            }
+            if (body.contains("请为以下任务制定执行计划")) {
+                return response("""
+                        {"acceptance_criteria":[{
+                          "id":"AC-01","description":"功能成果可观察","verification_method":"TOOL",
+                          "verifier":"list_dir","test_signal":"工具返回成功","severity":"high","applies_to":["s1"]
+                        }],"steps":[
+                          {"id":"s1","description":"实现功能","type":"ANALYSIS","dependencies":[]}
+                        ]}
+                        """);
+            }
+            return response("unexpected worker call");
+        };
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    new DispatchingStubGLMClient(dispatcher), isolatedToolRegistry(tempDir), mm);
+            orchestrator.setPlanSemanticReviewEnabled(true);
+            orchestrator.setPlanReviewHandler(request ->
+                    AgentOrchestrator.TeamPlanReviewDecision.cancel("协议修复完成"));
+
+            String result = orchestrator.run("实现功能");
+
+            assertEquals(2, reviewCalls.get());
+            assertTrue(result.contains("协议修复完成"), result);
+        }
+    }
+
+    @Test
+    void shouldFailClosedWhenPlanReviewerProtocolRepairAlsoMalformed(@TempDir Path tempDir) {
+        AtomicInteger workerCalls = new AtomicInteger();
+        AtomicInteger reviewCalls = new AtomicInteger();
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("计划语义评审")) {
+                reviewCalls.incrementAndGet();
                 return response("not-json");
             }
             if (body.contains("请为以下任务制定执行计划")) {
@@ -773,6 +847,7 @@ class AgentOrchestratorTest {
             String result = orchestrator.run("实现功能");
 
             assertTrue(result.contains("计划语义评审失败"), result);
+            assertEquals(2, reviewCalls.get());
             assertEquals(0, workerCalls.get());
         }
     }
