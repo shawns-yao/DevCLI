@@ -543,6 +543,7 @@
 - 已实现：RAG 统一输出 Recall@5、MRR@5、nDCG@5；Agent 输出任务成功率；Memory 输出写入准确率、低价值拦截率、Recall@5 和注入命中率；Compression 输出事实保真率；聚合器生成固定 JSON、CSV 和数据清单
 - 已验证：CodeSearchNet Java 公共 test split 50 条；Memory 25 条策略样本与 12 条召回查询；230k token 阈值、18 条事实、5 次真实压缩；2026-07-16 Agent 完整复跑中，单 Agent 成功率 0/5、隐藏检查平均完成率 0%，Planner/Worker/Reviewer 成功率 0/5、隐藏检查平均完成率 27.33%
 - 已实现阶段二（2026-07-16）：固定 SWE-bench Lite、LongMemEval Oracle Cleaned、LongBench v1 和 RULER v1 官方版本、许可、SHA-256 与本地原始数据边界；新增统一目录清单、数据适配器、官方指标兼容实现、RULER 固定种子生成、SWE-bench predictions 与 Linux Docker harness 命令、真实长上下文报告及聚合 CSV 接入；首轮运行 LongMemEval 3 条、LongBench 6 条、RULER 3 条。SWE-bench Lite 单样本已生成 predictions，但补丁只包含复现脚本；官方 harness 已修复 fixtures 导入与本地镜像构建参数
+- 已补强（2026-08-29）：SWE-bench 三模式驱动记录 Java、沙箱、LLM HTTP 协议和 Maven 仓库配置类型，且不泄露本机仓库绝对路径
 - 待完成：LongMemEval 官方 LLM judge、SWE-bench Lite 官方 resolved 结果、LongBench/RULER 多长度和扩大样本评测；SWE-bench 基础镜像构建连续两次因 Ubuntu archive 返回 503 中断，尚无有效 resolved 分母；当前首轮公开样本只验证链路，不代表完整集合成绩
 - 风险：真实 LLM、Embedding、Reranker 和公开数据集端点会引入费用、耗时、网络依赖和结果波动；50 条 RAG 样本、3 条公开长上下文样本和单次 Agent 运行不代表统计稳定结论
 

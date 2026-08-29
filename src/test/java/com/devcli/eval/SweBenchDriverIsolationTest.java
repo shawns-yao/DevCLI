@@ -51,6 +51,24 @@ class SweBenchDriverIsolationTest {
                 new Properties(), Map.of()));
     }
 
+    @Test
+    void environmentFingerprintRecordsReproductionInputsWithoutLeakingRepositoryPath() {
+        Properties properties = new Properties();
+        properties.setProperty("java.version", "17.0.12");
+        properties.setProperty("devcli.command.sandbox.mode", "HOST_WARN");
+        properties.setProperty("devcli.llm.http.protocol", "HTTP_1_1");
+        properties.setProperty("devcli.command.sandbox.maven.repository",
+                "C:\\private\\maven\\repository");
+
+        String fingerprint = SweBenchDriver.environmentFingerprint(properties, Map.of());
+
+        assertEquals("java=17.0.12 sandbox=HOST_WARN http=HTTP_1_1 mavenRepo=EXPLICIT",
+                fingerprint);
+        assertTrue(!fingerprint.contains("private"), fingerprint);
+        assertEquals("java=unknown sandbox=DOCKER http=AUTO mavenRepo=DEFAULT",
+                SweBenchDriver.environmentFingerprint(new Properties(), Map.of()));
+    }
+
     private static Set<String> toolNames(ToolRegistry registry) {
         return registry.getToolDefinitions().stream()
                 .map(LlmClient.Tool::name)

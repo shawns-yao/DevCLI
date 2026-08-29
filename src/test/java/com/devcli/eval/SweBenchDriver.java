@@ -62,8 +62,8 @@ public final class SweBenchDriver {
 
         long started = System.currentTimeMillis();
         System.err.println("[driver] mode=" + mode + " provider=" + client.getProviderName()
-                + " model=" + client.getModelName() + " sandbox="
-                + resolveSandboxMode(System.getProperties(), System.getenv())
+                + " model=" + client.getModelName() + " env={"
+                + environmentFingerprint(System.getProperties(), System.getenv()) + "}"
                 + " project=" + project);
         String out = switch (mode) {
             case "solo" -> runReact(client, project, prompt, true);
@@ -127,5 +127,39 @@ public final class SweBenchDriver {
                     "sandbox mode must be DOCKER|HOST_WARN: " + configured);
         }
         return normalized;
+    }
+
+    static String environmentFingerprint(Properties properties,
+                                         Map<String, String> environment) {
+        Properties safeProperties = properties == null ? new Properties() : properties;
+        Map<String, String> safeEnvironment = environment == null ? Map.of() : environment;
+        String javaVersion = firstNonBlank(safeProperties.getProperty("java.version"), null,
+                "unknown");
+        String httpProtocol = firstNonBlank(
+                safeProperties.getProperty("devcli.llm.http.protocol"),
+                safeEnvironment.get("DEVCLI_LLM_HTTP_PROTOCOL"), "AUTO")
+                .toUpperCase(Locale.ROOT).replace('-', '_').replace('.', '_');
+        if ("HTTP11".equals(httpProtocol)) {
+            httpProtocol = "HTTP_1_1";
+        }
+        String mavenRepository = firstNonBlank(
+                safeProperties.getProperty(
+                        DefaultCommandExecutionService.SANDBOX_MAVEN_REPOSITORY_PROPERTY),
+                safeEnvironment.get(
+                        DefaultCommandExecutionService.SANDBOX_MAVEN_REPOSITORY_ENV), "");
+        return "java=" + javaVersion
+                + " sandbox=" + resolveSandboxMode(safeProperties, safeEnvironment)
+                + " http=" + httpProtocol
+                + " mavenRepo=" + (mavenRepository.isBlank() ? "DEFAULT" : "EXPLICIT");
+    }
+
+    private static String firstNonBlank(String first, String second, String fallback) {
+        if (first != null && !first.isBlank()) {
+            return first.trim();
+        }
+        if (second != null && !second.isBlank()) {
+            return second.trim();
+        }
+        return fallback;
     }
 }
