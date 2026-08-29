@@ -20,6 +20,7 @@ import com.devcli.tool.ToolRegistry;
 import com.devcli.workspace.PatchSet;
 import com.devcli.workspace.WorkspaceExecutionSession;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
@@ -134,6 +135,9 @@ final class DelegationSession implements DelegateTaskTool.Handler {
                 try (ToolRegistry child = parent.forkForProject(Path.of(parent.getProjectPath()))) {
                     result = executeChild(child, client, budget, id, role, rolePrompt,
                             arguments, context, ToolRegistry.ToolAccessScope.READ_ONLY);
+                    if (result.isSuccess() && !role.equals("reviewer")) {
+                        result = registerChildReport(id, result);
+                    }
                 }
             }
         } catch (CancellationException e) {
@@ -167,6 +171,26 @@ final class DelegationSession implements DelegateTaskTool.Handler {
                 reportStore.remove(expired);
             }
         }
+    }
+
+    private ToolOutput registerChildReport(String id, ToolOutput result) {
+        try {
+            JsonNode root = JSON.readTree(result.text());
+            if (root != null && root.isObject()) {
+                ObjectNode report = (ObjectNode) root;
+                report.put("report_id", id);
+                String normalized = report.toString();
+                storeReport(id, normalized);
+                return ToolOutput.success(normalized).withModifiedResources(result.modifiedResources());
+            }
+        } catch (IOException ignored) {
+            // Preserve a bounded textual report when a child did not use the structured format.
+        }
+        ObjectNode wrapper = JSON.createObjectNode();
+        wrapper.put("child_id", id).put("report_id", id).put("summary", bounded(result.text()));
+        String normalized = wrapper.toString();
+        storeReport(id, normalized);
+        return ToolOutput.success(normalized).withModifiedResources(result.modifiedResources());
     }
 
     private void appendPatchEvidence(ObjectNode report, PatchSet patch) {
