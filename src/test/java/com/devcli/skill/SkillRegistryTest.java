@@ -227,6 +227,24 @@ class SkillRegistryTest {
     }
 
     @Test
+    void recordsOnlyActualSkillActivation(@TempDir Path tempDir) throws IOException {
+        Path user = tempDir.resolve("user");
+        writeSkill(user, "guide", "desc", "body");
+        SkillRegistry registry = new SkillRegistry(null, user, null,
+                new SkillStateStore(tempDir.resolve("skills.json")));
+        registry.reload();
+
+        registry.recordIndexRender(1, 0);
+        assertEquals(0, registry.selectionMetrics().bodyActivationCount());
+        registry.recordActivation("guide", SkillRegistry.ActivationKind.BODY);
+        registry.recordActivation("guide", SkillRegistry.ActivationKind.REFERENCE);
+
+        SkillRegistry.SelectionMetrics metrics = registry.selectionMetrics();
+        assertEquals(1, metrics.bodyActivationCount());
+        assertEquals(1, metrics.referenceActivationCount());
+    }
+
+    @Test
     void skipsFileWithMalformedFrontmatterButContinues(@TempDir Path tempDir) throws IOException {
         Path user = tempDir.resolve("user");
         Files.createDirectories(user.resolve("good"));

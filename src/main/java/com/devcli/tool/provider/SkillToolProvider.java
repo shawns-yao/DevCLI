@@ -66,6 +66,7 @@ public final class SkillToolProvider implements ToolProvider {
             targetBuffer.push(name, page.content(), skill.allowedTools(), skill.context(), !skill.paths().isEmpty());
         }
         skillRegistry.recordUsage(name);
+        skillRegistry.recordActivation(name, SkillRegistry.ActivationKind.BODY);
         String allowedTools = skill.allowedTools().isEmpty()
                 ? ""
                 : "允许工具: " + String.join(", ", skill.allowedTools()) + "。";
@@ -105,6 +106,7 @@ public final class SkillToolProvider implements ToolProvider {
                     ? "\n\n继续读取: load_skill(name=\"" + skill.name() + "\", reference=\""
                     + relativePath + "\", page=" + (page.number() + 1) + ")"
                     : "";
+            context.skillRegistry().recordActivation(skill.name(), SkillRegistry.ActivationKind.REFERENCE);
             return ToolOutput.success("Skill reference " + relativePath + " 第 " + page.number()
                     + "/" + page.total() + " 页\n\n" + page.content() + next);
         } catch (java.io.IOException e) {

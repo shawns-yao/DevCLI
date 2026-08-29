@@ -43,6 +43,8 @@ public final class SkillRegistry {
     private long renderedSkills;
     private long omittedSkills;
     private long loadCount;
+    private long bodyActivationCount;
+    private long referenceActivationCount;
 
     public SkillRegistry(Path builtinCacheRoot, Path userSkillsDir, Path projectSkillsDir, SkillStateStore stateStore) {
         this.builtinCacheRoot = builtinCacheRoot;
@@ -145,7 +147,20 @@ public final class SkillRegistry {
     }
 
     public synchronized SelectionMetrics selectionMetrics() {
-        return new SelectionMetrics(selectionRuns, renderedSkills, omittedSkills, loadCount);
+        return new SelectionMetrics(selectionRuns, renderedSkills, omittedSkills, loadCount,
+                bodyActivationCount, referenceActivationCount);
+    }
+
+    /** 记录 Skill 正文或 reference 真正进入当前任务，而非仅出现在索引中。 */
+    public synchronized void recordActivation(String name, ActivationKind kind) {
+        if (name == null || name.isBlank() || kind == null) {
+            return;
+        }
+        if (kind == ActivationKind.BODY) {
+            bodyActivationCount++;
+        } else {
+            referenceActivationCount++;
+        }
     }
 
     public SkillStateStore stateStore() {
@@ -431,8 +446,13 @@ public final class SkillRegistry {
         return regex.toString();
     }
 
+    public enum ActivationKind {
+        BODY, REFERENCE
+    }
+
     public record SelectionMetrics(long selectionRuns, long renderedSkills,
-                                   long omittedSkills, long loadCount) {
+                                   long omittedSkills, long loadCount,
+                                   long bodyActivationCount, long referenceActivationCount) {
     }
 
     public record CatalogSnapshot(long generation, List<Skill> skills) {
