@@ -30,14 +30,21 @@ final class ReviewCoordinator {
         void recordEvent(String agentId, String stepId, String phase, String summary);
     }
 
-    record PreReviewResult(boolean passed, boolean hardCheckExecuted, String feedback) {
+    record PreReviewResult(boolean passed, boolean hardCheckExecuted,
+                           PreReviewVerifier.FailureKind failureKind, String feedback) {
         static PreReviewResult skipped() {
-            return new PreReviewResult(true, false, "");
+            return new PreReviewResult(true, false, PreReviewVerifier.FailureKind.NONE, "");
         }
     }
 
     record ReviewDecision(boolean approved, String issues, boolean reviewerError,
-                          boolean hardCheckExecuted) {
+                          boolean hardCheckExecuted,
+                          PreReviewVerifier.FailureKind hardCheckFailureKind) {
+        ReviewDecision(boolean approved, String issues, boolean reviewerError,
+                       boolean hardCheckExecuted) {
+            this(approved, issues, reviewerError, hardCheckExecuted,
+                    PreReviewVerifier.FailureKind.NONE);
+        }
     }
 
     private final MemoryManager memoryManager;
@@ -87,7 +94,7 @@ final class ReviewCoordinator {
             out.println("⛔ 步骤 [" + step.id() + "] Pre-Review Hook 未通过，跳过 Reviewer LLM");
             out.println("   反馈: " + preReview.feedback() + "\n");
             return new ReviewDecision(false, preReview.feedback(), false,
-                    preReview.hardCheckExecuted());
+                    preReview.hardCheckExecuted(), preReview.failureKind());
         }
         if (!preReview.feedback().isBlank()) {
             out.println(preReview.feedback() + "\n");
@@ -228,7 +235,8 @@ final class ReviewCoordinator {
         }
         Path projectRoot = Path.of(activeToolRegistry.get().getProjectPath()).toAbsolutePath().normalize();
         PreReviewVerifier.Result result = preReviewVerifier.verify(projectRoot, step.id());
-        return new PreReviewResult(result.passed(), result.hardCheckExecuted(), result.feedback());
+        return new PreReviewResult(result.passed(), result.hardCheckExecuted(),
+                result.failureKind(), result.feedback());
     }
 
     void appendAcceptanceCriteriaSection(StringBuilder target,

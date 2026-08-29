@@ -144,7 +144,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - checkpoint 协议版本 9 通过 `RecoveryState` 恢复共享 artifact、验收方式、验证器、适用节点、pending PatchSet 写前日志及文件权限、稳定子代理身份、步骤分配、消息游标、有界且按步骤归属的 AttemptDigest、已消耗的在位重做次数和重做失败现场；旧协议缺失适用节点时迁移为 `FINAL`，缺失验证字段时迁移为人工验收。恢复保持原步骤绑定和原重做额度，只注入 schema 兼容的最近摘要及当前步骤失败尝试，不恢复完整私有对话。
 - Plan Worker 每次尝试都通过隔离 ToolRegistry 的 `runWithResourceLease(stepId, ...)` 绑定资源租约上下文，并在 finally 中释放；并行工具线程显式继承步骤租约归属。ToolRegistry 统一托管 `ResourceLeaseMaintenance`，project fork 共享同一个定时线程；最后一个注册关闭后停止。默认每 60 秒清理过期租约，可通过 `devcli.resource.lease.cleanup.interval.seconds` / `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
 - Plan 副作用步骤在隔离工作区执行；`ToolEffect` / `ToolAccessScope` 在工具管线中强制限制非隔离任务只能使用只读能力。隔离命令和 Pre-Review 默认通过受限 Docker 执行，无网络且失败关闭；每次执行使用唯一容器名，超时或取消时终止客户端进程树并有界执行 `docker rm -f`；显式 `HOST_WARN` 只允许 Maven 离线执行 `clean/validate/compile/test-compile/test/package/verify`、`javac` 与只读 Git，拒绝命令行指定的任意 Maven 插件和发布阶段，并输出主机风险提示，不自动回退。PatchSet 逐文件流式哈希，只保留变更内容；JVM 公平锁与跨进程文件锁共同串行提交，锁缓存按活跃使用者计数退役。应用前保存 before/after 哈希和原文件备份；备份限制为当前所有者访问，孤儿日志按 TTL 清理，恢复时提升完成、继续待执行或回滚，失败回滚会报告具体路径。
-- `PreReviewVerifier` 独立负责 Maven/javac 选择、Java 文件扫描、超时、进程输出解码和失败摘要。Reviewer 声称 TOOL 标准通过时，声明验证器必须出现在本轮真实成功工具调用中；实际执行的 Pre-Review 命令计为 `execute_command` 证据。Reviewer 重试和节点重做耗尽后，结果显式输出失败步骤、额度、最后原因、checkpoint 和人工处理选项。
+- `PreReviewVerifier` 独立负责 Maven/javac 选择、Java 文件扫描、超时、进程输出解码和失败摘要。Maven 多模块根目录即使没有根级 Java 源码也执行硬检查，存在 `mvnw` 时优先使用 Wrapper；结果区分代码失败与超时、取消、沙箱不可用、依赖或工具链缺失等环境失败。Reviewer 声称 TOOL 标准通过时，声明验证器必须出现在本轮真实成功工具调用中；实际执行的 Pre-Review 命令计为 `execute_command` 证据。Reviewer 重试和节点重做耗尽后，结果显式输出失败步骤、额度、最后原因、checkpoint 和人工处理选项。
 - `Planner.replan()` 不是 Agent 循环，没有工具调用权，因此失败后重规划只读取 ExecutionArtifact 的最小结构化产物事实，不读取完整任务 result 作为主要依据。
 
 ### HITL System

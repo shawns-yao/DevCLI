@@ -106,6 +106,84 @@ class PreReviewVerifierTest {
     }
 
     @Test
+    void shouldRunMavenAtMultiModuleRootWithoutRootJavaSources(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        AtomicReference<CommandExecutionService.Request> captured = new AtomicReference<>();
+        PreReviewVerifier verifier = new PreReviewVerifier(30, request -> {
+            captured.set(request);
+            return CommandExecutionService.Result.completed(0, "");
+        });
+
+        PreReviewVerifier.Result result = verifier.verify(tempDir, "step-multi-module");
+
+        assertTrue(result.passed(), result.feedback());
+        assertTrue(result.hardCheckExecuted());
+        assertEquals("mvn -q -DskipTests test-compile", captured.get().command());
+    }
+
+    @Test
+    void shouldPreferMavenWrapperWhenAvailable(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        Files.writeString(tempDir.resolve("mvnw"), "#!/bin/sh", StandardCharsets.UTF_8);
+        AtomicReference<CommandExecutionService.Request> captured = new AtomicReference<>();
+        PreReviewVerifier verifier = new PreReviewVerifier(30, request -> {
+            captured.set(request);
+            return CommandExecutionService.Result.completed(0, "");
+        });
+
+        PreReviewVerifier.Result result = verifier.verify(tempDir, "step-wrapper");
+
+        assertTrue(result.passed(), result.feedback());
+        assertEquals("./mvnw -q -DskipTests test-compile", captured.get().command());
+    }
+
+    @Test
+    void shouldClassifyCompilerFailureAsCodeFailure(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        PreReviewVerifier verifier = new PreReviewVerifier(30, request ->
+                CommandExecutionService.Result.completed(1,
+                        "[ERROR] /src/Foo.java:[3,9] cannot find symbol"));
+
+        PreReviewVerifier.Result result = verifier.verify(tempDir, "step-code-failure");
+
+        assertFalse(result.passed());
+        assertEquals(PreReviewVerifier.FailureKind.CODE, result.failureKind());
+    }
+
+    @Test
+    void shouldClassifyDependencyResolutionFailureAsInfrastructure(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        PreReviewVerifier verifier = new PreReviewVerifier(30, request ->
+                CommandExecutionService.Result.completed(1,
+                        "Plugin org.apache.maven.plugins:maven-compiler-plugin could not be resolved in offline mode"));
+
+        PreReviewVerifier.Result result = verifier.verify(tempDir, "step-missing-plugin");
+
+        assertFalse(result.passed());
+        assertEquals(PreReviewVerifier.FailureKind.INFRASTRUCTURE, result.failureKind());
+    }
+
+    @Test
+    void shouldClassifyTimeoutCancellationAndSandboxFailureAsInfrastructure(@TempDir Path tempDir)
+            throws Exception {
+        Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+
+        PreReviewVerifier.Result timedOut = new PreReviewVerifier(30,
+                request -> CommandExecutionService.Result.timedOut("timeout"))
+                .verify(tempDir, "step-timeout");
+        PreReviewVerifier.Result cancelled = new PreReviewVerifier(30,
+                request -> CommandExecutionService.Result.cancelled("cancelled"))
+                .verify(tempDir, "step-cancelled");
+        PreReviewVerifier.Result sandboxFailure = new PreReviewVerifier(30, request -> {
+            throw new IllegalStateException("Docker daemon unavailable");
+        }).verify(tempDir, "step-sandbox");
+
+        assertEquals(PreReviewVerifier.FailureKind.INFRASTRUCTURE, timedOut.failureKind());
+        assertEquals(PreReviewVerifier.FailureKind.INFRASTRUCTURE, cancelled.failureKind());
+        assertEquals(PreReviewVerifier.FailureKind.INFRASTRUCTURE, sandboxFailure.failureKind());
+    }
+
+    @Test
     void shouldPreserveHostWarnNoticeFromSuccessfulHardCheck(@TempDir Path tempDir) throws Exception {
         Path javaRoot = tempDir.resolve("src/main/java");
         Files.createDirectories(javaRoot);

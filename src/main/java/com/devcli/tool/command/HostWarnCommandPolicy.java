@@ -8,7 +8,8 @@ import java.util.Set;
  * HOST_WARN 模式的第一阶段主机命令白名单，只覆盖 Java 项目构建与只读 Git。
  */
 final class HostWarnCommandPolicy {
-    private static final Set<String> BUILD_COMMANDS = Set.of("mvn", "mvn.cmd", "javac");
+    private static final Set<String> BUILD_COMMANDS = Set.of(
+            "mvn", "mvn.cmd", "mvnw", "mvnw.cmd", "javac");
     private static final Set<String> MAVEN_LIFECYCLE_PHASES = Set.of(
             "clean", "validate", "compile", "test-compile", "test", "package", "verify");
     private static final Set<String> READ_ONLY_GIT_COMMANDS = Set.of(
@@ -38,7 +39,7 @@ final class HostWarnCommandPolicy {
         if (!BUILD_COMMANDS.contains(executable)) {
             throw rejected("仅允许 Maven、javac 和只读 Git 命令");
         }
-        if ("mvn".equals(executable) || "mvn.cmd".equals(executable)) {
+        if (Set.of("mvn", "mvn.cmd", "mvnw", "mvnw.cmd").contains(executable)) {
             validateMavenLifecycle(tokens);
             if (tokens.stream().noneMatch(token -> "-o".equals(token) || "--offline".equals(token))) {
                 return tokens.get(0) + " -o" + command.substring(tokens.get(0).length());

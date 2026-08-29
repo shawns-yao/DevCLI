@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 
 
 /**
@@ -21,6 +22,12 @@ final class PreReviewVerifier {
 
     private final int timeoutSeconds;
     private final CommandExecutionService commandExecutionService;
+
+    enum FailureKind {
+        NONE,
+        CODE,
+        INFRASTRUCTURE
+    }
 
     PreReviewVerifier() {
         this(DEFAULT_TIMEOUT_SECONDS, new DefaultCommandExecutionService());
@@ -39,13 +46,13 @@ final class PreReviewVerifier {
     Result verify(Path projectRoot, String stepId) {
         Path normalizedRoot = projectRoot.toAbsolutePath().normalize();
         Path javaRoot = normalizedRoot.resolve("src/main/java");
+        if (Files.isRegularFile(normalizedRoot.resolve("pom.xml"))) {
+            String mavenCommand = mavenExecutable(normalizedRoot)
+                    + " -q -DskipTests test-compile";
+            return runCommand(normalizedRoot, mavenCommand, mavenCommand, true);
+        }
         if (!Files.isDirectory(javaRoot)) {
             return Result.skipped();
-        }
-
-        if (Files.isRegularFile(normalizedRoot.resolve("pom.xml"))) {
-            return runCommand(normalizedRoot, "mvn -q -DskipTests test-compile",
-                    "mvn -q -DskipTests test-compile");
         }
 
         List<Path> javaFiles;
@@ -56,7 +63,8 @@ final class PreReviewVerifier {
                     .sorted(Comparator.comparing(Path::toString))
                     .toList();
         } catch (IOException e) {
-            return Result.failed("Pre-review hard check failed: 无法扫描 Java 文件：" + e.getMessage());
+            return Result.infrastructureFailure(
+                    "Pre-review hard check failed: 无法扫描 Java 文件：" + e.getMessage());
         }
         if (javaFiles.isEmpty()) {
             return Result.skipped();
@@ -65,12 +73,13 @@ final class PreReviewVerifier {
         Path outputBase = normalizedRoot.resolve("target/devcli-pre-review-classes");
         Path outputDir = outputBase.resolve(safeStepId(stepId)).normalize();
         if (!outputDir.startsWith(outputBase)) {
-            return Result.failed("Pre-review hard check failed: 非法步骤标识");
+            return Result.infrastructureFailure("Pre-review hard check failed: 非法步骤标识");
         }
         try {
             Files.createDirectories(outputDir);
         } catch (IOException e) {
-            return Result.failed("Pre-review hard check failed: 无法创建编译目录：" + e.getMessage());
+            return Result.infrastructureFailure(
+                    "Pre-review hard check failed: 无法创建编译目录：" + e.getMessage());
         }
 
         Path argumentFile = null;
@@ -81,9 +90,10 @@ final class PreReviewVerifier {
                     .toString().replace('\\', '/').replace("\"", "\\\"");
             return runCommand(normalizedRoot,
                     "javac @\"" + relativeArgumentFile + "\"",
-                    "javac -encoding UTF-8");
+                    "javac -encoding UTF-8", false);
         } catch (IOException e) {
-            return Result.failed("Pre-review hard check failed: 无法创建 javac 参数文件：" + e.getMessage());
+            return Result.infrastructureFailure(
+                    "Pre-review hard check failed: 无法创建 javac 参数文件：" + e.getMessage());
         } finally {
             if (argumentFile != null) {
                 try {
@@ -114,7 +124,15 @@ final class PreReviewVerifier {
         return "\"" + normalized + "\"";
     }
 
-    private Result runCommand(Path projectRoot, String command, String displayCommand) {
+    private String mavenExecutable(Path projectRoot) {
+        if (Files.isRegularFile(projectRoot.resolve("mvnw"))) {
+            return "./mvnw";
+        }
+        return "mvn";
+    }
+
+    private Result runCommand(Path projectRoot, String command, String displayCommand,
+                              boolean mavenBuild) {
         try {
             CommandExecutionService.Result execution = commandExecutionService.execute(
                     new CommandExecutionService.Request(
@@ -123,18 +141,37 @@ final class PreReviewVerifier {
                 return Result.verified(execution.output());
             }
             if (execution.timedOut()) {
-                return Result.failed("Pre-review hard check failed: " + displayCommand
+                return Result.infrastructureFailure("Pre-review hard check failed: " + displayCommand
                         + " 超过 " + timeoutSeconds + "s");
             }
             if (execution.cancelled()) {
-                return Result.failed("Pre-review hard check failed: " + displayCommand + " 被中断");
+                return Result.infrastructureFailure(
+                        "Pre-review hard check failed: " + displayCommand + " 被中断");
             }
-            return Result.failed("Pre-review hard check failed: " + displayCommand
-                    + "\n" + summarizeFailure(execution.output()));
+            String feedback = "Pre-review hard check failed: " + displayCommand
+                    + "\n" + summarizeFailure(execution.output());
+            return mavenBuild && isInfrastructureFailure(execution.output())
+                    ? Result.infrastructureFailure(feedback)
+                    : Result.codeFailure(feedback);
         } catch (RuntimeException e) {
-            return Result.failed("Pre-review hard check failed: 无法在命令沙箱执行 "
+            return Result.infrastructureFailure("Pre-review hard check failed: 无法在命令沙箱执行 "
                     + displayCommand + "：" + e.getMessage());
         }
+    }
+
+    private boolean isInfrastructureFailure(String output) {
+        String normalized = output == null ? "" : output.toLowerCase(Locale.ROOT);
+        return normalized.contains("could not be resolved")
+                || normalized.contains("non-resolvable")
+                || normalized.contains("could not resolve")
+                || normalized.contains("cannot access")
+                || normalized.contains("offline mode")
+                || normalized.contains("invalid target release")
+                || normalized.contains("release version") && normalized.contains("not supported")
+                || normalized.contains("source option") && normalized.contains("is no longer supported")
+                || normalized.contains("unsupportedclassversionerror")
+                || normalized.contains("java_home")
+                || normalized.contains("no compiler is provided");
     }
 
     private String summarizeFailure(String output) {
@@ -189,23 +226,33 @@ final class PreReviewVerifier {
         return text.substring(0, maxLength) + "\n...<truncated>";
     }
 
-    record Result(boolean passed, boolean hardCheckExecuted, String feedback) {
+    record Result(boolean passed, boolean hardCheckExecuted, FailureKind failureKind,
+                  String feedback) {
         Result {
+            failureKind = failureKind == null ? FailureKind.NONE : failureKind;
             feedback = feedback == null ? "" : feedback;
         }
 
         static Result skipped() {
-            return new Result(true, false, "");
+            return new Result(true, false, FailureKind.NONE, "");
         }
 
         static Result verified(String feedback) {
             String normalized = feedback == null ? "" : feedback.trim();
-            return new Result(true, true,
+            return new Result(true, true, FailureKind.NONE,
                     normalized.contains("HOST_WARN") ? normalized : "");
         }
 
-        static Result failed(String feedback) {
-            return new Result(false, true,
+        static Result codeFailure(String feedback) {
+            return failed(FailureKind.CODE, feedback);
+        }
+
+        static Result infrastructureFailure(String feedback) {
+            return failed(FailureKind.INFRASTRUCTURE, feedback);
+        }
+
+        private static Result failed(FailureKind failureKind, String feedback) {
+            return new Result(false, true, failureKind,
                     feedback == null ? "Pre-review hard check failed" : feedback);
         }
     }

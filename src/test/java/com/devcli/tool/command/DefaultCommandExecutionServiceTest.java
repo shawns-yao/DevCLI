@@ -203,14 +203,17 @@ class DefaultCommandExecutionServiceTest {
         service.execute(new CommandExecutionService.Request("mvn test", project, 30, true));
         service.execute(new CommandExecutionService.Request(
                 "mvn -q -DskipTests test-compile", project, 30, true));
+        service.execute(new CommandExecutionService.Request(
+                "./mvnw -q -DskipTests test-compile", project, 30, true));
         service.execute(new CommandExecutionService.Request("javac @\"target/sources.args\"", project, 30, true));
         service.execute(new CommandExecutionService.Request("git status --short", project, 30, true));
 
-        assertEquals(4, hostCalls.get());
+        assertEquals(5, hostCalls.get());
         assertTrue(commands.get(0).startsWith("mvn -o "), commands.toString());
         assertTrue(commands.get(1).startsWith("mvn -o "), commands.toString());
-        assertEquals("javac @\"target/sources.args\"", commands.get(2));
-        assertEquals("git status --short", commands.get(3));
+        assertTrue(commands.get(2).startsWith("./mvnw -o "), commands.toString());
+        assertEquals("javac @\"target/sources.args\"", commands.get(3));
+        assertEquals("git status --short", commands.get(4));
     }
 
     @Test
