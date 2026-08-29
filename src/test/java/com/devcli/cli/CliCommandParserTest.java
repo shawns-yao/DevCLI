@@ -441,4 +441,12 @@ class CliCommandParserTest {
         assertEquals(CliCommandParser.CommandType.SKILL_OFF, off.type());
         assertEquals("verbose-debug", off.payload());
     }
+
+    @Test
+    void parsesProjectSkillTrustCommands() {
+        assertEquals(CliCommandParser.CommandType.SKILL_TRUST_PROJECT,
+                CliCommandParser.parse("/skill trust project").type());
+        assertEquals(CliCommandParser.CommandType.SKILL_UNTRUST_PROJECT,
+                CliCommandParser.parse("/skill untrust project").type());
+    }
 }

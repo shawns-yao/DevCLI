@@ -50,6 +50,8 @@ final class CliCommandParser {
         SKILL_SHOW,
         SKILL_ON,
         SKILL_OFF,
+        SKILL_TRUST_PROJECT,
+        SKILL_UNTRUST_PROJECT,
         SKILL_RELOAD,
         CONFIG,
         SESSION,
@@ -331,6 +333,14 @@ final class CliCommandParser {
 
         if (trimmed.equalsIgnoreCase("/skill reload")) {
             return new ParsedCommand(CommandType.SKILL_RELOAD, null);
+        }
+
+        if (trimmed.equalsIgnoreCase("/skill trust project")) {
+            return new ParsedCommand(CommandType.SKILL_TRUST_PROJECT, null);
+        }
+
+        if (trimmed.equalsIgnoreCase("/skill untrust project")) {
+            return new ParsedCommand(CommandType.SKILL_UNTRUST_PROJECT, null);
         }
 
         if (trimmed.regionMatches(true, 0, "/skill show ", 0, 12)) {

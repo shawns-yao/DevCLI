@@ -51,4 +51,20 @@ class SkillStateStoreTest {
         SkillStateStore store = new SkillStateStore(file);
         assertTrue(store.disabled().isEmpty());
     }
+
+    @Test
+    void persistsProjectDirectoryTrustByCanonicalFingerprint(@TempDir Path tempDir) throws Exception {
+        Path file = tempDir.resolve("skills.json");
+        Path projectSkills = tempDir.resolve("repo/.devcli/skills");
+        Files.createDirectories(projectSkills);
+        SkillStateStore store = new SkillStateStore(file);
+
+        assertFalse(store.isProjectDirectoryTrusted(projectSkills));
+        store.trustProjectDirectory(projectSkills.resolve("..").resolve("skills"));
+
+        SkillStateStore reopened = new SkillStateStore(file);
+        assertTrue(reopened.isProjectDirectoryTrusted(projectSkills));
+        reopened.untrustProjectDirectory(projectSkills);
+        assertFalse(new SkillStateStore(file).isProjectDirectoryTrusted(projectSkills));
+    }
 }

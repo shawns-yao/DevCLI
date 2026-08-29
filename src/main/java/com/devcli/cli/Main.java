@@ -796,6 +796,16 @@ public class Main {
                         renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
                         continue;
                     }
+                    case SKILL_TRUST_PROJECT -> {
+                        ui.println(SkillCommandHandler.trustProject(skillRegistry));
+                        renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
+                        continue;
+                    }
+                    case SKILL_UNTRUST_PROJECT -> {
+                        ui.println(SkillCommandHandler.untrustProject(skillRegistry));
+                        renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
+                        continue;
+                    }
                     case SKILL_RELOAD -> {
                         skillRegistry.reload();
                         try {
@@ -1721,6 +1731,8 @@ public class Main {
                 new SlashCommandHint("/skill show ", "/skill show <name>", "查看 SKILL.md 全文"),
                 new SlashCommandHint("/skill on ", "/skill on <name>", "启用 skill"),
                 new SlashCommandHint("/skill off ", "/skill off <name>", "禁用 skill"),
+                new SlashCommandHint("/skill trust project", "/skill trust project", "信任项目 skill 目录"),
+                new SlashCommandHint("/skill untrust project", "/skill untrust project", "取消信任项目 skill 目录"),
                 new SlashCommandHint("/skill reload", "/skill reload", "重新扫描 skill 目录"),
                 new SlashCommandHint("/help", "/help", "查看命令帮助"),
                 new SlashCommandHint("/exit", "/exit", "退出 DevCLI"),

@@ -6,6 +6,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
@@ -31,6 +34,26 @@ public final class SkillStateStore {
     }
 
     public synchronized Set<String> disabled() {
+        return readTextSet("disabled");
+    }
+
+    public synchronized boolean isProjectDirectoryTrusted(Path directory) {
+        return trustedProjectDirectoryFingerprints().contains(projectDirectoryFingerprint(directory));
+    }
+
+    public synchronized void trustProjectDirectory(Path directory) {
+        updateProjectDirectoryTrust(directory, true);
+    }
+
+    public synchronized void untrustProjectDirectory(Path directory) {
+        updateProjectDirectoryTrust(directory, false);
+    }
+
+    public synchronized Set<String> trustedProjectDirectoryFingerprints() {
+        return readTextSet("trustedProjectDirectories");
+    }
+
+    private Set<String> readTextSet(String field) {
         if (!Files.exists(file)) {
             return Set.of();
         }
@@ -41,8 +64,8 @@ public final class SkillStateStore {
             }
             ObjectNode root = (ObjectNode) MAPPER.readTree(content);
             Set<String> result = new LinkedHashSet<>();
-            if (root.has("disabled") && root.get("disabled").isArray()) {
-                root.get("disabled").forEach(node -> {
+            if (root.has(field) && root.get(field).isArray()) {
+                root.get(field).forEach(node -> {
                     if (node.isTextual() && !node.asText().isBlank()) {
                         result.add(node.asText());
                     }
@@ -58,23 +81,61 @@ public final class SkillStateStore {
     public synchronized void disable(String name) {
         Set<String> set = new LinkedHashSet<>(disabled());
         set.add(name);
-        write(set);
+        write(set, trustedProjectDirectoryFingerprints());
     }
 
     public synchronized void enable(String name) {
         Set<String> set = new LinkedHashSet<>(disabled());
         set.remove(name);
-        write(set);
+        write(set, trustedProjectDirectoryFingerprints());
     }
 
-    private void write(Set<String> disabled) {
+    private void updateProjectDirectoryTrust(Path directory, boolean trusted) {
+        String fingerprint = projectDirectoryFingerprint(directory);
+        Set<String> trustedDirectories = new LinkedHashSet<>(trustedProjectDirectoryFingerprints());
+        if (trusted) {
+            trustedDirectories.add(fingerprint);
+        } else {
+            trustedDirectories.remove(fingerprint);
+        }
+        write(disabled(), trustedDirectories);
+    }
+
+    private void write(Set<String> disabled, Set<String> trustedProjectDirectories) {
         try {
             ObjectNode root = MAPPER.createObjectNode();
             root.putPOJO("disabled", disabled);
+            root.putPOJO("trustedProjectDirectories", trustedProjectDirectories);
             Files.createDirectories(file.getParent());
             Files.writeString(file, MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(root));
         } catch (IOException e) {
             System.err.println("⚠️ skills.json 写入失败: " + e.getMessage());
         }
+    }
+
+    private static String projectDirectoryFingerprint(Path directory) {
+        if (directory == null) {
+            throw new IllegalArgumentException("project skill directory 不能为空");
+        }
+        Path canonical;
+        try {
+            canonical = directory.toRealPath();
+        } catch (IOException ignored) {
+            canonical = directory.toAbsolutePath().normalize();
+        }
+        String normalized = canonical.toString().replace('\\', '/');
+        if (isWindows()) {
+            normalized = normalized.toLowerCase(java.util.Locale.ROOT);
+        }
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(normalized.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 不可用", e);
+        }
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win");
     }
 }
