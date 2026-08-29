@@ -83,7 +83,7 @@ Multi-Agent 并行批次由 `MultiAgentBatchExecutor` 负责资源冲突分波�
 
 非默认 Maven 仓库只能通过 `DEVCLI_COMMAND_SANDBOX_MAVEN_REPOSITORY` / `-Ddevcli.command.sandbox.maven.repository` 显式指定存在的绝对目录。Docker 仅对 Maven 命令只读挂载，`HOST_WARN` 显式传入 `maven.repo.local`；运行时不自动扫描或硬编码开发机路径。
 
-Reviewer 前置硬约束：Worker 产物进入 Reviewer LLM 前，`AgentOrchestrator` 委托 `PreReviewVerifier` 执行 Pre-Review Hook；Maven 根目录即使没有根级 `src/main/java` 也会执行硬检查，存在 `mvnw` 时优先使用 Wrapper，否则执行 `mvn -q -DskipTests test-compile`；无 Maven 时使用 UTF-8 javac 参数文件传递源码清单，避免 Windows 命令行长度限制。两类命令都通过统一命令服务执行；默认使用 Docker，显式 `HOST_WARN` 时 Maven 自动增加离线参数并在 Reviewer 前展示主机风险提示。验证器独立负责 Java 文件扫描、命令选择、超时、参数文件清理和失败摘要，并区分代码失败与超时、取消、沙箱不可用、依赖或工具链缺失等环境失败。失败时直接生成 `approved=false` 反馈打回 Worker，不唤醒 Reviewer LLM。
+Reviewer 前置硬约束：Worker 产物进入 Reviewer LLM 前，`AgentOrchestrator` 委托 `PreReviewVerifier` 执行 Pre-Review Hook；Maven 根目录即使没有根级 `src/main/java` 也会执行硬检查，存在 `mvnw` 时优先使用 Wrapper，否则执行 `mvn -q -DskipTests test-compile`；无 Maven 时使用 UTF-8 javac 参数文件传递源码清单，避免 Windows 命令行长度限制。两类命令都通过统一命令服务执行；默认使用 Docker，显式 `HOST_WARN` 时 Maven 自动增加离线参数并在 Reviewer 前展示主机风险提示。验证器独立负责 Java 文件扫描、命令选择、超时、参数文件清理和失败摘要，并按 Maven 依赖解析、仓库写入、工具链、超时、取消或沙箱故障的精确信号识别环境失败；普通编译错误中的 `cannot access` 不会被误判为环境问题。失败时直接生成 `approved=false` 反馈打回 Worker，不唤醒 Reviewer LLM。
 
 Reviewer 输出必须是可解析 JSON，并包含三层评分：`functional_correctness`、`integration_completeness`、`code_quality`。任一分数低于 `0.6`，或 `functional_correctness < 1.0`，Orchestrator 强制判不通过；非 JSON 文本不再凭“通过”等关键词放行。Pre-Review 会区分“未执行硬检查”和“硬检查实际通过”；Reviewer 发生可重试 LLM 故障时，只有实际执行的硬检查已通过才允许降级接受普通步骤，未执行硬检查继续失败关闭。Reviewer 默认最多 2 轮，可通过 `DEVCLI_TEAM_REVIEWER_MAX_ITERATIONS` / `-Ddevcli.team.reviewer.max.iterations` 调整到 `[1, 8]`；达到上限按可恢复 Reviewer 故障处理，但不绕过硬检查条件。Final integration 保留既有瞬时故障降级策略。
 

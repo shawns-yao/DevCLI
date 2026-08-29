@@ -161,17 +161,22 @@ final class PreReviewVerifier {
 
     private boolean isInfrastructureFailure(String output) {
         String normalized = output == null ? "" : output.toLowerCase(Locale.ROOT);
-        return normalized.contains("could not be resolved")
+        boolean dependencyResolutionFailure = normalized.contains("could not be resolved")
                 || normalized.contains("non-resolvable")
                 || normalized.contains("could not resolve")
-                || normalized.contains("cannot access")
-                || normalized.contains("offline mode")
-                || normalized.contains("invalid target release")
+                || normalized.contains("offline mode");
+        boolean repositoryIoFailure = normalized.contains("tracking file")
+                && (normalized.contains("read-only file system")
+                || normalized.contains("permission denied")
+                || normalized.contains("access is denied")
+                || normalized.contains("could not create"));
+        boolean toolchainFailure = normalized.contains("invalid target release")
                 || normalized.contains("release version") && normalized.contains("not supported")
                 || normalized.contains("source option") && normalized.contains("is no longer supported")
                 || normalized.contains("unsupportedclassversionerror")
                 || normalized.contains("java_home")
                 || normalized.contains("no compiler is provided");
+        return dependencyResolutionFailure || repositoryIoFailure || toolchainFailure;
     }
 
     private String summarizeFailure(String output) {

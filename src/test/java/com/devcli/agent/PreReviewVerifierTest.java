@@ -164,6 +164,36 @@ class PreReviewVerifierTest {
     }
 
     @Test
+    void shouldNotTreatGenericCannotAccessCompilerErrorAsInfrastructure(
+            @TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        PreReviewVerifier verifier = new PreReviewVerifier(30, request ->
+                CommandExecutionService.Result.completed(1,
+                        "[ERROR] /src/App.java:[7,12] cannot access BrokenType\n"
+                                + "bad source file: BrokenType.java does not contain class BrokenType"));
+
+        PreReviewVerifier.Result result = verifier.verify(tempDir, "step-source-error");
+
+        assertFalse(result.passed());
+        assertEquals(PreReviewVerifier.FailureKind.CODE, result.failureKind());
+    }
+
+    @Test
+    void shouldClassifyReadonlyMavenRepositoryFailureAsInfrastructure(
+            @TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        PreReviewVerifier verifier = new PreReviewVerifier(30, request ->
+                CommandExecutionService.Result.completed(1,
+                        "Could not create tracking file /maven-repository/example.lastUpdated: "
+                                + "Read-only file system"));
+
+        PreReviewVerifier.Result result = verifier.verify(tempDir, "step-readonly-repository");
+
+        assertFalse(result.passed());
+        assertEquals(PreReviewVerifier.FailureKind.INFRASTRUCTURE, result.failureKind());
+    }
+
+    @Test
     void shouldClassifyTimeoutCancellationAndSandboxFailureAsInfrastructure(@TempDir Path tempDir)
             throws Exception {
         Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
