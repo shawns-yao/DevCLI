@@ -76,7 +76,11 @@ public final class ExtensionRegistry {
                 "skill:" + skill.name(), ExtensionContract.Kind.SKILL, skill.name(),
                 skill.version(), source(skill.source()), true,
                 Set.of("skill", "context:" + skill.context().wireName()),
-                Map.of("description", skill.description(), "source", skill.displaySource())));
+                Map.of("description", skill.description(),
+                        "source", skill.displaySource(),
+                        "requiresTools", String.join(",", skill.requiresTools()),
+                        "requiresMcp", String.join(",", skill.requiresMcp()),
+                        "dependsOn", String.join(",", skill.dependsOn()))));
     }
 
     public static ExtensionContract fromHook(HookDefinition hook) {

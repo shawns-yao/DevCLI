@@ -245,6 +245,48 @@ class SkillRegistryTest {
         assertEquals("good", registry.allSkills().getFirst().name());
     }
 
+    @Test
+    void filtersSkillsWithMissingToolMcpOrSkillDependencies(@TempDir Path tempDir) throws IOException {
+        Path user = tempDir.resolve("user");
+        writeSkillWithDependencies(user, "base", "", "", "");
+        writeSkillWithDependencies(user, "ready", "read_file", "filesystem", "base");
+        writeSkillWithDependencies(user, "missing-tool", "write_file", "filesystem", "base");
+        writeSkillWithDependencies(user, "missing-mcp", "read_file", "browser", "base");
+        writeSkillWithDependencies(user, "missing-skill", "read_file", "filesystem", "ghost");
+        SkillRegistry registry = new SkillRegistry(null, user, null,
+                new SkillStateStore(tempDir.resolve("skills.json")));
+        registry.setAvailableDependencies(() -> java.util.Set.of("read_file"),
+                () -> java.util.Set.of("filesystem"));
+        registry.reload();
+
+        assertEquals(java.util.Set.of("base", "ready"), registry.enabledSkills().stream()
+                .map(Skill::name).collect(java.util.stream.Collectors.toSet()));
+        assertNull(registry.findSkill("missing-tool"));
+        assertTrue(registry.warnings().stream().anyMatch(message -> message.contains("missing-tool")));
+    }
+
+    @Test
+    void reloadPublishesImmutableGenerationAndDiagnostics(@TempDir Path tempDir) throws IOException {
+        Path user = tempDir.resolve("user");
+        writeSkill(user, "stable", "first", "v1");
+        SkillRegistry registry = new SkillRegistry(null, user, null,
+                new SkillStateStore(tempDir.resolve("skills.json")));
+        java.util.List<SkillRegistry.Diagnostic> diagnostics = new java.util.ArrayList<>();
+        registry.setDiagnosticSink(diagnostics::add);
+        registry.reload();
+        SkillRegistry.CatalogSnapshot first = registry.snapshot();
+
+        writeSkill(user, "stable", "second", "v2");
+        Files.createDirectories(user.resolve("bad"));
+        Files.writeString(user.resolve("bad/SKILL.md"), "invalid");
+        registry.reload();
+
+        assertTrue(registry.snapshot().generation() > first.generation());
+        assertEquals("v1", first.skills().getFirst().version());
+        assertEquals("v2", registry.snapshot().skills().getFirst().version());
+        assertTrue(diagnostics.stream().anyMatch(item -> item.code().equals("skill_invalid")));
+    }
+
     private static void writeSkill(Path root, String name, String desc, String version) throws IOException {
         Path skillDir = root.resolve(name);
         Files.createDirectories(skillDir);
@@ -252,5 +294,18 @@ class SkillRegistryTest {
                 + "\ndescription: " + desc
                 + "\nversion: \"" + version + "\"\n---\nbody for " + name + "\n";
         Files.writeString(skillDir.resolve("SKILL.md"), content);
+    }
+
+    private static void writeSkillWithDependencies(Path root, String name, String tool,
+                                                   String mcp, String dependency) throws IOException {
+        Path skillDir = root.resolve(name);
+        Files.createDirectories(skillDir);
+        StringBuilder content = new StringBuilder("---\nname: ").append(name)
+                .append("\ndescription: dependency test\n");
+        if (!tool.isBlank()) content.append("requiresTools: [").append(tool).append("]\n");
+        if (!mcp.isBlank()) content.append("requiresMcp: [").append(mcp).append("]\n");
+        if (!dependency.isBlank()) content.append("dependsOn: [").append(dependency).append("]\n");
+        content.append("---\nbody\n");
+        Files.writeString(skillDir.resolve("SKILL.md"), content.toString());
     }
 }

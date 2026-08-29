@@ -22,6 +22,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
+import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
 
 /** Skill 启用状态和项目目录信任状态的跨进程原子存储。 */
@@ -33,6 +34,7 @@ public final class SkillStateStore {
     private final Path file;
     private final Path lockFile;
     private final ReentrantLock processLock;
+    private volatile Consumer<SkillRegistry.Diagnostic> diagnosticSink = ignored -> { };
 
     public SkillStateStore(Path file) {
         if (file == null) throw new IllegalArgumentException("skills state file 不能为空");
@@ -44,6 +46,10 @@ public final class SkillStateStore {
 
     public Path file() {
         return file;
+    }
+
+    public void setDiagnosticSink(Consumer<SkillRegistry.Diagnostic> sink) {
+        diagnosticSink = sink == null ? ignored -> { } : sink;
     }
 
     public Set<String> disabled() {
@@ -117,7 +123,9 @@ public final class SkillStateStore {
             return new State(readSet(root.path("disabled")),
                     readSet(root.path("trustedProjectDirectories")));
         } catch (Exception e) {
-            System.err.println("⚠️ skills.json 解析失败，使用空状态: " + e.getMessage());
+            diagnosticSink.accept(new SkillRegistry.Diagnostic(
+                    "skill_state_invalid", "skills.json 解析失败，使用空状态: " + e.getMessage(),
+                    file.toString()));
             return State.empty();
         }
     }

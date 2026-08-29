@@ -10,6 +10,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -32,6 +34,11 @@ public final class SkillRegistry {
     private final Map<String, Skill> skillsByName = new LinkedHashMap<>();
     private final Map<String, Integer> usageCounts = new LinkedHashMap<>();
     private final List<String> warnings = new ArrayList<>();
+    private Supplier<Set<String>> availableTools = Set::of;
+    private Supplier<Set<String>> availableMcpServers = Set::of;
+    private Consumer<Diagnostic> diagnosticSink = ignored -> { };
+    private long generation;
+    private CatalogSnapshot catalogSnapshot = new CatalogSnapshot(0, List.of());
     private long selectionRuns;
     private long renderedSkills;
     private long omittedSkills;
@@ -54,21 +61,27 @@ public final class SkillRegistry {
             if (stateStore != null && stateStore.isProjectDirectoryTrusted(projectSkillsDir)) {
                 loadDirectory(projectSkillsDir, Skill.Source.PROJECT);
             } else {
-                warnings.add("项目 Skill 目录未信任，已跳过: " + projectSkillsDir.toAbsolutePath().normalize());
+                warn("skill_project_untrusted",
+                        "项目 Skill 目录未信任，已跳过: " + projectSkillsDir.toAbsolutePath().normalize(),
+                        projectSkillsDir);
             }
         }
+        validateDependencies();
+        generation++;
+        catalogSnapshot = new CatalogSnapshot(generation, sortedSkills());
     }
 
     public synchronized List<Skill> allSkills() {
-        return skillsByName.values().stream()
-                .sorted((a, b) -> a.name().compareTo(b.name()))
-                .toList();
+        return catalogSnapshot.generation() == generation
+                ? catalogSnapshot.skills()
+                : sortedSkills();
     }
 
     public synchronized List<Skill> enabledSkills() {
         Set<String> disabled = stateStore == null ? Set.of() : stateStore.disabled();
         return allSkills().stream()
                 .filter(s -> !disabled.contains(s.name()))
+                .filter(this::dependenciesSatisfied)
                 .sorted(usageThenNameComparator())
                 .toList();
     }
@@ -112,6 +125,7 @@ public final class SkillRegistry {
         if (skill == null) return null;
         Set<String> disabled = stateStore == null ? Set.of() : stateStore.disabled();
         if (disabled.contains(name)) return null;
+        if (!dependenciesSatisfied(skill)) return null;
         return skill;
     }
 
@@ -136,6 +150,20 @@ public final class SkillRegistry {
 
     public SkillStateStore stateStore() {
         return stateStore;
+    }
+
+    public synchronized void setAvailableDependencies(Supplier<Set<String>> tools,
+                                                      Supplier<Set<String>> mcpServers) {
+        this.availableTools = tools == null ? Set::of : tools;
+        this.availableMcpServers = mcpServers == null ? Set::of : mcpServers;
+    }
+
+    public synchronized void setDiagnosticSink(Consumer<Diagnostic> sink) {
+        this.diagnosticSink = sink == null ? ignored -> { } : sink;
+    }
+
+    public synchronized CatalogSnapshot snapshot() {
+        return catalogSnapshot;
     }
 
     public Path projectSkillsDirectory() {
@@ -183,8 +211,7 @@ public final class SkillRegistry {
                 }
             }
         } catch (IOException e) {
-            warnings.add("扫描 skill 目录失败 " + dir + ": " + e.getMessage());
-            System.err.println("⚠️ 扫描 skill 目录失败 " + dir + ": " + e.getMessage());
+            warn("skill_scan_failed", "扫描 skill 目录失败 " + dir + ": " + e.getMessage(), dir);
         }
     }
 
@@ -193,15 +220,13 @@ public final class SkillRegistry {
         try {
             content = Files.readString(skillMd);
         } catch (IOException e) {
-            warnings.add("读取 SKILL.md 失败 " + skillMd + ": " + e.getMessage());
-            System.err.println("⚠️ 读取 SKILL.md 失败 " + skillMd + ": " + e.getMessage());
+            warn("skill_read_failed", "读取 SKILL.md 失败 " + skillMd + ": " + e.getMessage(), skillMd);
             return null;
         }
 
         SkillFrontmatterParser.ParseResult parsed = SkillFrontmatterParser.parse(content);
         for (String w : parsed.warnings()) {
-            warnings.add(skillMd + ": " + w);
-            System.err.println("⚠️ Skill " + skillMd + " frontmatter: " + w);
+            warn("skill_invalid", skillMd + ": " + w, skillMd);
         }
         if (!parsed.valid()) {
             return null;
@@ -221,9 +246,13 @@ public final class SkillRegistry {
         Skill.Context context = Skill.Context.from(stringField(fm, "context"));
         if (source == Skill.Source.PROJECT && context == Skill.Context.FORK) {
             context = Skill.Context.INLINE;
-            warnings.add(skillMd + ": project Skill 不允许 context:fork，已限制为 inline");
+            warn("skill_project_fork_denied",
+                    skillMd + ": project Skill 不允许 context:fork，已限制为 inline", skillMd);
         }
         List<String> paths = listField(fm, "paths");
+        List<String> requiresTools = listField(fm, "requiresTools");
+        List<String> requiresMcp = listField(fm, "requiresMcp");
+        List<String> dependsOn = listField(fm, "dependsOn");
 
         Path referencesDir = skillDir.resolve("references");
         if (!Files.isDirectory(referencesDir)) {
@@ -239,11 +268,64 @@ public final class SkillRegistry {
                 allowedTools,
                 context,
                 paths,
+                requiresTools,
+                requiresMcp,
+                dependsOn,
                 source,
                 source == Skill.Source.PROJECT ? delimitProjectBody(parsed.body()) : parsed.body(),
                 skillMd,
                 referencesDir
         );
+    }
+
+    private void validateDependencies() {
+        for (Skill skill : skillsByName.values()) {
+            List<String> missing = missingDependencies(skill);
+            if (!missing.isEmpty()) {
+                warn("skill_dependency_missing",
+                        "Skill '" + skill.name() + "' 缺少依赖: " + String.join(", ", missing),
+                        skill.skillMdPath());
+            }
+        }
+    }
+
+    private boolean dependenciesSatisfied(Skill skill) {
+        return missingDependencies(skill).isEmpty();
+    }
+
+    private List<String> missingDependencies(Skill skill) {
+        Set<String> tools = safeDependencies(availableTools);
+        Set<String> mcp = safeDependencies(availableMcpServers);
+        List<String> missing = new ArrayList<>();
+        skill.requiresTools().stream().filter(name -> !tools.contains(name))
+                .forEach(name -> missing.add("tool:" + name));
+        skill.requiresMcp().stream().filter(name -> !mcp.contains(name))
+                .forEach(name -> missing.add("mcp:" + name));
+        skill.dependsOn().stream().filter(name -> !skillsByName.containsKey(name))
+                .forEach(name -> missing.add("skill:" + name));
+        return missing;
+    }
+
+    private Set<String> safeDependencies(Supplier<Set<String>> supplier) {
+        try {
+            Set<String> values = supplier.get();
+            return values == null ? Set.of() : Set.copyOf(values);
+        } catch (RuntimeException e) {
+            warn("skill_dependency_probe_failed", "读取 Skill 依赖状态失败: " + e.getMessage(), null);
+            return Set.of();
+        }
+    }
+
+    private List<Skill> sortedSkills() {
+        return skillsByName.values().stream()
+                .sorted(Comparator.comparing(Skill::name))
+                .toList();
+    }
+
+    private void warn(String code, String message, Path path) {
+        warnings.add(message);
+        diagnosticSink.accept(new Diagnostic(code, message,
+                path == null ? "" : path.toAbsolutePath().normalize().toString()));
     }
 
     private static String delimitProjectBody(String body) {
@@ -351,5 +433,14 @@ public final class SkillRegistry {
 
     public record SelectionMetrics(long selectionRuns, long renderedSkills,
                                    long omittedSkills, long loadCount) {
+    }
+
+    public record CatalogSnapshot(long generation, List<Skill> skills) {
+        public CatalogSnapshot {
+            skills = skills == null ? List.of() : List.copyOf(skills);
+        }
+    }
+
+    public record Diagnostic(String code, String message, String path) {
     }
 }

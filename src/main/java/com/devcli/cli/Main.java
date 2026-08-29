@@ -292,13 +292,32 @@ public class Main {
             Path userSkillsDir = home.resolve(".devcli/skills");
             Path projectSkillsDir = Path.of(".devcli/skills").toAbsolutePath();
             try {
-                new com.devcli.skill.SkillBuiltinExtractor(skillsCacheDir).extractAll();
+                new com.devcli.skill.SkillBuiltinExtractor(skillsCacheDir,
+                        diagnostic -> TRACE_SINK.emit(new com.devcli.runtime.event.RunEvent.CustomMessage(
+                                "skill.diagnostic", diagnostic.message(), java.util.Map.of(
+                                "code", diagnostic.code(), "path", diagnostic.path())))).extractAll();
             } catch (Exception e) {
                 startupNote = appendStartupNote(startupNote, "内置 skill 解压失败: " + e.getMessage());
             }
             com.devcli.skill.SkillStateStore skillStateStore = new com.devcli.skill.SkillStateStore(home.resolve(".devcli/skills.json"));
+            skillStateStore.setDiagnosticSink(diagnostic -> TRACE_SINK.emit(
+                    new com.devcli.runtime.event.RunEvent.CustomMessage(
+                            "skill.diagnostic", diagnostic.message(), java.util.Map.of(
+                            "code", diagnostic.code(), "path", diagnostic.path()))));
             com.devcli.skill.SkillRegistry skillRegistry = new com.devcli.skill.SkillRegistry(
                     skillsCacheDir, userSkillsDir, projectSkillsDir, skillStateStore);
+            skillRegistry.setAvailableDependencies(
+                    () -> hitlToolRegistry.searchableTools().stream()
+                            .map(com.devcli.tool.ToolRegistry.Tool::name)
+                            .collect(java.util.stream.Collectors.toUnmodifiableSet()),
+                    () -> mcpServerManager.servers().stream()
+                            .filter(server -> server.status() == com.devcli.mcp.McpServerStatus.READY)
+                            .map(com.devcli.mcp.McpServer::name)
+                            .collect(java.util.stream.Collectors.toUnmodifiableSet()));
+            skillRegistry.setDiagnosticSink(diagnostic -> TRACE_SINK.emit(
+                    new com.devcli.runtime.event.RunEvent.CustomMessage(
+                            "skill.diagnostic", diagnostic.message(), java.util.Map.of(
+                            "code", diagnostic.code(), "path", diagnostic.path()))));
             skillRegistry.reload();
             skillRegistryRef.set(skillRegistry);
             skillRegistry.allSkills().forEach(skill -> extensionRegistry.registerOrReplace(
