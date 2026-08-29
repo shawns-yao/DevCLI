@@ -2250,6 +2250,89 @@ class AgentOrchestratorTest {
         }
     }
 
+    @Test
+    void infrastructureHardCheckFailureShouldCheckpointWorkerPatch(@TempDir Path tempDir)
+            throws Exception {
+        String checkpointId;
+        Path javaRoot = tempDir.resolve("src/main/java");
+        Files.createDirectories(javaRoot);
+        GLMClient llmClient = new GLMClient("test-key") {
+            @Override
+            public ChatResponse chat(List<Message> messages, List<Tool> tools,
+                                     StreamListener listener) {
+                String body = DispatchingStubGLMClient.findLastUser(messages);
+                if (body.contains("请为以下任务制定执行计划")) {
+                    return response("""
+                            {
+                              "summary": "写入并验证",
+                              "steps": [
+                                {"id":"s1","description":"写入 src/main/java/Deferred.java","type":"FILE_WRITE","dependencies":[]}
+                              ]
+                            }
+                            """);
+                }
+                if (body.contains("写入 src/main/java/Deferred.java")) {
+                    return toolResponse("worker-deferred", "write_file",
+                            "{\"path\":\"src/main/java/Deferred.java\","
+                                    + "\"content\":\"public class Deferred {}\"}");
+                }
+                return response(approvedReviewJson());
+            }
+        };
+
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    llmClient, isolatedToolRegistry(tempDir), mm);
+            orchestrator.setPreReviewVerifier(new PreReviewVerifier(30,
+                    request -> com.devcli.tool.command.CommandExecutionService.Result
+                            .timedOut("Docker daemon unavailable")));
+
+            String result = orchestrator.run("写入 src/main/java/Deferred.java");
+
+            assertTrue(result.contains("未完全完成"), result);
+            assertFalse(Files.exists(javaRoot.resolve("Deferred.java")),
+                    "未验证补丁不能写入主项目");
+            AgentCheckpoint checkpoint = AgentCheckpoint.loadLatest();
+            assertNotNull(checkpoint);
+            assertTrue(checkpoint.hasDeferredPatch("step_1"));
+            assertFalse(checkpoint.loadDeferredPatch("step_1").isEmpty());
+            checkpointId = checkpoint.getOrchestrationId();
+        }
+
+        GLMClient resumeClient = new GLMClient("test-key") {
+            @Override
+            public ChatResponse chat(List<Message> messages, List<Tool> tools,
+                                     StreamListener listener) throws IOException {
+                String body = DispatchingStubGLMClient.findLastUser(messages);
+                if (body.contains("原始任务：")) {
+                    throw new LlmException(LlmErrorCode.NETWORK, "test", "test-model", 0,
+                            "connection reset", true, 0L, null);
+                }
+                if (body.contains("Deferred.java") || body.contains("最终集成验收")) {
+                    return toolResponse("worker-resume", "write_file",
+                            "{\"path\":\"src/main/java/Deferred.java\","
+                                    + "\"content\":\"public class Deferred {}\"}");
+                }
+                return response(approvedReviewJson());
+            }
+        };
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    resumeClient, isolatedToolRegistry(tempDir), mm);
+            orchestrator.setPreReviewVerifier(new PreReviewVerifier(30,
+                    request -> com.devcli.tool.command.CommandExecutionService.Result
+                            .completed(0, "ok")));
+
+            String resumed = orchestrator.resume(checkpointId);
+
+            assertTrue(Files.isRegularFile(javaRoot.resolve("Deferred.java")), resumed);
+            assertEquals("public class Deferred {}",
+                    Files.readString(javaRoot.resolve("Deferred.java")));
+            assertNull(AgentCheckpoint.load(checkpointId),
+                    "全部步骤重新验证通过后应删除 checkpoint");
+        }
+    }
+
     private static LlmClient.ChatResponse awaitBarrierThenReturn(CountDownLatch latch,
                                                                   AtomicInteger current,
                                                                   AtomicInteger peak,

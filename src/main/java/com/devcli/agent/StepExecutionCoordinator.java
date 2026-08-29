@@ -57,6 +57,7 @@ final class StepExecutionCoordinator {
     private static final class StepUpdateBuffer {
         private final String stepId;
         private AgentOrchestrator.ExecutionStep updated;
+        private boolean verificationInfrastructureFailure;
 
         private StepUpdateBuffer(String stepId) {
             this.stepId = stepId;
@@ -188,6 +189,7 @@ final class StepExecutionCoordinator {
             AgentOrchestrator.ExecutionStep step = steps.get(index);
             if (AgentOrchestrator.isFinalIntegrationStep(step)
                     || step.status() != AgentOrchestrator.StepStatus.FAILED
+                    || checkpointCoordinator.hasDeferredPatch(step.id())
                     || !runState.redoTracker().canRedo(step.id())) {
                 continue;
             }
@@ -289,6 +291,18 @@ final class StepExecutionCoordinator {
         StepUpdateBuffer buffer = new StepUpdateBuffer(step.id());
         try (WorkspaceExecutionSession session =
                      WorkspaceExecutionSession.open(toolRegistry, step.id())) {
+            CheckpointCoordinator.DeferredPatchRestore deferredPatch =
+                    checkpointCoordinator.restoreDeferredPatch(step.id(), session.workspacePath());
+            if (deferredPatch.present() && !deferredPatch.restored()) {
+                String reason = "待验证 PatchSet 无法恢复到隔离工作区: " + deferredPatch.failure();
+                commitStepUpdate(steps, step.id(), step.withFailed(reason));
+                stepOut.println("❌ 步骤 [" + step.id() + "] " + reason + "\n");
+                return;
+            }
+            String effectiveContext = deferredPatch.present()
+                    ? context + "\n\n[恢复上下文] 上次因硬验证环境故障保留的 PatchSet"
+                    + " 已恢复到当前隔离工作区。请检查现有修改并继续验证，不要假设文件仍是原始状态。"
+                    : context;
             ToolRegistry isolatedRegistry = session.toolRegistry();
             SubAgent isolatedWorker = new SubAgent(
                     worker.getName(), worker.getRole(), llmClient, isolatedRegistry);
@@ -310,7 +324,7 @@ final class StepExecutionCoordinator {
                 isolatedRegistry.runWithToolAccess(
                         ToolRegistry.ToolAccessScope.ISOLATED_PROJECT, () -> {
                             runStepWithLease(step, steps, retryCount,
-                                    isolatedWorker, isolatedReviewer, context, stepOut,
+                                    isolatedWorker, isolatedReviewer, effectiveContext, stepOut,
                                     workerForkContext, reviewerForkContext);
                             return null;
                         });
@@ -337,12 +351,25 @@ final class StepExecutionCoordinator {
                                 String reason = applyResult.failureDescription();
                                 decision = step.withFailed(reason);
                                 stepOut.println("❌ 步骤 [" + step.id() + "] " + reason + "\n");
+                                commitStepUpdate(steps, step.id(), decision);
                             } else {
                                 decision = workerOutcome.withModifiedFiles(
                                         applyResult.modifiedResources());
+                                AgentOrchestrator.ExecutionStep terminalDecision = decision;
+                                checkpointCoordinator.persistTerminalClearingDeferredPatch(
+                                        step.id(), () -> commitStepUpdate(
+                                                steps, step.id(), terminalDecision));
                             }
-                            commitStepUpdate(steps, step.id(), decision);
                         });
+            } else if (buffer.verificationInfrastructureFailure && !patchSet.isEmpty()) {
+                checkpointCoordinator.preserveDeferredPatch(
+                        step.id(), patchSet, outcome.result());
+                String reason = outcome.result()
+                        + "\n未验证 PatchSet 已保存到 checkpoint；修复环境后可通过 resume 重新验证。";
+                commitStepUpdate(steps, step.id(), outcome.withFailed(reason)
+                        .withModifiedFiles(List.of()));
+                stepOut.println("💾 步骤 [" + step.id()
+                        + "] 未验证 PatchSet 已保存，未写入主项目\n");
             } else {
                 commitStepUpdate(steps, step.id(), outcome.withModifiedFiles(List.of()));
             }
@@ -418,6 +445,11 @@ final class StepExecutionCoordinator {
             return;
         }
 
+        if (failOnVerificationInfrastructure(
+                steps, step, acceptedReview, stepOut)) {
+            return;
+        }
+
         int retries = retryCount.getOrDefault(step.id(), 0);
         String issues = acceptedReview.issues();
         if (acceptedReview.reviewerError()) {
@@ -452,6 +484,9 @@ final class StepExecutionCoordinator {
                     step, localReviewer, acceptedResult, stepOut, reviewerForkContext);
             acceptedReview = retryReview;
             issues = retryReview.issues();
+            if (failOnVerificationInfrastructure(steps, step, retryReview, stepOut)) {
+                return;
+            }
             if (retryReview.reviewerError()) {
                 if (reviewCoordinator.shouldAcceptAfterRecoverableFailure(
                         step, issues, retryReview.hardCheckExecuted())) {
@@ -480,6 +515,24 @@ final class StepExecutionCoordinator {
                                PrintStream stepOut) {
         updateStep(steps, step.id(), step.withFailed("用户取消"));
         stepOut.println("⏹️ 步骤 [" + step.id() + "] 已取消\n");
+    }
+
+    private boolean failOnVerificationInfrastructure(
+            List<AgentOrchestrator.ExecutionStep> steps,
+            AgentOrchestrator.ExecutionStep step,
+            ReviewCoordinator.ReviewDecision review,
+            PrintStream stepOut) {
+        if (review.hardCheckFailureKind() != PreReviewVerifier.FailureKind.INFRASTRUCTURE) {
+            return false;
+        }
+        StepUpdateBuffer buffer = activeStepUpdate.get();
+        if (buffer != null && buffer.stepId.equals(step.id())) {
+            buffer.verificationInfrastructureFailure = true;
+        }
+        updateStep(steps, step.id(), step.withFailed(review.issues()));
+        stepOut.println("⏸️ 步骤 [" + step.id()
+                + "] 硬验证环境不可用，停止重复执行 Worker\n");
+        return true;
     }
 
     private void acceptStep(List<AgentOrchestrator.ExecutionStep> steps,

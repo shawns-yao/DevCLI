@@ -30,6 +30,12 @@ final class CheckpointCoordinator {
                         Set<String> ordinaryStepIds) {
     }
 
+    record DeferredPatchRestore(boolean present, boolean restored, String failure) {
+        static DeferredPatchRestore absent() {
+            return new DeferredPatchRestore(false, true, "");
+        }
+    }
+
     private final OrchestrationRunState runState;
     private final MemoryManager memoryManager;
     private final WorkspaceCommitCoordinator workspaceCommitCoordinator;
@@ -104,18 +110,36 @@ final class CheckpointCoordinator {
     }
 
     List<AgentOrchestrator.ExecutionStep> rebuildSteps(AgentCheckpoint.RecoveryState recovery) {
-        return recovery.planSteps().stream()
-                .map(planStep -> restoreStep(planStep, recovery))
-                .toList();
+        Set<String> deferredDependents = new java.util.HashSet<>(recovery.deferredPatchSteps());
+        boolean changed;
+        do {
+            changed = false;
+            for (AgentCheckpoint.PlanStep planStep : recovery.planSteps()) {
+                if (!deferredDependents.contains(planStep.id())
+                        && planStep.dependencies() != null
+                        && planStep.dependencies().stream().anyMatch(deferredDependents::contains)) {
+                    changed |= deferredDependents.add(planStep.id());
+                }
+            }
+        } while (changed);
+        return new java.util.ArrayList<>(recovery.planSteps().stream()
+                .map(planStep -> restoreStep(
+                        planStep, recovery, deferredDependents.contains(planStep.id())))
+                .toList());
     }
 
     private AgentOrchestrator.ExecutionStep restoreStep(
             AgentCheckpoint.PlanStep planStep,
-            AgentCheckpoint.RecoveryState recovery) {
+            AgentCheckpoint.RecoveryState recovery,
+            boolean retryDeferredDependency) {
         List<String> dependencies = planStep.dependencies() == null
                 ? List.of()
                 : planStep.dependencies();
         ExecutionArtifact artifact = recovery.artifacts().get(planStep.id());
+        if (retryDeferredDependency) {
+            return AgentOrchestrator.ExecutionStep.pending(
+                    planStep.id(), planStep.description(), planStep.type(), dependencies);
+        }
         if (artifact != null
                 && (artifact.successful() || !recovery.redoPendingSteps().contains(planStep.id()))) {
             return new AgentOrchestrator.ExecutionStep(
@@ -152,6 +176,55 @@ final class CheckpointCoordinator {
         }
         checkpoint.recordRedoAttempt(stepId, attempt, failureReason, modifiedFiles);
         saveStrict();
+    }
+
+    boolean hasDeferredPatch(String stepId) {
+        AgentCheckpoint checkpoint = runState.checkpoint();
+        return checkpoint != null && checkpoint.hasDeferredPatch(stepId);
+    }
+
+    void preserveDeferredPatch(String stepId, PatchSet patchSet, String failureReason) {
+        AgentCheckpoint checkpoint = runState.checkpoint();
+        if (checkpoint == null || patchSet == null || patchSet.isEmpty()) {
+            return;
+        }
+        try {
+            checkpoint.preserveDeferredPatch(stepId, patchSet, failureReason);
+        } catch (IOException e) {
+            throw new IllegalStateException("待验证 PatchSet 持久化失败: " + e.getMessage(), e);
+        }
+    }
+
+    DeferredPatchRestore restoreDeferredPatch(String stepId, Path workspaceRoot) {
+        AgentCheckpoint checkpoint = runState.checkpoint();
+        if (checkpoint == null || !checkpoint.hasDeferredPatch(stepId)) {
+            return DeferredPatchRestore.absent();
+        }
+        try {
+            PatchSet.ApplyResult result = checkpoint.loadDeferredPatch(stepId).apply(workspaceRoot);
+            return new DeferredPatchRestore(true, result.applied(),
+                    result.applied() ? "" : result.failureDescription());
+        } catch (IOException e) {
+            return new DeferredPatchRestore(true, false,
+                    "待验证 PatchSet 读取失败: " + e.getMessage());
+        }
+    }
+
+    void persistTerminalClearingDeferredPatch(String stepId, Runnable terminalPersistence) {
+        Objects.requireNonNull(terminalPersistence, "terminalPersistence");
+        AgentCheckpoint checkpoint = runState.checkpoint();
+        if (checkpoint == null) {
+            terminalPersistence.run();
+            return;
+        }
+        AgentCheckpoint.DeferredPatch removed = checkpoint.markDeferredPatchTerminal(stepId);
+        try {
+            terminalPersistence.run();
+        } catch (RuntimeException e) {
+            checkpoint.restoreDeferredPatchMetadata(removed);
+            throw e;
+        }
+        checkpoint.cleanupDeferredPatchFiles(removed);
     }
 
     String assignedWorkerId(String stepId) {
