@@ -152,7 +152,8 @@ public class RetrievalFusion {
                 result.symbolVersion(),
                 result.classpathEpoch(),
                 result.indexEpoch(),
-                result.invalidations()
+                result.invalidations(),
+                result.freshness()
         );
     }
 
