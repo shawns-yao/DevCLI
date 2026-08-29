@@ -116,7 +116,7 @@ mvn -q "-Dtest=SweBenchLiteAgentBenchmarkIT" -DskipTests=false `
 `SweBenchDriver` 的 `solo` / `delegate` / `plan` 对照只改变编排方式。三种模式统一使用
 `read_file`、`write_file`、`edit_file`、`list_dir`、`grep_code`、`execute_command` 和
 `read_tool_result` 白名单，并关闭长期记忆注入；`delegate` 仅额外开放 `delegate_task`。
-驱动不开放 `search_code`，避免本机残留索引成为未记录变量。新增工具不会自动进入评测面。
+驱动不开放 `search_code`，避免本机残留索引成为未记录变量。新增工具不会自动进入评测面。驱动不再强制覆盖命令沙箱模式，默认沿用生产 `DOCKER`；只有运行方显式设置 `DEVCLI_COMMAND_SANDBOX_MODE=HOST_WARN` 或对应系统属性时才使用主机白名单，并在运行日志记录实际模式。
 
 使用固定 Dockerfile 构建 Linux 官方 harness 后，可追加 `-Ddevcli.benchmark.swebench.evaluate=true`。Windows Python 缺少 `resource` 模块，不能直接运行官方 harness；必须使用 Linux Docker 或 Linux 主机。
 

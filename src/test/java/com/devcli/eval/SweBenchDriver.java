@@ -8,6 +8,7 @@ import com.devcli.llm.LlmClientFactory;
 import com.devcli.runtime.AgentSessionRuntime;
 import com.devcli.runtime.event.RunEventSink;
 import com.devcli.tool.ToolRegistry;
+import com.devcli.tool.command.DefaultCommandExecutionService;
 
 import java.io.OutputStream;
 import java.io.PrintStream;
@@ -15,6 +16,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 
 /**
@@ -42,8 +45,6 @@ public final class SweBenchDriver {
             "execute_command", "read_tool_result");
 
     public static void main(String[] args) throws Exception {
-        // benchmark 在主机用 Maven/javac 白名单做编译验证（默认 Docker 需预装 maven 镜像）
-        System.setProperty("devcli.command.sandbox.mode", "HOST_WARN");
         if (args.length < 4) {
             System.err.println("usage: SweBenchDriver <project> <promptFile> <outFile> <solo|delegate|plan>");
             System.exit(2);
@@ -61,7 +62,9 @@ public final class SweBenchDriver {
 
         long started = System.currentTimeMillis();
         System.err.println("[driver] mode=" + mode + " provider=" + client.getProviderName()
-                + " model=" + client.getModelName() + " project=" + project);
+                + " model=" + client.getModelName() + " sandbox="
+                + resolveSandboxMode(System.getProperties(), System.getenv())
+                + " project=" + project);
         String out = switch (mode) {
             case "solo" -> runReact(client, project, prompt, true);
             case "delegate" -> runReact(client, project, prompt, false);
@@ -108,5 +111,21 @@ public final class SweBenchDriver {
         }
         registry.retainTools(allowed);
         agent.getMemoryManager().setMemoryIgnored(true);
+    }
+
+    static String resolveSandboxMode(Properties properties, Map<String, String> environment) {
+        String configured = properties == null ? null : properties.getProperty(
+                DefaultCommandExecutionService.SANDBOX_MODE_PROPERTY);
+        if ((configured == null || configured.isBlank()) && environment != null) {
+            configured = environment.get(DefaultCommandExecutionService.SANDBOX_MODE_ENV);
+        }
+        String normalized = configured == null || configured.isBlank()
+                ? "DOCKER"
+                : configured.trim().toUpperCase(Locale.ROOT).replace('-', '_');
+        if (!Set.of("DOCKER", "HOST_WARN").contains(normalized)) {
+            throw new IllegalArgumentException(
+                    "sandbox mode must be DOCKER|HOST_WARN: " + configured);
+        }
+        return normalized;
     }
 }

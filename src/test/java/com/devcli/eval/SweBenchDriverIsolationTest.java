@@ -7,6 +7,8 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -35,6 +37,18 @@ class SweBenchDriverIsolationTest {
             assertEquals(expected, toolNamesWithDelegation(registry));
             assertTrue(agent.getMemoryManager().isMemoryIgnored());
         }
+    }
+
+    @Test
+    void sandboxModeUsesExternalConfigurationWithoutMutatingIt() {
+        Properties properties = new Properties();
+        properties.setProperty("devcli.command.sandbox.mode", "HOST_WARN");
+
+        assertEquals("HOST_WARN", SweBenchDriver.resolveSandboxMode(
+                properties, Map.of("DEVCLI_COMMAND_SANDBOX_MODE", "DOCKER")));
+        assertEquals("HOST_WARN", properties.getProperty("devcli.command.sandbox.mode"));
+        assertEquals("DOCKER", SweBenchDriver.resolveSandboxMode(
+                new Properties(), Map.of()));
     }
 
     private static Set<String> toolNames(ToolRegistry registry) {
