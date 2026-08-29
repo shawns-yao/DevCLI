@@ -93,6 +93,72 @@ class DefaultCommandExecutionServiceTest {
     }
 
     @Test
+    void dockerCommandMountsExplicitMavenRepositoryReadOnly(@TempDir Path project,
+                                                            @TempDir Path repository) {
+        Properties properties = new Properties();
+        properties.setProperty(
+                DefaultCommandExecutionService.SANDBOX_MAVEN_REPOSITORY_PROPERTY,
+                repository.toString());
+        DefaultCommandExecutionService.Config config =
+                DefaultCommandExecutionService.Config.resolve(properties, Map.of());
+
+        List<String> command = DefaultCommandExecutionService.dockerCommand(
+                new CommandExecutionService.Request("mvn test", project, 30, true), config);
+
+        assertTrue(command.contains("type=bind,src=" + repository.toAbsolutePath().normalize()
+                + ",dst=/maven-repository,readonly"), command.toString());
+        int envIndex = command.indexOf("--env");
+        assertTrue(envIndex > 0, command.toString());
+        assertEquals("MAVEN_OPTS=-Dmaven.repo.local=/maven-repository",
+                command.get(envIndex + 1));
+    }
+
+    @Test
+    void dockerCommandDoesNotExposeMavenRepositoryToNonMavenCommands(
+            @TempDir Path project, @TempDir Path repository) {
+        Properties properties = new Properties();
+        properties.setProperty(
+                DefaultCommandExecutionService.SANDBOX_MAVEN_REPOSITORY_PROPERTY,
+                repository.toString());
+        DefaultCommandExecutionService.Config config =
+                DefaultCommandExecutionService.Config.resolve(properties, Map.of());
+
+        List<String> command = DefaultCommandExecutionService.dockerCommand(
+                new CommandExecutionService.Request("javac @sources.args", project, 30, true),
+                config);
+
+        assertTrue(command.stream().noneMatch(value -> value.contains("/maven-repository")),
+                command.toString());
+    }
+
+    @Test
+    void hostWarnMavenUsesExplicitLocalRepository(@TempDir Path project,
+                                                  @TempDir Path repository) {
+        Properties properties = new Properties();
+        properties.setProperty(DefaultCommandExecutionService.SANDBOX_MODE_PROPERTY, "HOST_WARN");
+        properties.setProperty(
+                DefaultCommandExecutionService.SANDBOX_MAVEN_REPOSITORY_PROPERTY,
+                repository.toString());
+        DefaultCommandExecutionService.Config config =
+                DefaultCommandExecutionService.Config.resolve(properties, Map.of());
+        java.util.concurrent.atomic.AtomicReference<String> command =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        DefaultCommandExecutionService service = new DefaultCommandExecutionService(
+                request -> {
+                    command.set(request.command());
+                    return CommandExecutionService.Result.completed(0, "ok");
+                },
+                request -> CommandExecutionService.Result.completed(0, "sandbox"),
+                config);
+
+        service.execute(new CommandExecutionService.Request(
+                "mvn -q test", project, 30, true));
+
+        assertTrue(command.get().startsWith("mvn -Dmaven.repo.local=\""
+                + repository.toAbsolutePath().normalize() + "\" -o "), command.get());
+    }
+
+    @Test
     void configurationUsesSystemPropertyBeforeEnvironment() {
         Properties properties = new Properties();
         properties.setProperty(DefaultCommandExecutionService.SANDBOX_IMAGE_PROPERTY,
@@ -225,6 +291,27 @@ class DefaultCommandExecutionServiceTest {
                 () -> DefaultCommandExecutionService.Config.resolve(properties, Map.of()));
 
         assertTrue(error.getMessage().contains("DOCKER|HOST_WARN"), error.getMessage());
+    }
+
+    @Test
+    void sandboxMavenRepositoryRequiresExistingAbsoluteDirectory(@TempDir Path project) {
+        Properties relative = new Properties();
+        relative.setProperty(
+                DefaultCommandExecutionService.SANDBOX_MAVEN_REPOSITORY_PROPERTY,
+                "relative/repository");
+        Properties missing = new Properties();
+        missing.setProperty(
+                DefaultCommandExecutionService.SANDBOX_MAVEN_REPOSITORY_PROPERTY,
+                project.resolve("missing").toString());
+
+        IllegalArgumentException relativeError = assertThrows(IllegalArgumentException.class,
+                () -> DefaultCommandExecutionService.Config.resolve(relative, Map.of()));
+        IllegalArgumentException missingError = assertThrows(IllegalArgumentException.class,
+                () -> DefaultCommandExecutionService.Config.resolve(missing, Map.of()));
+
+        assertTrue(relativeError.getMessage().contains("absolute"), relativeError.getMessage());
+        assertTrue(missingError.getMessage().contains("existing directory"),
+                missingError.getMessage());
     }
 
     @Test

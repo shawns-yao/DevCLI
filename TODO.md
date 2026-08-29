@@ -45,8 +45,9 @@
 - 日期：`2026-08-27`
 - 已实现：命令执行新增显式 `DOCKER | HOST_WARN` 模式；默认仍使用 Docker 且不可用时失败关闭，不进行自动主机回退
 - 已实现：`HOST_WARN` 仅允许 Maven 离线执行 `clean/validate/compile/test-compile/test/package/verify`、`javac` 和只读 Git；拒绝任意 Maven 插件、发布阶段、其他运行时、网络工具、命令串、管道、重定向和写入型 Git，并在工具结果及 Reviewer 前展示主机风险提示
+- 已补强（2026-08-29）：非默认 Maven 仓库支持显式绝对路径配置；Docker 仅对 Maven 命令只读挂载，`HOST_WARN` 注入 `maven.repo.local`，不自动扫描或硬编码开发机目录
 - 影响范围：统一命令执行服务、Pre-Review、Reviewer 前置展示、Shell 工具配置、环境配置示例和架构说明
-- 验证：沙箱模式、白名单绕过、Pre-Review 风险提示等限定回归通过；最近一次 `mvn -q -Pquick -DskipTests=false test` 生成 221 份 Surefire 报告，共 1663 项，0 失败、0 错误、0 跳过，Maven 退出码 0
+- 验证：沙箱模式、白名单绕过、Pre-Review 风险提示等限定回归通过；2026-08-29 使用显式本地仓库执行命令服务、Pre-Review 和评测驱动限定测试，共 29 项，0 失败、0 错误；最近一次 Quick 全量生成 221 份 Surefire 报告，共 1663 项，0 失败、0 错误、0 跳过，Maven 退出码 0
 - 文档：已同步 `.env.example`、`AGENTS.md`、`README.md`、`docs/agents-reference.md`、`docs/architecture-convergence-design.md` 和 `docs/benchmark-evaluation.md`
 - 未验证：未启动交互 CLI，未调用真实 LLM/MCP，未验证真实 Docker，也未执行真实 `/plan + HOST_WARN` 端到端流程
 - 剩余风险：`HOST_WARN` 不是操作系统级沙箱，POM 已声明插件仍可能在主机产生副作用；完整三档沙箱、通用语言生态白名单和高风险逐次 Docker 档尚未实现

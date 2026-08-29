@@ -6,12 +6,14 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -29,19 +31,24 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
     public static final String DOCKER_BINARY_ENV = "DEVCLI_COMMAND_SANDBOX_DOCKER_BINARY";
     public static final String SANDBOX_USER_PROPERTY = "devcli.command.sandbox.user";
     public static final String SANDBOX_USER_ENV = "DEVCLI_COMMAND_SANDBOX_USER";
+    public static final String SANDBOX_MAVEN_REPOSITORY_PROPERTY =
+            "devcli.command.sandbox.maven.repository";
+    public static final String SANDBOX_MAVEN_REPOSITORY_ENV =
+            "DEVCLI_COMMAND_SANDBOX_MAVEN_REPOSITORY";
     private static final String DEFAULT_SANDBOX_IMAGE = "maven:3.9.9-eclipse-temurin-17";
     private static final int MAX_COMMAND_OUTPUT_CHARS = 8_000;
 
     private final Backend hostBackend;
     private final Backend sandboxBackend;
     private final SandboxMode sandboxMode;
+    private final String mavenRepository;
 
     public DefaultCommandExecutionService() {
         this(Config.resolve(System.getProperties(), System.getenv()));
     }
 
     private DefaultCommandExecutionService(Config config) {
-        this(new HostBackend(), new DockerBackend(config), config.mode());
+        this(new HostBackend(), new DockerBackend(config), config);
     }
 
     DefaultCommandExecutionService(Backend hostBackend, Backend sandboxBackend) {
@@ -50,9 +57,21 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
 
     DefaultCommandExecutionService(Backend hostBackend, Backend sandboxBackend,
                                    SandboxMode sandboxMode) {
+        this(hostBackend, sandboxBackend, sandboxMode, "");
+    }
+
+    DefaultCommandExecutionService(Backend hostBackend, Backend sandboxBackend,
+                                   Config config) {
+        this(hostBackend, sandboxBackend, config == null ? SandboxMode.DOCKER : config.mode(),
+                config == null ? "" : config.mavenRepository());
+    }
+
+    private DefaultCommandExecutionService(Backend hostBackend, Backend sandboxBackend,
+                                           SandboxMode sandboxMode, String mavenRepository) {
         this.hostBackend = hostBackend;
         this.sandboxBackend = sandboxBackend;
         this.sandboxMode = sandboxMode == null ? SandboxMode.DOCKER : sandboxMode;
+        this.mavenRepository = mavenRepository == null ? "" : mavenRepository;
     }
 
     @Override
@@ -61,6 +80,7 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
             return (request.sandboxRequired() ? sandboxBackend : hostBackend).execute(request);
         }
         String hostCommand = HostWarnCommandPolicy.validateAndNormalize(request.command());
+        hostCommand = withMavenRepository(hostCommand, mavenRepository);
         Request hostRequest = new Request(hostCommand, request.projectRoot(), request.timeoutSeconds(),
                 false, request.executionContext());
         Result result = hostBackend.execute(hostRequest);
@@ -95,6 +115,13 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
                 "--mount", mount,
                 "--workdir", "/workspace",
                 config.image(), "sh", "-lc", request.command()));
+        if (!config.mavenRepository().isBlank() && isMavenCommand(request.command())) {
+            int workdirIndex = command.indexOf("--workdir");
+            command.addAll(workdirIndex, List.of(
+                    "--mount", "type=bind,src=" + config.mavenRepository()
+                            + ",dst=/maven-repository,readonly",
+                    "--env", "MAVEN_OPTS=-Dmaven.repo.local=/maven-repository"));
+        }
         if (config.user() != null && !config.user().isBlank()) {
             command.add(2, config.user());
             command.add(2, "--user");
@@ -108,6 +135,28 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
 
     private static String newContainerName() {
         return "devcli-run-" + UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private static String withMavenRepository(String command, String repository) {
+        if (repository == null || repository.isBlank() || !isMavenCommand(command)) {
+            return command;
+        }
+        String trimmed = command == null ? "" : command.trim();
+        int separator = trimmed.indexOf(' ');
+        String executable = separator < 0 ? trimmed : trimmed.substring(0, separator);
+        String remainder = separator < 0 ? "" : trimmed.substring(separator);
+        return executable + " -Dmaven.repo.local=\"" + repository + "\"" + remainder;
+    }
+
+    private static boolean isMavenCommand(String command) {
+        String trimmed = command == null ? "" : command.trim();
+        int separator = trimmed.indexOf(' ');
+        String executable = separator < 0 ? trimmed : trimmed.substring(0, separator);
+        String normalizedExecutable = executable.replace('\\', '/');
+        int slash = normalizedExecutable.lastIndexOf('/');
+        String name = (slash < 0 ? normalizedExecutable
+                : normalizedExecutable.substring(slash + 1)).toLowerCase(Locale.ROOT);
+        return Set.of("mvn", "mvn.cmd", "mvnw", "mvnw.cmd").contains(name);
     }
 
     interface Backend {
@@ -373,7 +422,8 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
         }
     }
 
-    record Config(String dockerBinary, String image, SandboxMode mode, String user) {
+    record Config(String dockerBinary, String image, SandboxMode mode, String user,
+                  String mavenRepository) {
         Config {
             if (dockerBinary == null || dockerBinary.isBlank()) {
                 throw new IllegalArgumentException("docker binary is required");
@@ -383,6 +433,7 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
             }
             mode = mode == null ? SandboxMode.DOCKER : mode;
             user = user == null ? "" : user.trim();
+            mavenRepository = normalizeMavenRepository(mavenRepository);
         }
 
         static Config resolve(Properties properties, Map<String, String> environment) {
@@ -395,7 +446,29 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
                             properties.getProperty(SANDBOX_MODE_PROPERTY),
                             environment.get(SANDBOX_MODE_ENV), "DOCKER")),
                     firstNonBlank(properties.getProperty(SANDBOX_USER_PROPERTY),
-                            environment.get(SANDBOX_USER_ENV), ""));
+                            environment.get(SANDBOX_USER_ENV), ""),
+                    firstNonBlank(properties.getProperty(SANDBOX_MAVEN_REPOSITORY_PROPERTY),
+                            environment.get(SANDBOX_MAVEN_REPOSITORY_ENV), ""));
+        }
+
+        private static String normalizeMavenRepository(String value) {
+            if (value == null || value.isBlank()) {
+                return "";
+            }
+            if (value.contains("\"") || value.contains("\r") || value.contains("\n")) {
+                throw new IllegalArgumentException("sandbox Maven repository path is invalid");
+            }
+            Path path = Path.of(value.trim());
+            if (!path.isAbsolute()) {
+                throw new IllegalArgumentException(
+                        "sandbox Maven repository path must be absolute: " + value);
+            }
+            Path normalized = path.normalize();
+            if (!Files.isDirectory(normalized)) {
+                throw new IllegalArgumentException(
+                        "sandbox Maven repository path must be an existing directory: " + value);
+            }
+            return normalized.toString();
         }
 
         private static String firstNonBlank(String first, String second, String fallback) {
