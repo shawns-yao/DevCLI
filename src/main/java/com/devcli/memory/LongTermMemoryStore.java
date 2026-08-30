@@ -1,6 +1,8 @@
 package com.devcli.memory;
 
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 /**
  * 长期记忆持久化抽象。
@@ -26,6 +28,36 @@ public interface LongTermMemoryStore extends AutoCloseable {
 
     /** 启动时一次性全量加载。 */
     List<MemoryEntry> loadAll();
+
+    /** 启动目录加载。持久化实现可只返回不含正文的轻量条目。 */
+    default List<MemoryEntry> loadCatalog() {
+        return loadAll();
+    }
+
+    /** 按 id 回读完整正文；默认实现兼容旧的测试 Store。 */
+    default Optional<MemoryEntry> loadById(String id) {
+        if (id == null || id.isBlank()) return Optional.empty();
+        return loadAll().stream().filter(entry -> id.equals(entry.getId())).findFirst();
+    }
+
+    /** 返回关键词候选 id；结果只是候选集合，最终相关性仍由 MemoryRetriever 计算。 */
+    default List<String> searchCandidateIds(String query, int limit) {
+        if (query == null || query.isBlank() || limit <= 0) return List.of();
+        var tokens = MemoryQueryTokenizer.tokenize(query);
+        return loadAll().stream()
+                .filter(entry -> MemoryQueryTokenizer.matches(entry.getContent(), tokens))
+                .limit(limit)
+                .map(MemoryEntry::getId)
+                .toList();
+    }
+
+    /** 启动时加载正文去重摘要，不读取 Markdown 正文。 */
+    default Map<String, String> loadContentDigests() {
+        return loadAll().stream().collect(java.util.stream.Collectors.toMap(
+                MemoryEntry::getId,
+                entry -> MemoryMarkdownRepository.contentDigest(entry.getContent()),
+                (left, right) -> left));
+    }
 
     /** 按 id 写入或覆盖一条 entry。返回 false 表示底层 store 未确认持久化成功。 */
     boolean upsert(MemoryEntry entry);

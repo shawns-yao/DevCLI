@@ -1,13 +1,16 @@
 # Markdown + SQLite 分层记忆设计
 
-> 状态：分阶段实现中。2026-08-30 已交付语义卡向量索引（SQLite `semantic_text` + float32 BLOB）及旧表兼容；Markdown 真值源、Catalog/outbox、FTS5/HNSW 和 L1 Hot Working Set 仍未交付。本文不构成基准成绩。
+> 状态：分阶段实现中。2026-08-30 已交付语义卡向量索引，以及 Markdown 正文/证据真值源和 SQLite Catalog 兼容迁移；Catalog outbox、FTS5/HNSW 和 L1 Hot Working Set 仍未交付。本文不构成基准成绩。
 
 ## 当前实现边界（2026-08-30）
 
-- SQLite `memory_facts` 继续保存长期记忆正文、证据和生命周期状态。
+- Markdown `records/<hash-prefix>/<id-hash>.md` 保存长期记忆正文与证据，文件名由记忆 ID 的 SHA-256 派生，避免路径穿越和重命名抖动。
+- SQLite `memory_facts` 保存生命周期、作用域、修订、热度、Markdown 相对路径、文档哈希、正文去重哈希和派生搜索语义卡；新写入不再保存正文、来源摘录或证据推理。
+- 旧 SQLite 正文会在打开数据库时批量迁移到 Markdown；Markdown 原子替换成功后才提交 Catalog，Catalog 失败则恢复原文件。
+- Markdown 缺失或哈希不一致时停止回读该条记忆，不回退到 SQLite 旧正文。
 - `MemoryVectorStore` 新写入只保存由 `MemorySemanticCard` 生成的短语义卡和 float32 BLOB；正文通过 `fact_id` 回读，不再写入向量表的正文列。
 - 旧库的 `content` / `embedding_json` 列保留为迁移兼容，旧数据仍可读取；新数据不依赖这两列。
-- Markdown 分片、人工编辑对账、召回热度缓存和 HNSW 尚未接入，不能对外宣称已完成。
+- Markdown 人工编辑导入/对账、召回热度缓存和 HNSW 尚未接入，不能对外宣称已完成；当前采用单卡单文件，分片合并仍是后续扩展。
 
 ## 1. 目标与边界
 
@@ -159,7 +162,7 @@ Hot Score 只用于缓存准入和淘汰，不参与最终相关性排序。普�
 ## 9. 迁移顺序
 
 1. 增加 Catalog 定位、内容哈希、索引状态和 outbox，不改变现有检索行为。
-2. 增加 Markdown 分片写入与 SQLite/Markdown 对账，保留 SQLite 正文兼容读取。
+2. 增加 Markdown 写入与 SQLite/Markdown 哈希校验，迁移后清空 SQLite 正文兼容列。（已完成单卡单文件版本）
 3. 增加 FTS5/BM25 和 RRF，替换内存 O(N) 关键词扫描。
 4. 把向量改为 `semantic_text + float32 BLOB`，接入现有 HNSW 能力。
 5. 增加 L1 Hot Working Set，取消启动时 `loadAll()`。
