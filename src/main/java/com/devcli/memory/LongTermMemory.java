@@ -12,7 +12,7 @@ import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -46,13 +46,16 @@ public class LongTermMemory implements Memory, AutoCloseable {
     private static final String LEGACY_JSON_FILE = "long_term_memory.json";
     private static final String LEGACY_JSON_BACKUP = "long_term_memory.json.bak";
 
+    /** 全量轻量目录；正文和完整证据只进入有界 Hot Working Set。 */
     private final Map<String, MemoryEntry> entries = new ConcurrentHashMap<>();
-    /** content hash 集合：去重快速查（O(1) vs 旧版 O(N) 字符串全表比对）。 */
-    private final Set<Integer> contentHashes = ConcurrentHashMap.newKeySet();
+    /** memory id -> 正文 SHA-256，用于无需加载正文的 O(1) 去重预筛。 */
+    private final Map<String, String> contentDigests = new ConcurrentHashMap<>();
+    private final Set<String> contentDigestValues = ConcurrentHashMap.newKeySet();
     private final AtomicInteger tokenCounter = new AtomicInteger(0);
     private final LongTermMemoryStore store;
     private final boolean persistentStore;
     private final Path storageDir;
+    private final MemoryHotCache hotCache;
 
     /** PR-C 语义检索钩子。 */
     private java.util.function.Consumer<MemoryEntry> onStoreHook = entry -> {};
@@ -76,9 +79,14 @@ public class LongTermMemory implements Memory, AutoCloseable {
      * 测试 / 自定义场景：直接传一个 store 实现 + 迁移目录（用于 in-memory store 测试）。
      */
     public LongTermMemory(LongTermMemoryStore store, Path migrationDir) {
+        this(store, migrationDir, new MemoryHotCache());
+    }
+
+    LongTermMemory(LongTermMemoryStore store, Path migrationDir, MemoryHotCache hotCache) {
         this.store = store;
         this.persistentStore = store != null && store.isPersistent();
         this.storageDir = migrationDir.toAbsolutePath().normalize();
+        this.hotCache = hotCache == null ? new MemoryHotCache() : hotCache;
         ensureDir(migrationDir);
         migrateLegacyJsonIfNeeded(migrationDir);
         loadFromStore();
@@ -90,7 +98,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
         if (entry == null) return;
         archiveExpired();
         entry = MemoryLifecyclePolicy.initializeExpiration(entry, Instant.now());
-        MemoryEntry previousById = entries.get(entry.getId());
+        MemoryEntry previousById = hydrate(entry.getId()).orElse(null);
         if (previousById == null && findDuplicateContent(entry) != null) {
             return;
         }
@@ -104,13 +112,8 @@ public class LongTermMemory implements Memory, AutoCloseable {
             log.warn("LongTermMemory store did not confirm persistence for {}; using in-memory fallback", entry.getId());
         }
 
-        int hash = entry.getContent().hashCode();
-        entries.put(entry.getId(), entry);
+        putLoaded(entry);
         tokenCounter.addAndGet(entry.getTokenCount() - (previousById == null ? 0 : previousById.getTokenCount()));
-        if (previousById != null) {
-            removeHashIfUnused(previousById.getContent().hashCode());
-        }
-        contentHashes.add(hash);
         try {
             onStoreHook.accept(entry);
         } catch (Exception e) {
@@ -142,7 +145,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
         MemoryWriteProtocol.Prepared prepared = MemoryWriteProtocol.prepare(entry);
         entry = MemoryLifecyclePolicy.initializeExpiration(prepared.entry(), Instant.now());
         archiveExpired();
-        List<MemoryEntry> existingEntries = new ArrayList<>(entries.values());
+        List<MemoryEntry> existingEntries = getAll();
         boolean hasExplicitTargets = explicitTargetIds != null && !explicitTargetIds.isEmpty();
         if (!hasExplicitTargets && MemoryConflictDetector.findEquivalent(entry, existingEntries).isPresent()) {
             return;
@@ -155,7 +158,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
         }
         if ((subject == null || subject.isBlank())
                 && explicitTargetIds != null && !explicitTargetIds.isEmpty()) {
-            MemoryEntry target = entries.get(explicitTargetIds.getFirst());
+            MemoryEntry target = hydrate(explicitTargetIds.getFirst()).orElse(null);
             subject = target == null || target.getSubject().isBlank()
                     ? "memory:" + explicitTargetIds.getFirst()
                     : target.getSubject();
@@ -171,7 +174,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
 
         List<MemoryEntry> supersededTargets = new ArrayList<>();
         int nextRevision = 1;
-        for (MemoryEntry existing : entries.values()) {
+        for (MemoryEntry existing : existingEntries) {
             String existingSubject = existing.getSubject().isBlank()
                     ? MemoryConflictDetector.inferSubject(existing.getContent())
                     : existing.getSubject();
@@ -186,7 +189,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
             if (existing.isActive()
                     && (sameStableKey || explicitTarget)
                     && !existing.getId().equals(entry.getId())) {
-                supersededTargets.add(existing);
+                hydrate(existing.getId()).ifPresent(supersededTargets::add);
             }
         }
 
@@ -217,11 +220,10 @@ public class LongTermMemory implements Memory, AutoCloseable {
                     managedEntry.getId());
         }
         for (MemoryEntry persistedEntry : revisionWrites) {
-            MemoryEntry previous = entries.put(persistedEntry.getId(), persistedEntry);
+            MemoryEntry previous = hydrate(persistedEntry.getId()).orElse(null);
+            putLoaded(persistedEntry);
             tokenCounter.addAndGet(persistedEntry.getTokenCount()
                     - (previous == null ? 0 : previous.getTokenCount()));
-            if (previous != null) removeHashIfUnused(previous.getContent().hashCode());
-            contentHashes.add(persistedEntry.getContent().hashCode());
         }
         try {
             onStoreHook.accept(managedEntry);
@@ -251,11 +253,10 @@ public class LongTermMemory implements Memory, AutoCloseable {
             log.warn("Memory candidate persistence rejected for {}", candidate.getId());
             return;
         }
-        MemoryEntry previous = entries.put(candidate.getId(), candidate);
+        MemoryEntry previous = hydrate(candidate.getId()).orElse(null);
+        putLoaded(candidate);
         tokenCounter.addAndGet(candidate.getTokenCount()
                 - (previous == null ? 0 : previous.getTokenCount()));
-        if (previous != null) removeHashIfUnused(previous.getContent().hashCode());
-        contentHashes.add(candidate.getContent().hashCode());
     }
 
     /**
@@ -268,8 +269,8 @@ public class LongTermMemory implements Memory, AutoCloseable {
         }
         archiveExpired();
         List<MemoryEntry> targets = targetIds.stream()
-                .map(entries::get)
-                .filter(java.util.Objects::nonNull)
+                .map(this::hydrate)
+                .flatMap(Optional::stream)
                 .filter(MemoryEntry::isRecallable)
                 .toList();
         if (targets.isEmpty()) {
@@ -301,17 +302,17 @@ public class LongTermMemory implements Memory, AutoCloseable {
         List<String> effectiveTargets = targetIds.stream()
                 .distinct()
                 .filter(id -> {
-                    MemoryEntry target = entries.get(id);
+                    MemoryEntry target = hydrate(id).orElse(null);
                     return target != null && target.isRecallable()
                             && !target.getId().equals(entry.getId());
                 })
                 .toList();
         if (effectiveTargets.isEmpty()) return false;
         storePrepared(entry, effectiveTargets);
-        MemoryEntry stored = entries.get(entry.getId());
+        MemoryEntry stored = hydrate(entry.getId()).orElse(null);
         if (stored == null || !stored.isRecallable()) return false;
         return effectiveTargets.stream().allMatch(id -> {
-            MemoryEntry target = entries.get(id);
+            MemoryEntry target = hydrate(id).orElse(null);
             return target != null && !target.isActive()
                     && entry.getId().equals(target.getSupersededBy());
         });
@@ -326,14 +327,26 @@ public class LongTermMemory implements Memory, AutoCloseable {
     @Override
     public synchronized Optional<MemoryEntry> retrieve(String id) {
         archiveExpired();
-        return Optional.ofNullable(entries.get(id));
+        return hydrate(id);
     }
 
     @Override
     public synchronized List<MemoryEntry> search(String query, int limit) {
+        List<MemoryEntry> results = searchCandidates(query, limit);
+        for (int i = results.size() - 1; i >= 0; i--) {
+            hotCache.put(results.get(i));
+        }
+        return results;
+    }
+
+    synchronized List<MemoryEntry> searchCandidates(String query, int limit) {
         archiveExpired();
         Set<String> queryTokens = MemoryQueryTokenizer.tokenize(query);
-        return entries.values().stream()
+        int expandedLimit = limit > Integer.MAX_VALUE / 10 ? Integer.MAX_VALUE : limit * 10;
+        int candidateLimit = Math.max(limit, Math.min(200, expandedLimit));
+        return store.searchCandidateIds(query, candidateLimit).stream()
+                .map(this::loadCandidate)
+                .flatMap(Optional::stream)
                 .filter(MemoryEntry::isRecallable)
                 .filter(entry -> {
                     if (MemoryQueryTokenizer.matches(entry.getContent(), queryTokens)) {
@@ -342,27 +355,32 @@ public class LongTermMemory implements Memory, AutoCloseable {
                     return entry.getMetadata().values().stream()
                             .anyMatch(value -> MemoryQueryTokenizer.matches(value, queryTokens));
                 })
-                .limit(limit)
+                .sorted(Comparator.comparingDouble(
+                        (MemoryEntry entry) -> keywordMatchScore(entry, query, queryTokens)).reversed())
+                .limit(Math.max(0, limit))
                 .collect(Collectors.toList());
     }
 
     @Override
     public synchronized List<MemoryEntry> getAll() {
         archiveExpired();
-        return new ArrayList<>(entries.values());
+        return entries.keySet().stream()
+                .map(this::hydrate)
+                .flatMap(Optional::stream)
+                .collect(Collectors.toCollection(ArrayList::new));
     }
 
     public synchronized boolean updateReviewState(
             String id, MemoryEvidence.ReviewState reviewState) {
         if (id == null || id.isBlank() || reviewState == null) return false;
         archiveExpired();
-        MemoryEntry existing = entries.get(id);
+        MemoryEntry existing = hydrate(id).orElse(null);
         if (existing == null) return false;
         if (existing.getEvidence().reviewState() == reviewState) return true;
         MemoryEntry updated = existing.withEvidence(existing.getEvidence().withReviewState(reviewState));
         if (reviewState == MemoryEvidence.ReviewState.REVIEWED) {
             storePrepared(updated, List.of());
-            MemoryEntry activated = entries.get(id);
+            MemoryEntry activated = hydrate(id).orElse(null);
             return activated != null && activated.isActive() && activated.isRecallable();
         }
         updated = MemoryWriteProtocol.prepare(updated).entry();
@@ -373,7 +391,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
             log.warn("Failed to persist review state {} for {}", reviewState, id);
             return false;
         }
-        entries.put(id, updated);
+        putLoaded(updated);
         return true;
     }
 
@@ -396,8 +414,9 @@ public class LongTermMemory implements Memory, AutoCloseable {
         }
         // SQLite 删除成功或非持久化模式，删除内存
         entries.remove(id);
+        hotCache.remove(id);
+        removeContentDigest(id);
         tokenCounter.addAndGet(-toRemove.getTokenCount());
-        removeHashIfUnused(toRemove.getContent().hashCode());
         try {
             onDeleteHook.accept(id);
         } catch (Exception e) {
@@ -411,6 +430,8 @@ public class LongTermMemory implements Memory, AutoCloseable {
         List<MemoryEntry> expiredEntries = entries.values().stream()
                 .filter(MemoryEntry::isActive)
                 .filter(entry -> entry.isExpired(now))
+                .map(entry -> hydrate(entry.getId()).orElse(null))
+                .filter(java.util.Objects::nonNull)
                 .toList();
         for (MemoryEntry entry : expiredEntries) {
             Map<String, String> metadata = new HashMap<>(entry.getMetadata());
@@ -419,7 +440,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
             MemoryEntry archived = entry.copy(entry.getSubject(), false, entry.getSupersededBy(),
                     entry.getRevision(), entry.getExpiresAt(), Map.copyOf(metadata));
             if (store.upsert(archived) || !persistentStore) {
-                entries.put(entry.getId(), archived);
+                putLoaded(archived);
             } else {
                 log.warn("Failed to archive expired memory {}", entry.getId());
             }
@@ -431,15 +452,15 @@ public class LongTermMemory implements Memory, AutoCloseable {
         if (ids == null || ids.isEmpty()) return true;
         Instant effectiveTime = recalledAt == null ? Instant.now() : recalledAt;
         List<MemoryEntry> updated = ids.stream().filter(java.util.Objects::nonNull).distinct()
-                .map(entries::get)
-                .filter(java.util.Objects::nonNull)
+                .map(this::hydrate)
+                .flatMap(Optional::stream)
                 .filter(MemoryEntry::isRecallable)
                 .map(entry -> MemoryLifecyclePolicy.recordRecall(entry, effectiveTime))
                 .toList();
         if (updated.isEmpty()) return true;
         boolean persisted = store.recordRecall(updated);
         if (!persisted && persistentStore) return false;
-        updated.forEach(entry -> entries.put(entry.getId(), entry));
+        updated.forEach(this::putLoaded);
         return true;
     }
 
@@ -447,23 +468,25 @@ public class LongTermMemory implements Memory, AutoCloseable {
     public synchronized boolean recordValidated(String id, Instant validatedAt) {
         if (id == null || id.isBlank()) return false;
         archiveExpired();
-        MemoryEntry existing = entries.get(id);
+        MemoryEntry existing = hydrate(id).orElse(null);
         if (existing == null || !existing.isRecallable()) return false;
         MemoryEntry updated = MemoryLifecyclePolicy.recordValidated(existing, validatedAt);
         boolean persisted = store.upsert(updated);
         if (!persisted && persistentStore) return false;
-        entries.put(id, updated);
+        putLoaded(updated);
         return true;
     }
 
     private MemoryEntry findDuplicateContent(MemoryEntry entry) {
-        int hash = entry.getContent().hashCode();
-        if (!contentHashes.contains(hash)) {
+        String digest = MemoryMarkdownRepository.contentDigest(entry.getContent());
+        if (!contentDigestValues.contains(digest)) {
             return null;
         }
-        for (MemoryEntry existing : entries.values()) {
+        for (Map.Entry<String, String> digestEntry : contentDigests.entrySet()) {
+            if (!digest.equals(digestEntry.getValue())) continue;
+            MemoryEntry existing = hydrate(digestEntry.getKey()).orElse(null);
             // 仅比对可召回条目：被 supersede 或已拒绝的旧条不应阻止同内容重新写入
-            if (existing.isRecallable()
+            if (existing != null && existing.isRecallable()
                     && !existing.getId().equals(entry.getId())
                     && MemoryWriteProtocol.scopeOf(existing).equals(MemoryWriteProtocol.scopeOf(entry))
                     && existing.getContent().equals(entry.getContent())) {
@@ -473,18 +496,12 @@ public class LongTermMemory implements Memory, AutoCloseable {
         return null;
     }
 
-    private void removeHashIfUnused(int hash) {
-        boolean stillUsed = entries.values().stream()
-                .anyMatch(e -> e.getContent().hashCode() == hash);
-        if (!stillUsed) {
-            contentHashes.remove(hash);
-        }
-    }
-
     @Override
     public synchronized void clear() {
         entries.clear();
-        contentHashes.clear();
+        contentDigests.clear();
+        contentDigestValues.clear();
+        hotCache.clear();
         tokenCounter.set(0);
         store.clear();
         try {
@@ -537,6 +554,8 @@ public class LongTermMemory implements Memory, AutoCloseable {
         archiveExpired();
         return entries.values().stream()
                 .filter(entry -> entry.getType() == type)
+                .map(entry -> hydrate(entry.getId()).orElse(null))
+                .filter(java.util.Objects::nonNull)
                 .collect(Collectors.toList());
     }
 
@@ -589,14 +608,107 @@ public class LongTermMemory implements Memory, AutoCloseable {
     }
 
     private void loadFromStore() {
-        for (MemoryEntry entry : store.loadAll()) {
-            entries.put(entry.getId(), entry);
-            contentHashes.add(entry.getContent().hashCode());
+        List<MemoryEntry> catalog = store.loadCatalog();
+        for (MemoryEntry entry : catalog) {
+            entries.put(entry.getId(), catalogEntry(entry));
             tokenCounter.addAndGet(entry.getTokenCount());
         }
+        contentDigests.putAll(store.loadContentDigests());
+        contentDigestValues.addAll(contentDigests.values());
+        catalog.stream()
+                .sorted(Comparator
+                        .comparing((MemoryEntry entry) -> !Boolean.parseBoolean(
+                                entry.getMetadata().getOrDefault("pinned", "false")))
+                        .thenComparing(Comparator.comparingDouble(
+                                MemoryHotCache::importanceOf).reversed())
+                        .thenComparing(Comparator.comparingLong(
+                                MemoryEntry::getValidatedUseCount).reversed())
+                        .thenComparing(Comparator.comparingLong(
+                                MemoryEntry::getRecallCount).reversed())
+                        .thenComparing(entry -> entry.getLastRecalledAt() == null
+                                ? Instant.EPOCH : entry.getLastRecalledAt(), Comparator.reverseOrder()))
+                .limit(hotCache.capacity())
+                .map(MemoryEntry::getId)
+                .map(store::loadById)
+                .flatMap(Optional::stream)
+                .forEach(hotCache::preload);
         if (!entries.isEmpty()) {
-            log.info("Loaded {} long-term memory entries from store", entries.size());
+            log.info("Loaded {} long-term memory catalog entries; preheated {} Markdown memories",
+                    entries.size(), hotCache.size());
         }
+    }
+
+    private Optional<MemoryEntry> hydrate(String id) {
+        if (id == null || id.isBlank() || !entries.containsKey(id)) return Optional.empty();
+        Optional<MemoryEntry> cached = hotCache.get(id);
+        if (cached.isPresent()) return cached;
+        Optional<MemoryEntry> loaded = store.loadById(id);
+        loaded.ifPresent(hotCache::put);
+        return loaded;
+    }
+
+    Optional<MemoryEntry> loadCandidate(String id) {
+        if (id == null || id.isBlank() || !entries.containsKey(id)) return Optional.empty();
+        Optional<MemoryEntry> cached = hotCache.peek(id);
+        return cached.isPresent() ? cached : store.loadById(id);
+    }
+
+    void promoteToHot(MemoryEntry entry) {
+        hotCache.put(entry);
+    }
+
+    private static double keywordMatchScore(MemoryEntry entry, String query, Set<String> queryTokens) {
+        if (entry == null) return 0;
+        String content = entry.getContent().toLowerCase(java.util.Locale.ROOT);
+        String normalizedQuery = query == null ? "" : query.toLowerCase(java.util.Locale.ROOT);
+        double score = !normalizedQuery.isBlank() && content.contains(normalizedQuery) ? 100 : 0;
+        for (String token : queryTokens) {
+            if (!token.isBlank() && content.contains(token.toLowerCase(java.util.Locale.ROOT))) score++;
+        }
+        return score;
+    }
+
+    private void putLoaded(MemoryEntry entry) {
+        entries.put(entry.getId(), catalogEntry(entry));
+        String digest = MemoryMarkdownRepository.contentDigest(entry.getContent());
+        String previous = contentDigests.put(entry.getId(), digest);
+        contentDigestValues.add(digest);
+        if (previous != null && !previous.equals(digest)
+                && !contentDigests.containsValue(previous)) {
+            contentDigestValues.remove(previous);
+        }
+        hotCache.put(entry);
+    }
+
+    private void removeContentDigest(String id) {
+        String removed = contentDigests.remove(id);
+        if (removed != null && !contentDigests.containsValue(removed)) {
+            contentDigestValues.remove(removed);
+        }
+    }
+
+    private static MemoryEntry catalogEntry(MemoryEntry entry) {
+        MemoryEvidence evidence = entry.getEvidence();
+        MemoryEvidence catalogEvidence = new MemoryEvidence(evidence.confidence(), "", "",
+                evidence.reviewState(), evidence.conflictsWith());
+        return new MemoryEntry(entry.getId(), "", entry.getType(), entry.getTimestamp(),
+                entry.getMetadata(), entry.getTokenCount(), entry.getSubject(), entry.isActive(),
+                entry.getSupersededBy(), entry.getSchemaVersion(), entry.getRevision(),
+                entry.getExpiresAt(), catalogEvidence, entry.getRecallCount(),
+                entry.getLastRecalledAt(), entry.getKind(), entry.getValidatedUseCount(),
+                entry.getLastValidatedAt());
+    }
+
+    int hotCacheSize() {
+        return hotCache.size();
+    }
+
+    boolean isHot(String id) {
+        return hotCache.contains(id);
+    }
+
+    Set<String> hotIds() {
+        return hotCache.ids();
     }
 
     private static void ensureDir(Path dir) {

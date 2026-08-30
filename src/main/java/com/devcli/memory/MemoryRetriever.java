@@ -99,22 +99,27 @@ public class MemoryRetriever {
         if (query == null || query.isBlank() || limit <= 0) {
             return List.of();
         }
+        Map<String, ScoredEntry> scoredById = new HashMap<>();
+        int semanticCandidateLimit = Math.max(MIN_SEMANTIC_CANDIDATES,
+                limit > Integer.MAX_VALUE / SEMANTIC_CANDIDATE_MULTIPLIER
+                        ? Integer.MAX_VALUE
+                        : limit * SEMANTIC_CANDIDATE_MULTIPLIER);
+
         Map<String, MemoryEntry> byId = new HashMap<>();
-        for (MemoryEntry entry : longTermMemory.getAll()) {
-            // 只把可召回事实纳入候选：被 supersede 或明确拒绝的条目不会注入 prompt
+        for (MemoryEntry entry : longTermMemory.searchCandidates(query, semanticCandidateLimit)) {
             if (entry.isRecallable() && isVisibleInScope(entry, activeScopeKeys)) {
                 byId.put(entry.getId(), entry);
             }
         }
 
-        Map<String, ScoredEntry> scoredById = new HashMap<>();
-
-        // 1. 语义检索（PR-C）：按 fact_id 命中向量，再与关键词分数合并
-        int semanticCandidateLimit = Math.max(MIN_SEMANTIC_CANDIDATES,
-                limit > Integer.MAX_VALUE / SEMANTIC_CANDIDATE_MULTIPLIER
-                        ? Integer.MAX_VALUE
-                        : limit * SEMANTIC_CANDIDATE_MULTIPLIER);
+        // 1. 语义检索（PR-C）：按 fact_id 命中后从 Hot Cache 或 Markdown 回读正文。
         List<SemanticHit> semanticHits = semanticSearch.search(query, semanticCandidateLimit);
+        for (SemanticHit hit : semanticHits) {
+            longTermMemory.loadCandidate(hit.factId())
+                    .filter(MemoryEntry::isRecallable)
+                    .filter(entry -> isVisibleInScope(entry, activeScopeKeys))
+                    .ifPresent(entry -> byId.put(entry.getId(), entry));
+        }
         if (!semanticHits.isEmpty()) {
             for (SemanticHit hit : semanticHits) {
                 MemoryEntry entry = byId.get(hit.factId());
@@ -151,11 +156,15 @@ public class MemoryRetriever {
             return List.of();
         }
         double topScore = ranked.get(0).score();
-        return ranked.stream()
+        List<RankedMemory> selected = ranked.stream()
                 .filter(result -> result.score() >= minScore)
                 .filter(result -> topScore - result.score() <= maxScoreGap)
                 .limit(Math.min(limit, maxInjected))
                 .toList();
+        for (int i = selected.size() - 1; i >= 0; i--) {
+            longTermMemory.promoteToHot(selected.get(i).entry());
+        }
+        return selected;
     }
 
     /**
