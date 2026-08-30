@@ -115,6 +115,69 @@ class MemoryVectorStoreTest {
     }
 
     @Test
+    void storesSemanticCardInsteadOfFullMemoryBody() {
+        MemoryEntry entry = new MemoryEntry("m1", "完整正文不应进入向量索引", MemoryEntry.MemoryType.FACT,
+                java.util.Map.of("memory_kind", "LESSON", "topic", "压缩", "conclusion", "保留证据"), 8);
+        String card = MemorySemanticCard.from(entry);
+        assertTrue(card.contains("type=LESSON"));
+        assertTrue(card.contains("topic=压缩"));
+        assertTrue(card.contains("summary=完整正文不应进入向量索引"));
+        try (MemoryVectorStore store = new MemoryVectorStore(tempDir)) {
+            store.upsert(entry.getId(), card, new float[]{1f, 0f});
+            assertEquals(card, store.search(new float[]{1f, 0f}, 1, 0.0).getFirst().content());
+        }
+    }
+
+    @Test
+    void upgradesLegacyTableWithoutWritingBodyIntoLegacyColumns() throws Exception {
+        java.nio.file.Files.createDirectories(tempDir);
+        try (java.sql.Connection connection = java.sql.DriverManager.getConnection(
+                "jdbc:sqlite:" + tempDir.resolve("memory_vectors.db"));
+             java.sql.Statement statement = connection.createStatement()) {
+            statement.execute("""
+                    CREATE TABLE memory_vectors (
+                        fact_id TEXT PRIMARY KEY,
+                        content TEXT NOT NULL,
+                        embedding_json TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """);
+            statement.execute("""
+                    INSERT INTO memory_vectors(fact_id, content, embedding_json)
+                    VALUES ('old', '旧版完整正文', '[1.0,0.0]')
+                    """);
+        }
+        try (MemoryVectorStore store = new MemoryVectorStore(tempDir)) {
+            store.upsert("m1", "type=LESSON topic=legacy", new float[]{1f, 0f});
+            assertEquals(2, store.count());
+            MemoryVectorStore.SearchResult inserted = store.search(new float[]{1f, 0f}, 5, 0.0).stream()
+                    .filter(result -> "m1".equals(result.factId()))
+                    .findFirst().orElseThrow();
+            assertEquals("type=LESSON topic=legacy", inserted.content());
+        }
+        try (java.sql.Connection connection = java.sql.DriverManager.getConnection(
+                "jdbc:sqlite:" + tempDir.resolve("memory_vectors.db"));
+             java.sql.Statement statement = connection.createStatement();
+             java.sql.ResultSet rows = statement.executeQuery(
+                     "SELECT content, embedding_json FROM memory_vectors WHERE fact_id='m1'")) {
+            assertTrue(rows.next());
+            assertEquals("", rows.getString("content"));
+            assertEquals("", rows.getString("embedding_json"));
+        }
+        try (java.sql.Connection connection = java.sql.DriverManager.getConnection(
+                "jdbc:sqlite:" + tempDir.resolve("memory_vectors.db"));
+             java.sql.Statement statement = connection.createStatement();
+             java.sql.ResultSet rows = statement.executeQuery(
+                     "SELECT semantic_text, content, embedding_json, dimensions FROM memory_vectors WHERE fact_id='old'")) {
+            assertTrue(rows.next());
+            assertEquals("summary=旧版完整正文", rows.getString("semantic_text"));
+            assertEquals("", rows.getString("content"));
+            assertEquals("", rows.getString("embedding_json"));
+            assertEquals(2, rows.getInt("dimensions"));
+        }
+    }
+
+    @Test
     void invalidArgumentsAreSafe() {
         try (MemoryVectorStore store = new MemoryVectorStore(tempDir)) {
             // null fact id / null embedding 都应静默忽略

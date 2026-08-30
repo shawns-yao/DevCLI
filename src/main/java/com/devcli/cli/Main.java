@@ -369,7 +369,7 @@ public class Main {
             com.devcli.memory.MemoryVectorStore memoryVectorStore = new com.devcli.memory.MemoryVectorStore();
             shutdown.register(40, "memoryVectorStore", memoryVectorStore::close);
             com.devcli.rag.EmbeddingClient embeddingClient = new com.devcli.rag.EmbeddingClient();
-            // store 钩子：每次 LongTermMemory.store 后异步 embed 写向量库
+            // store 钩子：每次 LongTermMemory.store 成功后同步生成语义卡并更新向量库
             reactAgent.getMemoryManager().getLongTermMemory().setVectorIndex(
                     entry -> embedAndUpsert(memoryVectorStore, embeddingClient, entry),
                     memoryVectorStore::delete,
@@ -2328,7 +2328,7 @@ public class Main {
     }
 
     /**
-     * PR-C：长期记忆向量同步。LongTermMemory.store 后调用，把 fact 内容 embed 后写入向量库。
+     * PR-C：长期记忆向量同步。LongTermMemory.store 后调用，把派生语义卡 embed 后写入向量库。
      * <p>失败模式：embed 失败（Ollama 不通 / API key 缺）静默跳过，不影响 store 主路径。
      * 上层检索时会自动 fallback 到关键词检索。
      */
@@ -2337,9 +2337,10 @@ public class Main {
                                         com.devcli.memory.MemoryEntry entry) {
         if (!store.isUsable() || entry == null) return;
         try {
-            float[] vec = embedder.embed(entry.getContent());
+            String semanticCard = com.devcli.memory.MemorySemanticCard.from(entry);
+            float[] vec = embedder.embed(semanticCard);
             if (vec != null && vec.length > 0) {
-                store.upsert(entry.getId(), entry.getContent(), vec);
+                store.upsert(entry.getId(), semanticCard, vec, embedder.modelName());
             }
         } catch (Exception e) {
             // 静默：embed 失败让 fact 继续以"关键词可搜"形态留在 LongTermMemory

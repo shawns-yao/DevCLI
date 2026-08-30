@@ -1,7 +1,6 @@
 package com.devcli.memory;
 
 import com.devcli.util.VectorMath;
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,6 +17,7 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.time.Instant;
 
 /**
  * 长期记忆向量存储 —— PR-C 新增。
@@ -28,15 +28,19 @@ import java.util.List;
  * <p>存储模式：单表 {@code memory_vectors}（fact_id 主键，对应 {@link MemoryEntry#getId()}）：
  * <pre>
  *   fact_id        TEXT PRIMARY KEY    -- 与 LongTermMemory 的 entry id 对齐
- *   content        TEXT                -- 冗余存一份正文，便于直接返回搜索结果
- *   embedding_json TEXT                -- float[] 序列化为 JSON 数组
- *   created_at     TIMESTAMP
+ *   semantic_text  TEXT                -- 由结构化记忆卡生成的派生语义文本
+ *   embedding      BLOB                -- float32 little-endian
+ *   dimensions     INTEGER
+ *   embedding_model TEXT
+ *   content_hash   TEXT
+ *   indexed_at_ms  INTEGER
  * </pre>
  *
  * <p>检索：余弦相似度，在内存计算（向量数量级 < 几千，足够）。
  * 阈值 {@link #DEFAULT_SIMILARITY_THRESHOLD} = 0.5：低于此分不召回，避免噪声进 prompt。
  *
- * <p>失败模式：构造或 embed 失败时所有方法静默退化为 no-op，让上层走关键词 fallback。
+ * <p>旧版 content/embedding_json 列保留用于迁移读取，但新写入不再复制正文。
+ * <p>失败模式：构造或 embed 失败时退化为 no-op，让上层走关键词 fallback。
  */
 public class MemoryVectorStore implements AutoCloseable {
 
@@ -66,15 +70,30 @@ public class MemoryVectorStore implements AutoCloseable {
             String dbPath = memoryDir.resolve("memory_vectors.db").toString();
             conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
             try (Statement stmt = conn.createStatement()) {
+                stmt.execute("PRAGMA journal_mode=WAL");
+                stmt.execute("PRAGMA busy_timeout=5000");
                 stmt.execute("""
                         CREATE TABLE IF NOT EXISTS memory_vectors (
                             fact_id TEXT PRIMARY KEY,
-                            content TEXT NOT NULL,
-                            embedding_json TEXT NOT NULL,
+                            semantic_text TEXT NOT NULL DEFAULT '',
+                            embedding BLOB,
+                            dimensions INTEGER NOT NULL DEFAULT 0,
+                            embedding_model TEXT NOT NULL DEFAULT '',
+                            content_hash TEXT NOT NULL DEFAULT '',
+                            indexed_at_ms INTEGER NOT NULL DEFAULT 0,
+                            content TEXT,
+                            embedding_json TEXT,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
                         """);
+                addColumnIfMissing(stmt, "semantic_text", "TEXT NOT NULL DEFAULT ''");
+                addColumnIfMissing(stmt, "embedding", "BLOB");
+                addColumnIfMissing(stmt, "dimensions", "INTEGER NOT NULL DEFAULT 0");
+                addColumnIfMissing(stmt, "embedding_model", "TEXT NOT NULL DEFAULT ''");
+                addColumnIfMissing(stmt, "content_hash", "TEXT NOT NULL DEFAULT ''");
+                addColumnIfMissing(stmt, "indexed_at_ms", "INTEGER NOT NULL DEFAULT 0");
             }
+            migrateLegacyRows(conn);
             ready = true;
         } catch (Exception e) {
             log.warn("MemoryVectorStore init failed; semantic recall disabled: {}", e.getMessage());
@@ -109,8 +128,12 @@ public class MemoryVectorStore implements AutoCloseable {
         }
     }
 
-    /** 写入 / 更新一条 fact 的向量。fact_id 已存在时覆盖。 */
+    /** 写入 / 更新一条语义卡向量。fact_id 已存在时覆盖。 */
     public void upsert(String factId, String content, float[] embedding) {
+        upsert(factId, content, embedding, "");
+    }
+
+    public void upsert(String factId, String semanticText, float[] embedding, String embeddingModel) {
         if (!usable) { notifyDegradeOnce(); return; }
         if (factId == null || embedding == null) return;
         if (embedding.length == 0) {
@@ -128,14 +151,19 @@ public class MemoryVectorStore implements AutoCloseable {
                 del.executeUpdate();
             }
             try (PreparedStatement ins = connection.prepareStatement(
-                    "INSERT INTO memory_vectors(fact_id, content, embedding_json) VALUES (?, ?, ?)")) {
+                    "INSERT INTO memory_vectors(fact_id, semantic_text, embedding, dimensions, embedding_model, content_hash, indexed_at_ms, content, embedding_json) VALUES (?, ?, ?, ?, ?, ?, ?, '', '')")) {
                 ins.setString(1, factId);
-                ins.setString(2, content == null ? "" : content);
-                ins.setString(3, JSON.writeValueAsString(embedding));
+                String text = semanticText == null ? "" : semanticText;
+                ins.setString(2, text);
+                ins.setBytes(3, toBlob(embedding));
+                ins.setInt(4, embedding.length);
+                ins.setString(5, embeddingModel == null ? "" : embeddingModel);
+                ins.setString(6, MemorySemanticCard.contentHash(text));
+                ins.setLong(7, Instant.now().toEpochMilli());
                 ins.executeUpdate();
             }
             connection.commit();
-        } catch (SQLException | JsonProcessingException e) {
+        } catch (SQLException e) {
             log.warn("MemoryVectorStore upsert failed for {}: {}", factId, e.getMessage());
             try {
                 connection.rollback();
@@ -186,11 +214,13 @@ public class MemoryVectorStore implements AutoCloseable {
         List<SearchResult> results = new ArrayList<>();
         try (Statement stmt = connection.createStatement();
              ResultSet rs = stmt.executeQuery(
-                     "SELECT fact_id, content, embedding_json FROM memory_vectors")) {
-            while (rs.next()) {
-                String factId = rs.getString("fact_id");
-                String content = rs.getString("content");
-                float[] vec = parseEmbedding(rs.getString("embedding_json"));
+                     "SELECT fact_id, semantic_text, embedding, dimensions, embedding_json, content FROM memory_vectors")) {
+                while (rs.next()) {
+                    String factId = rs.getString("fact_id");
+                String content = rs.getString("semantic_text");
+                if (content == null || content.isBlank()) content = rs.getString("content");
+                float[] vec = fromBlob(rs.getBytes("embedding"), rs.getInt("dimensions"));
+                if (vec == null) vec = parseEmbedding(rs.getString("embedding_json"));
                 if (vec == null || vec.length != queryVector.length) continue;
                 double sim = cosineSimilarity(queryVector, vec);
                 if (sim >= threshold) {
@@ -237,10 +267,89 @@ public class MemoryVectorStore implements AutoCloseable {
         }
     }
 
+    private static byte[] toBlob(float[] vector) {
+        java.nio.ByteBuffer buffer = java.nio.ByteBuffer.allocate(vector.length * Float.BYTES)
+                .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        for (float value : vector) buffer.putFloat(value);
+        return buffer.array();
+    }
+
+    private static float[] fromBlob(byte[] blob, int dimensions) {
+        if (blob == null || blob.length == 0 || dimensions <= 0 || blob.length != dimensions * Float.BYTES) {
+            return null;
+        }
+        java.nio.ByteBuffer buffer = java.nio.ByteBuffer.wrap(blob).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        float[] vector = new float[dimensions];
+        for (int i = 0; i < dimensions; i++) vector[i] = buffer.getFloat();
+        return vector;
+    }
+
+    private static void addColumnIfMissing(Statement stmt, String column, String definition) throws SQLException {
+        boolean present = false;
+        try (ResultSet rs = stmt.executeQuery("PRAGMA table_info(memory_vectors)")) {
+            while (rs.next()) {
+                if (column.equalsIgnoreCase(rs.getString("name"))) {
+                    present = true;
+                    break;
+                }
+            }
+        }
+        if (!present) stmt.execute("ALTER TABLE memory_vectors ADD COLUMN " + column + " " + definition);
+    }
+
+    private static void migrateLegacyRows(Connection connection) throws SQLException {
+        List<LegacyRow> rows = new ArrayList<>();
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery("""
+                     SELECT fact_id, content, embedding_json
+                     FROM memory_vectors
+                     WHERE (embedding IS NULL OR dimensions = 0)
+                       AND embedding_json IS NOT NULL
+                       AND embedding_json <> ''
+                     """)) {
+            while (rs.next()) {
+                float[] vector = parseEmbedding(rs.getString("embedding_json"));
+                if (vector != null && vector.length > 0) {
+                    rows.add(new LegacyRow(rs.getString("fact_id"), rs.getString("content"), vector));
+                }
+            }
+        }
+        if (rows.isEmpty()) return;
+        boolean autoCommit = connection.getAutoCommit();
+        connection.setAutoCommit(false);
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE memory_vectors
+                SET semantic_text = ?, embedding = ?, dimensions = ?, embedding_model = 'legacy',
+                    content_hash = ?, indexed_at_ms = ?, content = '', embedding_json = ''
+                WHERE fact_id = ?
+                """)) {
+            for (LegacyRow row : rows) {
+                String semanticText = MemorySemanticCard.fromLegacyText(row.content());
+                update.setString(1, semanticText);
+                update.setBytes(2, toBlob(row.embedding()));
+                update.setInt(3, row.embedding().length);
+                update.setString(4, MemorySemanticCard.contentHash(semanticText));
+                update.setLong(5, Instant.now().toEpochMilli());
+                update.setString(6, row.factId());
+                update.addBatch();
+            }
+            update.executeBatch();
+            connection.commit();
+        } catch (SQLException error) {
+            connection.rollback();
+            throw error;
+        } finally {
+            connection.setAutoCommit(autoCommit);
+        }
+    }
+
     private static double cosineSimilarity(float[] a, float[] b) {
         return VectorMath.cosineSimilarity(a, b);
     }
 
     public record SearchResult(String factId, String content, double similarity) {
+    }
+
+    private record LegacyRow(String factId, String content, float[] embedding) {
     }
 }
