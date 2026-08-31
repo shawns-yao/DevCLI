@@ -324,6 +324,49 @@ class MemoryManagerTest {
     }
 
     @Test
+    void rawModeMustNotGeneratePreSummary() {
+        String key = ConversationHistoryCompactor.COMPACTION_ENABLED_PROPERTY;
+        String previous = System.getProperty(key);
+        System.setProperty(key, "false");
+        StubGLMClient client = new StubGLMClient(List.of(
+                new LlmClient.ChatResponse("assistant", "UNEXPECTED SUMMARY", null, 100, 20)));
+        try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
+             MemoryManager manager = new MemoryManager(client, 4096, 128000, ltm)) {
+            manager.maintainSessionPreSummaryAfterTurn(
+                    List.of(LlmClient.Message.user(longText(10_000))), 4, 12_000);
+            assertEquals(0, client.messagesByCall.size(), "raw must disable all summary calls");
+            assertTrue(manager.getCompactionSummaryCache().currentPreSummary().isEmpty());
+        } finally {
+            if (previous == null) System.clearProperty(key);
+            else System.setProperty(key, previous);
+        }
+    }
+
+    @Test
+    void preSummaryReportsActualUsageEvenForEmptySummary() {
+        String key = ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY;
+        String previous = System.getProperty(key);
+        java.io.PrintStream originalErr = System.err;
+        var captured = new java.io.ByteArrayOutputStream();
+        System.setProperty(key, "true");
+        System.setErr(new java.io.PrintStream(captured, true, java.nio.charset.StandardCharsets.UTF_8));
+        StubGLMClient client = new StubGLMClient(List.of(
+                new LlmClient.ChatResponse("assistant", "", null, null, 100, 20, 30)));
+        try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
+             MemoryManager manager = new MemoryManager(client, 4096, 128000, ltm)) {
+            assertEquals(MemoryManager.SessionPreSummaryMaintenanceResult.FAILED,
+                    manager.maintainSessionPreSummaryAfterTurn(
+                            List.of(LlmClient.Message.user("task")), 4, 0));
+            assertTrue(captured.toString(java.nio.charset.StandardCharsets.UTF_8).contains(
+                    "kind=summary-call inputTokens=100 outputTokens=20 cachedInputTokens=30 source=pre-summary"));
+        } finally {
+            System.setErr(originalErr);
+            if (previous == null) System.clearProperty(key);
+            else System.setProperty(key, previous);
+        }
+    }
+
+    @Test
     void maintainSessionPreSummaryAfterTurnTriggersOnTokenGrowth() {
         try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
              MemoryManager memoryManager = new MemoryManager(

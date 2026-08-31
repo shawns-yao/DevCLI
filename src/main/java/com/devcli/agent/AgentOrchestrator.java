@@ -216,6 +216,7 @@ public class AgentOrchestrator {
             List<AcceptanceCriterionView> criteria,
             boolean requiresHumanReview,
             boolean semanticReviewExecuted,
+            boolean semanticReviewApproved,
             String semanticReviewSummary
     ) {
         public TeamPlanReviewRequest {
@@ -226,7 +227,16 @@ public class AgentOrchestrator {
         public TeamPlanReviewRequest(String goal, String planSummary,
                                      List<AcceptanceCriterionView> criteria,
                                      boolean requiresHumanReview) {
-            this(goal, planSummary, criteria, requiresHumanReview, false, "");
+            this(goal, planSummary, criteria, requiresHumanReview, false, true, "");
+        }
+
+        public TeamPlanReviewRequest(String goal, String planSummary,
+                                     List<AcceptanceCriterionView> criteria,
+                                     boolean requiresHumanReview,
+                                     boolean semanticReviewExecuted,
+                                     String semanticReviewSummary) {
+            this(goal, planSummary, criteria, requiresHumanReview,
+                    semanticReviewExecuted, true, semanticReviewSummary);
         }
     }
 
@@ -509,17 +519,20 @@ public class AgentOrchestrator {
     }
 
     private record PlanGenerationResult(AgentMessage message, List<ExecutionStep> steps,
-                                        TeamPlanReviewProtocol.Evaluation semanticReview) {
+                                        TeamPlanReviewProtocol.Evaluation semanticReview,
+                                        String failureReason) {
         private PlanGenerationResult {
             steps = steps == null ? new ArrayList<>() : new ArrayList<>(steps);
             semanticReview = semanticReview == null
                     ? TeamPlanReviewProtocol.Evaluation.skipped() : semanticReview;
+            failureReason = failureReason == null ? "" : failureReason.trim();
         }
     }
 
     private PlanGenerationResult requestValidatedPlan(String userInput) {
         PlanCoordinator.GenerationResult result = planCoordinator.requestValidatedPlan(userInput);
-        return new PlanGenerationResult(result.message(), result.steps(), result.semanticReview());
+        return new PlanGenerationResult(result.message(), result.steps(), result.semanticReview(),
+                result.failureReason());
     }
 
     private TeamPlanReviewProtocol.Evaluation reviewGeneratedPlan(
@@ -571,7 +584,9 @@ public class AgentOrchestrator {
             // 2. 解析计划（requestValidatedPlan 已完成协议校验和超步数粗化）
             List<ExecutionStep> steps = planGeneration.steps();
             if (steps.isEmpty()) {
-                finalResultForSummary = "❌ 规划失败：无法解析执行计划\n原始输出:\n"
+                String reason = planGeneration.failureReason().isBlank()
+                        ? "无法解析执行计划" : planGeneration.failureReason();
+                finalResultForSummary = "❌ 规划失败：" + reason + "\n原始输出:\n"
                         + Objects.toString(planResult.content(), "");
                 return finalResultForSummary;
             }
@@ -655,7 +670,18 @@ public class AgentOrchestrator {
                 criteria,
                 preflight.requiresHumanReview(),
                 planSemanticReviewEnabled,
-                semanticReview.summary());
+                semanticReview.approved(),
+                semanticReviewSummary(semanticReview));
+    }
+
+    private String semanticReviewSummary(TeamPlanReviewProtocol.Evaluation semanticReview) {
+        String summary = semanticReview.summary();
+        if (semanticReview.approved() || semanticReview.issues().isBlank()) {
+            return summary;
+        }
+        return summary.isBlank()
+                ? semanticReview.issues()
+                : summary + "；" + semanticReview.issues();
     }
 
     private void scheduleSessionPreSummaryMaintenance(String userInput, String result) {
@@ -733,9 +759,9 @@ public class AgentOrchestrator {
                             .filter(step -> !isFinalIntegrationStep(step))
                             .toList());
             if (!semanticReview.protocolValid() || !semanticReview.approved()) {
-                return "❌ checkpoint [" + loaded.getOrchestrationId()
-                        + "] 计划语义评审未通过，不能继续恢复："
-                        + semanticReview.issues() + "。请重新发起 /plan 任务。";
+                out.println("⚠️ checkpoint [" + loaded.getOrchestrationId()
+                        + "] 计划语义评审给出建议，恢复继续："
+                        + semanticReviewSummary(semanticReview) + "\n");
             }
             if (loadedProtocolVersion < 6) {
                 TeamPlanReviewDecision decision = planReviewHandler.review(

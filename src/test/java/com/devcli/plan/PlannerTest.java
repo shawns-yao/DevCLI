@@ -56,6 +56,38 @@ class PlannerTest {
     }
 
     @Test
+    void acceptsStepsKeyAsAliasForTasks() throws Exception {
+        // 回归：编排层与模型常用 steps 命名，计划层不得只认 tasks 而判空计划
+        Planner planner = new Planner(new StubGLMClient("""
+                {
+                  "summary": "steps 别名",
+                  "steps": [
+                    {
+                      "id": "step_1",
+                      "description": "定位迭代器源码",
+                      "type": "FILE_READ",
+                      "dependencies": []
+                    },
+                    {
+                      "id": "step_2",
+                      "description": "最小修复空栈",
+                      "type": "FILE_WRITE",
+                      "dependencies": ["step_1"]
+                    }
+                  ]
+                }
+                """));
+
+        ExecutionPlan plan = planner.createPlan("先定位迭代器源码然后最小修复空栈问题");
+
+        assertEquals("steps 别名", plan.getSummary());
+        assertEquals(2, plan.getAllTasks().size());
+        // 原始 step_1/step_2 重映射为 task_1/task_2，依赖同步映射
+        assertEquals(List.of("task_1"), plan.getTask("task_2").getDependencies());
+        assertEquals(Task.TaskType.FILE_WRITE, plan.getTask("task_2").getType());
+    }
+
+    @Test
     void replanIncludesStructuredTaskArtifacts() throws Exception {
         StubGLMClient client = new StubGLMClient("""
                 {

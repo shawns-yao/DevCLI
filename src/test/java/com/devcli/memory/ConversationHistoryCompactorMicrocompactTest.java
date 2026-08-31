@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * microcompact（第 0 层）测试：截断单条超大消息，不调 LLM、不删消息、不破坏 tool_call 配对。
+ * microcompact（第 0 层）测试：只回收旧工具结果，不修改用户或助手语义消息。
  */
 class ConversationHistoryCompactorMicrocompactTest {
 
@@ -22,136 +22,230 @@ class ConversationHistoryCompactorMicrocompactTest {
     Path tempDir;
 
     @Test
-    void truncatesOversizeNonLastMessageAndKeepsMetadata() {
+    void neverModifiesUserOrAssistantMessages() {
         ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 30_000, true);
+        String user = "user-requirement-".repeat(5_000);
+        String assistant = "assistant-decision-".repeat(4_000);
         List<LlmClient.Message> history = new ArrayList<>();
         history.add(LlmClient.Message.system("S"));
-        history.add(LlmClient.Message.user("Q"));
-        // 30k 字符的工具结果，非最后一条 → 超普通阈值 24k 被截断
-        history.add(new LlmClient.Message("tool", "x".repeat(30_000), null, null, "c1"));
-        history.add(LlmClient.Message.assistant("done"));
+        history.add(LlmClient.Message.user(user));
+        history.add(LlmClient.Message.assistant(assistant));
+
+        assertFalse(c.microcompactOversizeMessages(history));
+        assertEquals(user, history.get(1).content());
+        assertEquals(assistant, history.get(2).content());
+    }
+
+    @Test
+    void clearsOldOversizeToolResultAndKeepsMetadata() {
+        ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 30_000, true);
+        c.setMicrocompactOutputRoot(tempDir);
+        List<LlmClient.Message> history = toolHistory(
+                tool("old", "read_file"),
+                tool("r1", "read_file"),
+                tool("r2", "grep_code"),
+                tool("r3", "list_dir"),
+                tool("r4", "search_code"));
+        history.set(2, new LlmClient.Message("tool", "x".repeat(30_000), null, null, "old"));
 
         boolean changed = c.microcompactOversizeMessages(history);
 
         assertTrue(changed);
         String compacted = history.get(2).content();
-        assertTrue(compacted.length() < 30_000, "超大工具结果应被截断");
-        assertTrue(compacted.contains("microcompact 截断"), "应保留截断标记");
-        assertEquals("c1", history.get(2).toolCallId(), "截断不应丢 toolCallId（保 tool_call 配对）");
-        assertEquals("tool", history.get(2).role(), "role 不变");
-        assertEquals(4, history.size(), "microcompact 不删消息");
+        assertTrue(compacted.length() < 30_000, "旧工具结果应被回收");
+        assertTrue(compacted.contains("<microcompact_boundary>"));
+        assertEquals("old", history.get(2).toolCallId(), "回收不能丢失 toolCallId");
+        assertEquals("tool", history.get(2).role());
     }
 
     @Test
-    void microcompactPersistsOversizeToolResultWhenOutputRootConfigured() throws IOException {
+    void persistsToolResultWithProjectRelativeRecoveryPath() throws IOException {
         ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 30_000, true);
         c.setMicrocompactOutputRoot(tempDir);
         String original = "tool-output-".repeat(3_000);
-        List<LlmClient.Message> history = new ArrayList<>();
-        history.add(LlmClient.Message.system("S"));
-        history.add(LlmClient.Message.user("Q"));
-        history.add(new LlmClient.Message("tool", original, null, null, "call/with:unsafe"));
-        history.add(LlmClient.Message.assistant("done"));
+        List<LlmClient.Message> history = toolHistory(
+                tool("call/with:unsafe", "read_file"),
+                tool("r1", "read_file"),
+                tool("r2", "grep_code"),
+                tool("r3", "list_dir"),
+                tool("r4", "search_code"));
+        history.set(2, new LlmClient.Message("tool", original, null, null, "call/with:unsafe"));
 
-        boolean changed = c.microcompactOversizeMessages(history);
+        assertTrue(c.microcompactOversizeMessages(history));
 
-        assertTrue(changed);
         String compacted = history.get(2).content();
-        assertTrue(compacted.contains("<microcompact_boundary>"));
-        assertTrue(compacted.contains("toolCallId=call/with:unsafe"));
-        assertTrue(compacted.contains("完整工具结果已落盘"));
+        assertTrue(compacted.contains("storedPath=.devcli/microcompact_tool_outputs/"), compacted);
+        assertFalse(compacted.contains(tempDir.toAbsolutePath().toString()),
+                "恢复提示不得暴露 Docker 无法访问的宿主机绝对路径");
         Path output = tempDir.resolve(ConversationHistoryCompactor.MICROCOMPACT_OUTPUTS_DIR)
                 .resolve(ConversationHistoryCompactor.microcompactSessionId())
                 .resolve("call_with_unsafe.txt");
-        assertTrue(Files.isRegularFile(output), "应落盘完整工具结果");
-        assertEquals(original, Files.readString(output), "落盘内容应保留完整原文");
+        assertTrue(Files.isRegularFile(output));
+        assertEquals(original, Files.readString(output));
     }
 
     @Test
-    void lastMessageUsesLooserThreshold() {
+    void keepsMostRecentToolResultsByCount() {
         ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 30_000, true);
+        c.setMicrocompactOutputRoot(tempDir);
+        List<LlmClient.Message> history = toolHistory(
+                tool("old", "read_file"),
+                tool("recent-1", "read_file"),
+                tool("recent-2", "grep_code"),
+                tool("recent-3", "list_dir"),
+                tool("recent-4", "search_code"));
 
-        // 30k 字符作为最后一条：< 48k 宽松阈值 → 不截断（保护当前上下文）
-        List<LlmClient.Message> asLast = new ArrayList<>();
-        asLast.add(LlmClient.Message.user("x".repeat(30_000)));
-        assertFalse(c.microcompactOversizeMessages(asLast), "30k 作为最后一条不应被截断");
+        assertTrue(c.microcompactOversizeMessages(history));
 
-        // 同样 30k 但非最后一条 → 超普通阈值 24k → 截断
-        List<LlmClient.Message> notLast = new ArrayList<>();
-        notLast.add(LlmClient.Message.user("x".repeat(30_000)));
-        notLast.add(LlmClient.Message.assistant("end"));
-        assertTrue(c.microcompactOversizeMessages(notLast), "30k 非最后一条应被截断");
+        assertTrue(history.get(2).content().contains("<microcompact_boundary>"));
+        for (int i = 1; i <= ConversationHistoryCompactor.MICRO_COMPACT_RETAIN_RECENT_TOOL_RESULTS; i++) {
+            assertEquals("result-recent-" + i, history.get(2 + i).content());
+        }
     }
 
     @Test
-    void lastMessageStillTruncatedAboveAbsoluteCap() {
+    void protectsCriticalExternalAndFailedCommandResults() {
         ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 30_000, true);
-        List<LlmClient.Message> history = new ArrayList<>();
-        history.add(LlmClient.Message.user("x".repeat(60_000))); // 最后一条但超 48k 绝对上限
+        c.setMicrocompactOutputRoot(tempDir);
+        List<LlmClient.Message> history = toolHistory(
+                tool("memory", "save_memory"),
+                tool("mcp", "mcp__memory__recall"),
+                tool("web", "web_fetch"),
+                tool("failed", "execute_command"),
+                tool("old-read", "read_file"),
+                tool("r1", "read_file"),
+                tool("r2", "grep_code"),
+                tool("r3", "list_dir"),
+                tool("r4", "search_code"));
+        history.set(5, new LlmClient.Message("tool",
+                "命令执行完成 (exit code: 1)\nBUILD FAILURE", null, null, "failed"));
 
-        boolean changed = c.microcompactOversizeMessages(history);
+        assertTrue(c.microcompactOversizeMessages(history));
 
-        assertTrue(changed, "最后一条超绝对上限仍须截断，避免单条撑爆保留区");
-        assertTrue(history.get(0).content().length() < 60_000);
+        assertEquals("result-memory", history.get(2).content());
+        assertEquals("result-mcp", history.get(3).content());
+        assertEquals("result-web", history.get(4).content());
+        assertTrue(history.get(5).content().contains("exit code: 1"));
+        assertTrue(history.get(6).content().contains("<microcompact_boundary>"));
     }
 
     @Test
-    void skipsMultimodalMessages() {
+    void supportsConfiguredToolExclusions() {
         ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 30_000, true);
-        List<LlmClient.Message> history = new ArrayList<>();
-        List<LlmClient.ContentPart> parts = List.of(
-                LlmClient.ContentPart.text("x".repeat(30_000)),
-                LlmClient.ContentPart.imageBase64("base64data", "image/png"));
-        history.add(LlmClient.Message.user(parts)); // hasContentParts() == true
-        history.add(LlmClient.Message.assistant("end"));
+        c.setMicrocompactOutputRoot(tempDir);
+        List<LlmClient.Message> history = toolHistory(
+                tool("protected-read", "read_file"),
+                tool("clearable-grep", "grep_code"),
+                tool("r1", "read_file"),
+                tool("r2", "grep_code"),
+                tool("r3", "list_dir"),
+                tool("r4", "search_code"));
+        String previous = System.getProperty(
+                ConversationHistoryCompactor.MICRO_COMPACT_EXCLUDE_TOOLS_PROPERTY);
+        try {
+            System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_EXCLUDE_TOOLS_PROPERTY,
+                    "read_file");
+            assertTrue(c.microcompactOversizeMessages(history));
+        } finally {
+            if (previous == null) {
+                System.clearProperty(ConversationHistoryCompactor.MICRO_COMPACT_EXCLUDE_TOOLS_PROPERTY);
+            } else {
+                System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_EXCLUDE_TOOLS_PROPERTY, previous);
+            }
+        }
 
-        assertFalse(c.microcompactOversizeMessages(history), "带图片附件的消息应跳过 microcompact");
+        assertEquals("result-protected-read", history.get(2).content());
+        assertTrue(history.get(3).content().contains("<microcompact_boundary>"));
     }
 
     @Test
-    void doesNotTruncateBelowThreshold() {
-        // 20k 字符 < 24k 阈值：不截断。这同时保护既有测试里 longText(20000) 的消息不被 microcompact 改动。
+    void recordsTokenChangesByRoleAndTool() {
         ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 30_000, true);
-        List<LlmClient.Message> history = new ArrayList<>();
-        history.add(LlmClient.Message.user("Q"));
-        history.add(new LlmClient.Message("tool", "x".repeat(20_000), null, null, "c1"));
-        history.add(LlmClient.Message.assistant("end"));
+        c.setMicrocompactOutputRoot(tempDir);
+        List<LlmClient.Message> history = toolHistory(
+                tool("old", "read_file"),
+                tool("r1", "read_file"),
+                tool("r2", "grep_code"),
+                tool("r3", "list_dir"),
+                tool("r4", "search_code"));
+        history.set(2, new LlmClient.Message("tool", "large-output-".repeat(3_000), null, null, "old"));
 
-        assertFalse(c.microcompactOversizeMessages(history), "低于阈值不应截断");
+        assertTrue(c.microcompactOversizeMessages(history));
+
+        ConversationHistoryCompactor.MicrocompactStats stats = c.lastMicrocompactStats();
+        assertEquals(1, stats.clearedToolResults());
+        assertTrue(stats.afterTokens() < stats.beforeTokens());
+        assertTrue(stats.removedTokensByTool().getOrDefault("read_file", 0) > 0);
+        assertEquals(stats.roleTokensBefore().get("user"), stats.roleTokensAfter().get("user"));
+        assertEquals(stats.roleTokensBefore().get("assistant"), stats.roleTokensAfter().get("assistant"));
+        assertTrue(stats.roleTokensAfter().get("tool") < stats.roleTokensBefore().get("tool"));
     }
 
     @Test
     void microcompactAloneAvoidsLlmSummarization() {
         AtomicInteger summarizeCalls = new AtomicInteger();
-        ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 30_000, true) {
+        ConversationHistoryCompactor c = summaryCountingCompactor(summarizeCalls);
+        c.setMicrocompactOutputRoot(tempDir);
+        List<LlmClient.Message> history = toolHistory(
+                tool("old", "read_file"),
+                tool("r1", "read_file"),
+                tool("r2", "grep_code"),
+                tool("r3", "list_dir"),
+                tool("r4", "search_code"));
+        history.set(2, new LlmClient.Message("tool", "x".repeat(120_000), null, null, "old"));
+
+        assertFalse(c.compactIfNeeded(history, 5_000));
+        assertEquals(0, summarizeCalls.get());
+        assertTrue(TokenBudget.estimateMessagesTokens(history) < 5_000);
+    }
+
+    @Test
+    void semanticCompactionStillRunsWhenToolGcCannotBringHistoryBelow256k() {
+        AtomicInteger summarizeCalls = new AtomicInteger();
+        ConversationHistoryCompactor c = summaryCountingCompactor(summarizeCalls);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("S"));
+        for (int i = 0; i < 25; i++) {
+            history.add(LlmClient.Message.user("requirement-" + i + "-" + "u".repeat(22_000)));
+            history.add(LlmClient.Message.assistant("decision-" + i + "-" + "a".repeat(22_000)));
+        }
+        assertTrue(TokenBudget.estimateMessagesTokens(history) > 256_000);
+
+        assertTrue(c.compactIfNeeded(history, 256_000));
+
+        assertEquals(1, summarizeCalls.get());
+        assertTrue(history.get(1).content().startsWith(ConversationHistoryCompactor.SUMMARY_MARKER));
+        assertEquals(0, c.lastMicrocompactStats().clearedToolResults());
+    }
+
+    private static ConversationHistoryCompactor summaryCountingCompactor(AtomicInteger calls) {
+        return new ConversationHistoryCompactor(null, 30_000, true) {
             @Override
             protected String summarize(List<LlmClient.Message> messages) {
-                summarizeCalls.incrementAndGet();
+                calls.incrementAndGet();
                 return "SUMMARY";
             }
 
             @Override
             protected String summarizeIncremental(String previousSummary, List<LlmClient.Message> newMessages) {
-                summarizeCalls.incrementAndGet();
+                calls.incrementAndGet();
                 return "SUMMARY";
             }
         };
+    }
+
+    private static LlmClient.ToolCall tool(String id, String name) {
+        return new LlmClient.ToolCall(id, new LlmClient.ToolCall.Function(name, "{}"));
+    }
+
+    private static List<LlmClient.Message> toolHistory(LlmClient.ToolCall... calls) {
         List<LlmClient.Message> history = new ArrayList<>();
-        history.add(LlmClient.Message.system("S"));
-        history.add(LlmClient.Message.user("hi"));
-        // 单条巨型工具结果（120k 字符 ≈ 30k token），非最后一条
-        history.add(new LlmClient.Message("tool", "x".repeat(120_000), null, null, "c1"));
+        history.add(LlmClient.Message.user("Q"));
+        history.add(LlmClient.Message.assistant(null, null, List.of(calls)));
+        for (LlmClient.ToolCall call : calls) {
+            history.add(new LlmClient.Message("tool", "result-" + call.id(), null, null, call.id()));
+        }
         history.add(LlmClient.Message.assistant("done"));
-
-        int before = TokenBudget.estimateMessagesTokens(history);
-        assertTrue(before > 5_000, "前提：micro 前应远超 trigger");
-
-        boolean compacted = c.compactIfNeeded(history, 5_000);
-
-        assertFalse(compacted, "micro-only 不算历史压缩，返回 false 避免调用方打印误导提示");
-        assertEquals(0, summarizeCalls.get(), "micro 扛住后不应调 LLM 摘要");
-        assertTrue(history.get(2).content().length() < 120_000, "巨型工具结果应被截断");
-        assertEquals(4, history.size(), "micro 不删消息");
-        assertTrue(TokenBudget.estimateMessagesTokens(history) < 5_000, "micro 后应低于 trigger");
+        return history;
     }
 }

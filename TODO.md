@@ -2,6 +2,84 @@
 
 > 评测历史说明：下方 2026-07 至 2026-08 的自建 Agent、Saga、记忆、压缩、并发和合成 RAG 记录仅用于开发过程审计，相关测试与结果文件已退役，不得作为当前 benchmark 结果。正式评测以 `docs/benchmark-evaluation.md` 的公开集合计划和官方评分器为准。
 
+## 2026-08-31 测试恢复、目录分离与公开效果实验
+
+| 事项 | 状态 | 日期 | 影响范围 | 阻塞或备注 |
+| --- | --- | --- | --- | --- |
+| 恢复历史 1902 项对应源码 | 已完成 | 2026-08-31 | src/test、benchmarks | 从 d43e3ec 恢复 267 个缺失的已跟踪文件；20 项未提交变更/新增文件从保留快照补回。只核对历史报告对应的 253 个类均存在，没有重新执行用例；来源清单见 Test/restoration/20260831/restoration-manifest.json |
+| 公开评测与单元测试分离 | 已完成 | 2026-08-31 | benchmarks/src/main/java、src/test/java、src/test/python、pom.xml、评测脚本 | 15 个公开 driver/支持文件移出单元测试目录；两份 Python 单元测试移入 src/test/python。SWE 与旧 reader 启动脚本不再依赖 target/test-classes；旧 reader 只做路径修复和语法检查，没有重新运行。Maven 单元测试仍可编译引用的公开支持类，但本轮不运行单元测试 |
+| Microcompact 收敛为工具结果 GC | 已完成 | 2026-08-31 | ConversationHistoryCompactor、压缩设计、定向测试 | 只回收旧 tool_result；user/assistant 与决策文本不做规则裁剪；保留最近可配置 N 项，保护记忆型 MCP、外部查询和失败证据，支持额外工具排除；记录角色/工具 Token，恢复引用改为项目相对路径；微压缩后仍超阈值才进入模型摘要 |
+| 恢复后的 Luna 上下文压缩单题 A/B | 已完成 | 2026-08-31 | Test/public-benchmarks/context/luna-git-restored-20260831-v1 | 公开权威数据测试：Druid 13704，raw→compact，各一次；同一 base、Luna、16K 实验阈值、4 轮同 Session、每轮 100 万 Token / 100 次迭代。官方双方 resolved，F2P 1/1、P2P 2/2；原始 1 对、排除 0 对、有效 1 对，官方环境错误 0 |
+| SWE Java 43 上下文压缩总体效果 | 未完成 | 2026-08-31 | SWE-bench Multilingual Java | 当前只有 1 对正式评分，不能推广为 43 题总体收益；其余 42 题尚未执行本轮配对 |
+
+本轮效果：raw 总 Token 398,355、耗时 316,568ms；compact 总 Token 645,958、耗时 483,080ms。Token Reduction 为 -62.16%，耗时增加 52.60%，官方 F2P 质量保持率 100%，净修复测试差 0。compact 历史压缩 3 次，摘要与预摘要共 6 次调用、额外 56,667 Token，已计入总量；由于没有节省 Token，每减少一万 Token 的质量损失不适用。两侧上下文超限均为 0。
+
+历史窗口峰值 raw 26,741、compact 28,623；compact 三次压缩分别为 19,803→8,852、17,433→11,938、16,247→12,035。说明压缩确实发生，但本题完整任务没有成本收益；不能把单次窗口缩小等同于总 Token 节省。生成期受限沙箱内 Maven 检查有环境失败记录，正式质量来自随后成功完成的官方镜像评测，不把模型自报的验证状态当成绩。完整指标与逐轮历史见该批次 `context-paired-summary.json`，官方原始报告保存在 `official-batch/`。
+
+此前 v2 批次有 502 和命令隔离协议缺口，v3 隔离批次按用户恢复并重新测试的要求停止；日志与工作区保留，不拼接为有效 A/B。当前目标仅为公开数据集效果评测，不再以全量回归数量代替功能收益。
+
+## 2026-08-31 Luna 16K 窗口与预摘要修复
+
+| 事项 | 状态 | 日期 | 影响范围 | 阻塞或备注 |
+| --- | --- | --- | --- | --- |
+| raw 完全关闭预摘要、补齐摘要实际用量 | 已完成 | 2026-08-31 | MemoryManager、压缩开关、测量脚本 | 两个缺陷先由定向测试复现；修复后 129 项定向测试通过；预摘要空回复也记录已用 Token |
+| 冻结编译产物及排除压缩回读文件 | 已完成 | 2026-08-31 | SWE 生成脚本 | 每批独立源码快照与编译目录；保留运行证据但不导出到补丁；普通新增文件仍保留，脚本定向检查通过 |
+| 16K、4 轮 Luna compact-only 冒烟 | 已完成 | 2026-08-31 | Druid 13704，同一 Session | 批次 luna-compact-smoke-20260831-v1：峰值 19,949 Token，4 次触发、2 次历史压缩；旧预摘要漏计且补丁包含运行缓存，仅作诊断，不作为收益成绩 |
+| 16K、4 轮 Luna 官方配对批次 | 已停止 | 2026-08-31 | luna-context-paired-20260831-v2 | raw 第 4 轮 502；后续发现命令隔离协议缺口，compact 主动停止；无有效配对，原始记录保留 |
+| 修复后的全量工程回归 | 已完成 | 2026-08-31 | 隔离源码构建 | 首次快照遗漏 Config/protocol-regression-baseline.json 的环境错误已修复；复核 1902 项、0 失败、0 错误、12 跳过，日志 Log/full-regression-presummary-confirm-20260831.log；不作为公开数据集功能成绩 |
+| 官方报告配对汇总 | 已完成 | 2026-08-31 | summarize-swebench-context.py | 只读官方报告；5 项指标与分母定向测试通过；零质量基线、不节省 Token、空补丁及外部失败不伪造质量保持率 |
+
+记忆公开实验不重跑；未提交或推送。下节保留此前 12K 批次的独立记录，不与本节结果合并。
+
+## 2026-08-31 Coding Agent 上下文配对实验
+
+| 事项 | 状态 | 日期 | 影响范围 | 阻塞或备注 |
+| --- | --- | --- | --- | --- |
+| 历史窗口与摘要成本记录 | 已完成 | 2026-08-31 | Compactor、SWE driver、生成脚本 | 记录每次判断、每轮结束、峰值及摘要 Token；不再把累计 API 输入当历史窗口 |
+| 结果来源、外部失败与记忆隔离 | 已完成 | 2026-08-31 | SWE driver、生成与官方评分脚本 | 校验模型、数据/源码哈希、轮数和预算；外部失败单列；驱动初始化前隔离记忆目录 |
+| Luna compact-only 阈值冒烟 | 已完成 | 2026-08-31 | Druid 13704、12K 实验阈值、2 轮同会话 | 隔离批次观察到 3 次成功压缩后结束诊断；不计完整解题样本；运行缓存从后续补丁导出中排除 |
+| raw/compact 官方配对 | 进行中 | 2026-08-31 | 相同 Issue、模型、预算、轮数及独立工作区 | 预先固定每轮 30 万 Token / 24 次迭代、2 轮、raw→compact；不混入旧模型结果 |
+
+实验记录见 `docs/benchmark-context-run-20260831.md`；记忆实验不重跑，Java 43 多智能体与 AgentDojo 接入仍未完成。
+
+## 2026-08-30 分层记忆设计与上下文压缩成本优化
+
+| 事项 | 状态 | 日期 | 影响范围 | 阻塞或备注 |
+| --- | --- | --- | --- | --- |
+| Markdown + SQLite + FTS5/HNSW 分层记忆 | 进行中 | 2026-08-30 | 长期记忆存储、索引、缓存和迁移 | 已完成语义卡 + float32 BLOB、Markdown 正文/证据真值源、旧 SQLite 正文原子迁移和有界 Hot Working Set；FTS5/HNSW、人工编辑导入、索引 outbox 与规模基准未完成 |
+| 按窗口滚动的摘要请求预算 | 已完成 | 2026-08-30 | `ConversationHistoryCompactor` | 首次分片、增量、归并和默认尾部按窗口预算；PTL 重试不丢历史；Quick 1803项、0失败、6跳过，新窗口用例7项通过 |
+| 上下文压缩真实模型复测 | 已停止 | 2026-08-30 | Luna、LongBench qmsum 冻结33题 | 25组完整配对显示 ROUGE-L 下降、总输入 Token 和耗时增加；停止扩大测试，待方案讨论后再修改与复测 |
+
+本轮删除了 RULER `magic number` 专项解析和提前读取最终问题的 query-aware 诊断补丁，避免把评测数据泄漏固化为产品逻辑。
+
+## 2026-08-30 公开集合功能配对评测
+
+| 事项 | 状态 | 日期 | 影响范围 | 阻塞或备注 |
+| --- | --- | --- | --- | --- |
+| LongBench真实Compactor入口与官方评分 | 进行中 | 2026-08-30 | 新测试driver、脚本、评测文档 | 200题两条件运行中；包含摘要总开销和API异常，不测工具回读恢复 |
+| LongMemEval-S证据检索对照 | 已完成 | 2026-08-30 | 隔离记忆存储、200题会话检索 | 188道可回答题Recall@5为81.44%，低于BM25的85.82%；不代表向量/完整记忆能力 |
+| LongMemEval-S回答与judge配对 | 已完成 | 2026-08-30 | reader与官方judge提示词 | 200题已保存；190题有双侧可判定标签，173对两侧reader均成功；judge使用网关Luna，不等同官方GPT-4o榜单 |
+| SWE Java43题solo/delegate官方评测 | 进行中 | 2026-08-30 | 生成与官方评分脚本 | 首个Druid产物官方评分通过，43题未完成；中断不自动重跑 |
+| AgentDojo与RULER补充诊断 | 进行中 | 2026-08-30 | 外部协议映射和压缩诊断 | AgentDojo安全工具管线未接通；RULER完成199/200双侧配对，multikey/32K压缩分数100→6且总Token增加34.28%，仅两类NIAH，不是完整榜单 |
+
+本轮限定验证：新增Java测试5项、Python指标测试4项通过；完整工程回归未重跑。运行日志及负结果见 `docs/benchmark-paired-run-20260830.md`。不修改产品实现，不提交、不推送。
+
+## 2026-08-29 Plan Reviewer 收敛与 SWE-bench 脚手架修复
+
+- 状态：已完成产品修复与诊断脚手架；真实模型复测、Multilingual 官方评分报告接入及验收未完成
+- 日期：`2026-08-29`
+- 已实现：Reviewer 默认 5 轮，最后一轮禁用工具并强制裁决；计划语义审查降为非阻塞建议，产物 LLM 审查仅在 Pre-Review 硬检查实际执行并通过后降为建议，未执行或失败时继续阻断
+- 已实现：规划失败终态透出真实原因；Windows 已验证 `HOST_WARN` 命令改用 `cmd.exe` 保留 Maven `-D` 参数；benchmark driver 汇总 Token/成本，无头确认继续保留 HUMAN 验收状态
+- 已实现：SWE-bench 脚本用 binary diff 纳入新增文件，挂载 Instance 后执行 `eval.sh`，要求 harness 退出码与 `meta.expect` 同时通过；关键评分元数据和 Reviewer 轮数不能被 `-SkipPreflight` 绕过；Maven 仓库默认使用 `$HOME/.m2/repository`，JSONL 无空首行，并记录用量与逐项评分
+- 同步修复：Pre-Review 的 Maven 项目固定调用沙箱镜像内置 `mvn`，不再在禁网容器中通过 `mvnw` 重复下载 Maven；运行脚本可用 `-M2 C:\Document\Maven\repository` 复用本机依赖缓存
+- 同步修复：委派工具定义快照在能力范围内生成，READ_ONLY 子 Agent 不再看到写入、命令或递归委派工具
+- 影响范围：Plan/Reviewer 编排、命令执行、文件工具、委派权限、SWE-bench driver/脚本及行为文档
+- 历史验证（2026-08-29）：定向回归 161 项通过；Quick 1787 项，0 失败、0 错误、6 跳过；干净全量 1864 项，0 失败、0 错误、12 跳过
+- 最新验证（2026-08-30）：评测适配与 Pre-Review 定向 31 项、Quick 1788 项（6 跳过）、协议回归 58 项、终端兼容 100 项、干净全量 1865 项（12 跳过），均为 0 失败、0 错误；PowerShell 脚本语法通过；本地公开资产就绪检查 1 项通过，4 个已登记资产哈希与 harness 正常
+- 真实模型单题诊断（2026-08-30，复用 `.env`、既有镜像和 `C:\Document\Maven\repository`）：`javaparser-4538` 的 solo `resolved=true`（114.2s，输入/输出 72016/3073）；delegate `resolved=true`（108.1s，55512/2095）；plan `resolved=true`（873.8s，352730/12571）。三者补丁均应用，NodeTest 18 与 NodePositionTest 7 全通过；这些是脚本自定义日志判定，不是 SWE-bench Multilingual 官方 report
+- 未验证：官方 SWE-bench Multilingual evaluator/report、Windows 实际 Maven HOST_WARN 命令、LongMemEval 官方 judge、RAG 官方数据与交互 CLI
+- 剩余风险：plan 本轮虽最终通过，但一次 Pre-Review 因 60 秒超时记录中间失败；需单独评估超时预算与多模块项目规模。脚本当前只做日志诊断，即使使用官方 `eval.sh` 和镜像，其自定义 `resolved` 也不能替代官方评分报告；单题单次不能支持统计优越性结论
+
 ## 2026-08-28 默认主 Agent 按需委派
 
 - 状态：已完成代码实现与限定回归；真实模型效果验收未完成

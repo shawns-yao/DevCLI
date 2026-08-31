@@ -449,6 +449,10 @@ final class StepExecutionCoordinator {
                 steps, step, acceptedReview, stepOut)) {
             return;
         }
+        if (acceptReviewerAdvisory(
+                steps, step, acceptedResult, acceptedEvidence, acceptedReview, stepOut)) {
+            return;
+        }
 
         int retries = retryCount.getOrDefault(step.id(), 0);
         String issues = acceptedReview.issues();
@@ -485,6 +489,10 @@ final class StepExecutionCoordinator {
             acceptedReview = retryReview;
             issues = retryReview.issues();
             if (failOnVerificationInfrastructure(steps, step, retryReview, stepOut)) {
+                return;
+            }
+            if (acceptReviewerAdvisory(
+                    steps, step, acceptedResult, acceptedEvidence, retryReview, stepOut)) {
                 return;
             }
             if (retryReview.reviewerError()) {
@@ -565,6 +573,22 @@ final class StepExecutionCoordinator {
                 true, review.issues(), true, review.hardCheckExecuted());
         acceptStep(steps, step, degradedResult, evidence, degradedReview, stepOut,
                 "Pre-Review 硬检查已通过，Reviewer 可恢复故障降级接受");
+        return true;
+    }
+
+    private boolean acceptReviewerAdvisory(
+            List<AgentOrchestrator.ExecutionStep> steps,
+            AgentOrchestrator.ExecutionStep step,
+            String result,
+            SubAgent.ExecutionEvidence evidence,
+            ReviewCoordinator.ReviewDecision review,
+            PrintStream stepOut) {
+        if (!ReviewCoordinator.isReviewerAdvisory(review)) {
+            return false;
+        }
+        String advisoryResult = result + "\n\nReviewer 建议（不阻断）：\n" + review.issues();
+        acceptStep(steps, step, advisoryResult, evidence, review, stepOut,
+                "确定性检查通过，Reviewer 建议已记录（不阻断）");
         return true;
     }
 

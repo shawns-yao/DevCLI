@@ -570,6 +570,7 @@ class AgentOrchestratorTest {
             String result = orchestrator.run("完成一个需要验收的任务");
 
             assertTrue(result.contains("规划失败"), result);
+            assertTrue(result.contains("验收标准不可执行"), result);
             assertEquals(0, workerCalls.get());
         } finally {
             if (previous == null) {
@@ -670,7 +671,7 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    void shouldRepairPlanRejectedBySemanticReviewerBeforeHumanApproval(@TempDir Path tempDir) {
+    void semanticPlanReviewRejectionIsAdvisoryBeforeHumanApproval(@TempDir Path tempDir) {
         AtomicInteger plannerCalls = new AtomicInteger();
         AtomicInteger semanticReviewCalls = new AtomicInteger();
         AtomicReference<AgentOrchestrator.TeamPlanReviewRequest> approvalRequest = new AtomicReference<>();
@@ -687,8 +688,8 @@ class AgentOrchestratorTest {
                         """);
             }
             if (body.contains("计划语义评审")) {
-                int review = semanticReviewCalls.incrementAndGet();
-                return response(review == 1 ? """
+                semanticReviewCalls.incrementAndGet();
+                return response("""
                         {"approved":false,"summary":"遗漏原始目标","requirement_coverage":[
                           {"requirement":"交付功能","status":"missing","step_ids":["step_1"],"criterion_ids":["AC-01"]}
                         ],"criteria_reviews":[
@@ -696,14 +697,6 @@ class AgentOrchestratorTest {
                         ],"issues":[
                           {"type":"missing_requirement","severity":"high","requirement":"交付功能","description":"计划未覆盖完整目标","suggested_fix":"补齐实现范围"}
                         ]}
-                        """ : """
-                        {"approved":true,"summary":"原始目标、节点和验收标准已闭环","requirement_coverage":[
-                          {"requirement":"交付功能","status":"covered","step_ids":["step_1"],"criterion_ids":["AC-01"]}
-                        ],"criteria_reviews":[
-                          {"id":"AC-01","clear":true,"verifiable":true,"scope_valid":true,"evidence":"list_dir 返回成功即可判定"}
-                        ],"counterexamples":[
-                          {"criterion_id":"AC-01","input":"目标目录不存在","expected_failure_signal":"list_dir 返回不存在","step_ids":["step_1"]}
-                        ],"issues":[]}
                         """);
             }
             return response("unexpected worker call");
@@ -720,12 +713,13 @@ class AgentOrchestratorTest {
 
             String result = orchestrator.run("交付完整功能");
 
-            assertEquals(2, plannerCalls.get());
-            assertEquals(2, semanticReviewCalls.get());
+            assertEquals(1, plannerCalls.get());
+            assertEquals(1, semanticReviewCalls.get());
             assertTrue(result.contains("测试结束"), result);
             assertNotNull(approvalRequest.get());
             assertTrue(approvalRequest.get().semanticReviewExecuted());
-            assertTrue(approvalRequest.get().semanticReviewSummary().contains("闭环"));
+            assertFalse(approvalRequest.get().semanticReviewApproved());
+            assertTrue(approvalRequest.get().semanticReviewSummary().contains("遗漏原始目标"));
         }
     }
 
@@ -817,9 +811,10 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    void shouldFailClosedWhenPlanReviewerProtocolRepairAlsoMalformed(@TempDir Path tempDir) {
+    void malformedPlanReviewerProtocolIsAdvisoryAfterBoundedRepair(@TempDir Path tempDir) {
         AtomicInteger workerCalls = new AtomicInteger();
         AtomicInteger reviewCalls = new AtomicInteger();
+        AtomicReference<AgentOrchestrator.TeamPlanReviewRequest> approvalRequest = new AtomicReference<>();
         Function<String, LlmClient.ChatResponse> dispatcher = body -> {
             if (body.contains("计划语义评审")) {
                 reviewCalls.incrementAndGet();
@@ -843,12 +838,19 @@ class AgentOrchestratorTest {
             AgentOrchestrator orchestrator = new AgentOrchestrator(
                     new DispatchingStubGLMClient(dispatcher), isolatedToolRegistry(tempDir), mm);
             orchestrator.setPlanSemanticReviewEnabled(true);
+            orchestrator.setPlanReviewHandler(request -> {
+                approvalRequest.set(request);
+                return AgentOrchestrator.TeamPlanReviewDecision.cancel("建议已展示");
+            });
 
             String result = orchestrator.run("实现功能");
 
-            assertTrue(result.contains("计划语义评审失败"), result);
+            assertTrue(result.contains("建议已展示"), result);
             assertEquals(2, reviewCalls.get());
             assertEquals(0, workerCalls.get());
+            assertNotNull(approvalRequest.get());
+            assertFalse(approvalRequest.get().semanticReviewApproved());
+            assertTrue(approvalRequest.get().semanticReviewSummary().contains("计划评审输出不是有效 JSON"));
         }
     }
 
@@ -1800,7 +1802,7 @@ class AgentOrchestratorTest {
             String finalResult = orchestrator.run("验证最终集成 reviewer 瞬时失败降级");
 
             assertTrue(finalResult.contains("Plan 任务完成"), finalResult);
-            assertTrue(finalResult.contains("Pre-Review"), finalResult);
+            assertTrue(finalResult.contains("Reviewer 建议"), finalResult);
         }
     }
     @Test
@@ -1820,53 +1822,18 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    void shouldRetryRejectedStepUntilApproval(@TempDir Path tempDir) {
-        StubGLMClient llmClient = new StubGLMClient(List.of(
-                response("""
-                        {
-                          "summary": "单步任务",
-                          "steps": [
-                            {
-                              "id": "s1",
-                              "description": "分析任务",
-                              "type": "ANALYSIS",
-                              "dependencies": []
-                            }
-                          ]
-                        }
-                        """),
-                response("第一次执行结果"),
-                response("""
-                        {"approved": false, "summary": "第一次未通过", "issues": ["需要补充细节"]}
-                        """),
-                response("第二次执行结果"),
-                response("""
-                        {"approved": false, "summary": "第二次未通过", "issues": ["还缺最后结论"]}
-                        """),
-                response("第三次执行结果"),
-                response(approvedReviewJson())
-        ));
-
-        AgentOrchestrator orchestrator;
-        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
-            orchestrator = new AgentOrchestrator(
-                    llmClient,
-                    isolatedToolRegistry(tempDir),
-                    mm
-            );
-
-            String finalResult = orchestrator.run("测试重试逻辑");
-
-            assertTrue(finalResult.contains("第三次执行结果"));
-            assertFalse(finalResult.contains("第二次执行结果"));
-        }
+    void reviewerAdvisoryRequiresExecutedSuccessfulHardCheck() {
+        assertTrue(ReviewCoordinator.isReviewerAdvisory(
+                new ReviewCoordinator.ReviewDecision(false, "建议", false, true)));
+        assertFalse(ReviewCoordinator.isReviewerAdvisory(
+                new ReviewCoordinator.ReviewDecision(false, "建议", false, false)));
+        assertFalse(ReviewCoordinator.isReviewerAdvisory(
+                new ReviewCoordinator.ReviewDecision(false, "环境失败", false, true,
+                        PreReviewVerifier.FailureKind.INFRASTRUCTURE)));
     }
 
     @Test
-    void shouldNotMarkApprovedWhenReviewerLlmFailsDuringRetry(@TempDir Path tempDir) {
-        // 回归测试 P0 bug：reviewer LLM 调用在重试阶段失败时，旧代码会把 approved 设为 true
-        // 让用户看到 "重试后审查通过" 但实际 reviewer 根本没回复。
-        // 修复后行为：reviewer 未通过/故障时标记 FAILED，不能放行下游依赖。
+    void reviewerLlmFailureWithoutHardCheckShouldNotBeAdvisory(@TempDir Path tempDir) {
         java.io.ByteArrayOutputStream stdoutCapture = new java.io.ByteArrayOutputStream();
         StubGLMClient llmClient = new StubGLMClient(List.of(
                 response("""
@@ -1877,13 +1844,8 @@ class AgentOrchestratorTest {
                           ]
                         }
                         """),
-                response("初始执行结果"),
-                response("""
-                        {"approved": false, "summary": "首次未通过", "issues": ["补充细节"]}
-                        """),
-                response("重试执行结果")
-                // 第 4 次 chat 调用（重试后再次审查）会因为队列耗尽抛 IOException，
-                // 模拟 "reviewer LLM 在重试阶段调用失败" 的真实场景
+                response("初始执行结果")
+                // Reviewer 调用因队列耗尽抛 IOException。
         ));
 
         try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
@@ -1894,16 +1856,14 @@ class AgentOrchestratorTest {
                     new java.io.PrintStream(stdoutCapture, true, java.nio.charset.StandardCharsets.UTF_8)
             );
 
-            String finalResult = orchestrator.run("测试 reviewer 故障不应误判通过");
+            String finalResult = orchestrator.run("测试 Reviewer 故障降为建议");
             assertTrue(finalResult.contains("未完全完成"), finalResult);
         }
 
         String stdout = stdoutCapture.toString(java.nio.charset.StandardCharsets.UTF_8);
-        // 修复前：日志会显示 "重试后审查通过"
         assertFalse(stdout.contains("重试后审查通过"),
                 "reviewer LLM 故障时不应宣称审查通过");
-        assertTrue(stdout.contains("审查阶段 LLM 调用失败") || stdout.contains("审查未通过"),
-                "应明确告知用户 reviewer 故障，stdout=" + stdout);
+        assertFalse(stdout.contains("Reviewer 建议已记录"), stdout);
     }
 
     @Test
@@ -2481,7 +2441,8 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    void rejectedWorkspacePatchShouldNotModifyMainProject(@TempDir Path tempDir) throws Exception {
+    void reviewerRejectionWithoutHardCheckShouldBlockWorkspacePatch(@TempDir Path tempDir)
+            throws Exception {
         AtomicInteger workerTurns = new AtomicInteger();
         AtomicInteger reviewerTurns = new AtomicInteger();
         Function<String, LlmClient.ChatResponse> dispatcher = body -> {
@@ -2519,11 +2480,51 @@ class AgentOrchestratorTest {
             AgentOrchestrator orchestrator = new AgentOrchestrator(
                     llmClient, isolatedToolRegistry(tempDir), mm);
 
-            String result = orchestrator.run("验证 Reviewer 拒绝时不应用 PatchSet");
+            String result = orchestrator.run("验证缺少硬检查时 Reviewer 拒绝阻断 PatchSet");
 
             assertTrue(result.contains("未完全完成"), result);
-            assertFalse(Files.exists(tempDir.resolve("rejected.txt")),
-                    "Reviewer 拒绝后主工作区不应出现隔离产物");
+            assertFalse(Files.exists(tempDir.resolve("rejected.txt")));
+            assertFalse(workspaceRootHasEntries(tempDir));
+        }
+    }
+
+    @Test
+    void deterministicPreReviewFailureShouldStillBlockWorkspacePatch(@TempDir Path tempDir)
+            throws Exception {
+        AtomicInteger workerTurns = new AtomicInteger();
+        Function<String, LlmClient.ChatResponse> dispatcher = body -> {
+            if (body.contains("请为以下任务制定执行计划")) {
+                return response("""
+                        {
+                          "summary": "硬检查失败",
+                          "steps": [
+                            {"id":"s1","description":"写入 src/main/java/Broken.java","type":"FILE_WRITE","dependencies":[]}
+                          ]
+                        }
+                        """);
+            }
+            if (body.contains("写入 src/main/java/Broken.java")) {
+                if (workerTurns.getAndIncrement() % 2 == 0) {
+                    return toolResponse("worker-write", "write_file",
+                            "{\"path\":\"src/main/java/Broken.java\",\"content\":\"broken\"}");
+                }
+                return response("文件写入完成");
+            }
+            return response(approvedReviewJson());
+        };
+
+        DispatchingStubGLMClient llmClient = new DispatchingStubGLMClient(dispatcher);
+        try (NoOpMemoryManager mm = new NoOpMemoryManager(tempDir.toFile())) {
+            AgentOrchestrator orchestrator = new AgentOrchestrator(
+                    llmClient, isolatedToolRegistry(tempDir), mm);
+            orchestrator.setPreReviewVerifier(new PreReviewVerifier(30,
+                    request -> com.devcli.tool.command.CommandExecutionService.Result
+                            .completed(1, "compile failed")));
+
+            String result = orchestrator.run("验证确定性硬检查仍阻断 PatchSet");
+
+            assertTrue(result.contains("未完全完成"), result);
+            assertFalse(Files.exists(tempDir.resolve("src/main/java/Broken.java")));
             assertFalse(workspaceRootHasEntries(tempDir));
         }
     }
@@ -2977,7 +2978,7 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    void resumeShouldReviewPendingPlanBeforeWorkerExecution(@TempDir File memoryDir) {
+    void resumeTreatsSemanticPlanRejectionAsAdvisory(@TempDir File memoryDir) {
         AgentCheckpoint checkpoint = new AgentCheckpoint("orch-plan-review-resume", "恢复关键功能");
         checkpoint.setPlanSteps(List.of(
                 new AgentCheckpoint.PlanStep("step-1", "继续实现功能", "ANALYSIS", List.of())));
@@ -3012,8 +3013,8 @@ class AgentOrchestratorTest {
             String result = orchestrator.resume("orch-plan-review-resume");
 
             assertEquals(1, reviewCalls.get());
-            assertEquals(0, workerCalls.get());
-            assertTrue(result.contains("计划语义评审未通过"), result);
+            assertTrue(workerCalls.get() >= 1, "semantic advisory should not block resumed workers");
+            assertFalse(result.contains("计划语义评审未通过"), result);
             assertNotNull(AgentCheckpoint.load("orch-plan-review-resume"));
         } finally {
             checkpoint.delete();

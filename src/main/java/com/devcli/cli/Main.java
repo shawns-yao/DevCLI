@@ -1113,9 +1113,12 @@ public class Main {
             text.append("⚠️ 当前计划包含需要人工验收的标准，执行前必须明确确认。\n");
         }
         if (request.semanticReviewExecuted()) {
-            text.append("✅ Reviewer 计划语义评审：")
+            text.append(request.semanticReviewApproved()
+                            ? "✅ Reviewer 计划语义评审："
+                            : "⚠️ Reviewer 计划语义评审建议（不阻断）：")
                     .append(request.semanticReviewSummary().isBlank()
-                            ? "已通过" : request.semanticReviewSummary())
+                            ? (request.semanticReviewApproved() ? "已通过" : "未提供有效结论")
+                            : request.semanticReviewSummary())
                     .append('\n');
         }
         return text.toString().trim();

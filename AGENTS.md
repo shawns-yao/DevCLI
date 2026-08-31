@@ -55,21 +55,21 @@ mvn test -DskipTests=false                  # 全量回归
 
 默认 ReAct 是主 Agent 按需委派模式：`delegate_task(role, task, context)` 由 `DelegationSession` 装配独立 `AgentExecutionEngine` 循环，不进入固定 DAG。explorer/planner/reviewer 只读，worker 使用已有 `WorkspaceExecutionSession`、命令沙箱、资源租约和 PatchSet 版本检查；工作循环正常结束且没有未解决的副作用工具失败后归并，主 Agent 负责最终验收。显式 `/plan` 的既有计划评审、硬检查和 checkpoint 流程保持不变。
 
-委派只继承冻结的 system 规则与 Skill 快照、显式 task/context，不复制父会话、长期记忆召回或兄弟消息。子 Agent 不能委派、遍历长期记忆、访问外部副作用工具或恢复其他运行的工具结果；可读取项目内文件，非逐文件权限沙箱。父子共享 Token 和总轮数预算，重复动作/错误按各自循环检测。每批最多并行 4 个工具，子任务默认 32 轮/300 秒，支持 `DEVCLI_DELEGATE_MAX_ITERATIONS` / `DEVCLI_DELEGATE_TIMEOUT_SECONDS`。取消向下传递到工具与 Anthropic/OpenAI-compatible HTTP 请求；未提交的子工作区产物不应用，已越过提交检查点的原子补丁不因取消自动回滚。
+委派只继承冻结的 system 规则与 Skill 快照、显式 task/context，不复制父会话、长期记忆召回或兄弟消息。子 Agent 不能委派、遍历长期记忆、访问外部副作用工具或恢复其他运行的工具结果；其工具定义快照按 `READ_ONLY` / `ISOLATED_PROJECT` 能力范围生成，不向模型暴露无权调用的工具。父子共享 Token 和总轮数预算，重复动作/错误按各自循环检测。每批最多并行 4 个工具，子任务默认 32 轮/300 秒，支持 `DEVCLI_DELEGATE_MAX_ITERATIONS` / `DEVCLI_DELEGATE_TIMEOUT_SECONDS`。取消向下传递到工具与 Anthropic/OpenAI-compatible HTTP 请求；未提交的子工作区产物不应用，已越过提交检查点的原子补丁不因取消自动回滚。
 
 `DEVCLI_DELEGATE_<ROLE>_PROVIDER/MODEL` 可配置四类角色的独立模型；未配置时复用当前主模型，显式配置不可用则返回失败，不静默替换。角色指引复用 `PromptRepository`，路径 `modes/delegate-<role>.md`，允许用户和项目级覆盖，但提示词不能放宽工具权限。详见 `docs/agents-reference.md`。
 
-Multi-Agent 中 Planner 负责拆解 DAG，Worker 负责实现子任务，Reviewer 先审计划语义闭环，再在硬检查通过后审查真实产物。
+Multi-Agent 中 Planner 负责拆解 DAG，Worker 负责实现子任务，Reviewer 给出计划语义和真实产物的非阻塞审查建议；确定性预检与 Pre-Review 硬检查负责阻断无效计划或产物。
 
 `AgentOrchestrator` 只保留团队装配、配置传播和 `run/resume` 顶层流程；计划生成与 DAG 预处理由 `PlanCoordinator` 承担，评审门禁由 `ReviewCoordinator` 承担，checkpoint 迁移与对账由 `CheckpointCoordinator` 承担，Worker 调度、重试、隔离工作区和 PatchSet 归并由 `StepExecutionCoordinator` 承担，可变运行态集中在 `OrchestrationRunState`，上下文与终态报告由 `OrchestrationNarrative` 生成。
 
 Plan 的任务适配由 `PlanTaskBatchExecutor` 负责，Team 的 Worker 适配由 `MultiAgentBatchExecutor` 负责；两者把冲突波次交给 `OrchestrationWaveExecutor`，共用有界并发、异常归属、独立输出缓冲与稳定顺序归并。任务结果及有界摘要由 `PlanTaskExecutionResult` 统一承载；Worker 池、公平锁、Pre-Review、Reviewer、角色记忆和 checkpoint 恢复拓扑仍只属于 Team。
 
-Plan 与 Multi-Agent 的 DAG 就绪判断和图结构校验统一使用 `ExecutionGraph`：`Task` 与 `ExecutionStep` 都实现只读 `ExecutionNode`，普通节点只在依赖全部完成后执行，最终集成节点可在依赖进入完成或失败终态后执行；缺失依赖和环会在执行前拒绝。两类节点和 checkpoint 共用 `ExecutionArtifact`，状态、输出、摘要、修改资源、错误、尝试次数和时间戳不再分散存储。Planner 必须输出 `acceptance_criteria`；每条标准必须声明 `test_signal`、`verification_method=TOOL|HUMAN`、`verifier` 和 `applies_to`，目标只能引用有效 DAG 节点或 `FINAL`。普通节点只注入自己的验收点，Final integration 重新检查全部验收点。Team 在确定性预检后使用独立、无工具的 Reviewer 上下文检查原始需求到节点和验收标准的覆盖；critical/high 标准必须给出反例输入和预期失败信号。`DEVCLI_TEAM_REVIEWER_PROVIDER` / `DEVCLI_TEAM_REVIEWER_MODEL` 可指定独立评审模型，显式配置不可用时失败关闭；未配置时兼容沿用主模型。语义拒绝进入 Planner 有界修复，评审协议损坏则失败关闭；通过后才进入用户执行、补充重规划或取消。Reviewer 执行期再用 `criteria_results` 逐条验证真实产物；TOOL 标准的声明验证器必须在本轮真实成功工具调用中出现，人工标准不能伪装为工具通过。验收点 `severity` 会随计划和 checkpoint 固化；critical/high 自动验收点失败或缺少覆盖时强制不通过。
+Plan 与 Multi-Agent 的 DAG 就绪判断和图结构校验统一使用 `ExecutionGraph`：`Task` 与 `ExecutionStep` 都实现只读 `ExecutionNode`，普通节点只在依赖全部完成后执行，最终集成节点可在依赖进入完成或失败终态后执行；缺失依赖和环会在执行前拒绝。两类节点和 checkpoint 共用 `ExecutionArtifact`。Planner 必须输出结构化 `acceptance_criteria`，确定性预检会拒绝缺失字段、未知 DAG 节点、非法验证器、环和阻塞性空工作区检查。Team 随后使用独立、无工具的 Reviewer 检查需求覆盖、逐条验收标准和 critical/high 反例；计划语义拒绝、协议损坏或模型故障会作为可见建议进入用户确认，不再阻断已通过确定性校验的计划。执行期只有实际执行并通过 Pre-Review 硬检查时，Reviewer 拒绝或故障才降为建议；未执行硬检查时 Reviewer 仍决定产物能否继续和归并。
 
 Agent、Plan、Worker 和 Reviewer 的流式输出状态机统一委托 `AgentStreamPresenter`；Memory/Compactor/Skill/MCP 恢复装配统一委托 `AgentRuntimeSupport`。旧内部 Renderer 包装类只保留兼容构造器，不再维护第二套状态逻辑。关键启动配置使用 `ConfigResolver`，显式非法值在加载时拒绝。
 
-Multi-Agent Planner 与计划语义 Reviewer 输出前后允许存在说明文本，编排器会提取完整 JSON 对象；Planner 声明的步骤类型必须属于固定枚举，纯读取或检查步骤不能伪装成 `FILE_WRITE` 后直接驱动强制写工具。计划评审只接受包含 `approved` 的合法对象，无法提取时由 Reviewer 进行一次有界协议修复，仍无效才失败关闭。Planner 解析失败、图结构无效或出现阻塞后续实现的空工作区纯检查步骤时，清空历史并携带失败原因有界修复，默认 2 次，可通过 `DEVCLI_TEAM_PLANNER_REPAIR_MAX_ATTEMPTS` / `-Ddevcli.team.planner.repair.max.attempts` 调整。空工作区是合法状态，目录或文件存在性检查应并入实现步骤并写明“若不存在则创建”。Worker 最终文本为空但本轮存在结构化 `SUCCESS` 工具证据时，编排器生成执行摘要并继续 Reviewer；没有成功工具证据时先进行一次强制执行协议修复，代码任务必须调用 `write_file` 并最小验证，读取或分析任务必须取得真实工具证据；该请求按步骤类型强制具体工具，FILE_WRITE / INTEGRATION 选择 `write_file`，COMMAND 选择 `execute_command`，其他类型选择 `list_dir`；Anthropic 与 OpenAI-compatible 都映射为命名工具选择。FILE_WRITE / INTEGRATION 步骤出现成功 `write_file` 批次后直接以结构化证据结束当前 Worker 执行；强制修复中的指定工具也采用同一规则，不再追加 LLM 收尾调用。Provider 忽略命名工具选择时，执行引擎追加一次严格 JSON 工具信封请求；只接受完整 JSON、目标工具名和对象参数，随后仍由工具参数校验与权限管线执行，不解析 reasoning、Markdown 或代码围栏。工具失败时继续让模型纠正，最终仍无成功证据才判失败。
+Multi-Agent Planner 与计划语义 Reviewer 输出前后允许存在说明文本，编排器会提取完整 JSON 对象；Planner 声明的步骤类型必须属于固定枚举，纯读取或检查步骤不能伪装成 `FILE_WRITE` 后直接驱动强制写工具。计划评审只接受包含 `approved` 的合法对象，无法提取时由 Reviewer 进行一次有界协议修复；仍无效时记录协议建议并继续用户确认。Planner 解析失败、图结构无效或出现阻塞后续实现的空工作区纯检查步骤时，清空历史并携带失败原因有界修复，默认 2 次，可通过 `DEVCLI_TEAM_PLANNER_REPAIR_MAX_ATTEMPTS` / `-Ddevcli.team.planner.repair.max.attempts` 调整。空工作区是合法状态，目录或文件存在性检查应并入实现步骤并写明“若不存在则创建”。Worker 最终文本为空但本轮存在结构化 `SUCCESS` 工具证据时，编排器生成执行摘要并继续 Reviewer；没有成功工具证据时先进行一次强制执行协议修复，代码任务必须调用 `write_file` 并最小验证，读取或分析任务必须取得真实工具证据；该请求按步骤类型强制具体工具，FILE_WRITE / INTEGRATION 选择 `write_file`，COMMAND 选择 `execute_command`，其他类型选择 `list_dir`；Anthropic 与 OpenAI-compatible 都映射为命名工具选择。FILE_WRITE / INTEGRATION 步骤出现成功 `write_file` 批次后直接以结构化证据结束当前 Worker 执行；强制修复中的指定工具也采用同一规则，不再追加 LLM 收尾调用。Provider 忽略命名工具选择时，执行引擎追加一次严格 JSON 工具信封请求；只接受完整 JSON、目标工具名和对象参数，随后仍由工具参数校验与权限管线执行，不解析 reasoning、Markdown 或代码围栏。工具失败时继续让模型纠正，最终仍无成功证据才判失败。
 
 Multi-Agent 的 `SessionMemory` 按角色注入隔离视图：Planner 只看任务状态 + 会话关键事件，不看工具原文证据；Worker 看完整任务状态 + 关键事件 + 工具证据；Reviewer 只看任务状态 + 工具证据，避免把会话事件误当验收依据。工具证据显式携带 agent、step、单调 origin sequence 和 `context_epoch`；同一 agent/step 的新执行开始后，旧 origin 的迟到证据会按逻辑序拒绝，不依赖墙钟时间。
 
@@ -83,9 +83,11 @@ Multi-Agent 并行批次由 `MultiAgentBatchExecutor` 负责资源冲突分波�
 
 非默认 Maven 仓库只能通过 `DEVCLI_COMMAND_SANDBOX_MAVEN_REPOSITORY` / `-Ddevcli.command.sandbox.maven.repository` 显式指定存在的绝对目录。Docker 仅对 Maven 命令只读挂载，`HOST_WARN` 显式传入 `maven.repo.local`；运行时不自动扫描或硬编码开发机路径。
 
-Reviewer 前置硬约束：Worker 产物进入 Reviewer LLM 前，`AgentOrchestrator` 委托 `PreReviewVerifier` 执行 Pre-Review Hook；Maven 根目录即使没有根级 `src/main/java` 也会执行硬检查，存在 `mvnw` 时优先使用 Wrapper，否则执行 `mvn -q -DskipTests test-compile`；无 Maven 时使用 UTF-8 javac 参数文件传递源码清单，避免 Windows 命令行长度限制。两类命令都通过统一命令服务执行；默认使用 Docker，显式 `HOST_WARN` 时 Maven 自动增加离线参数并在 Reviewer 前展示主机风险提示。验证器独立负责 Java 文件扫描、命令选择、超时、参数文件清理和失败摘要，并按 Maven 依赖解析、仓库写入、工具链、超时、取消或沙箱故障的精确信号识别环境失败；普通编译错误中的 `cannot access` 不会被误判为环境问题。失败时直接生成 `approved=false` 反馈打回 Worker，不唤醒 Reviewer LLM。
+Windows 下已通过 `HOST_WARN` 策略校验的命令使用 `cmd.exe` 执行，避免 PowerShell `-Command` 改写 Maven `-Dname=value` 参数；普通主机命令仍使用 PowerShell。重复调用指纹保留命令原文语义，带引号的纠正命令不会与未加引号的失败命令合并。
 
-Reviewer 输出必须是可解析 JSON，并包含三层评分：`functional_correctness`、`integration_completeness`、`code_quality`。任一分数低于 `0.6`，或 `functional_correctness < 1.0`，Orchestrator 强制判不通过；非 JSON 文本不再凭“通过”等关键词放行。Pre-Review 会区分“未执行硬检查”和“硬检查实际通过”；Reviewer 发生可重试 LLM 故障时，只有实际执行的硬检查已通过才允许降级接受普通步骤，未执行硬检查继续失败关闭。Reviewer 默认最多 2 轮，可通过 `DEVCLI_TEAM_REVIEWER_MAX_ITERATIONS` / `-Ddevcli.team.reviewer.max.iterations` 调整到 `[1, 8]`；达到上限按可恢复 Reviewer 故障处理，但不绕过硬检查条件。Final integration 保留既有瞬时故障降级策略。
+Reviewer 前置硬约束：Worker 产物进入 Reviewer LLM 前，`AgentOrchestrator` 委托 `PreReviewVerifier` 执行 Pre-Review Hook；Maven 根目录即使没有根级 `src/main/java` 也会执行 `mvn -q -DskipTests test-compile` 硬检查，固定复用沙箱镜像内置 Maven，避免禁网临时容器通过 Wrapper 重复下载 Maven 本体；无 Maven 时使用 UTF-8 javac 参数文件传递源码清单，避免 Windows 命令行长度限制。两类命令都通过统一命令服务执行；默认使用 Docker，显式 `HOST_WARN` 时 Maven 自动增加离线参数并在 Reviewer 前展示主机风险提示。验证器独立负责 Java 文件扫描、命令选择、超时、参数文件清理和失败摘要，并按 Maven 依赖解析、仓库写入、工具链、超时、取消或沙箱故障的精确信号识别环境失败；普通编译错误中的 `cannot access` 不会被误判为环境问题。失败时直接生成 `approved=false` 反馈打回 Worker，不唤醒 Reviewer LLM。
+
+Reviewer 输出应为包含三层评分和逐条验收结果的 JSON。实际执行并通过 Pre-Review 硬检查后，Reviewer 拒绝、协议错误或 LLM 故障只作为可见建议，不触发 Worker 重做；未执行硬检查时继续失败关闭。编译、测试等硬检查失败仍会阻断并保留隔离补丁。Reviewer 默认最多 5 轮，可通过 `DEVCLI_TEAM_REVIEWER_MAX_ITERATIONS` / `-Ddevcli.team.reviewer.max.iterations` 调整到 `[1, 8]`；最后一轮禁用工具并强制只输出裁决 JSON，证据不足时明确拒绝。
 
 Final integration 只做入口/API/默认参数/跨模块联动胶水；普通步骤失败比例达到 `50%` 时熔断，不让最终步骤强行修补。
 
@@ -97,12 +99,14 @@ Side-Git 快照按 `devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX` 保留最近快
 
 职责边界：`conversationHistory` 与六段 `RollingSummary` 只治理当前线程上下文窗口，不保存待办、当前工作或下一步；`SessionMemory` 是当前任务内的运行投影，会按 Token 预算裁剪且不跨进程。`ExecutionArtifact` 是 Plan / Multi-Agent / checkpoint 的任务终态唯一来源；`output` 保留 Worker 原始结果，`summary` 由 Orchestrator 根据结构化成功工具证据和 Reviewer / Pre-Review 结论生成，依赖步骤只注入该可信摘要。隔离执行期间的修改只存在工作区内，PatchSet 成功应用后才把 `modifiedResources` 同步到运行态、checkpoint 和 `SessionMemory`。后续依赖步骤读取已批准的主项目成果；同进程靠 `SessionMemory`，跨进程靠 checkpoint `RecoveryState` 的有界失败尝试摘要。固定 Final integration 会在补丁归并后执行硬检查并复核全部验收点，承担合并结果的整体验证。
 
-内置核心工具 14 个：`read_file` / `write_file` / `edit_file` / `list_dir` / `execute_command` / `create_project` / `search_code` / `grep_code` / `web_search` / `web_fetch` / `save_memory` / `confirm_memory` / `list_memory` / `revert_turn`
+内置核心工具 14 个：`read_file` / `write_file` / `edit_file` / `list_dir` / `execute_command` / `create_project` / `search_code` / `grep_code` / `web_search` / `web_fetch` / `save_memory` / `confirm_memory` / `list_memory` / `revert_turn`。`read_file` 同传行范围与字符范围时优先行范围并返回提示；`edit_file` 按目标文件换行风格对齐匹配文本。
 
 Code RAG 检索链路当前为 keyword + semantic + bounded graph → `RRF（倒数排名融合）` → symbol-aware boost → `CrossEncoderReranker（交叉编码器重排）`。Rerank 默认开启，默认指向本地 Docker 暴露的 OpenAI-compatible `/rerank` endpoint；不可用时自动降级回 RRF 结果，不阻断检索。`/index` 按文件批量生成 chunk embedding；批量请求失败或返回数量异常时逐条降级并保留成功 chunk。`ToolRegistry` 会按项目路径复用 `CodeRetriever` / SQLite 连接，项目路径切换时关闭旧连接。索引替换会为变更和删除的 symbol 生成 `negativeFact`，`search_code` 会输出相关失效事实，并通过工具结果强类型旁路载荷把 evidence 与 negativeFact 传给 `SessionMemory`；展示文本不再嵌入结构化 JSON，旧 JSON 与旧展示文本解析只保留历史兼容。keyword 通道保持 SQLite 索引实现，`grep_code` 作为独立实时精确检索工具存在，不替代 `search_code`，用于类名、方法名、配置键、错误文本和固定字符串片段定位。长文档型 definition 查询直接使用 semantic route，避免 keyword fusion 与 reranker 对文档描述引入排序噪声；短符号查询仍保留 precise-first 链路。
 索引构建开始时记录 `base_epoch` 并标记 dirty 文件；增量构建把未变化代码块及 embedding 复制到 SQLite 影子表，只重新分块和嵌入 dirty 文件，并保守重算项目关系图。影子候选通过校验后，在事务内执行 `base_epoch + generation` CAS 和原子提升；旧构建不能覆盖新 epoch，未提升候选对检索不可见。检索结果标记 `CURRENT` / `STALE` / `DIRTY`；DIRTY 和 STALE 命中默认回读实时内容校验，变化内容重新分块，无法校验时保留警示。项目级 `WatchService` 会把外部文件变化标记为 DIRTY。
 
-量化评测覆盖 RAG、Agent、Memory 和 Context Compression / Long Context。正式结果只接受公开集合原始任务、固定版本、SHA-256、官方 harness/evaluator 和完整原始报告；公开集合与历史自建测试严格分离。RAG 输出 Recall@5、MRR@5、nDCG@5；SWE-bench 只接受官方 Docker harness resolved 结果；LongMemEval、LongBench 和 RULER 必须记录官方指标、子任务、长度和样本量。旧的项目内 CLI、订单 Saga、Checkout、对抗记忆、压缩、并发和合成 RAG 结果只在 `docs/benchmark-evaluation.md` 历史归档中保留，不得作为当前事实或简历数字。SWE-bench 三模式驱动不得覆写命令沙箱配置，默认沿用生产 Docker，并记录 Java 版本、沙箱模式、LLM HTTP 协议和 Maven 仓库配置类型；显式 `HOST_WARN` 仅用于受限主机检查，日志不记录本机仓库绝对路径。
+量化评测规范见 `docs/benchmark-evaluation.md`，覆盖 RAG、Agent、Memory 和 Context Compression / Long Context。正式结果只接受公开集合原始任务、固定版本、SHA-256、官方 harness/evaluator 和完整原始报告；公开集合与历史自建测试严格分离。当前 RAG 适配器输出二值相关性的 Recall@5、MRR@5、nDCG@5，不等同于 CodeSearchNet Challenge 使用人工分级相关性的官方 nDCG；CodeXGLUE 的 MRR 是另一套协议。SWE-bench Java 评测目标为 Multilingual Java 子集，正式 resolved 只取官方 Docker harness 报告。当前 LongMemEval、LongBench v1 和 RULER 入口直接调用模型，尚未接入项目记忆或压缩功能的开关对照，不得用于宣称对应功能收益。正式评测须记录官方指标、子任务、长度和样本量。旧的项目内 CLI、订单 Saga、Checkout、对抗记忆、压缩、并发和合成 RAG 结果只在该文档历史归档中保留，不得作为当前事实或简历数字。SWE-bench 三模式脚本用 `git add -N` + binary diff 纳入新增文件，并记录输入/输出/缓存 Token 和估算成本；其 Docker 退出码、patch 应用状态、日志信号与 `meta.expect` 检查仅构成本地诊断，即使使用官方镜像和 `eval.sh`，自定义 `resolved` 也不能替代尚未接入的官方评分报告。显式 `HOST_WARN` 仅用于受限主机检查，日志不记录本机仓库绝对路径。
+
+长期记忆正文与完整证据保存在 `~/.devcli/memory/records/` 下的 Markdown 记忆卡；SQLite `memory_facts` 只保存生命周期、作用域、修订、热度、Markdown 相对路径、文档/正文哈希和派生搜索语义卡。旧 SQLite 正文会在启动时原子迁移到 Markdown 并清空正文副本；Markdown 缺失或哈希不一致时停止回读，不使用旧正文兜底。`LongTermMemory` 启动只加载轻量 Catalog，并按 pinned、importance、验证次数、召回次数和最近召回时间预热最多 200 条完整记忆，可通过 `DEVCLI_MEMORY_HOT_MAX_ENTRIES` / `-Ddevcli.memory.hot.max.entries` 调整；冷记忆仍通过 SQLite 全量候选或向量命中按 id 回读 Markdown，Hot Working Set 不是检索边界。向量表只保存 `MemorySemanticCard` 派生语义文本、embedding 模型、SHA-256 和 float32 BLOB。FTS5/HNSW、人工编辑导入与索引 outbox 仍属于后续设计，详见 `docs/memory-markdown-sqlite-vector-design.md`。
 
 MCP 动态工具：`mcp__{server}__{tool}`（+ resources 虚拟工具）
 
@@ -187,9 +191,10 @@ Execution Trace：ReAct 与 Plan/Team 全路径通过 `RunEventTraceSink` 把结
 - 长期记忆统一记录 `schemaVersion`、主题内 `revision`、`MemoryKind`、`expiresAt`、`expiry_mode`、`recallCount/lastRecalledAt`、`validatedUseCount/lastValidatedAt`、`scope_type/scope_key` 和结构化 `MemoryEvidence`。项目、仓库或符号记忆只有作用域匹配时才参与关键词与向量排序；真实注入只更新召回观测，不刷新新鲜度、不续期、不按次数提权。用户确认、同值重复显式保存等强验证信号才刷新新鲜度并分档延长 TTL；初始 TTL 固定，到期后软归档。自动晋升仅允许 HIGH 且存在任务快照原文的候选，落库为 `CURATED`；人工确认后为 `REVIEWED`。来源使用脱敏快照、任务标识和 SHA-256 固化，不依赖原会话长期存在。命中同作用域稳定键的等价事实直接去重，只有值变化才 supersede；工具观察与规则冲突继续显式提示用户裁决
 - 敏感 `save_memory` 返回持久化 `confirmation_id`；模型必须先询问用户，再调用 `confirm_memory(save_redacted|save_edited|cancel)`。确认 id 默认 24 小时过期，可通过 `DEVCLI_MEMORY_CONFIRMATION_TTL_SECONDS` 调整；已完成票据重复确认返回同一终态结果，最终仍统一经过明文脱敏边界
 - `/memory organize` 只生成整理计划；`/memory organize apply` 仍由程序重新计算风险，只自动应用同主题、同类型、全部未审核、覆盖完整且计划置信度不低于 0.9 的合并。已审核条目、跨主题、跨类型、部分覆盖、REVIEW 和 REJECT 候选不得自动应用，只在本次报告中标记为需要人工复核；记忆正文按 JSON 数据载荷交给整理模型，不作为指令
-- `/memory export` 把 SQLite 自动记忆单向导出为人可读 Markdown 审计快照 `memory-audit.md`（`MemoryAuditReport` 纯渲染，按类型分组、带稳定 ID/状态/作用域/来源）；SQLite 仍是唯一权威源，导出文件只读、不回写、不双写，删改仍走 `/memory forget` 等正式入口
-- `ConversationHistoryCompactor` 是唯一治理 LLM messages 窗口的压缩点；压缩前先走第 0 层 `microcompact`（单条超大消息头尾截断；旧轮次 tool_result 按 toolCallId 成批落盘并替换为 `<microcompact_boundary>` 引用；不删消息、保 tool_call 配对），扛不住再摘要。首次摘要使用 Map-Reduce；后续固定保留六段，模型只提出受限生命周期操作，程序负责覆盖、完成迁移和删除；旧九段摘要可解析，但待办、当前工作和下一步会被丢弃。默认每 5 次成功压缩执行生命周期 GC，不再二次压缩旧摘要。摘要写回 history 前必须经过 `CompactionSemanticGuard`
+- `/memory export` 把 Markdown 正文与 SQLite Catalog 组合渲染为人可读审计快照 `memory-audit.md`（按类型分组、带稳定 ID/状态/作用域/来源）；该导出文件仍只读、不回写，删改必须走 `/memory forget` 等正式入口
+- `ConversationHistoryCompactor` 是唯一治理 LLM messages 窗口的压缩点；压缩前先走第 0 层 `microcompact`（单条超大消息头尾截断；旧轮次 tool_result 按 toolCallId 成批落盘并替换为 `<microcompact_boundary>` 引用；不删消息、保 tool_call 配对），扛不住再摘要。首次摘要按摘要模型 Token 窗口选择单次调用或 Map-Reduce，完整请求能放入窗口时不再按固定 60k 字符强制分片；后续固定保留六段，模型只提出受限生命周期操作，程序负责覆盖、完成迁移和删除；旧九段摘要可解析，但待办、当前工作和下一步会被丢弃。默认每 5 次成功压缩执行生命周期 GC，不再二次压缩旧摘要。摘要写回 history 前必须经过 `CompactionSemanticGuard`；该守卫只保护工作状态约束，不承担未来随机事实检索
 - `CompactionSummaryCache` 维护当前进程内会话预摘要，自动压缩时优先复用覆盖同一消息指纹且未过期的预摘要；已有预摘要覆盖当前历史前缀时，只用旧摘要和新增消息生成完整替代摘要；预摘要默认 30 分钟过期，不写长期记忆
+- 摘要分片不再使用 60,000 字符上限：首次 Map、增量更新和 Reduce 都按完整请求 Token 预算计算；增量逐批携带上批更新后的摘要，归并按实际预算分组。默认原文尾部随窗口按 15% 滚动，并受 history 触发阈值的一半约束；显式尾部预算不变。Provider 上下文超限时收紧请求预算重分片，不丢最旧轮次；空分片或增量协议无效不提交压缩历史。详情见 `docs/context-compaction-design.md`。
 - RAG 每次检索保存不含代码正文的分阶段审计记录，覆盖 keyword / semantic / graph 候选、RRF 融合、rerank、最终选择和降级状态；普通 CLI 会话归档默认关闭，启用后 ReAct 保存脱敏模型消息，Plan / Team 保存顶层输入输出，`/history clear` 同时删除归档
 - 压缩成功后会插入 `[压缩后恢复上下文]` 消息：恢复段按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 和 MCP 工具状态分节；恢复内容经统一预算与行级去重后注入，Multi-Agent 会按 Planner / Worker / Reviewer 角色裁剪；SkillContextBuffer 追加已加载 Skill 与 allowedTools 状态
 - 压缩边界 `<compact_boundary>` 会记录已加载 Skill、RAG epoch、MCP 工具快照和压缩后恢复入口状态；RAG epoch 合并当前会话已命中证据与当前项目全局索引版本，MCP 工具快照按 server 记录工具数量、schema 指纹和生命周期版本
@@ -307,5 +312,7 @@ Execution Trace：ReAct 与 Plan/Team 全路径通过 `RunEventTraceSink` 把结
 不要把 `ROADMAP.md` 中"将来要做"误读成"现在已有"。
 
 ## 持续维护约定
+
+公开配对实验新增测试入口 `PairedContextDriver`（实际调用生产 Compactor）、`MemoryEvidenceDriver`（隔离目录中的长期记忆与关键词检索）、`MemoryReaderDriver`（近期窗口/检索上下文对照）。它们不是完整Agent多轮评测；不测向量召回、自动记忆晋升或工具回读恢复。原始数据、抽样和成本边界见 `docs/benchmark-paired-run-20260830.md`；已有模型直测不得替代这些功能对照。`scripts/score-swebench-official.ps1` 与旧的自定义日志评分脚本不同，运行未修改官方Docker harness；Java43题批量和AgentDojo安全接入尚未完成。已完成结果跳过，中断记录保留且不自动付费重跑。
 
 形成稳定协作规则时直接补进本文件，不要只留在聊天记录里。详细实现细节补到 `docs/agents-reference.md`。

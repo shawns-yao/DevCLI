@@ -82,7 +82,7 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
         String hostCommand = HostWarnCommandPolicy.validateAndNormalize(request.command());
         hostCommand = withMavenRepository(hostCommand, mavenRepository);
         Request hostRequest = new Request(hostCommand, request.projectRoot(), request.timeoutSeconds(),
-                false, request.executionContext());
+                true, request.executionContext());
         Result result = hostBackend.execute(hostRequest);
         return new Result(result.exitCode(),
                 "⚠️ 沙箱模式 HOST_WARN：隔离命令在主机上执行，风险由用户承担。\n"
@@ -166,7 +166,8 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
     private static final class HostBackend implements Backend {
         @Override
         public Result execute(Request request) {
-            return runProcess(hostShellCommand(request.command()), request, false);
+            return runProcess(hostShellCommand(
+                    request.command(), isWindows(), request.sandboxRequired()), request, false);
         }
     }
 
@@ -280,8 +281,12 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
                 : cancellation.message());
     }
 
-    private static List<String> hostShellCommand(String command) {
-        if (isWindows()) {
+    static List<String> hostShellCommand(String command, boolean windows,
+                                         boolean validatedHostWarnCommand) {
+        if (windows && validatedHostWarnCommand) {
+            return List.of("cmd.exe", "/d", "/s", "/c", command);
+        }
+        if (windows) {
             String utf8Command = "[Console]::InputEncoding = [Text.UTF8Encoding]::new($false); "
                     + "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); "
                     + command;

@@ -31,6 +31,10 @@ public record ContextProfile(
         int outputReserveTokens
 ) {
     public static final double DEFAULT_COMPRESSION_TRIGGER_RATIO = 0.90;
+    public static final String COMPRESSION_TRIGGER_TOKENS_PROPERTY =
+            "devcli.context.compression.trigger.tokens";
+    public static final String COMPRESSION_TRIGGER_TOKENS_ENV =
+            "DEVCLI_CONTEXT_COMPRESSION_TRIGGER_TOKENS";
     private static final int MIN_WINDOW = 8_000;
     private static final int MCP_RESOURCE_INDEX_MIN_WINDOW = 32_000;
     /** from(null) / custom() 无法得知模型输出能力时的默认输出上限，对齐请求默认 max_tokens */
@@ -87,7 +91,26 @@ public record ContextProfile(
         int ratioTrigger = (int) Math.floor(maxContextWindow * compressionTriggerRatio);
         int reserve = Math.min(Math.max(outputReserveTokens, MIN_OUTPUT_RESERVE), maxContextWindow / 2);
         int reserveTrigger = maxContextWindow - reserve;
-        return Math.min(ratioTrigger, reserveTrigger);
+        int defaultTrigger = Math.min(ratioTrigger, reserveTrigger);
+        String override = System.getProperty(COMPRESSION_TRIGGER_TOKENS_PROPERTY);
+        if (override == null || override.isBlank()) {
+            override = System.getenv(COMPRESSION_TRIGGER_TOKENS_ENV);
+        }
+        if (override == null || override.isBlank()) {
+            return defaultTrigger;
+        }
+        final int configured;
+        try {
+            configured = Integer.parseInt(override.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(COMPRESSION_TRIGGER_TOKENS_PROPERTY
+                    + " must be a positive integer, got: " + override, e);
+        }
+        if (configured <= 0 || configured > maxContextWindow) {
+            throw new IllegalArgumentException(COMPRESSION_TRIGGER_TOKENS_PROPERTY
+                    + " must be within 1.." + maxContextWindow + ", got: " + configured);
+        }
+        return Math.min(defaultTrigger, configured);
     }
 
     /**

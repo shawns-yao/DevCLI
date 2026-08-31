@@ -36,4 +36,16 @@ class ToolInvocationFingerprintTest {
 
         assertEquals(first, second);
     }
+
+    @Test
+    void preservesCorrectiveQuotingInCommandArguments() {
+        String unquoted = ToolInvocationFingerprint.of(
+                "execute_command",
+                "{\"command\":\"mvn -Dmaven.compiler.release=8 compile\"}");
+        String quoted = ToolInvocationFingerprint.of(
+                "execute_command",
+                "{\"command\":\"mvn \\\"-Dmaven.compiler.release=8\\\" compile\"}");
+
+        assertNotEquals(unquoted, quoted);
+    }
 }

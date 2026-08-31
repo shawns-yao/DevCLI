@@ -24,7 +24,7 @@ public final class FileToolProvider implements ToolProvider {
     public void register(ToolContext context) {
         context.registerTool(ToolRegistry.Tool.structured(
                 "read_file",
-                "分页读取项目内文件。start_line/end_line 为 1-based 闭区间；offset/limit 为字符偏移和字符数；默认最多返回约 4000 Token，next_cursor 可继续读取",
+                "分页读取项目内文件。行范围 start_line/end_line（1-based 闭区间）与字符范围 offset/limit（字符偏移与字符数）二选一，优先使用 start_line/end_line，切勿同时提供两组；默认最多返回约 4000 Token，next_cursor 可继续读取",
                 context.createToolParameters(
                         new ToolParameter("path", "string", "文件路径", true),
                         new ToolParameter("start_line", "integer", "起始行，1-based", false),
@@ -147,7 +147,12 @@ public final class FileToolProvider implements ToolProvider {
                         return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
                                 "读取文件失败: " + e.getMessage(), false);
                     }
-                    int occurrences = countOccurrences(before, oldString);
+                    // Windows 工作区文件可能为 CRLF，而模型经 JSON 给出的 old/new_string 一般是 LF；
+                    // 先按文件自身行尾对齐再逐字匹配，避免跨平台行尾差异导致永远匹配不上而反复熔断
+                    String fileEol = before.contains("\r\n") ? "\r\n" : "\n";
+                    String oldAligned = alignEol(oldString, fileEol);
+                    String newAligned = alignEol(newString, fileEol);
+                    int occurrences = countOccurrences(before, oldAligned);
                     if (occurrences == 0) {
                         return ToolOutput.rejected(ToolErrorCode.INVALID_ARGUMENTS,
                                 "old_string 未在文件中匹配到。请重新 read_file 核对确切文本（含缩进/空白/换行）后再编辑", true);
@@ -157,7 +162,7 @@ public final class FileToolProvider implements ToolProvider {
                                 "old_string 在文件中出现 " + occurrences
                                         + " 次，必须唯一。请带上更多前后文使其唯一，或分多次精确编辑", true);
                     }
-                    String content = before.replace(oldString, newString);
+                    String content = before.replace(oldAligned, newAligned);
                     if (content.equals(before)) {
                         return ToolOutput.success("文件内容未变化，无需写入: " + path);
                     }
@@ -241,8 +246,11 @@ public final class FileToolProvider implements ToolProvider {
                     explicitChars = true;
                 }
             }
+            boolean ignoredCharWindow = false;
             if (explicitLines && explicitChars) {
-                return invalid("行范围参数不能与 offset/limit 混用");
+                // 容错：模型同时给出行范围与字符偏移时优先稳定的行范围、忽略字符组，
+                // 避免冗余可选参数被硬 reject 后反复重试、触发停滞熔断
+                ignoredCharWindow = true;
             }
 
             ReadPage page = explicitLines
@@ -254,7 +262,12 @@ public final class FileToolProvider implements ToolProvider {
             FileReadPage metadata = new FileReadPage(
                     args.get("path"), page.mode(), page.offset(), page.startLine(), page.endLine(),
                     page.content().length(), page.nextCursor(), page.hasMore(), Files.size(safe));
-            return ToolOutput.success(renderReadPage(page)).withSideChannel(metadata);
+            String rendered = renderReadPage(page);
+            if (ignoredCharWindow) {
+                rendered = "提示: 同时提供了行范围与 offset/limit，已优先使用 start_line/end_line 并忽略 offset/limit，后续请勿两组同传。\n"
+                        + rendered;
+            }
+            return ToolOutput.success(rendered).withSideChannel(metadata);
         } catch (IllegalArgumentException e) {
             return invalid(e.getMessage());
         } catch (Exception e) {
@@ -412,6 +425,13 @@ public final class FileToolProvider implements ToolProvider {
 
     private static boolean hasValue(Map<String, String> args, String name) {
         return !value(args, name).isBlank();
+    }
+
+    private static String alignEol(String text, String fileEol) {
+        if (text == null) {
+            return "";
+        }
+        return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", fileEol);
     }
 
     private static int countOccurrences(String text, String token) {

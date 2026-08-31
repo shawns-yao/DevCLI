@@ -53,8 +53,14 @@ import java.util.function.Supplier;
 public class SubAgent {
     private static final Logger log = LoggerFactory.getLogger(SubAgent.class);
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
-    static final int DEFAULT_REVIEWER_MAX_ITERATIONS = 2;
+    static final int DEFAULT_REVIEWER_MAX_ITERATIONS = 5;
     static final int MAX_REVIEWER_MAX_ITERATIONS = 8;
+    private static final String REVIEWER_FINAL_DECISION_PROMPT = """
+            Reviewer 取证阶段已经结束。现在是最终裁决轮，禁止继续调用工具。
+            必须只输出一个完整、可解析的裁决 JSON，并严格覆盖 system prompt 要求的
+            approved、summary、verification、scores、criteria_results、must_fix、issues、suggestions。
+            证据不足时明确 approved=false，不得继续分析、请求取证或输出 Markdown。
+            """;
 
     /**
      * Forked SubAgent execution starts from a frozen shared prefix, then appends a task-specific suffix.
@@ -527,7 +533,9 @@ public class SubAgent {
 
                     @Override
                     public List<LlmClient.Tool> toolDefinitions(int iteration) {
-                        return toolsEnabled ? toolDefinitionsFor(forkContext) : null;
+                        return toolsEnabled && !isReviewerFinalIteration(iteration)
+                                ? toolDefinitionsFor(forkContext)
+                                : null;
                     }
 
                     @Override
@@ -559,6 +567,10 @@ public class SubAgent {
                         // 前缀失配。它现在只含会话级稳定内容，任务级内容已在任务消息的当轮快照里。
                         injectPendingLspDiagnostics(history, out);
                         maybeCompactHistory(history, out);
+                        if (toolsEnabled && isReviewerFinalIteration(iteration)) {
+                            history.add(LlmClient.Message.internalUser(
+                                    REVIEWER_FINAL_DECISION_PROMPT));
+                        }
                     }
 
                     @Override
@@ -702,6 +714,11 @@ public class SubAgent {
                                 FailureFeedback.fromReason(describeLlmFailure(error)).render());
                     }
                 });
+    }
+
+    private boolean isReviewerFinalIteration(int iteration) {
+        return role == AgentRole.REVIEWER
+                && iteration >= resolveReviewerMaxIterations();
     }
 
     private AgentBudget createExecutionBudget() {

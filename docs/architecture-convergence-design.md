@@ -193,8 +193,8 @@ Reviewer FAIL / 取消 / 崩溃
   1. Pre-Review：编译/测试退出码 0；
   2. 每条 `verification_method=TOOL` 验收点，其 verifier 在本轮真实成功调用（工具调用记录可查）；
   3. LSP 无 error 级诊断（接入 4.10）；
-  4. LLM 裁决 ∈ `{approve, changes_requested}` 二值 + issues 列表（文件/行/问题/建议），changes_requested 即打回。
-- 删除三个浮点分与 0.6/1.0 阈值；Reviewer 最多 2 轮固定，不可配。
+  4. LLM 裁决输出 `approved + issues`，作为可见建议，不进入硬门。
+- Reviewer 默认最多 5 轮，可配置为 `[1, 8]`；最后一轮禁用工具并强制裁决。只有 Pre-Review 硬检查实际执行并通过时，拒绝、协议错误和模型故障才不触发 Worker 重做；未执行硬检查时继续失败关闭。
 - 独立性靠**上下文隔离**（无工具、只给 diff + 验收点），独立模型仅一个 env 可选；默认同模型可接受，但补"同模型 vs 异模型"消融实验写进评测报告。
 - Final integration 只做胶水；普通步骤失败 50% 熔断保留。
 

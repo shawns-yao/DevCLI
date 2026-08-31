@@ -237,10 +237,11 @@ final class DelegationSession implements DelegateTaskTool.Handler {
         registry.restrictForDelegation();
         if (skillBuffer != null) registry.setSkillContextBuffer(skillBuffer.copy());
         registry.setContextProfile(ContextProfile.from(client));
-        List<LlmClient.Tool> tools = toolSnapshots.computeIfAbsent(role, ignored -> {
-            registry.prefetchToolDefinitionsForInput(arguments.get("task"));
-            return List.copyOf(registry.getToolDefinitions());
-        });
+        List<LlmClient.Tool> tools = registry.runWithToolAccess(scope,
+                () -> toolSnapshots.computeIfAbsent(role, ignored -> {
+                    registry.prefetchToolDefinitionsForInput(arguments.get("task"));
+                    return List.copyOf(registry.getToolDefinitions());
+                }));
         try (RunContext run = CancellationContext.startRunContext(Path.of(registry.getProjectPath()));
              CancellationToken.Registration registration = context.cancellationToken().onCancel(
                      cancelled -> run.cancellationToken().cancel(cancelled.reason(), cancelled.message()))) {

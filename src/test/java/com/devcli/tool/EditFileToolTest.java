@@ -41,6 +41,20 @@ class EditFileToolTest {
     }
 
     @Test
+    void editFileAlignsLfArgumentsToCrLfFile() throws Exception {
+        Path file = projectRoot.resolve("windows.txt");
+        Files.writeString(file, "one\r\ntwo\r\nthree\r\n");
+        try (ToolRegistry registry = registry()) {
+            ToolOutput output = registry.executeToolOutput("edit_file",
+                    "{\"path\":\"windows.txt\",\"old_string\":\"one\\ntwo\","
+                            + "\"new_string\":\"one\\nchanged\"}");
+
+            assertTrue(output.isSuccess(), output.text());
+            assertEquals("one\r\nchanged\r\nthree\r\n", Files.readString(file));
+        }
+    }
+
+    @Test
     void noOpEditDoesNotAdvanceContextOrReportModifiedFile() throws Exception {
         Files.writeString(projectRoot.resolve("sample.txt"), "same");
         try (ToolRegistry registry = registry()) {

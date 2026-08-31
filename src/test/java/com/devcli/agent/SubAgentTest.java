@@ -27,11 +27,54 @@ import static org.junit.jupiter.api.Assertions.*;
 class SubAgentTest {
 
     @Test
-    void reviewerIterationLimitDefaultsToDocumentedTwoRounds() {
+    void reviewerIterationLimitDefaultsToFiveRounds() {
         String previous = System.getProperty("devcli.team.reviewer.max.iterations");
         try {
             System.clearProperty("devcli.team.reviewer.max.iterations");
-            assertEquals(2, SubAgent.resolveReviewerMaxIterations());
+            assertEquals(5, SubAgent.resolveReviewerMaxIterations());
+        } finally {
+            if (previous == null) {
+                System.clearProperty("devcli.team.reviewer.max.iterations");
+            } else {
+                System.setProperty("devcli.team.reviewer.max.iterations", previous);
+            }
+        }
+    }
+
+    @Test
+    void reviewerFinalIterationDisablesToolsAndForcesDecision(@TempDir Path tempDir) throws Exception {
+        String previous = System.getProperty("devcli.team.reviewer.max.iterations");
+        System.setProperty("devcli.team.reviewer.max.iterations", "5");
+        Files.writeString(tempDir.resolve("evidence.txt"), "evidence");
+        try (ToolRegistry tools = new ToolRegistry()) {
+            tools.setProjectPath(tempDir.toString());
+            List<CallScript> calls = new java.util.ArrayList<>();
+            for (int index = 0; index < 4; index++) {
+                calls.add(new CallScript(listener -> { }, new LlmClient.ChatResponse(
+                        "assistant", "", null,
+                        List.of(new LlmClient.ToolCall(
+                                "read_" + index,
+                                new LlmClient.ToolCall.Function("read_file",
+                                        "{\"path\":\"evidence.txt\",\"offset\":" + index
+                                                + ",\"limit\":1}"))),
+                        8, 3)));
+            }
+            calls.add(new CallScript(listener -> { }, new LlmClient.ChatResponse(
+                    "assistant", "{\"approved\":false}", null, 8, 3)));
+            MultiCallStreamClient llm = new MultiCallStreamClient(calls);
+            SubAgent reviewer = new SubAgent("reviewer", AgentRole.REVIEWER, llm, tools);
+
+            reviewer.review("检查实现", "worker result",
+                    new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+
+            assertEquals(5, llm.toolsByCall.size());
+            assertTrue(llm.toolsByCall.get(4) == null || llm.toolsByCall.get(4).isEmpty());
+            String finalPrompt = llm.messagesByCall.get(4).stream()
+                    .filter(message -> "user".equals(message.role()))
+                    .reduce((first, second) -> second)
+                    .orElseThrow()
+                    .content();
+            assertTrue(finalPrompt.contains("最终裁决"), finalPrompt);
         } finally {
             if (previous == null) {
                 System.clearProperty("devcli.team.reviewer.max.iterations");

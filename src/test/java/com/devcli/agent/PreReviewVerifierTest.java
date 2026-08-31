@@ -122,7 +122,7 @@ class PreReviewVerifierTest {
     }
 
     @Test
-    void shouldPreferMavenWrapperWhenAvailable(@TempDir Path tempDir) throws Exception {
+    void shouldUsePinnedSandboxMavenWhenWrapperExists(@TempDir Path tempDir) throws Exception {
         Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
         Files.writeString(tempDir.resolve("mvnw"), "#!/bin/sh", StandardCharsets.UTF_8);
         AtomicReference<CommandExecutionService.Request> captured = new AtomicReference<>();
@@ -134,7 +134,24 @@ class PreReviewVerifierTest {
         PreReviewVerifier.Result result = verifier.verify(tempDir, "step-wrapper");
 
         assertTrue(result.passed(), result.feedback());
-        assertEquals("./mvnw -q -DskipTests test-compile", captured.get().command());
+        assertEquals("mvn -q -DskipTests test-compile", captured.get().command());
+    }
+
+    @Test
+    void shouldNotInspectCrlfWrapperWhenUsingPinnedSandboxMaven(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        // 禁网 Pre-Review 固定使用镜像 Maven，不让 Wrapper 重新下载 Maven 本体。
+        Files.writeString(tempDir.resolve("mvnw"), "#!/bin/sh\r\necho wrapper\r\n", StandardCharsets.UTF_8);
+        AtomicReference<CommandExecutionService.Request> captured = new AtomicReference<>();
+        PreReviewVerifier verifier = new PreReviewVerifier(30, request -> {
+            captured.set(request);
+            return CommandExecutionService.Result.completed(0, "");
+        });
+
+        PreReviewVerifier.Result result = verifier.verify(tempDir, "step-crlf-wrapper");
+
+        assertTrue(result.passed(), result.feedback());
+        assertEquals("mvn -q -DskipTests test-compile", captured.get().command());
     }
 
     @Test

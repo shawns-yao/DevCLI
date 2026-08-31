@@ -926,6 +926,9 @@ public class MemoryManager implements AutoCloseable {
             List<LlmClient.Message> history,
             int turnToolCalls,
             int largestToolResultChars) {
+        if (!ConversationHistoryCompactor.isCompactionEnabled(System.getProperties(), System.getenv())) {
+            return SessionPreSummaryMaintenanceResult.SKIPPED_DISABLED;
+        }
         if (llmClient == null || history == null || history.isEmpty()) {
             return SessionPreSummaryMaintenanceResult.SKIPPED_EMPTY_HISTORY;
         }
@@ -975,6 +978,12 @@ public class MemoryManager implements AutoCloseable {
                 );
             }
             LlmClient.ChatResponse response = llmClient.chat(summaryRequest, List.of());
+            if (Boolean.parseBoolean(System.getProperty(
+                    ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY, "false"))) {
+                System.err.printf(java.util.Locale.ROOT,
+                        "[context-compaction] kind=summary-call inputTokens=%d outputTokens=%d cachedInputTokens=%d source=pre-summary%n",
+                        response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
+            }
             String summary = response.content();
             if (summary == null || summary.isBlank()) {
                 preSummaryFailureCount.incrementAndGet();
@@ -999,6 +1008,12 @@ public class MemoryManager implements AutoCloseable {
             return SessionPreSummaryMaintenanceResult.MAINTAINED;
         } catch (IOException | RuntimeException e) {
             preSummaryFailureCount.incrementAndGet();
+            if (e instanceof com.devcli.llm.LlmException failure && Boolean.parseBoolean(System.getProperty(
+                    ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY, "false"))) {
+                System.err.printf(java.util.Locale.ROOT,
+                        "[context-compaction] kind=summary-error code=%s status=%d source=pre-summary%n",
+                        failure.code(), failure.statusCode());
+            }
             log.warn("session pre-summary maintenance failed", e);
             return SessionPreSummaryMaintenanceResult.FAILED;
         }
@@ -1156,6 +1171,7 @@ public class MemoryManager implements AutoCloseable {
 
     public enum SessionPreSummaryMaintenanceResult {
         MAINTAINED,
+        SKIPPED_DISABLED,
         SKIPPED_EMPTY_HISTORY,
         SKIPPED_BELOW_THRESHOLD,
         SKIPPED_ALREADY_CURRENT,

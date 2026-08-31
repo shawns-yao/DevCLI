@@ -28,12 +28,14 @@ final class PlanCoordinator {
 
     record GenerationResult(AgentMessage message,
                             List<AgentOrchestrator.ExecutionStep> steps,
-                            TeamPlanReviewProtocol.Evaluation semanticReview) {
+                            TeamPlanReviewProtocol.Evaluation semanticReview,
+                            String failureReason) {
         GenerationResult {
             steps = steps == null ? List.of() : List.copyOf(steps);
             semanticReview = semanticReview == null
                     ? TeamPlanReviewProtocol.Evaluation.skipped()
                     : semanticReview;
+            failureReason = failureReason == null ? "" : failureReason.trim();
         }
     }
 
@@ -66,7 +68,7 @@ final class PlanCoordinator {
         AgentMessage result = executePlanner(AgentMessage.task("orchestrator",
                 "请为以下任务制定执行计划：\n" + Objects.toString(userInput, "")));
         if (result.type() == AgentMessage.Type.ERROR) {
-            return failed(result, TeamPlanReviewProtocol.Evaluation.skipped());
+            return failed(result, TeamPlanReviewProtocol.Evaluation.skipped(), result.content());
         }
         int maxRepairAttempts = TeamPlannerProtocol.resolveRepairAttempts();
         for (int repairAttempt = 0; ; repairAttempt++) {
@@ -76,37 +78,39 @@ final class PlanCoordinator {
                     TeamPlanReviewProtocol.Evaluation.skipped();
             if (planIssue == null) {
                 semanticReview = reviewGeneratedPlan(userInput, steps);
-                if (!semanticReview.protocolValid()) {
-                    return failed(AgentMessage.error("plan-reviewer", AgentRole.REVIEWER,
-                            "计划语义评审失败：" + semanticReview.issues()), semanticReview);
-                }
                 if (semanticReview.approved()) {
-                    return new GenerationResult(result, steps, semanticReview);
+                    return new GenerationResult(result, steps, semanticReview, "");
                 }
-                planIssue = "计划语义评审未通过：" + semanticReview.issues();
+                String advisory = semanticReview.issues().isBlank()
+                        ? semanticReview.summary() : semanticReview.issues();
+                log.warn("Plan semantic review advisory: {}", advisory);
+                out.println("⚠️ 计划语义评审给出建议，但不阻断已通过确定性校验的计划："
+                        + advisory + "\n");
+                return new GenerationResult(result, steps, semanticReview, "");
             }
             if (repairAttempt >= maxRepairAttempts) {
                 log.warn("Planner output remained invalid after repair attempts: {}", planIssue);
-                return failed(result, semanticReview);
+                return failed(result, semanticReview, planIssue);
             }
             if (CancellationContext.isCancelled()) {
-                return failed(result, TeamPlanReviewProtocol.Evaluation.skipped());
+                return failed(result, TeamPlanReviewProtocol.Evaluation.skipped(), "任务已取消");
             }
             int attempt = repairAttempt + 1;
-            out.println("⚠️ 规划候选未通过校验或语义评审，正在请求修复 (" + attempt
+            out.println("⚠️ 规划候选未通过确定性校验，正在请求修复 (" + attempt
                     + "/" + maxRepairAttempts + ")...\n");
             result = executePlanner(AgentMessage.task("orchestrator",
                     TeamPlannerProtocol.buildRepairPrompt(
                             userInput, result.content(), planIssue, attempt)));
             if (result.type() == AgentMessage.Type.ERROR) {
-                return failed(result, semanticReview);
+                return failed(result, semanticReview, result.content());
             }
         }
     }
 
     private GenerationResult failed(AgentMessage message,
-                                    TeamPlanReviewProtocol.Evaluation review) {
-        return new GenerationResult(message, List.of(), review);
+                                    TeamPlanReviewProtocol.Evaluation review,
+                                    String failureReason) {
+        return new GenerationResult(message, List.of(), review, failureReason);
     }
 
     TeamPlanReviewProtocol.Evaluation reviewGeneratedPlan(

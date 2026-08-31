@@ -32,6 +32,8 @@ CLI / Runtime API / Headless
 └── Renderer                  inline / plain 终端输出
 ```
 
+![运行界面](images/Snipaste_2026-05-20_16-57-44.png)
+
 ## 请求与执行模式
 
 ### 默认 ReAct
@@ -49,7 +51,7 @@ Planner
   → ExecutionGraph / AcceptanceCriteria
   → Worker 隔离执行
   → PreReviewVerifier 确定性检查
-  → Reviewer 语义验收
+  → Reviewer 语义建议（非阻塞）
   → PatchSet 版本校验与归并
   → Final integration
 ```
@@ -185,7 +187,7 @@ Worker 工作区
   → 失败回滚或 checkpoint
 ```
 
-同一文件不允许多个运行中步骤并发写入。未通过版本检查、Reviewer、策略或验收的补丁不会写入主项目。
+同一文件不允许多个运行中步骤并发写入。未通过版本检查、Pre-Review 硬检查、策略或确定性验收的补丁不会写入主项目。
 
 命令默认在禁网、只读根文件系统的 Docker 沙箱执行；`HOST_WARN` 是显式的受限主机检查模式，不作为自动降级路径。Maven 本地仓库路径只接受显式配置的绝对目录。
 
@@ -194,9 +196,9 @@ Worker 工作区
 确定性验证和模型评审分层：
 
 - 编译、测试、哈希、权限和版本校验由工具负责；
-- Reviewer 负责静态和语义核对；
+- Reviewer 负责静态和语义核对；Pre-Review 硬检查实际通过后，其结论作为非阻塞建议；
 - 验收标准声明验证方式、验证器和适用节点；
-- `critical/high` 问题阻断，`normal` 问题进入 advisory；
+- 编译、测试等确定性问题阻断，LLM 评审问题进入 advisory；
 - 缺少真实工具证据时不能伪装为通过。
 
 默认 ReAct 委派只在高风险条件下触发独立 Reviewer，例如大范围修改、关键安全资源或副作用工具失败。Reviewer 可以配置独立模型；配置不可用时失败关闭。

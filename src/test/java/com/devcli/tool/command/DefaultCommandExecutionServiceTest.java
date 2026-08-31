@@ -283,6 +283,16 @@ class DefaultCommandExecutionServiceTest {
     }
 
     @Test
+    void windowsHostWarnUsesCmdToPreserveMavenSystemProperties() {
+        String command = "mvn -o -Dmaven.compiler.release=8 -DskipTests compile";
+
+        List<String> shell = DefaultCommandExecutionService.hostShellCommand(
+                command, true, true);
+
+        assertEquals(List.of("cmd.exe", "/d", "/s", "/c", command), shell);
+    }
+
+    @Test
     void sandboxModeRejectsInvalidExplicitValue() {
         Properties properties = new Properties();
         properties.setProperty(DefaultCommandExecutionService.SANDBOX_MODE_PROPERTY, "auto");

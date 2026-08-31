@@ -148,9 +148,16 @@ final class ReviewCoordinator {
     }
 
     boolean shouldAcceptAfterRecoverableFailure(AgentOrchestrator.ExecutionStep step,
-                                                String issues,
-                                                boolean hardCheckExecuted) {
+                                                 String issues,
+                                                 boolean hardCheckExecuted) {
         return canDegradeReviewerFailure(isRecoverableReviewerFailure(issues), hardCheckExecuted);
+    }
+
+    static boolean isReviewerAdvisory(ReviewDecision review) {
+        return review != null
+                && !review.approved()
+                && review.hardCheckExecuted()
+                && review.hardCheckFailureKind() == PreReviewVerifier.FailureKind.NONE;
     }
 
     static boolean canDegradeReviewerFailure(boolean recoverableFailure,
@@ -190,7 +197,9 @@ final class ReviewCoordinator {
                 .append("; review=")
                 .append(review != null && review.approved()
                         ? (review.reviewerError() ? "DEGRADED" : "APPROVED")
-                        : "REJECTED")
+                        : (review != null
+                                && review.hardCheckFailureKind() == PreReviewVerifier.FailureKind.NONE
+                                ? "ADVISORY" : "REJECTED"))
                 .append("; hard_check=")
                 .append(review != null && review.hardCheckExecuted() ? "PASSED" : "NOT_RUN");
         List<SubAgent.ToolEvidence> successful = evidence == null ? List.of() : evidence.toolResults().stream()

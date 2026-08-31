@@ -1,5 +1,6 @@
 package com.devcli.memory;
 
+import com.devcli.context.ContextProfile;
 import com.devcli.llm.LlmClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -12,10 +13,13 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -24,10 +28,8 @@ import java.util.function.Supplier;
  * <p>v3 重构（路径 B）：旧版本曾与 {@code ContextCompressor + ConversationMemory} 双轨并存，
  * 后者只压旁路笔记本不影响 LLM 输入，已删除。本类是真正治理 LLM 输入窗口的唯一压缩点。
  *
- * <p>第 0 层 microcompact：在任何 LLM 摘要之前，先把单条超大消息头尾截断并将完整原文落盘
- * （{@link #microcompactOversizeMessages}，不调 LLM、不删消息）。这既能在很多情况下直接把 token
- * 压回阈值、省掉摘要，又保证后续保留区不被单条巨型消息撑爆（避免单条 100k 导致 splitIdx==systemEnd
- * 而跳过压缩）；上下文中的边界标记保留原始长度与可恢复路径。
+ * <p>第 0 层 microcompact：在任何 LLM 摘要之前，只回收已经离开最近保护区的旧工具结果，
+ * 不调用 LLM，也不修改 user / assistant 消息。完整工具结果落盘，并在上下文中保留项目相对路径。
  *
  * 算法：
  * 1. 估算 conversationHistory 当前 token，未达 trigger 直接返回 false
@@ -52,41 +54,30 @@ public class ConversationHistoryCompactor {
 
     private static final Logger log = LoggerFactory.getLogger(ConversationHistoryCompactor.class);
 
+    /** 实验与诊断用：默认保持生产压缩行为，可显式关闭形成 raw 对照。 */
+    public static final String COMPACTION_ENABLED_PROPERTY = "devcli.context.compaction.enabled";
+    public static final String COMPACTION_ENABLED_ENV = "DEVCLI_CONTEXT_COMPACTION_ENABLED";
+    public static final String COMPACTION_METRICS_PROPERTY = "devcli.context.compaction.metrics.enabled";
+
     /**
      * 老阈值参数，向后兼容字段名（虽然语义改了）。当通过旧构造器
      * {@code ConversationHistoryCompactor(llm, n)} 传入时，会按 "n × 1k token" 折算成
      * retainRecentTokens（每个 user 轮约 1k token 是个粗估）。
      */
     private static final int DEFAULT_RETAIN_RECENT_ROUNDS = 3;
-    /** 默认按 token 预算保留尾部。30k token 在 200k window 下约占 15%，给 LLM 充足近期上下文。 */
-    private static final int DEFAULT_RETAIN_RECENT_TOKENS = 30_000;
+    private static final double DEFAULT_RETAIN_WINDOW_RATIO = 0.15;
 
-    // ── microcompact（第 0 层）：截断单条超大消息，不调 LLM ──
-    /**
-     * 普通消息触发 microcompact 截断的 content 字符阈值。超过则头尾保留、中间省略。
-     * 主要命中大工具结果（read_file 大文件 / bash 刷屏 / search 大结果）。
-     */
-    static final int MICRO_COMPACT_TRIGGER_CHARS = 24_000;
-    /** 普通超大消息截断后保留的头部字符数。 */
-    private static final int MICRO_COMPACT_HEAD_CHARS = 2_000;
-    /** 普通超大消息截断后保留的尾部字符数（错误码 / 结论常在结尾）。 */
-    private static final int MICRO_COMPACT_TAIL_CHARS = 1_000;
-    /**
-     * 最后一条消息（通常是当前请求或刚执行的工具结果）的截断阈值，比普通消息宽松，
-     * 尽量不动当前上下文；只有超过这个绝对上限才截，避免单条就撑爆保留区。
-     */
-    static final int MICRO_COMPACT_LAST_TRIGGER_CHARS = 48_000;
-    /** 最后一条消息截断后保留的头部字符数（更宽松）。 */
-    private static final int MICRO_COMPACT_LAST_HEAD_CHARS = 6_000;
-    /** 最后一条消息截断后保留的尾部字符数（更宽松）。 */
-    private static final int MICRO_COMPACT_LAST_TAIL_CHARS = 3_000;
-    /** 按轮次清理旧工具结果时保留最近多少个 user round 不动。 */
-    private static final int MICRO_COMPACT_RETAIN_RECENT_TOOL_ROUNDS = 2;
-    /** 普通用户/助手大消息的可恢复落盘目录。 */
-    static final String MICROCOMPACT_MESSAGE_OUTPUTS_DIR = ".devcli/microcompact_message_outputs";
+    // ── microcompact（第 0 层）：旧工具结果 GC，不调 LLM ──
+    static final int MICRO_COMPACT_RETAIN_RECENT_TOOL_RESULTS = 4;
+    static final String MICRO_COMPACT_KEEP_RECENT_PROPERTY =
+            "devcli.context.microcompact.keep.recent.tool.results";
+    static final String MICRO_COMPACT_KEEP_RECENT_ENV =
+            "DEVCLI_CONTEXT_MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS";
+    static final String MICRO_COMPACT_EXCLUDE_TOOLS_PROPERTY =
+            "devcli.context.microcompact.exclude.tools";
+    static final String MICRO_COMPACT_EXCLUDE_TOOLS_ENV =
+            "DEVCLI_CONTEXT_MICROCOMPACT_EXCLUDE_TOOLS";
 
-    /** 单片送 LLM 的字符上限。控制单次摘要请求不会撑爆 LLM window。 */
-    private static final int MAP_CHUNK_CHARS = 60_000;
     /**
      * Reduce 阶段最多合并多少片摘要。如果片数 > 此值，会先做"二次 Map"
      * （每 N 片合并成一段中间摘要），再 Reduce 最终。防止 Reduce prompt 自己撑爆 window。
@@ -134,16 +125,15 @@ public class ConversationHistoryCompactor {
 
     /**
      * 摘要调用自身 prompt-too-long 时的最大重试次数。
-     * 每次重试丢掉 oldMsgs 头部 20% 的 user 边界对齐 round，再试一次。
+     * 每次重试收紧单次请求预算，重新分片全部原始消息，不删除历史。
      * 超过仍然 PTL 才计入 {@link #consecutiveFailures}。
      */
     static final int MAX_PTL_RETRIES = 3;
 
     /**
-     * 每次 PTL retry 丢掉的 round 比例。20% 是经验值——丢太少不够腾出空间、
-     * 丢太多保留区压力过大。
+     * Provider 窗口小于本地估算时逐步降低摘要请求预算。
      */
-    private static final double PTL_RETRY_DROP_RATIO = 0.20;
+    private static final double PTL_RETRY_BUDGET_RATIO = 0.75;
 
     /**
      * 识别 LLM 返回的"prompt too long"错误信息片段。各家 provider 错误措辞不一，
@@ -251,13 +241,33 @@ public class ConversationHistoryCompactor {
             """;
 
     private LlmClient llmClient;
+    private int learnedSummaryInputBudget;
     private final int retainRecentTokens;
+    private boolean adaptiveRetainBudget;
     /** 六段摘要的程序化垃圾回收（capSummarySize 优先用它裁剪，不调 LLM）。 */
     private final SummaryGarbageCollector summaryGc = new SummaryGarbageCollector();
     private CompactionSummaryCache compactionSummaryCache;
     private Supplier<String> postCompactContextSupplier;
     private Supplier<CompactBoundaryRuntimeState> compactBoundaryRuntimeStateSupplier;
     private Path microcompactOutputRoot;
+    private MicrocompactStats lastMicrocompactStats = MicrocompactStats.empty();
+
+    public record MicrocompactStats(int beforeTokens,
+                                    int afterTokens,
+                                    int clearedToolResults,
+                                    Map<String, Integer> removedTokensByTool,
+                                    Map<String, Integer> roleTokensBefore,
+                                    Map<String, Integer> roleTokensAfter) {
+        public MicrocompactStats {
+            removedTokensByTool = Map.copyOf(removedTokensByTool);
+            roleTokensBefore = Map.copyOf(roleTokensBefore);
+            roleTokensAfter = Map.copyOf(roleTokensAfter);
+        }
+
+        static MicrocompactStats empty() {
+            return new MicrocompactStats(0, 0, 0, Map.of(), Map.of(), Map.of());
+        }
+    }
 
     /**
      * 连续压缩失败计数。每次摘要 LLM 调用失败 / 返回空 / 找不到分割点时 +1；
@@ -275,7 +285,8 @@ public class ConversationHistoryCompactor {
     private long lastFallbackTimestamp = 0;
 
     public ConversationHistoryCompactor(LlmClient llmClient) {
-        this(llmClient, DEFAULT_RETAIN_RECENT_TOKENS, true);
+        this(llmClient, 1, true);
+        adaptiveRetainBudget = true;
     }
 
     /**
@@ -298,6 +309,7 @@ public class ConversationHistoryCompactor {
 
     public void setLlmClient(LlmClient llmClient) {
         this.llmClient = llmClient;
+        learnedSummaryInputBudget = 0;
     }
 
     /** 配置周期性生命周期 GC 间隔；传入 0 表示关闭周期治理。兼容保留旧方法名。 */
@@ -324,6 +336,10 @@ public class ConversationHistoryCompactor {
                 : microcompactOutputRoot.toAbsolutePath().normalize();
     }
 
+    public MicrocompactStats lastMicrocompactStats() {
+        return lastMicrocompactStats;
+    }
+
     static String microcompactSessionId() {
         return MICROCOMPACT_SESSION_ID;
     }
@@ -333,23 +349,35 @@ public class ConversationHistoryCompactor {
      *
      * @param history       Agent 主循环的 conversationHistory，调用结束后可能被替换为更短列表
      * @param triggerTokens 触发压缩的 token 阈值（通常是 ContextProfile.compressionTriggerTokens()）
-     * @return 是否做了历史级压缩（LLM 摘要或降级截断）；仅 microcompact 截断单条超大消息
-     *         不改变历史结构，返回 false（截断已在 content 留标记 + log，调用方无需提示）
+     * @return 是否做了历史级压缩（LLM 摘要或降级截断）；仅 microcompact 回收旧工具结果
+     *         不改变历史结构，返回 false（回收已在 content 留标记 + log，调用方无需提示）
      */
     public boolean compactIfNeeded(List<LlmClient.Message> history, int triggerTokens) {
         if (history == null || history.isEmpty()) return false;
+        int preCompactionTokens = TokenBudget.estimateMessagesTokens(history);
+        boolean metrics = Boolean.parseBoolean(System.getProperty(COMPACTION_METRICS_PROPERTY, "false"));
+        boolean enabled = isCompactionEnabled(System.getProperties(), System.getenv());
+        if (metrics) {
+            System.err.printf(Locale.ROOT,
+                    "[context-compaction] kind=decision enabled=%s historyTokens=%d triggerTokens=%d%n",
+                    enabled, preCompactionTokens, triggerTokens);
+        }
+        if (!enabled) return false;
+        if (metrics && preCompactionTokens >= triggerTokens) {
+            System.err.printf(Locale.ROOT,
+                    "[context-compaction] kind=trigger beforeTokens=%d triggerTokens=%d%n",
+                    preCompactionTokens, triggerTokens);
+        }
 
-        // 第 0 层 microcompact：先截断单条超大消息（不调 LLM）。这既能在很多情况下直接把
-        // token 压回阈值内、省掉一次 LLM 摘要，又保证后续 full compact 的保留区不会被单条巨型
-        // 消息撑爆（解决"单条 100k 让 splitIdx==systemEnd 而 skip"的盲区）。即使在熔断/冷却期
-        // 也执行——这是降级时最划算的廉价压缩。
+        // 第 0 层 microcompact：只回收旧工具结果，不改 user / assistant 语义消息。
+        // 回收后仍超过阈值才进入模型摘要；熔断/冷却期也可执行这层低成本 Tool Result GC。
         boolean microChanged = microcompactOversizeMessages(history);
         if (TokenBudget.estimateMessagesTokens(history) < triggerTokens) {
             if (microChanged) {
                 log.info("microcompact alone brought conversation below trigger; skip LLM summarization");
             }
-            // micro 只是后台截断单条超大消息、不改变历史结构（不摘要、不删消息），不视为"历史压缩"，
-            // 返回 false 避免调用方打印"已压缩为摘要"的误导提示。截断已在 content 留标记 + log，非静默丢弃。
+            // micro 只替换旧 tool_result 正文、不改变消息结构，不视为"历史压缩"；
+            // 返回 false 避免调用方打印"已压缩为摘要"的误导提示。
             return false;
         }
 
@@ -363,6 +391,11 @@ public class ConversationHistoryCompactor {
                 boolean truncated = fallbackTruncate(history, triggerTokens);
                 if (truncated) {
                     lastFallbackTimestamp = now;
+                    if (metrics) {
+                        System.err.printf(Locale.ROOT,
+                                "[context-compaction] kind=fallback beforeTokens=%d triggerTokens=%d%n",
+                                preCompactionTokens, triggerTokens);
+                    }
                 }
                 return truncated;
             }
@@ -376,6 +409,11 @@ public class ConversationHistoryCompactor {
             if (truncated) {
                 lastFallbackTimestamp = now;
                 consecutiveFailures = 0; // 重置计数器
+                if (metrics) {
+                    System.err.printf(Locale.ROOT,
+                            "[context-compaction] kind=fallback beforeTokens=%d triggerTokens=%d%n",
+                            preCompactionTokens, triggerTokens);
+                }
             }
             return truncated;
         }
@@ -384,8 +422,10 @@ public class ConversationHistoryCompactor {
         int systemEnd = "system".equals(history.get(0).role()) ? 1 : 0;
 
         // 1) token 预算保留区：从尾巴往前累计 token，落在 user 边界
-        int splitIdx = findSplitIdxByTokenBudget(history, systemEnd, retainRecentTokens);
-        splitIdx = fitRecentTailWithinTokenBudget(history, systemEnd, splitIdx, retainRecentTokens);
+        int tailBudget = adaptiveRetainBudget
+                ? Math.min(retainRecentTokens(), Math.max(1, triggerTokens / 2)) : retainRecentTokens;
+        int splitIdx = findSplitIdxByTokenBudget(history, systemEnd, tailBudget);
+        splitIdx = fitRecentTailWithinTokenBudget(history, systemEnd, splitIdx, tailBudget);
         if (splitIdx <= systemEnd) {
             log.info("compactIfNeeded skip: cannot find safe splitIdx > systemEnd={}", systemEnd);
             // 这不是 LLM 调用失败，是结构性无法压缩（如全是 system 或 retainTokens 过大）。
@@ -507,6 +547,12 @@ public class ConversationHistoryCompactor {
                 currentTokens, afterTokens, oldMsgs.size() + systemEnd, rebuilt.size(),
                 periodicLifecycleGc ? "lifecycle-gc" : (summaryBase != null ? "incremental" : "full"),
                 summary.length()));
+        if (Boolean.parseBoolean(System.getProperty(COMPACTION_METRICS_PROPERTY, "false"))) {
+            System.err.printf(Locale.ROOT,
+                    "[context-compaction] kind=history mode=%s beforeTokens=%d afterTokens=%d summaryChars=%d%n",
+                    periodicLifecycleGc ? "lifecycle-gc" : (summaryBase != null ? "incremental" : "full"),
+                    currentTokens, afterTokens, summary.length());
+        }
         return true;
     }
 
@@ -555,124 +601,153 @@ public class ConversationHistoryCompactor {
     }
 
     /**
-     * 第 0 层 microcompact：把单条 content 超阈值的消息头尾截断、中间用标记替代，原地修改 history。
-     * 不调 LLM、不删消息（保持 tool_call/tool_result 配对），是最廉价的一层压缩，先于任何 LLM
-     * 摘要执行，也用于熔断/冷却期降级。
-     *
-     * <p>普通文本和工具结果都会保留头尾，并在 context 中写入可重新读取的落盘路径。
-     *
-     * <p>保护规则：
-     * <ul>
-     *   <li>最后一条消息阈值更宽松（{@link #MICRO_COMPACT_LAST_TRIGGER_CHARS}），尽量不动当前上下文</li>
-     *   <li>带图片附件（contentParts）的消息跳过，避免破坏多模态结构</li>
-     * </ul>
-     *
-     * @return 是否有消息被截断
+     * 第 0 层 microcompact：仅回收旧 tool_result。user、assistant、任务状态与决策文本不参与规则删除。
+     * 最近 N 个工具结果、显式排除工具、记忆/外部查询工具和仍携带失败信号的结果受到保护。
      */
     boolean microcompactOversizeMessages(List<LlmClient.Message> history) {
-        if (history == null || history.isEmpty()) return false;
-        int lastIdx = history.size() - 1;
-        boolean changed = microcompactOldToolResultsByRound(history);
+        if (history == null || history.isEmpty()) {
+            lastMicrocompactStats = MicrocompactStats.empty();
+            return false;
+        }
+        int beforeTokens = TokenBudget.estimateMessagesTokens(history);
+        Map<String, Integer> roleBefore = roleTokens(history);
+        Map<String, String> toolNames = toolNamesByCallId(history);
+        List<Integer> toolResultIndexes = new ArrayList<>();
         for (int i = 0; i < history.size(); i++) {
-            LlmClient.Message msg = history.get(i);
-            if (msg.hasContentParts()) continue; // 跳过多模态消息
-            String content = msg.content();
-            if (content == null) continue;
-
-            boolean isLast = i == lastIdx;
-            int trigger = isLast ? MICRO_COMPACT_LAST_TRIGGER_CHARS : MICRO_COMPACT_TRIGGER_CHARS;
-            if (content.length() <= trigger) continue;
-
-            int head = isLast ? MICRO_COMPACT_LAST_HEAD_CHARS : MICRO_COMPACT_HEAD_CHARS;
-            int tail = isLast ? MICRO_COMPACT_LAST_TAIL_CHARS : MICRO_COMPACT_TAIL_CHARS;
-            String compacted = "tool".equals(msg.role()) && msg.toolCallId() != null
-                    ? compactOversizeToolContent(msg.toolCallId(), content, head, tail)
-                    : compactOversizeMessageContent(i, msg, content, head, tail);
-            if (compacted.length() < content.length()) {
-                history.set(i, new LlmClient.Message(
-                        msg.role(), compacted, msg.reasoningContent(), msg.toolCalls(),
-                        msg.toolCallId(), msg.contentParts(), msg.source()));
-                changed = true;
-                log.info("microcompact truncated message[{}] role={}: {} -> {} chars",
-                        i, msg.role(), content.length(), compacted.length());
+            LlmClient.Message message = history.get(i);
+            if ("tool".equals(message.role()) && message.toolCallId() != null) {
+                toolResultIndexes.add(i);
             }
         }
-        return changed;
+
+        int keepRecent = configuredKeepRecentToolResults();
+        int firstClearablePosition = Math.max(0, toolResultIndexes.size() - keepRecent);
+        Set<Integer> recentIndexes = new LinkedHashSet<>(
+                toolResultIndexes.subList(firstClearablePosition, toolResultIndexes.size()));
+        Map<String, Integer> removedByTool = new LinkedHashMap<>();
+        int cleared = 0;
+        if (microcompactOutputRoot != null) {
+            for (int index : toolResultIndexes) {
+                if (recentIndexes.contains(index)) continue;
+                LlmClient.Message message = history.get(index);
+                String content = message.content();
+                String toolName = toolNames.getOrDefault(message.toolCallId(), "unknown");
+                if (content == null || content.isBlank()
+                        || content.contains("<microcompact_boundary>")
+                        || isProtectedToolResult(toolName, content)) {
+                    continue;
+                }
+                int before = TokenBudget.estimateMessagesTokens(List.of(message));
+                String compacted = collapseOldToolResultContent(message.toolCallId(), toolName, content);
+                if (compacted.equals(content)) continue;
+                LlmClient.Message replacement = new LlmClient.Message(
+                        message.role(), compacted, message.reasoningContent(), message.toolCalls(),
+                        message.toolCallId(), message.contentParts(), message.source());
+                history.set(index, replacement);
+                int after = TokenBudget.estimateMessagesTokens(List.of(replacement));
+                removedByTool.merge(toolName, Math.max(0, before - after), Integer::sum);
+                cleared++;
+                log.info("microcompact cleared old tool_result[{}] tool={} toolCallId={}: {} -> {} chars",
+                        index, toolName, message.toolCallId(), content.length(), compacted.length());
+            }
+        }
+
+        int afterTokens = TokenBudget.estimateMessagesTokens(history);
+        lastMicrocompactStats = new MicrocompactStats(
+                beforeTokens, afterTokens, cleared, removedByTool, roleBefore, roleTokens(history));
+        if (Boolean.parseBoolean(System.getProperty(COMPACTION_METRICS_PROPERTY, "false"))) {
+            System.err.printf(Locale.ROOT,
+                    "[context-compaction] kind=micro beforeTokens=%d afterTokens=%d clearedToolResults=%d "
+                            + "removedByTool=%s roleBefore=%s roleAfter=%s%n",
+                    beforeTokens, afterTokens, cleared, removedByTool,
+                    lastMicrocompactStats.roleTokensBefore(), lastMicrocompactStats.roleTokensAfter());
+        }
+        return cleared > 0;
     }
 
-    private boolean microcompactOldToolResultsByRound(List<LlmClient.Message> history) {
-        if (microcompactOutputRoot == null || history == null || history.isEmpty()) {
-            return false;
-        }
-        List<Integer> userRoundStarts = new ArrayList<>();
-        for (int i = 0; i < history.size(); i++) {
-            if ("user".equals(history.get(i).role())) {
-                userRoundStarts.add(i);
-            }
-        }
-        if (userRoundStarts.size() <= MICRO_COMPACT_RETAIN_RECENT_TOOL_ROUNDS) {
-            return false;
-        }
-        int retainStart = userRoundStarts.get(userRoundStarts.size() - MICRO_COMPACT_RETAIN_RECENT_TOOL_ROUNDS);
-        Set<String> oldToolCallIds = new LinkedHashSet<>();
-        for (int i = 0; i < retainStart; i++) {
-            LlmClient.Message msg = history.get(i);
-            if (msg.toolCalls() == null) {
-                continue;
-            }
-            for (LlmClient.ToolCall toolCall : msg.toolCalls()) {
-                if (toolCall.id() != null && !toolCall.id().isBlank()) {
-                    oldToolCallIds.add(toolCall.id());
+    private static Map<String, String> toolNamesByCallId(List<LlmClient.Message> history) {
+        Map<String, String> names = new LinkedHashMap<>();
+        for (LlmClient.Message message : history) {
+            if (message.toolCalls() == null) continue;
+            for (LlmClient.ToolCall call : message.toolCalls()) {
+                if (call.id() != null && call.function() != null && call.function().name() != null) {
+                    names.put(call.id(), call.function().name());
                 }
             }
         }
-        if (oldToolCallIds.isEmpty()) {
-            return false;
-        }
-        boolean changed = false;
-        for (int i = 0; i < retainStart; i++) {
-            LlmClient.Message msg = history.get(i);
-            String content = msg.content();
-            if (!"tool".equals(msg.role())
-                    || msg.toolCallId() == null
-                    || !oldToolCallIds.contains(msg.toolCallId())
-                    || content == null
-                    || content.contains("<microcompact_boundary>")) {
-                continue;
-            }
-            String compacted = collapseOldToolResultContent(msg.toolCallId(), content);
-            if (!compacted.equals(content)) {
-                history.set(i, new LlmClient.Message(
-                        msg.role(), compacted, msg.reasoningContent(), msg.toolCalls(),
-                        msg.toolCallId(), msg.contentParts(), msg.source()));
-                changed = true;
-                log.info("microcompact cleared old tool_result[{}] toolCallId={} by round: {} -> {} chars",
-                        i, msg.toolCallId(), content.length(), compacted.length());
-            }
-        }
-        return changed;
+        return names;
     }
 
-    private String compactOversizeToolContent(String toolCallId, String content, int headChars, int tailChars) {
-        Path outputFile = persistMicrocompactToolOutput(toolCallId, content);
-        if (outputFile != null) {
-            return compactOversizeContent(
-                    content,
-                    headChars,
-                    tailChars,
-                    "\n\n" + renderMicrocompactBoundary(toolCallId, content.length(), outputFile)
-                            + "[完整工具结果已落盘；可用 read_file 读取 storedPath。]");
+    private static Map<String, Integer> roleTokens(List<LlmClient.Message> history) {
+        Map<String, Integer> tokens = new LinkedHashMap<>();
+        for (LlmClient.Message message : history) {
+            String role = message.role() == null ? "unknown" : message.role();
+            tokens.merge(role, TokenBudget.estimateMessagesTokens(List.of(message)), Integer::sum);
         }
-        return compactOversizeContent(content, headChars, tailChars);
+        return tokens;
     }
 
-    private String collapseOldToolResultContent(String toolCallId, String content) {
+    private static int configuredKeepRecentToolResults() {
+        String configured = System.getProperty(MICRO_COMPACT_KEEP_RECENT_PROPERTY);
+        if (configured == null || configured.isBlank()) {
+            configured = System.getenv(MICRO_COMPACT_KEEP_RECENT_ENV);
+        }
+        if (configured == null || configured.isBlank()) {
+            return MICRO_COMPACT_RETAIN_RECENT_TOOL_RESULTS;
+        }
+        try {
+            return Math.max(0, Integer.parseInt(configured.trim()));
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(MICRO_COMPACT_KEEP_RECENT_PROPERTY
+                    + " must be a non-negative integer, got: " + configured, e);
+        }
+    }
+
+    private static boolean isProtectedToolResult(String toolName, String content) {
+        String normalizedName = toolName == null ? "" : toolName.trim().toLowerCase(Locale.ROOT);
+        if (normalizedName.equals("save_memory") || normalizedName.equals("confirm_memory")
+                || normalizedName.equals("list_memory")
+                || normalizedName.equals("web_search") || normalizedName.equals("web_fetch")
+                || (normalizedName.startsWith("mcp__")
+                && (normalizedName.contains("memory") || normalizedName.contains("recall")))) {
+            return true;
+        }
+        if (isConfiguredExcludedTool(normalizedName)) {
+            return true;
+        }
+        String normalizedContent = content.toLowerCase(Locale.ROOT);
+        return normalizedContent.contains("toolstatus=error")
+                || normalizedContent.contains("execution_failed")
+                || normalizedContent.matches("(?s).*exit code:\\s*[1-9][0-9]*.*")
+                || normalizedContent.contains("build failure")
+                || normalizedContent.contains("工具执行失败")
+                || normalizedContent.contains("命令执行失败");
+    }
+
+    private static boolean isConfiguredExcludedTool(String toolName) {
+        String configured = System.getProperty(MICRO_COMPACT_EXCLUDE_TOOLS_PROPERTY);
+        if (configured == null || configured.isBlank()) {
+            configured = System.getenv(MICRO_COMPACT_EXCLUDE_TOOLS_ENV);
+        }
+        if (configured == null || configured.isBlank()) return false;
+        for (String raw : configured.split(",")) {
+            String pattern = raw.trim().toLowerCase(Locale.ROOT);
+            if (pattern.isEmpty()) continue;
+            if (pattern.endsWith("*") && toolName.startsWith(pattern.substring(0, pattern.length() - 1))) {
+                return true;
+            }
+            if (toolName.equals(pattern)) return true;
+        }
+        return false;
+    }
+
+    private String collapseOldToolResultContent(String toolCallId, String toolName, String content) {
         Path outputFile = persistMicrocompactToolOutput(toolCallId, content);
         if (outputFile == null) {
             return content;
         }
-        return renderMicrocompactBoundary(toolCallId, content.length(), outputFile)
-                + "[旧工具结果已按轮次折叠；可用 read_file 读取 storedPath。]";
+        return renderMicrocompactBoundary(toolCallId, toolName, content.length(), outputFile)
+                + "[旧工具结果已回收；可用 read_file 读取 storedPath。]";
     }
 
     private Path persistMicrocompactToolOutput(String toolCallId, String content) {
@@ -699,92 +774,19 @@ public class ConversationHistoryCompactor {
         }
     }
 
-    private String compactOversizeMessageContent(int index,
-                                                 LlmClient.Message message,
-                                                 String content,
-                                                 int headChars,
-                                                 int tailChars) {
-        String messageId = (message.role() == null ? "message" : message.role())
-                + "-" + index + "-" + content.length() + "-" + Integer.toUnsignedString(content.hashCode());
-        Path outputFile = persistMicrocompactMessageContent(messageId, content);
-        if (outputFile == null) {
-            return compactOversizeContent(content, headChars, tailChars);
-        }
-        return compactOversizeContent(
-                content,
-                headChars,
-                tailChars,
-                "\n\n" + renderMicrocompactMessageBoundary(messageId, content.length(), outputFile)
-                        + "[完整消息已落盘；可用 read_file 读取 storedPath。]");
-    }
-
-    private Path persistMicrocompactMessageContent(String messageId, String content) {
-        if (microcompactOutputRoot == null) {
-            return null;
-        }
-        try {
-            Path outputDir = microcompactOutputRoot
-                    .resolve(MICROCOMPACT_MESSAGE_OUTPUTS_DIR)
-                    .resolve(MICROCOMPACT_SESSION_ID);
-            Files.createDirectories(outputDir);
-            Path outputFile = outputDir.resolve(sanitizeFileName(messageId) + ".txt")
-                    .toAbsolutePath()
-                    .normalize();
-            if (!outputFile.startsWith(microcompactOutputRoot)) {
-                return null;
-            }
-            Files.writeString(outputFile, content, StandardCharsets.UTF_8);
-            return outputFile;
-        } catch (IOException | RuntimeException e) {
-            log.warn("failed to persist microcompact message {}; fallback to inline excerpt",
-                    messageId, e);
-            return null;
-        }
-    }
-
-    private static String renderMicrocompactBoundary(String toolCallId, int originalChars, Path outputFile) {
+    private String renderMicrocompactBoundary(String toolCallId,
+                                              String toolName,
+                                              int originalChars,
+                                              Path outputFile) {
+        String storedPath = microcompactOutputRoot.relativize(outputFile)
+                .toString().replace('\\', '/');
         return "<microcompact_boundary>\n"
                 + "type=tool_result\n"
                 + "toolCallId=" + toolCallId + "\n"
+                + "toolName=" + toolName + "\n"
                 + "originalChars=" + originalChars + "\n"
-                + "storedPath=" + outputFile + "\n"
+                + "storedPath=" + storedPath + "\n"
                 + "</microcompact_boundary>\n";
-    }
-
-    private static String renderMicrocompactMessageBoundary(String messageId,
-                                                             int originalChars,
-                                                             Path outputFile) {
-        return "<microcompact_boundary>\n"
-                + "type=message\n"
-                + "messageId=" + messageId + "\n"
-                + "originalChars=" + originalChars + "\n"
-                + "storedPath=" + outputFile + "\n"
-                + "</microcompact_boundary>\n";
-    }
-
-    /**
-     * 头尾截断单条超大 content：保留头 {@code headChars} + 尾 {@code tailChars}，中间替换为标记。
-     * 中间能省出的量太小（标记反而更长）时返回原文不截断。
-     *
-     * <p>扩展点：后续可改为把原文写盘、返回 "[结果已存盘 path=… 可重读]" 的引用形态，
-     * 使被截断内容可重新取回。
-     */
-    private static String compactOversizeContent(String content, int headChars, int tailChars) {
-        return compactOversizeContent(content, headChars, tailChars,
-                "\n\n[... microcompact 截断 %d 字符；已保留头尾，完整内容可重新执行对应工具获取 ...]");
-    }
-
-    private static String compactOversizeContent(String content, int headChars, int tailChars, String marker) {
-        int removed = content.length() - headChars - tailChars;
-        if (removed <= 200) {
-            return content;
-        }
-        String head = content.substring(0, headChars);
-        String tail = content.substring(content.length() - tailChars);
-        String middle = marker.contains("%d") ? String.format(Locale.ROOT, marker, removed) : marker;
-        return head
-                + middle + "\n\n"
-                + tail;
     }
 
     private static String sanitizeFileName(String value) {
@@ -801,17 +803,14 @@ public class ConversationHistoryCompactor {
      * <p>每次 LLM 调用按以下规则处理：
      * <ul>
      *   <li>成功 → 返回 summary</li>
-     *   <li>抛 IOException 且消息含 PTL 关键词 → 丢掉 oldMsgs 头部
-     *       {@link #PTL_RETRY_DROP_RATIO} 的 user 边界对齐 round，重试
+     *   <li>抛 IOException 且消息含 PTL 关键词 → 收紧请求预算后重新分片，重试
      *       （最多 {@link #MAX_PTL_RETRIES} 次）</li>
      *   <li>抛 IOException 且非 PTL → 直接 recordFailure 并返回 giveUp</li>
      *   <li>3 次 PTL 重试仍失败 → recordFailure(ptl_exhausted) 并返回 giveUp</li>
      *   <li>summary 空 → recordFailure(empty_summary) 并返回 giveUp</li>
      * </ul>
      *
-     * <p>注意：增量摘要场景（prev != null）只对 newMsgs 做 PTL retry，不丢
-     * prev.summaryText（那是上一轮的事实，丢了等于失忆）。如果 newMsgs
-     * 太大触发 PTL，丢 newMsgs 头部即可。
+     * <p>完整历史、已有摘要和新增消息在重试之间保持不变。
      */
     private SummaryAttempt summarizeWithPtlRetry(PreviousSummary prev,
                                                   List<LlmClient.Message> history,
@@ -862,17 +861,14 @@ public class ConversationHistoryCompactor {
                     return SummaryAttempt.giveUp();
                 }
 
-                List<LlmClient.Message> trimmed = dropOldestRoundsByRatio(currentMsgs, PTL_RETRY_DROP_RATIO);
-                if (trimmed.size() == currentMsgs.size() || trimmed.isEmpty()) {
-                    // 实在切不动了（消息太少或全是 user 边界外的内容）→ 放弃 PTL retry
-                    log.warn("conversation summary PTL but cannot drop more rounds; give up", e);
-                    recordFailure("ptl_uncuttable");
+                int reducedBudget = (int) (summaryInputBudgetTokens() * PTL_RETRY_BUDGET_RATIO);
+                if (reducedBudget < 1) {
+                    recordFailure("ptl_budget_exhausted");
                     return SummaryAttempt.giveUp();
                 }
-                int dropped = currentMsgs.size() - trimmed.size();
-                log.info("conversation summary PTL on attempt {}/{}: dropped {} oldest messages, retrying with {}",
-                        ptlAttempts, MAX_PTL_RETRIES, dropped, trimmed.size());
-                currentMsgs = trimmed;
+                learnedSummaryInputBudget = reducedBudget;
+                log.info("conversation summary PTL on attempt {}/{}: request budget reduced to {}, retaining all {} messages",
+                        ptlAttempts, MAX_PTL_RETRIES, reducedBudget, currentMsgs.size());
             }
         }
     }
@@ -894,39 +890,6 @@ public class ConversationHistoryCompactor {
             cur = cur.getCause();
         }
         return false;
-    }
-
-    /**
-     * 按 user 边界把消息列表切成 round（每个 round 以 user 开头），丢掉头部
-     * 占比 {@code dropRatio} 的 round（向上取整，至少丢 1 个），保留剩下的。
-     *
-     * <p>关键约束：保留段必须以 user 消息起头，避免出现 "tool_result 没有
-     * 对应 tool_call" 的协议错误。如果丢掉头部后第一条不是 user，会继续
-     * 往后丢直到对齐。
-     */
-    static List<LlmClient.Message> dropOldestRoundsByRatio(List<LlmClient.Message> messages, double dropRatio) {
-        if (messages == null || messages.size() <= 1) return List.of();
-
-        // 1) 切分成 round：每个 round 从 user 边界开始
-        List<Integer> roundStarts = new ArrayList<>();
-        for (int i = 0; i < messages.size(); i++) {
-            if ("user".equals(messages.get(i).role())) {
-                roundStarts.add(i);
-            }
-        }
-        if (roundStarts.size() <= 1) {
-            // 只有 0-1 个 user 边界 → 没法切，调用方应放弃 PTL retry
-            return messages;
-        }
-
-        // 2) 计算丢多少个 round（至少 1 个）
-        int totalRounds = roundStarts.size();
-        int dropCount = (int) Math.ceil(totalRounds * dropRatio);
-        dropCount = Math.max(1, Math.min(dropCount, totalRounds - 1)); // 至少留 1 个 round
-
-        // 3) 切割：保留从 roundStarts.get(dropCount) 开始的部分
-        int keepFrom = roundStarts.get(dropCount);
-        return new ArrayList<>(messages.subList(keepFrom, messages.size()));
     }
 
     /** 摘要尝试结果。terminated=true 时调用方应当结束本次 compactIfNeeded。 */
@@ -998,8 +961,8 @@ public class ConversationHistoryCompactor {
     }
 
     /**
-     * user 边界对齐会带来一个常见超预算场景：边界所在的单条消息本身就大于尾部预算。
-     * 先把边界向后移动，尽量把最旧的保留轮次送入摘要；只剩单条大消息时再做可恢复截断。
+     * user 边界对齐会带来尾部超预算场景。只移动安全的 user 边界，绝不通过规则截断
+     * user / assistant 或最近工具结果；仍然超限时交给后续模型语义压缩和窗口保护处理。
      */
     private int fitRecentTailWithinTokenBudget(List<LlmClient.Message> history,
                                                int systemEnd,
@@ -1016,32 +979,6 @@ public class ConversationHistoryCompactor {
             splitIdx = nextUser;
         }
 
-        int tailTokens = estimateRangeTokens(history, splitIdx, history.size());
-        if (tailTokens <= retainTokens) {
-            return splitIdx;
-        }
-
-        // 没有可再前移的安全 user 边界时，只压缩保留区最旧消息，优先保留最新内容。
-        for (int i = splitIdx; i < history.size() && tailTokens > retainTokens; i++) {
-            LlmClient.Message message = history.get(i);
-            if (message.content() == null || message.content().isBlank()
-                    || message.hasContentParts()) {
-                continue;
-            }
-            int messageTokens = TokenBudget.estimateMessagesTokens(List.of(message));
-            int allowed = Math.max(128, messageTokens - (tailTokens - retainTokens));
-            if (allowed >= messageTokens) {
-                continue;
-            }
-            String compacted = compactMessageToTokenBudget(i, message, allowed);
-            if (compacted.length() < message.content().length()) {
-                history.set(i, new LlmClient.Message(
-                        message.role(), compacted, message.reasoningContent(),
-                        message.toolCalls(), message.toolCallId(), message.contentParts(),
-                        message.source()));
-                tailTokens = estimateRangeTokens(history, splitIdx, history.size());
-            }
-        }
         return splitIdx;
     }
 
@@ -1059,37 +996,6 @@ public class ConversationHistoryCompactor {
             return 0;
         }
         return TokenBudget.estimateMessagesTokens(history.subList(start, end));
-    }
-
-    private String compactMessageToTokenBudget(int index,
-                                               LlmClient.Message message,
-                                               int targetTokens) {
-        String content = message.content();
-        String messageId = (message.role() == null ? "message" : message.role())
-                + "-budget-" + index + "-" + content.length()
-                + "-" + Integer.toUnsignedString(content.hashCode());
-        Path outputFile = persistMicrocompactMessageContent(messageId, content);
-        String marker = outputFile == null
-                ? "\n\n[... 消息已按原文 token 预算截断 %d 字符；中间内容不可直接展示 ...]"
-                : "\n\n" + renderMicrocompactMessageBoundary(messageId, content.length(), outputFile)
-                        + "[完整消息已落盘；可用 read_file 读取 storedPath。]";
-        int retainedChars = Math.min(content.length() - 1,
-                Math.max(256, Math.max(1, targetTokens) * 3));
-        String candidate = content;
-        for (int attempt = 0; attempt < 10; attempt++) {
-            int head = Math.max(64, retainedChars / 2);
-            int tail = Math.max(64, retainedChars - head);
-            candidate = compactOversizeContent(content, head, tail, marker);
-            int estimated = TokenBudget.estimateMessagesTokens(List.of(
-                    new LlmClient.Message(message.role(), candidate,
-                            message.reasoningContent(), message.toolCalls(), message.toolCallId(),
-                            message.contentParts(), message.source())));
-            if (estimated <= targetTokens || retainedChars <= 256) {
-                return candidate;
-            }
-            retainedChars = Math.max(256, retainedChars * 3 / 4);
-        }
-        return candidate;
     }
 
     /**
@@ -1125,7 +1031,7 @@ public class ConversationHistoryCompactor {
     /**
      * 真正调 LLM 摘要 —— Map-Reduce 形态：
      * <ol>
-     *   <li><b>Map</b>: 把整段历史按 {@link #MAP_CHUNK_CHARS} 字符分片，
+     *   <li><b>Map</b>: 把整段历史按摘要模型的完整请求 Token 预算分片，
      *       每片送一次 LLM 出片摘要 —— 历史所有内容都进 LLM 视野，不再 first-N 截断</li>
      *   <li><b>Reduce</b>: 多片摘要合并为最终摘要；
      *       如果片数 > {@link #MAX_REDUCE_FANIN}，先两两合并降阶再最终合并</li>
@@ -1153,26 +1059,29 @@ public class ConversationHistoryCompactor {
             full.append("\n\n");
         }
 
-        // 2) 单片场景走原逻辑：直接一次摘要
-        if (full.length() <= MAP_CHUNK_CHARS) {
+        // 2) 整体请求能放进摘要模型窗口时直接单次摘要。固定字符阈值会把长窗口模型
+        // 本可一次处理的历史强行拆成多次 Map + Reduce，增加 Token、延迟和语义损失。
+        if (fitsSinglePassSummary(full.toString())) {
             return summarizeSingle(full.toString());
         }
 
         // 3) Map: 切片后逐片摘要
-        List<String> chunks = splitIntoChunks(full.toString(), MAP_CHUNK_CHARS);
+        String mapSystem = "你是一个对话摘要助手，专注于本片段事实保留，不输出片段外信息。";
+        List<String> chunks = new ArrayList<>();
+        String text = full.toString();
+        for (int start = 0; start < text.length();) {
+            // 先按最大序号开销分片，实际片段序号只会占用更少 Token。
+            int end = nextChunkEnd(text, start, mapSystem,
+                    chunk -> String.format(MAP_PROMPT, Integer.MAX_VALUE, Integer.MAX_VALUE, chunk));
+            chunks.add(text.substring(start, end));
+            start = end;
+        }
         log.info("Map-Reduce summarize: {} chars -> {} chunks", full.length(), chunks.size());
         List<String> mapSummaries = new ArrayList<>();
         for (int i = 0; i < chunks.size(); i++) {
             String mapPrompt = String.format(MAP_PROMPT, i + 1, chunks.size(), chunks.get(i));
-            String mapSummary = chatOnce(
-                    "你是一个对话摘要助手，专注于本片段事实保留，不输出片段外信息。",
-                    mapPrompt);
-            if (mapSummary != null && !mapSummary.isBlank()) {
-                mapSummaries.add(mapSummary.trim());
-            }
-        }
-        if (mapSummaries.isEmpty()) {
-            return null;
+            String mapSummary = requireSummary(chatOnce(mapSystem, mapPrompt));
+            mapSummaries.add(mapSummary.trim());
         }
 
         // 4) Reduce: 合并片摘要；若片数过多先两两合并降阶
@@ -1209,31 +1118,21 @@ public class ConversationHistoryCompactor {
             }
             newContent.append("\n\n");
         }
-        // 新增内容如果太大，先对新增部分做 Map-Reduce，再传给 INCREMENTAL_PROMPT
-        // 这是兜底：增量场景下新增内容通常 < MAP_CHUNK_CHARS，不会触发
-        String newDigest;
-        if (newContent.length() <= MAP_CHUNK_CHARS) {
-            newDigest = newContent.toString();
-        } else {
-            log.info("Incremental: new content {} chars > {} cap, sub-summarize first",
-                    newContent.length(), MAP_CHUNK_CHARS);
-            List<String> chunks = splitIntoChunks(newContent.toString(), MAP_CHUNK_CHARS);
-            List<String> mapSummaries = new ArrayList<>();
-            for (int i = 0; i < chunks.size(); i++) {
-                String mapPrompt = String.format(MAP_PROMPT, i + 1, chunks.size(), chunks.get(i));
-                String mapSummary = chatOnce(
-                        "你是一个对话摘要助手，专注于本片段事实保留，不输出片段外信息。",
-                        mapPrompt);
-                if (mapSummary != null && !mapSummary.isBlank()) {
-                    mapSummaries.add(mapSummary.trim());
-                }
-            }
-            newDigest = String.join("\n\n", mapSummaries);
+        String rolling = previousSummary;
+        String text = newContent.toString();
+        String system = "你是一个滚动摘要变更提取器，只提出受限 JSON 操作，不直接重写摘要。";
+        for (int start = 0; start < text.length();) {
+            String base = rolling;
+            Function<String, String> prompt = chunk -> String.format(INCREMENTAL_PROMPT, base, chunk);
+            int end = nextChunkEnd(text, start, system, prompt);
+            String proposedOperations = requireSummary(chatOnce(system, prompt.apply(text.substring(start, end))));
+            rolling = applyIncrementalOperations(base, proposedOperations);
+            start = end;
         }
-        String prompt = String.format(INCREMENTAL_PROMPT, previousSummary, newDigest);
-        String proposedOperations = chatOnce(
-                "你是一个滚动摘要变更提取器，只提出受限 JSON 操作，不直接重写摘要。",
-                prompt);
+        return rolling;
+    }
+
+    private String applyIncrementalOperations(String previousSummary, String proposedOperations) throws IOException {
         SummaryLifecycleReducer.Result reduced =
                 new SummaryLifecycleReducer().apply(previousSummary, proposedOperations);
         if (reduced.applied()) {
@@ -1247,47 +1146,94 @@ public class ConversationHistoryCompactor {
             log.warn("incremental summarizer returned legacy nine-section snapshot; normalized in compatibility mode");
             return legacy.render();
         }
-        log.warn("incremental summary operations rejected ({}); keep previous summary", reduced.reason());
-        return previousSummary;
+        throw new IOException("Incremental summary operations rejected; original history retained");
     }
 
     /**
      * Reduce: 多片摘要合并。
-     * <p>如果一次性合并的字符总量超过 {@link #MAP_CHUNK_CHARS}，
-     * 先做"二次 Map"——每 {@link #MAX_REDUCE_FANIN} 片合并成一段中间摘要，
-     * 再递归 Reduce，避免 Reduce prompt 撑爆 window。
+     * <p>每批按完整请求 Token 预算装填，片数上限仅限制归并复杂度。
      */
     private String reduceSummaries(List<String> summaries) throws IOException {
         if (summaries.size() == 1) {
             return summaries.get(0);
         }
-        // 估算 join 后总长
-        int totalChars = summaries.stream().mapToInt(String::length).sum() + summaries.size() * 30;
-        if (totalChars <= MAP_CHUNK_CHARS && summaries.size() <= MAX_REDUCE_FANIN) {
-            // 一次性 Reduce
-            return doReduceOnce(summaries);
-        }
-        // 否则分批先合并降阶，再递归
         List<String> intermediate = new ArrayList<>();
-        for (int i = 0; i < summaries.size(); i += MAX_REDUCE_FANIN) {
-            List<String> batch = summaries.subList(i, Math.min(i + MAX_REDUCE_FANIN, summaries.size()));
-            if (batch.size() == 1) {
-                intermediate.add(batch.get(0));
-            } else {
-                intermediate.add(doReduceOnce(batch));
+        for (int start = 0; start < summaries.size();) {
+            int end = start + 1;
+            while (end < summaries.size() && end - start < MAX_REDUCE_FANIN
+                    && fitsSummaryRequest(reduceSystem(), reducePrompt(summaries.subList(start, end + 1)))) {
+                end++;
             }
+            List<String> batch = summaries.subList(start, end);
+            intermediate.add(batch.size() == 1 ? batch.get(0) : doReduceOnce(batch));
+            start = end;
+        }
+        if (intermediate.size() >= summaries.size()) {
+            throw new IOException("Partial summaries cannot be merged within the model input budget; original history retained");
         }
         return reduceSummaries(intermediate);
     }
 
     private String doReduceOnce(List<String> summaries) throws IOException {
+        return requireSummary(chatOnce(reduceSystem(), reducePrompt(summaries)));
+    }
+
+    private static String reduceSystem() {
+        return "你是一个摘要合并助手，必须保留所有片段里出现过的精确实体原文。";
+    }
+
+    private static String reducePrompt(List<String> summaries) {
         StringBuilder joined = new StringBuilder();
         for (int i = 0; i < summaries.size(); i++) {
             joined.append("--- 片段摘要 ").append(i + 1).append(" / ").append(summaries.size()).append(" ---\n");
             joined.append(summaries.get(i)).append("\n\n");
         }
-        String prompt = String.format(REDUCE_PROMPT, joined);
-        return chatOnce("你是一个摘要合并助手，必须保留所有片段里出现过的精确实体原文。", prompt);
+        return String.format(REDUCE_PROMPT, joined);
+    }
+
+    private boolean fitsSinglePassSummary(String content) {
+        return fitsSummaryRequest("你是一个对话摘要助手，只输出摘要本身，不输出元描述。",
+                String.format(SUMMARY_PROMPT, content));
+    }
+
+    private boolean fitsSummaryRequest(String system, String prompt) {
+        return TokenBudget.estimateMessagesTokens(List.of(
+                LlmClient.Message.system(system), LlmClient.Message.user(prompt))) <= summaryInputBudgetTokens();
+    }
+
+    private int summaryInputBudgetTokens() {
+        int modelBudget = ContextProfile.from(llmClient).compressionTriggerTokens();
+        return learnedSummaryInputBudget > 0 ? Math.min(modelBudget, learnedSummaryInputBudget) : modelBudget;
+    }
+
+    private int nextChunkEnd(String text, int start, String system,
+                             Function<String, String> prompt) throws IOException {
+        if (!fitsSummaryRequest(system, prompt.apply(""))) {
+            throw new IOException("Summary base and instructions exceed the model input budget; original history retained");
+        }
+        int low = start;
+        int high = text.length();
+        while (low < high) {
+            int mid = low + (high - low + 1) / 2;
+            if (fitsSummaryRequest(system, prompt.apply(text.substring(start, mid)))) low = mid;
+            else high = mid - 1;
+        }
+        int end = low;
+        if (end < text.length() && end > start && Character.isHighSurrogate(text.charAt(end - 1))
+                && Character.isLowSurrogate(text.charAt(end))) end--;
+        if (end <= start) throw new IOException("No room for a complete character in summary request");
+        if (end < text.length()) {
+            int boundary = text.lastIndexOf("\n\n", end - 2);
+            if (boundary > start + (end - start) / 2) end = boundary + 2;
+        }
+        return end;
+    }
+
+    private static String requireSummary(String summary) throws IOException {
+        if (summary == null || summary.isBlank()) {
+            throw new IOException("Summary response is empty; original history retained");
+        }
+        return summary;
     }
 
     /**
@@ -1345,31 +1291,27 @@ public class ConversationHistoryCompactor {
                 LlmClient.Message.system(systemPrompt),
                 LlmClient.Message.user(userPrompt)
         );
-        LlmClient.ChatResponse response = llmClient.chat(req, null);
-        return response == null ? null : response.content();
-    }
-
-    /**
-     * 按字符上限切片。尽量在双换行（消息边界）切，否则在硬上限处切。
-     * 不再 first-N 截断——整段历史都会进 LLM 视野。
-     */
-    private static List<String> splitIntoChunks(String text, int chunkSize) {
-        List<String> chunks = new ArrayList<>();
-        int n = text.length();
-        int start = 0;
-        while (start < n) {
-            int end = Math.min(start + chunkSize, n);
-            if (end < n) {
-                // 优先在 "\n\n" 边界切
-                int boundary = text.lastIndexOf("\n\n", end);
-                if (boundary > start + chunkSize / 2) {
-                    end = boundary + 2; // 包含 \n\n
-                }
-            }
-            chunks.add(text.substring(start, end));
-            start = end;
+        if (TokenBudget.estimateMessagesTokens(req) > summaryInputBudgetTokens()) {
+            throw new IOException("Summary request exceeds local input budget; original history retained");
         }
-        return chunks;
+        LlmClient.ChatResponse response;
+        try {
+            response = llmClient.chat(req, null);
+        } catch (com.devcli.llm.LlmException failure) {
+            if (Boolean.parseBoolean(System.getProperty(COMPACTION_METRICS_PROPERTY, "false"))) {
+                System.err.printf(Locale.ROOT,
+                        "[context-compaction] kind=summary-error code=%s status=%d%n",
+                        failure.code(), failure.statusCode());
+            }
+            throw failure;
+        }
+        if (response != null && Boolean.parseBoolean(
+                System.getProperty(COMPACTION_METRICS_PROPERTY, "false"))) {
+            System.err.printf(Locale.ROOT,
+                    "[context-compaction] kind=summary-call inputTokens=%d outputTokens=%d cachedInputTokens=%d%n",
+                    response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
+        }
+        return response == null ? null : response.content();
     }
 
     /**
@@ -1484,6 +1426,30 @@ public class ConversationHistoryCompactor {
     }
 
     public int retainRecentTokens() {
-        return retainRecentTokens;
+        return adaptiveRetainBudget
+                ? Math.max(1, (int) (ContextProfile.from(llmClient).maxContextWindow() * DEFAULT_RETAIN_WINDOW_RATIO))
+                : retainRecentTokens;
+    }
+
+    public static boolean isCompactionEnabled(java.util.Properties properties,
+                                              java.util.Map<String, String> environment) {
+        String configured = properties == null ? null : properties.getProperty(COMPACTION_ENABLED_PROPERTY);
+        if ((configured == null || configured.isBlank()) && environment != null) {
+            configured = environment.get(COMPACTION_ENABLED_ENV);
+        }
+        if (configured == null || configured.isBlank()) {
+            return true;
+        }
+        String normalized = configured.trim().toLowerCase(Locale.ROOT);
+        if ("true".equals(normalized) || "1".equals(normalized) || "yes".equals(normalized)
+                || "on".equals(normalized)) {
+            return true;
+        }
+        if ("false".equals(normalized) || "0".equals(normalized) || "no".equals(normalized)
+                || "off".equals(normalized)) {
+            return false;
+        }
+        throw new IllegalArgumentException(COMPACTION_ENABLED_PROPERTY
+                + " must be true|false, got: " + configured);
     }
 }

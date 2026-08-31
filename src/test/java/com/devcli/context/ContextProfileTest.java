@@ -119,4 +119,20 @@ class ContextProfileTest {
         assertEquals(230_400, profile.compressionTriggerTokens());
         assertEquals(222_400, profile.historyTriggerTokens(8_000));
     }
+
+    @Test
+    void explicitCompressionTriggerOverrideIsBoundedAndApplied() {
+        String key = ContextProfile.COMPRESSION_TRIGGER_TOKENS_PROPERTY;
+        String previous = System.getProperty(key);
+        try {
+            System.setProperty(key, "20000");
+            assertEquals(20_000, ContextProfile.custom(128_000, 4_000).compressionTriggerTokens());
+            System.setProperty(key, "0");
+            assertThrows(IllegalArgumentException.class,
+                    () -> ContextProfile.custom(128_000, 4_000).compressionTriggerTokens());
+        } finally {
+            if (previous == null) System.clearProperty(key);
+            else System.setProperty(key, previous);
+        }
+    }
 }

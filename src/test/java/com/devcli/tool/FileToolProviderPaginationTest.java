@@ -82,7 +82,7 @@ class FileToolProviderPaginationTest {
     }
 
     @Test
-    void readFileRejectsMixedLineAndCharacterRanges() throws Exception {
+    void readFilePrefersLineRangeWhenCharacterRangeIsAlsoPresent() throws Exception {
         Files.writeString(projectRoot.resolve("mixed.txt"), "one\ntwo\nthree\n");
 
         try (ToolRegistry registry = new ToolRegistry()) {
@@ -91,9 +91,9 @@ class FileToolProviderPaginationTest {
                     "read_file",
                     "{\"path\":\"mixed.txt\",\"start_line\":1,\"offset\":2}");
 
-            assertEquals(ToolStatus.REJECTED, output.status());
-            assertEquals(ToolErrorCode.INVALID_ARGUMENTS, output.errorCode());
-            assertTrue(output.text().contains("不能"), output.text());
+            assertTrue(output.isSuccess(), output.text());
+            assertTrue(output.text().contains("已优先使用 start_line/end_line"), output.text());
+            assertTrue(output.text().contains("one"), output.text());
         }
     }
 

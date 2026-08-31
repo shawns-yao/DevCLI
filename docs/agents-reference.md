@@ -44,7 +44,7 @@ Worker 完成正常工具循环后才生成 PatchSet；未解决的写入/命令
 
 | 数据 | 默认路径 | 覆盖方式 |
 |------|----------|----------|
-| 长期记忆 | `~/.devcli/memory/long_term_memory.json` | `-Ddevcli.memory.dir` |
+| 长期记忆 | `~/.devcli/memory/memory_vectors.db` + `records/**/*.md` | `DEVCLI_MEMORY_DIR` / `-Ddevcli.memory.dir` |
 | RAG 索引 | `~/.devcli/rag/codebase.db` | `-Ddevcli.rag.dir` |
 | 审计日志 | `~/.devcli/audit/audit-YYYY-MM-DD.jsonl` | `DEVCLI_AUDIT_DIR` / `-Ddevcli.audit.dir` |
 | Side-Git 快照 | `~/.devcli/snapshots/<project_hash>/<worktree_hash>/.git` | `DEVCLI_SNAPSHOT_DIR` / `-Ddevcli.snapshot.dir` |
@@ -132,8 +132,8 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 唯一公开入口为 `/plan`，固定进入 Planner/Worker/Reviewer 链路；旧 `/plan --team` 与 `/team` 仅保留解析兼容，不再出现在帮助和补全中。串行或并行由 DAG 就绪状态与资源冲突决定。
 - `MultiAgentBatchExecutor` 委托 `OrchestrationWaveExecutor` 完成有界并发、异常归属、输出隔离和稳定顺序归并；`PlanExecuteAgent` 与 STANDARD profile 仅保留内部兼容，不进入 CLI 路由。
 - 三角色：Planner / Worker(默认 2 个) / Reviewer
-- 流程：规划与确定性预检 → Reviewer 计划语义评审 → 用户确认 → 按依赖分配 Worker → Pre-Review / 产物 Reviewer → 未通过有界重试
-- 计划 Reviewer 使用独立、无工具上下文，逐项输出需求覆盖、节点引用、验收标准评审和结构化问题；critical/high 标准必须给出反例输入及预期失败信号。输出前后允许少量说明文本，但只提取包含 `approved` 的完整合法 JSON 对象；无法提取时由同一 Reviewer 进行一次协议修复，仍无效才失败关闭。可选的独立 Provider / 模型通过 `DEVCLI_TEAM_REVIEWER_PROVIDER` / `DEVCLI_TEAM_REVIEWER_MODEL` 配置，显式配置不可用时失败关闭。拒绝反馈给 Planner 有界修复。恢复未完成 checkpoint 时重新评审，避免旧计划绕过新门禁。
+- 流程：规划与确定性预检 → Reviewer 计划语义建议 → 用户确认 → 按依赖分配 Worker → Pre-Review 硬检查 / 产物 Reviewer 建议 → 归并
+- 计划 Reviewer 使用独立、无工具上下文，逐项输出需求覆盖、节点引用、验收标准评审和结构化问题；critical/high 标准必须给出反例输入及预期失败信号。输出前后允许少量说明文本，只提取包含 `approved` 的完整合法 JSON 对象；无法提取时进行一次协议修复。拒绝、协议损坏和模型故障均作为可见建议，不阻断已通过确定性预检的计划。可选的独立 Provider / 模型通过 `DEVCLI_TEAM_REVIEWER_PROVIDER` / `DEVCLI_TEAM_REVIEWER_MODEL` 配置。
 - 每条验收标准必须包含判定信号、`TOOL|HUMAN` 验证方式、验证器和 `applies_to`。目标只能是有效 DAG 节点或 `FINAL`；普通节点只接收自己的标准，Final integration 接收全部标准。缺失字段、重复 ID、未知节点、未知工具或具有项目写入副作用的自动验证器会在执行前拒绝。
 - Planner 输出先做协议与结构校验：支持从前后说明中提取完整 JSON；步骤类型限制为固定枚举，纯读取或检查语义不能声明为 `FILE_WRITE`。解析失败、DAG 无效或阻塞性空工作区纯检查步骤会触发有界修复。修复前清空 Planner 历史，并把原始任务、失败原因、无效输出预览和固定 schema 放入新请求。默认修复 2 次，可通过 `devcli.team.planner.repair.max.attempts` / `DEVCLI_TEAM_PLANNER_REPAIR_MAX_ATTEMPTS` 调整到 `[0, 3]`。
 - Planner 不调用工具；空工作区属于合法状态。目录和文件存在性检查不能成为阻塞实现的独立步骤，必要检查并入首个实现步骤并采用“若不存在则创建”语义。
@@ -144,7 +144,8 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - checkpoint 协议版本 10 通过 `RecoveryState` 恢复共享 artifact、验收方式、验证器、适用节点、pending PatchSet 写前日志及文件权限、待验证 PatchSet 附件、稳定子代理身份、步骤分配、消息游标、有界且按步骤归属的 AttemptDigest、已消耗的在位重做次数和重做失败现场；旧协议缺失适用节点时迁移为 `FINAL`，缺失验证字段时迁移为人工验收。Pre-Review 环境失败不合并未验证代码，PatchSet 以哈希和权限元数据加私有内容旁路保存；resume 将它及下游节点重置到待执行状态，在新隔离工作区恢复并重新验证。恢复保持原步骤绑定和原重做额度，只注入 schema 兼容的最近摘要及当前步骤失败尝试，不恢复完整私有对话。
 - Plan Worker 每次尝试都通过隔离 ToolRegistry 的 `runWithResourceLease(stepId, ...)` 绑定资源租约上下文，并在 finally 中释放；并行工具线程显式继承步骤租约归属。ToolRegistry 统一托管 `ResourceLeaseMaintenance`，project fork 共享同一个定时线程；最后一个注册关闭后停止。默认每 60 秒清理过期租约，可通过 `devcli.resource.lease.cleanup.interval.seconds` / `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
 - Plan 副作用步骤在隔离工作区执行；`ToolEffect` / `ToolAccessScope` 在工具管线中强制限制非隔离任务只能使用只读能力。隔离命令和 Pre-Review 默认通过受限 Docker 执行，无网络且失败关闭；每次执行使用唯一容器名，超时或取消时终止客户端进程树并有界执行 `docker rm -f`；显式 `HOST_WARN` 只允许 Maven 离线执行 `clean/validate/compile/test-compile/test/package/verify`、`javac` 与只读 Git，拒绝命令行指定的任意 Maven 插件和发布阶段，并输出主机风险提示，不自动回退。非默认 Maven 仓库需通过 `DEVCLI_COMMAND_SANDBOX_MAVEN_REPOSITORY` 或系统属性显式指定存在的绝对目录，Docker 仅对 Maven 命令只读挂载，`HOST_WARN` 注入 `maven.repo.local`。PatchSet 逐文件流式哈希，只保留变更内容；JVM 公平锁与跨进程文件锁共同串行提交，锁缓存按活跃使用者计数退役。应用前保存 before/after 哈希和原文件备份；备份限制为当前所有者访问，孤儿日志按 TTL 清理，恢复时提升完成、继续待执行或回滚，失败回滚会报告具体路径。
-- `PreReviewVerifier` 独立负责 Maven/javac 选择、Java 文件扫描、超时、进程输出解码和失败摘要。Maven 多模块根目录即使没有根级 Java 源码也执行硬检查，存在 `mvnw` 时优先使用 Wrapper；仅按依赖解析、仓库写入、工具链、超时、取消和沙箱故障的精确信号识别环境失败，普通编译错误中的 `cannot access` 仍归为代码失败。Reviewer 声称 TOOL 标准通过时，声明验证器必须出现在本轮真实成功工具调用中；实际执行的 Pre-Review 命令计为 `execute_command` 证据。Reviewer 重试和节点重做耗尽后，结果显式输出失败步骤、额度、最后原因、checkpoint 和人工处理选项。
+- Windows 的已验证 `HOST_WARN` 命令使用 `cmd.exe` 执行，保留 Maven `-Dname=value` 参数；普通主机命令仍使用 PowerShell。命令指纹保留引号差异，纠正后的命令不会与先前失败调用误合并。
+- `PreReviewVerifier` 独立负责 Maven/javac 选择、Java 文件扫描、超时、进程输出解码和失败摘要。Maven 多模块根目录即使没有根级 Java 源码也执行硬检查；Maven 项目固定使用沙箱镜像内置的 `mvn`，复用显式只读本地仓库，不通过 Wrapper 在禁网临时容器中重复下载 Maven 本体。仅按依赖解析、仓库写入、工具链、超时、取消和沙箱故障的精确信号识别环境失败，普通编译错误中的 `cannot access` 仍归为代码失败。编译、测试等确定性失败继续阻断；只有 Pre-Review 硬检查实际执行并通过时，产物 Reviewer 的拒绝、协议错误或 LLM 故障才记录为建议，不触发 Worker 重做。未执行硬检查时 Reviewer 失败关闭。Reviewer 默认 5 轮，可配置为 `[1, 8]`；最后一轮禁用工具并强制输出裁决 JSON。
 - `Planner.replan()` 不是 Agent 循环，没有工具调用权，因此失败后重规划只读取 ExecutionArtifact 的最小结构化产物事实，不读取完整任务 result 作为主要依据。
 
 ### HITL System
@@ -351,6 +352,8 @@ Reviewer 前 Java 硬验证；封装 Maven/javac 命令、扫描、超时、输�
 ### ToolRegistry.java
 14 个内置核心工具（含 `edit_file` 精确替换、`confirm_memory` 一次性敏感确认和 `grep_code` 实时精确文本搜索）+ MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult；`ToolExecutionPipeline` 按阶段执行取消、存在性、能力范围、Skill 权限、参数校验、HITL、审计、策略和结果治理；`ToolOutput` / `ToolExecutionResult` 携带 status、errorCode、retryable、imageParts 和 modifiedResources；内置 Provider 通过结构化执行器直接保留参数错误、策略拒绝、命令退出、超时和取消状态；HITL 作为管线中间件，不再覆写 executeTool；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会返回 `search_tools` 引导和 query 示例
 
+`read_file` 同传行范围与字符范围时优先行范围并返回提示；`edit_file` 会按目标文件的 CRLF/LF 风格对齐匹配文本。
+
 ### Workspace Package
 `WorkspaceBackend` 定义物化后端，`WorkspaceBackendFactory` 默认自动选择：项目根是 Git 仓库时使用原生 worktree，共享 Git 对象后叠加当前脏文件、删除文件、未跟踪及被忽略文件；常见 `.env`、凭据和密钥文件在三类后端中统一过滤，不进入 Worker 工作区或 PatchSet；非 Git 目录优先使用 `FileSystemCowWorkspaceBackend`。Linux 通过 GNU `cp --reflink=always` 强制文件系统 reflink；Windows 11 24H2 / Windows Server 2025 及以上版本只在 ReFS 上使用系统块克隆路径；其他平台、克隆失败、输出缺失或源目标哈希不一致时清理部分工作区并回退 `CopyWorkspaceBackend` 有界并行复制。实现不使用硬链接，避免直接写文件或外部命令修改共享 inode。worktree 和写时复制物化后删除排除目录与符号链接，worktree 创建、注销和 prune 均在项目级公平锁与跨进程 `FileLock` 内执行；复制完成等待和线程终止都有明确超时，线程中断会向调用方传播；`WorkspaceCleanupPolicy` 通过 TTL 和跨进程文件租约清理孤儿目录；`WorkspaceExecutionSession` 管理隔离 ToolRegistry 生命周期；`ProjectCommitCoordinator` 使用基于项目真实路径哈希命名的 JDK `FileLock` 串行化同项目跨进程提交；PatchSet 逐文件流式哈希，未变化文件不读取完整内容，并负责 `afterHash` 内容一致性、可执行标记、哈希冲突预检、路径与链接边界、原子应用和可观测回滚。文件锁默认位于 `~/.devcli/locks/project-commit/`，网络文件系统的锁语义取决于底层实现
 
@@ -429,13 +432,13 @@ EMBEDDING_BASE_URL=http://localhost:11434
 
 ## Benchmark Evaluation
 
-评测入口位于 `src/test/java/com/devcli/benchmark/`，默认不进入快速回归。RAG benchmark 支持 CodeSearchNet Java 公共 test split，并统一计算 Recall@5、MRR@5、nDCG@5；长文档型 definition 查询直接走 semantic route，短符号和调用链查询继续使用 keyword、semantic、graph、RRF 与可选 rerank。
+评测方法与工程测试入口统一见 [量化评测规范](benchmark-evaluation.md)。`src/test/java/com/devcli/benchmark/` 默认被 Quick 排除，真实 `*IT` 还需显式选择并启用开关。当前 RAG 适配器使用 CodeSearchNet docstring/code 派生语料，比较 semantic 与完整检索，输出二值相关性的 Recall@5、MRR@5、nDCG@5；它不是使用人工分级标签的 CodeSearchNet Challenge 官方 nDCG，也未提供完整的五档消融。
 
-Agent benchmark 对同一组隐藏检查任务比较单 Agent 与 Planner/Worker/Reviewer，任务成功要求 LLM 流程完成且隐藏检查全部通过。Memory benchmark 统计写入策略准确率、低价值拦截率、Recall@5 和注入命中率。Compression benchmark 在 230k token 生产阈值下执行多次真实摘要，再通过分层事实问答统计保真率。
+旧隐藏任务、自建 Memory 和 Compression 评测已退役，仅保留历史归档。当前 `SweBenchDriver` 支持 solo/delegate/plan，但三模式 PowerShell 脚本直接运行 `eval.sh` 并解析日志，尚未接入 Multilingual 官方评分报告，自定义 `resolved` 不得作为官方成绩。正式 Java 评测须冻结 Multilingual Java 任务清单、各角色模型和预算，并读取官方 report 的 resolved 与逐测试 F2P/P2P。
 
-公开集合扩展由 `PublicBenchmarkCatalog` 读取固定配置并校验原始文件 SHA-256 与官方 harness。`PublicBenchmarkReadinessIT` 验证 SWE-bench Lite、LongMemEval、LongBench 和 RULER 数据入口；`RulerDatasetGenerationIT` 直接调用固定版本官方生成器，避免 Windows shell 对换行模板的破坏；`PublicLongContextBenchmarkIT` 生成 LongMemEval hypothesis、复用 LongBench 官方 prompt/数字指标和 RULER string match；`SweBenchLiteAgentBenchmarkIT` 生成官方 predictions JSONL，并可通过 Linux Docker harness 执行 resolved 评测。代理指标与官方指标在报告中分字段保存。
+`PublicBenchmarkCatalog` 校验已登记资产的 SHA-256；当前目录包含 Lite、LongMemEval Oracle、LongBench v1 和 RULER v1。`PublicBenchmarkReadinessIT` 检查这些入口，不能证明未登记资产已可用。`RulerDatasetGenerationIT` 调用固定版本生成器；`PublicLongContextBenchmarkIT` 直接把历史或长文本交给模型，尚未经过项目记忆和压缩模块，也未调用官方 judge/evaluator。其 LongBench 专用评分仅覆盖两个英文合成任务，其他任务回退为包含命中；字段名包含 official 不代表官方评分已接通。`SweBenchLiteAgentBenchmarkIT` 可输出 predictions 并调用 Lite Linux Docker harness，但不能替代 Multilingual 接入。
 
-公开 benchmark 原始报告默认写入 `target/benchmark-reports/`。旧的自建任务聚合器和结果文件已经退役；评测方法、固定版本、复现命令和结果边界见 `docs/benchmark-evaluation.md`。
+Java IT 报告默认写入 `target/benchmark-reports/`，三模式脚本写入 Instance 下的 runs 目录。正式记忆与压缩成绩须补齐真实功能开/关对照和官方评分；报告必须区分工程回归、模型直测与项目功能收益，不能以代理指标或历史数字回填简历。
 
 ## Test Coverage Summary
 

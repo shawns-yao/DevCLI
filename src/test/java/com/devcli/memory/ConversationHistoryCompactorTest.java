@@ -4,7 +4,10 @@ import com.devcli.llm.LlmClient;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -84,27 +87,21 @@ class ConversationHistoryCompactorTest {
     }
 
     @Test
-    void oversizedRecentMessageIsBoundedByTokenBudgetAndStored(@TempDir Path tempDir) throws IOException {
+    void oversizedRecentUserMessageIsPreservedForSemanticCompaction(@TempDir Path tempDir) {
         StubCompactor c = new StubCompactor("SUMMARY", 3_000, true);
         c.setMicrocompactOutputRoot(tempDir);
+        String currentRequest = "large current upload " + longText(20_000);
         List<LlmClient.Message> history = new ArrayList<>();
         history.add(LlmClient.Message.system("SYSTEM"));
         history.add(LlmClient.Message.user("old question " + longText(5_000)));
         history.add(LlmClient.Message.assistant("old answer " + longText(5_000)));
-        history.add(LlmClient.Message.user("large current upload " + longText(20_000)));
+        history.add(LlmClient.Message.user(currentRequest));
         history.add(LlmClient.Message.assistant("current answer"));
 
         assertTrue(c.compactIfNeeded(history, 100));
-        int tailStart = 3;
-        int tailTokens = TokenBudget.estimateMessagesTokens(
-                history.subList(tailStart, history.size()));
-        assertTrue(tailTokens <= 3_000,
-                "最新原文区不能因单条大消息突破 token 预算，实际=" + tailTokens);
-        assertTrue(history.get(tailStart).content().contains("storedPath="),
-                "被截断的普通消息必须保留可恢复落盘引用");
-        assertTrue(Files.walk(tempDir)
-                .anyMatch(path -> path.toString().contains("microcompact_message_outputs")
-                        && Files.isRegularFile(path)));
+        assertEquals(currentRequest, history.get(3).content(),
+                "规则式 microcompact 不得裁剪当前用户请求");
+        assertEquals(0, c.lastMicrocompactStats().clearedToolResults());
     }
 
     @Test
@@ -165,7 +162,19 @@ class ConversationHistoryCompactorTest {
         history.add(LlmClient.Message.user("RecentQ2"));
         history.add(LlmClient.Message.assistant("recent answer"));
 
-        boolean changed = c.microcompactOversizeMessages(history);
+        String previousKeep = System.getProperty(
+                ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY);
+        boolean changed;
+        try {
+            System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY, "1");
+            changed = c.microcompactOversizeMessages(history);
+        } finally {
+            if (previousKeep == null) {
+                System.clearProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY);
+            } else {
+                System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY, previousKeep);
+            }
+        }
 
         assertTrue(changed);
         assertTrue(history.get(3).content().contains("<microcompact_boundary>"), history.get(3).content());
@@ -723,16 +732,17 @@ class ConversationHistoryCompactorTest {
     }
 
     // ─────────────────────────────────────────────────────────
-    // PTL retry 测试：摘要调用自身 OOM 时按 user 边界丢头部 round 重试
+    // PTL retry 收紧请求预算，不删除原始历史。
     // ─────────────────────────────────────────────────────────
 
     @Test
-    void ptlRetrySucceedsOnSecondAttemptAfterDroppingOldestRound() {
-        // 第 1 次摘要返回 prompt-too-long，第 2 次（消息变少后）成功
+    void ptlRetrySucceedsWithoutDroppingOldestRound() {
         AtomicInteger attempt = new AtomicInteger();
+        List<List<LlmClient.Message>> inputs = new ArrayList<>();
         ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 2_000, true) {
             @Override
             protected String summarize(List<LlmClient.Message> messages) throws IOException {
+                inputs.add(List.copyOf(messages));
                 int n = attempt.incrementAndGet();
                 if (n == 1) {
                     throw new IOException("prompt is too long: 250000 tokens exceeds maximum 200000");
@@ -744,6 +754,7 @@ class ConversationHistoryCompactorTest {
         boolean ok = c.compactIfNeeded(buildBigHistory(), 100);
         assertTrue(ok, "PTL retry 应该让第 2 次摘要成功");
         assertEquals(2, attempt.get(), "应当尝试 2 次：第 1 次 PTL，第 2 次成功");
+        assertEquals(inputs.get(0), inputs.get(1), "重试必须保留全部待摘要消息");
         assertEquals(0, c.getConsecutiveFailures(), "成功后失败计数应清零");
     }
 
@@ -783,26 +794,16 @@ class ConversationHistoryCompactorTest {
     }
 
     @Test
-    void ptlRetryDropsRoundsAtUserBoundary() {
-        // 验证 dropOldestRoundsByRatio 切割点对齐 user 边界
-        List<LlmClient.Message> messages = new ArrayList<>();
-        messages.add(LlmClient.Message.user("Q1"));
-        messages.add(LlmClient.Message.assistant("A1"));
-        messages.add(LlmClient.Message.user("Q2"));
-        messages.add(LlmClient.Message.assistant("A2"));
-        messages.add(LlmClient.Message.user("Q3"));
-        messages.add(LlmClient.Message.assistant("A3"));
-        messages.add(LlmClient.Message.user("Q4"));
-        messages.add(LlmClient.Message.assistant("A4"));
-        messages.add(LlmClient.Message.user("Q5"));
-        messages.add(LlmClient.Message.assistant("A5"));
-
-        // 5 个 round，drop 20% = ceil(1) = 1 round → 保留 4 个 round = 8 条消息
-        List<LlmClient.Message> trimmed = ConversationHistoryCompactor
-                .dropOldestRoundsByRatio(messages, 0.20);
-        assertEquals(8, trimmed.size());
-        assertEquals("user", trimmed.get(0).role(), "保留段必须以 user 起头");
-        assertEquals("Q2", trimmed.get(0).content());
+    void failedPtlRetryKeepsHistoryUnchanged() {
+        var compactor = new ConversationHistoryCompactor(null, 2_000, true) {
+            @Override protected String summarize(List<LlmClient.Message> messages) throws IOException {
+                throw new IOException("context length exceeded");
+            }
+        };
+        List<LlmClient.Message> history = buildBigHistory();
+        List<LlmClient.Message> original = List.copyOf(history);
+        assertFalse(compactor.compactIfNeeded(history, 100));
+        assertEquals(original, history);
     }
 
     @Test
@@ -829,6 +830,113 @@ class ConversationHistoryCompactorTest {
                 new IOException("max_tokens must be greater than thinking.budget_tokens")));
     }
 
+    @Test
+    void usesSinglePassWhenHistoryFitsModelTokenWindow() throws IOException {
+        RecordingSummaryClient client = new RecordingSummaryClient(128_000);
+        ConversationHistoryCompactor compactor =
+                new ConversationHistoryCompactor(client, 2_000, true);
+
+        String summary = compactor.summarize(List.of(
+                LlmClient.Message.user("project history " + longText(80_000))));
+
+        assertEquals(RecordingSummaryClient.SUMMARY, summary);
+        assertEquals(1, client.calls.get(),
+                "超过旧 60K 字符阈值但仍位于模型 Token 窗口内时应单次摘要");
+    }
+
+    @Test
+    void disabledCompactionLeavesHistoryUntouchedAndSkipsSummaryModel() {
+        String key = ConversationHistoryCompactor.COMPACTION_ENABLED_PROPERTY;
+        String previous = System.getProperty(key);
+        AtomicInteger calls = new AtomicInteger();
+        ConversationHistoryCompactor compactor = new ConversationHistoryCompactor(null, 2_000, true) {
+            @Override protected String summarize(List<LlmClient.Message> messages) {
+                calls.incrementAndGet();
+                return RecordingSummaryClient.SUMMARY;
+            }
+        };
+        List<LlmClient.Message> history = buildBigHistory();
+        List<LlmClient.Message> original = List.copyOf(history);
+        try {
+            System.setProperty(key, "false");
+            assertFalse(compactor.compactIfNeeded(history, 100));
+            assertEquals(original, history);
+            assertEquals(0, calls.get());
+        } finally {
+            if (previous == null) System.clearProperty(key);
+            else System.setProperty(key, previous);
+        }
+    }
+
+    @Test
+    void metricsReportEveryDecisionEvenWhenRawModeDisablesCompaction() {
+        String enabledKey = ConversationHistoryCompactor.COMPACTION_ENABLED_PROPERTY;
+        String metricsKey = ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY;
+        String previousEnabled = System.getProperty(enabledKey);
+        String previousMetrics = System.getProperty(metricsKey);
+        PrintStream previousErr = System.err;
+        ByteArrayOutputStream captured = new ByteArrayOutputStream();
+        List<LlmClient.Message> history = List.of(
+                LlmClient.Message.system("system"),
+                LlmClient.Message.user("current task"));
+        try {
+            System.setProperty(enabledKey, "false");
+            System.setProperty(metricsKey, "true");
+            System.setErr(new PrintStream(captured, true, StandardCharsets.UTF_8));
+
+            assertFalse(new ConversationHistoryCompactor(null, 2_000, true)
+                    .compactIfNeeded(new ArrayList<>(history), 80_000));
+
+            String output = captured.toString(StandardCharsets.UTF_8);
+            assertTrue(output.contains("kind=decision enabled=false"), output);
+            assertTrue(output.contains("historyTokens="
+                    + TokenBudget.estimateMessagesTokens(history)), output);
+            assertTrue(output.contains("triggerTokens=80000"), output);
+        } finally {
+            System.setErr(previousErr);
+            restoreProperty(enabledKey, previousEnabled);
+            restoreProperty(metricsKey, previousMetrics);
+        }
+    }
+
+    @Test
+    void metricsReportSummaryCallTokenUsage() throws IOException {
+        String metricsKey = ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY;
+        String previousMetrics = System.getProperty(metricsKey);
+        PrintStream previousErr = System.err;
+        ByteArrayOutputStream captured = new ByteArrayOutputStream();
+        try {
+            System.setProperty(metricsKey, "true");
+            System.setErr(new PrintStream(captured, true, StandardCharsets.UTF_8));
+
+            new ConversationHistoryCompactor(new RecordingSummaryClient(128_000), 2_000, true)
+                    .summarize(List.of(LlmClient.Message.user("project history")));
+
+            assertTrue(captured.toString(StandardCharsets.UTF_8).contains(
+                    "kind=summary-call inputTokens=100 outputTokens=50 cachedInputTokens=0"));
+        } finally {
+            System.setErr(previousErr);
+            restoreProperty(metricsKey, previousMetrics);
+        }
+    }
+
+    @Test
+    void keepsMapReduceForHistoryThatExceedsModelTokenWindow() throws IOException {
+        RecordingSummaryClient client = new RecordingSummaryClient(8_000);
+        ConversationHistoryCompactor compactor =
+                new ConversationHistoryCompactor(client, 2_000, true);
+
+        compactor.summarize(List.of(
+                LlmClient.Message.user("project history " + longText(80_000))));
+
+        assertTrue(client.calls.get() > 1,
+                "超过摘要模型 Token 预算时仍必须分片并归并");
+        int requestBudget = com.devcli.context.ContextProfile.from(client).compressionTriggerTokens();
+        assertTrue(client.requests.stream()
+                        .allMatch(request -> TokenBudget.estimateMessagesTokens(request) <= requestBudget),
+                "Map-Reduce 的每个请求都必须位于摘要模型输入预算内");
+    }
+
     /** 构造一段足够大、可以 split 的 history。 */
     private static List<LlmClient.Message> buildBigHistory() {
         List<LlmClient.Message> history = new ArrayList<>();
@@ -843,6 +951,11 @@ class ConversationHistoryCompactorTest {
     private static void appendRound(List<LlmClient.Message> history, int id) {
         history.add(LlmClient.Message.user("new question " + id + " " + longText(2_000)));
         history.add(LlmClient.Message.assistant("new answer " + id + " " + longText(2_000)));
+    }
+
+    private static void restoreProperty(String key, String value) {
+        if (value == null) System.clearProperty(key);
+        else System.setProperty(key, value);
     }
 
     /** 测试用 stub：summarize 返回固定字符串，避免真实 LLM 依赖。 */
@@ -874,6 +987,63 @@ class ConversationHistoryCompactorTest {
                                               List<LlmClient.Message> newMessages) throws IOException {
             incrementalCalls.incrementAndGet();
             return mockSummary;
+        }
+    }
+
+    private static final class RecordingSummaryClient implements LlmClient {
+        private static final String SUMMARY = """
+                ## 主要请求与意图
+                - 保留项目历史
+                ## 关键技术概念
+                - 无
+                ## 文件和代码
+                - 无
+                ## 踩过的坑和修复
+                - 无
+                ## 问题解决过程
+                - 无
+                ## 逐条用户消息
+                - 用户提供项目历史
+                """;
+        private final int contextWindow;
+        private final AtomicInteger calls = new AtomicInteger();
+        private final List<List<Message>> requests = new ArrayList<>();
+
+        private RecordingSummaryClient(int contextWindow) {
+            this.contextWindow = contextWindow;
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools) {
+            calls.incrementAndGet();
+            requests.add(List.copyOf(messages));
+            return new ChatResponse("assistant", SUMMARY, null, 100, 50);
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools,
+                                 StreamListener listener) {
+            return chat(messages, tools);
+        }
+
+        @Override
+        public String getModelName() {
+            return "recording-summary";
+        }
+
+        @Override
+        public String getProviderName() {
+            return "test";
+        }
+
+        @Override
+        public int maxContextWindow() {
+            return contextWindow;
+        }
+
+        @Override
+        public int maxOutputTokens() {
+            return 2_048;
         }
     }
 }

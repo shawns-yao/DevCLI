@@ -47,8 +47,7 @@ final class PreReviewVerifier {
         Path normalizedRoot = projectRoot.toAbsolutePath().normalize();
         Path javaRoot = normalizedRoot.resolve("src/main/java");
         if (Files.isRegularFile(normalizedRoot.resolve("pom.xml"))) {
-            String mavenCommand = mavenExecutable(normalizedRoot)
-                    + " -q -DskipTests test-compile";
+            String mavenCommand = "mvn -q -DskipTests test-compile";
             return runCommand(normalizedRoot, mavenCommand, mavenCommand, true);
         }
         if (!Files.isDirectory(javaRoot)) {
@@ -122,13 +121,6 @@ final class PreReviewVerifier {
     private String quoteJavacArgument(Path path) {
         String normalized = path.toString().replace('\\', '/').replace("\"", "\\\"");
         return "\"" + normalized + "\"";
-    }
-
-    private String mavenExecutable(Path projectRoot) {
-        if (Files.isRegularFile(projectRoot.resolve("mvnw"))) {
-            return "./mvnw";
-        }
-        return "mvn";
     }
 
     private Result runCommand(Path projectRoot, String command, String displayCommand,
