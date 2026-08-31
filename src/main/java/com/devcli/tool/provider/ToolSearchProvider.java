@@ -6,11 +6,15 @@ import com.devcli.tool.ToolRegistry;
 
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.Set;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class ToolSearchProvider implements ToolProvider {
+    private static final Set<String> QUERY_STOP_WORDS = Set.of(
+            "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have",
+            "i", "in", "is", "it", "of", "on", "or", "that", "the", "this", "to", "was", "with");
     private final AtomicLong buildCount = new AtomicLong();
     private volatile ToolSearchIndex searchIndex;
 
@@ -120,6 +124,9 @@ public final class ToolSearchProvider implements ToolProvider {
 
     private static List<String> splitTerms(String normalized) {
         return Arrays.stream(normalized.split("\\s+"))
+                .map(term -> term.replaceAll("^[^\\p{L}\\p{N}_-]+|[^\\p{L}\\p{N}_-]+$", ""))
+                .filter(term -> term.length() >= 3)
+                .filter(term -> !QUERY_STOP_WORDS.contains(term))
                 .filter(s -> !s.isBlank())
                 .toList();
     }

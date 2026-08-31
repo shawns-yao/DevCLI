@@ -132,7 +132,8 @@ public final class AgentSessionRuntime implements AutoCloseable {
             activeContext.set(context);
             try {
                 String output = agent.run(prompt);
-                RunResult result = new RunResult(output, agent.getConversationHistory(), context.isCancelled());
+                List<LlmClient.Message> history = agent.getConversationHistory();
+                RunResult result = new RunResult(resolveOutput(output, history), history, context.isCancelled());
                 marker.complete(result);
                 return result;
             } catch (Throwable error) {
@@ -186,7 +187,8 @@ public final class AgentSessionRuntime implements AutoCloseable {
         activeContext.set(context);
         try {
             String output = agent.run(prompt);
-            result.complete(new RunResult(output, agent.getConversationHistory(), context.isCancelled()));
+            List<LlmClient.Message> history = agent.getConversationHistory();
+            result.complete(new RunResult(resolveOutput(output, history), history, context.isCancelled()));
         } catch (Throwable error) {
             result.completeExceptionally(error);
         } finally {
@@ -215,6 +217,23 @@ public final class AgentSessionRuntime implements AutoCloseable {
 
     private static Path normalize(Path path) {
         return Objects.requireNonNull(path, "projectPath").toAbsolutePath().normalize();
+    }
+
+    static String resolveOutput(String output, List<LlmClient.Message> history) {
+        if (output != null && !output.isBlank()) {
+            return output;
+        }
+        if (history == null) {
+            return "";
+        }
+        for (int i = history.size() - 1; i >= 0; i--) {
+            LlmClient.Message message = history.get(i);
+            if (message != null && "assistant".equals(message.role())
+                    && message.content() != null && !message.content().isBlank()) {
+                return message.content();
+            }
+        }
+        return output == null ? "" : output;
     }
 
     public record RunResult(String output, List<LlmClient.Message> history, boolean cancelled) {

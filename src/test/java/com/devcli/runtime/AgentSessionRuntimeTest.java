@@ -8,6 +8,7 @@ import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 class AgentSessionRuntimeTest {
@@ -22,6 +23,18 @@ class AgentSessionRuntimeTest {
             assertFalse(result.cancelled());
             assertFalse(session.isRunning());
         }
+    }
+
+    @Test
+    void streamedEmptyReturnRecoversFinalAssistantMessage() {
+        String output = AgentSessionRuntime.resolveOutput("", List.of(
+                LlmClient.Message.system("system"),
+                LlmClient.Message.user("question"),
+                LlmClient.Message.assistant("tool reasoning", List.of()),
+                LlmClient.Message.assistant("final answer")
+        ));
+
+        assertEquals("final answer", output);
     }
 
     private static final class NoopLlmClient implements LlmClient {

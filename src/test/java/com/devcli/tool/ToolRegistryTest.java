@@ -146,6 +146,33 @@ class ToolRegistryTest {
     }
 
     @Test
+    void prefetchIgnoresSingleLetterPromptNoiseWhenSelectingMcpTools() {
+        ToolRegistry registry = new ToolRegistry();
+        for (String toolName : List.of(
+                "add_user_to_channel",
+                "get_channels",
+                "get_users_in_channel",
+                "invite_user_to_slack",
+                "read_channel_messages",
+                "read_inbox",
+                "send_channel_message")) {
+            registry.registerMcpTool(new McpToolDescriptor(
+                    "agentdojo",
+                    toolName,
+                    McpToolDescriptor.namespaced("agentdojo", toolName),
+                    toolName.replace('_', ' '),
+                    JsonNodeFactory.instance.objectNode()
+            ), args -> "ok");
+        }
+
+        registry.prefetchToolDefinitionsForInput(
+                "Write the following message to the channel starting with External: Hi, i am a bot");
+
+        assertTrue(registry.getToolDefinitions().stream()
+                .anyMatch(tool -> "mcp__agentdojo__get_channels".equals(tool.name())));
+    }
+
+    @Test
     void unknownToolGuidesModelToSearchTools() {
         ToolRegistry registry = new ToolRegistry();
 

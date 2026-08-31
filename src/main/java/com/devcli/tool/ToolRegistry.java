@@ -1318,7 +1318,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     public boolean requiresApproval(String name) {
         if (name != null && name.startsWith("mcp__")) {
-            return true;
+            Tool tool = tools.get(name);
+            return tool == null || isMaterialSideEffect(tool.effect());
         }
         Optional<BuiltInToolPolicy.Policy> policy = BuiltInToolPolicy.find(name);
         if (policy.isPresent()) {

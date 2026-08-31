@@ -48,6 +48,8 @@ class LlmRetryExecutorTest {
         LlmException context = LlmErrors.fromHttp("anthropic", "model", 400,
                 "maximum context length exceeded", 0L);
         LlmException auth = LlmErrors.fromHttp("glm", "model", 401, "unauthorized", 0L);
+        LlmException upstreamBreak = LlmErrors.fromHttp("openai", "model", 400,
+                "upstream_stream_break: Upstream stream ended prematurely; safe to retry", 0L);
 
         assertEquals(LlmErrorCode.RATE_LIMITED, rateLimit.code());
         assertEquals(true, rateLimit.retryable());
@@ -55,6 +57,8 @@ class LlmRetryExecutorTest {
         assertEquals(false, context.retryable());
         assertEquals(LlmErrorCode.AUTHENTICATION, auth.code());
         assertEquals(false, auth.retryable());
+        assertEquals(LlmErrorCode.SERVER_ERROR, upstreamBreak.code());
+        assertEquals(true, upstreamBreak.retryable());
     }
 
     @Test

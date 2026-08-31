@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.devcli.browser.BrowserGuard;
 import com.devcli.browser.BrowserSession;
 import com.devcli.browser.SensitivePagePolicy;
+import com.devcli.mcp.config.McpToolTrustPolicy;
 import com.devcli.mcp.protocol.McpToolDescriptor;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolOutput;
@@ -17,6 +18,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
@@ -239,6 +241,24 @@ class HitlToolRegistryTest {
 
         assertEquals("deleted", result);
         assertEquals(1, stub.requestCount());
+    }
+
+    @Test
+    void trustedReadOnlyMcpToolSkipsApproval() {
+        StubHandler stub = new StubHandler(req -> {
+            throw new AssertionError("受信任只读 MCP 工具不应触发审批");
+        });
+        HitlToolRegistry registry = new HitlToolRegistry(stub);
+        registry.setMcpToolTrustPolicy("calendar", new McpToolTrustPolicy(true, Set.of(), Set.of()));
+        registerMcpTool(registry, "calendar", "search_events",
+                new McpToolDescriptor.Annotations(true, false, false),
+                args -> "events");
+
+        String result = registry.executeTool("mcp__calendar__search_events", "{}");
+
+        assertEquals("events", result);
+        assertFalse(registry.requiresApproval("mcp__calendar__search_events"));
+        assertEquals(0, stub.requestCount());
     }
 
     @Test
