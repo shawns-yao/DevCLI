@@ -21,6 +21,36 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SweBenchDriverIsolationTest {
 
     @Test
+    void qaProtocolUsesShortDistinctQuestionsWithoutRepeatingOriginalIssue() {
+        List<String> questions = SweBenchDriver.qaContinuationPrompts();
+        assertEquals(63, questions.size());
+        assertEquals(63, new java.util.HashSet<>(questions).size());
+        assertTrue(questions.stream().allMatch(q -> !q.isBlank() && q.length() < 600));
+    }
+
+    @Test
+    void transcriptPreservesRealQuestionsAnswersAndSessionIdentity(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+        var path = directory.resolve("conversation.jsonl");
+        var usage = new SweBenchDriver.UsageCollector(path);
+        usage.recordTurn("session-a", "first question", "first answer",
+                new SweBenchDriver.ContextWindowSnapshot(1, 123, 255182));
+        usage.recordTurn("session-a", "follow-up question", "follow-up answer",
+                new SweBenchDriver.ContextWindowSnapshot(2, 456, 255182));
+        var lines = java.nio.file.Files.readAllLines(path);
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        assertEquals(2, lines.size());
+        var first = mapper.readTree(lines.get(0));
+        var second = mapper.readTree(lines.get(1));
+        assertEquals("first question", first.path("question").asText());
+        assertEquals("follow-up answer", second.path("answer").asText());
+        assertEquals(first.path("session_id"), second.path("session_id"));
+        assertEquals(456, second.path("history_tokens").asInt());
+        org.junit.jupiter.api.Assertions.assertThrows(java.nio.file.FileAlreadyExistsException.class,
+                () -> new SweBenchDriver.UsageCollector(path));
+    }
+
+    @Test
     void soloRetainsOnlyClosedBookToolsAndDisablesLongTermMemory() {
         try (ToolRegistry registry = new ToolRegistry(); Agent agent = new Agent(new NoopClient(), registry)) {
             SweBenchDriver.configureClosedBook(agent, false);
@@ -157,6 +187,13 @@ class SweBenchDriverIsolationTest {
         SweBenchDriver.runReact(unavailable, project, "Read the workspace and report its contents",
                 true, new SweBenchDriver.UsageCollector(), 4, java.util.List.of());
         assertEquals(1, calls.get(), "External model failure must not start additional continuation rounds");
+    }
+
+    @Test
+    void originalTaskQaAcceptsTerraFallbackModel() {
+        assertTrue(SweBenchDriver.isSupportedQaModel("gpt-5.6-luna"));
+        assertTrue(SweBenchDriver.isSupportedQaModel("gpt-5.6-terra"));
+        assertTrue(!SweBenchDriver.isSupportedQaModel("gpt-5.5"));
     }
 
     private static Set<String> toolNames(ToolRegistry registry) {

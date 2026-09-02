@@ -2,13 +2,14 @@
 param(
   [string]$Dataset = "Data/raw/public-benchmarks/swebench-multilingual/test.parquet",
   [string]$Python = "C:\Download\Pycharm\python-3.10.11\python.exe",
-  [string]$Model = "gpt-5.6-luna",
+  [ValidateSet('auto','gpt-5.6-luna','gpt-5.6-terra')][string]$Model = "auto",
   [ValidateSet('smoke','public')][string]$TestType = 'smoke',
   [ValidateSet('solo','delegate')][string[]]$Mode = @('solo','delegate'),
   [ValidateSet('raw','compact')][string[]]$ContextMode = @('raw','compact'),
   [string[]]$InstanceIds = @(),
   [ValidateRange(0,1000000)][int]$CompressionTriggerTokens = 0,
   [ValidateRange(1,64)][int]$ContinuationRounds = 1,
+  [ValidateSet('continue','original-task-qa')][string]$ConversationProtocol = 'continue',
   [ValidateRange(0,2000000)][int]$ModelContextWindowTokens = 0,
   [string]$TaskPromptRoot = '',
   [string]$ContinuationPromptRoot = '',
@@ -22,6 +23,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$RequestedModel = $Model
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Dataset = (Resolve-Path (Join-Path $Root $Dataset)).Path
 $Python = (Resolve-Path $Python).Path
@@ -29,6 +31,48 @@ $M2 = (Resolve-Path $M2).Path
 $CacheRoot = [IO.Path]::GetFullPath((Join-Path $Root $CacheRoot))
 $OutRoot = [IO.Path]::GetFullPath((Join-Path $Root $OutRoot))
 $WorkRoot = [IO.Path]::GetFullPath((Join-Path $Root $WorkRoot))
+
+function Read-DotEnvValue([string]$Name) {
+  $envPath = Join-Path $Root '.env'
+  if (-not (Test-Path -LiteralPath $envPath)) { return $null }
+  $line = Get-Content -LiteralPath $envPath | Where-Object { $_ -match "^\s*${Name}=(.*)$" } | Select-Object -First 1
+  if ($null -eq $line) { return $null }
+  return ([regex]::Match($line, "^\s*${Name}=(.*)$")).Groups[1].Value.Trim()
+}
+
+function Resolve-BenchmarkModel([string]$Requested) {
+  if ($Requested -eq 'gpt-5.6-terra') { return $Requested }
+  $baseUrl = Read-DotEnvValue 'OPENAI_BASE_URL'
+  $apiKey = Read-DotEnvValue 'OPENAI_API_KEY'
+  if (-not [string]::IsNullOrWhiteSpace($baseUrl) -and -not [string]::IsNullOrWhiteSpace($apiKey)) {
+    try {
+      $headers = @{ Authorization = "Bearer $apiKey" }
+      $available = @(Invoke-RestMethod -Uri (($baseUrl.TrimEnd('/')) + '/models') -Headers $headers -Method Get -TimeoutSec 10).data |
+        ForEach-Object { $_.id }
+      if ($available -contains 'gpt-5.6-luna') { return 'gpt-5.6-luna' }
+    } catch {
+      Write-Warning "模型可用性探测失败，将尝试 Luna；失败后自动回退 Terra：$($_.Exception.Message)"
+      if ($Requested -eq 'auto') { return 'gpt-5.6-luna' }
+    }
+  }
+  if ($Requested -eq 'gpt-5.6-luna') {
+    Write-Warning 'Luna 当前不在网关模型列表，自动回退 Terra'
+  }
+  return 'gpt-5.6-terra'
+}
+
+$Model = Resolve-BenchmarkModel $RequestedModel
+if ($ConversationProtocol -eq 'original-task-qa' -and (
+    $Model -notin @('gpt-5.6-luna', 'gpt-5.6-terra') -or $TestType -ne 'public' -or
+    $Mode.Count -ne 1 -or $Mode[0] -ne 'solo' -or
+    $ContextMode.Count -ne 1 -or $ContextMode[0] -ne 'compact' -or
+    $CompressionTriggerTokens -ne 64000 -or $ContinuationRounds -lt 2 -or
+    $TaskPromptRoot -or $ContinuationPromptRoot)) {
+  throw 'original-task-qa requires public Luna/Terra, solo compact, 64000 threshold, 2..64 rounds and no prompt overrides'
+}
+if ($ConversationProtocol -eq 'original-task-qa' -and (Test-Path -LiteralPath $OutRoot)) {
+  throw 'original-task-qa requires a fresh batch directory; preserve previous runs'
+}
 if (-not [string]::IsNullOrWhiteSpace($ContinuationPromptRoot)) {
   $ContinuationPromptRoot = (Resolve-Path (Join-Path $Root $ContinuationPromptRoot)).Path
 }
@@ -100,13 +144,27 @@ function Get-DriverEvidence([string]$LogPath) {
   }
   $windows = @([regex]::Matches($text, '(?m)^(?:\[context-compaction\] kind=decision |\[driver\] context )[^\r\n]*historyTokens=(\d+) triggerTokens=(\d+)') |
     ForEach-Object { [long]$_.Groups[1].Value })
+  # 仅 kind=summary-call 是真正改写 conversationHistory 的语义压缩。
+  # pre-summary-call 只更新 SessionMemory 的可复用缓存，不能计入压缩次数。
   $summaries = @([regex]::Matches($text, '(?m)^\[context-compaction\] kind=summary-call inputTokens=(\d+) outputTokens=(\d+) cachedInputTokens=(\d+)'))
+  $preSummaries = @([regex]::Matches($text, '(?m)^\[context-compaction\] kind=pre-summary-call inputTokens=(\d+) outputTokens=(\d+) cachedInputTokens=(\d+)'))
   $summaryInput = 0L; $summaryOutput = 0L; $summaryCached = 0L
   foreach ($call in $summaries) {
     $summaryInput += [long]$call.Groups[1].Value
     $summaryOutput += [long]$call.Groups[2].Value
     $summaryCached += [long]$call.Groups[3].Value
   }
+  $preSummaryInput = 0L; $preSummaryOutput = 0L; $preSummaryCached = 0L
+  foreach ($call in $preSummaries) {
+    $preSummaryInput += [long]$call.Groups[1].Value
+    $preSummaryOutput += [long]$call.Groups[2].Value
+    $preSummaryCached += [long]$call.Groups[3].Value
+  }
+  $evictions = @([regex]::Matches($text, '(?m)^\[context-compaction\] kind=eviction beforeTokens=(\d+) afterTokens=(\d+) changed=(true|false)') |
+    ForEach-Object {
+      [pscustomobject]@{ before_tokens = [long]$_.Groups[1].Value; after_tokens = [long]$_.Groups[2].Value;
+        changed = [bool]::Parse($_.Groups[3].Value) }
+    })
   $externalCodes = @([regex]::Matches($text, '(?m)^\[driver\] failure code=(\w+) external=true') |
     ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
   $externalCodes += @([regex]::Matches($text, '(?m)^\[context-compaction\] kind=summary-error code=(AUTHENTICATION|RATE_LIMITED|OVERLOADED|TIMEOUT|NETWORK|SERVER_ERROR)\b') |
@@ -119,12 +177,22 @@ function Get-DriverEvidence([string]$LogPath) {
     elseif ($errorLine -match 'code=(AUTHENTICATION|RATE_LIMITED|OVERLOADED|TIMEOUT|NETWORK|SERVER_ERROR)') { $externalCodes += $Matches[1] }
     elseif ($errorLine -match 'status=503\b') { $externalCodes += 'SERVER_ERROR' }
   }
+  if ([regex]::IsMatch($text, '(?m)^\[driver\] failure code=UNKNOWN\b') -and
+      [regex]::IsMatch($text, '(?i)(工具沙箱|Docker 挂载|docker.*(?:mount|I/O)|(?:mount|I/O).*docker)')) {
+    $externalCodes += 'SANDBOX_IO'
+  }
   return [pscustomobject]@{
     Fields = $fields
     PeakHistoryTokens = if ($windows.Count) { ($windows | Measure-Object -Maximum).Maximum } else { $null }
     RoundCount = [regex]::Matches($text, '(?m)^\[driver\] context round=').Count
     SummaryInput = $summaryInput; SummaryOutput = $summaryOutput; SummaryCached = $summaryCached
     SummaryCalls = $summaries.Count
+    PreSummaryInput = $preSummaryInput; PreSummaryOutput = $preSummaryOutput; PreSummaryCached = $preSummaryCached
+    PreSummaryCalls = $preSummaries.Count
+    EvictionEvents = $evictions
+    EvictionBeforeTokens = if ($evictions.Count) { ($evictions | Measure-Object before_tokens -Maximum).Maximum } else { $null }
+    EvictionAfterTokens = if ($evictions.Count) { $evictions[-1].after_tokens } else { $null }
+    EvictionChanged = if ($evictions.Count) { [bool]($evictions | Where-Object changed).Count } else { $null }
     ExternalCodes = @($externalCodes | Sort-Object -Unique)
     ContextLimitErrors = [regex]::Matches($text, '(?m)^(?:\[driver\] failure |\[context-compaction\] kind=summary-error )code=CONTEXT_LENGTH\b').Count
     DelegationCalls = [regex]::Matches($text, '(?m)^\[driver\] delegation-call\r?$').Count
@@ -185,6 +253,19 @@ if ($InstanceIds.Count -gt 0) {
 } else {
   $Cases = $AllCases
 }
+if ($ConversationProtocol -eq 'original-task-qa') {
+  [ordered]@{
+    test_type='public_authoritative_dataset'; dataset='SWE-bench Multilingual Java';
+    source='https://huggingface.co/datasets/SWE-bench/SWE-bench_Multilingual';
+    dataset_sha256=$DatasetHash; source_sha256=$SourceHash; conversation_protocol=$ConversationProtocol;
+    model=$Model; mode='solo'; context_mode='compact'; compression_trigger_tokens=$CompressionTriggerTokens;
+    configured_model_context_window_tokens=$ModelContextWindowTokens;
+    original_samples=$Cases.Count; instance_ids=@($Cases.instance_id); rounds=$ContinuationRounds;
+    per_round_token_budget=$TokenBudget; per_round_max_iterations=$MaxIterations;
+    initial_prompt_source='official_problem_statement'; continuation_source='fixed_short_questions_in_driver';
+    run_count_per_condition=1; nontriggered_samples='report separately; never claim semantic compression effect'
+  } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutRoot 'qa-protocol.json') -Encoding utf8NoBOM
+}
 $previousModel = $env:OPENAI_MODEL
 $env:OPENAI_MODEL = $Model
 
@@ -198,10 +279,11 @@ try {
       $done = Join-Path $caseDir 'result.json'
       if (Test-Path $done) {
         $previous = Get-Content -Raw -LiteralPath $done | ConvertFrom-Json
-        if ($previous.base_commit -ne $case.base_commit -or $previous.requested_model -ne $Model `
+        if ($previous.base_commit -ne $case.base_commit -or $previous.requested_model -ne $RequestedModel `
             -or $previous.test_type -ne $TestType `
             -or $previous.mode -ne $currentMode -or $previous.context_mode -ne $currentContextMode `
             -or $previous.continuation_rounds -ne $ContinuationRounds `
+            -or $previous.conversation_protocol -ne $ConversationProtocol `
             -or [int]$previous.model_context_window_tokens -ne $ModelContextWindowTokens `
             -or [int]$previous.compression_trigger_tokens -ne $CompressionTriggerTokens `
             -or $previous.dataset_sha256 -ne $DatasetHash -or $previous.source_sha256 -ne $SourceHash `
@@ -254,6 +336,8 @@ try {
         test_type=$TestType; summary_usage_scope='compactor_and_presummary';
         tool_scope='ISOLATED_PROJECT';
         model=$Model; mode=$currentMode; context_mode=$currentContextMode; continuation_rounds=$ContinuationRounds;
+        conversation_protocol=$ConversationProtocol;
+        initial_prompt_source=$(if ($null -eq $taskPromptSource) {'official_problem_statement'} else {'custom_override'});
         model_context_window_tokens=$ModelContextWindowTokens;
         prompt_protocol_sha256=$promptProtocolHash;
         compression_trigger_tokens=$CompressionTriggerTokens; token_budget=$TokenBudget; max_iterations=$MaxIterations;
@@ -279,7 +363,7 @@ try {
       if ($null -ne $taskPromptSource) {
         Copy-Item -LiteralPath $taskPromptSource -Destination $prompt
       } else {
-        Set-Content -LiteralPath $prompt -Value $case.problem_statement -Encoding utf8NoBOM
+        [IO.File]::WriteAllText($prompt, $case.problem_statement, [Text.UTF8Encoding]::new($false))
       }
       if ($completedLog) {
         Write-Host "[resume-result] $($case.instance_id) $condition"
@@ -304,7 +388,12 @@ try {
           "-Ddevcli.react.hard.max.iterations=$MaxIterations",
           "-Ddevcli.command.sandbox.maven.repository=$M2",
           '-Ddevcli.context.compaction.metrics.enabled=true'
+          "-Ddevcli.benchmark.conversation.protocol=$ConversationProtocol"
         )
+        if ($ConversationProtocol -eq 'original-task-qa') {
+          # 公共上下文压缩实验只测阈值触发的语义压缩；预摘要缓存另行评估，避免混入模型调用。
+          $javaArgs += '-Ddevcli.context.pre-summary.enabled=false'
+        }
         if ($CompressionTriggerTokens -gt 0) {
           $javaArgs += "-Ddevcli.context.compression.trigger.tokens=$CompressionTriggerTokens"
         }
@@ -346,7 +435,8 @@ try {
         instance_id = $case.instance_id
         schema_version = 2
         test_type = $TestType
-        summary_usage_scope = 'compactor_and_presummary'
+        summary_usage_scope = if ($ConversationProtocol -eq 'original-task-qa') { 'compactor_only' } else { 'compactor_and_presummary' }
+        pre_summary_enabled = $ConversationProtocol -ne 'original-task-qa'
         dataset_sha256 = $DatasetHash
         source_sha256 = $SourceHash
         repo = $case.repo
@@ -357,6 +447,8 @@ try {
         model_context_window_tokens = if ($ModelContextWindowTokens -gt 0) { $ModelContextWindowTokens } else { $null }
         prompt_protocol_sha256 = $promptProtocolHash
         continuation_rounds = $ContinuationRounds
+        conversation_protocol = $ConversationProtocol
+        initial_prompt_source = $spec.initial_prompt_source
         token_budget = $TokenBudget
         max_iterations = $MaxIterations
         max_output_tokens = $MaxOutputTokens
@@ -366,6 +458,14 @@ try {
         summary_input_tokens = $evidence.SummaryInput
         summary_output_tokens = $evidence.SummaryOutput
         summary_cached_input_tokens = $evidence.SummaryCached
+        pre_summary_calls = $evidence.PreSummaryCalls
+        pre_summary_input_tokens = $evidence.PreSummaryInput
+        pre_summary_output_tokens = $evidence.PreSummaryOutput
+        pre_summary_cached_input_tokens = $evidence.PreSummaryCached
+        eviction_before_tokens = $evidence.EvictionBeforeTokens
+        eviction_after_tokens = $evidence.EvictionAfterTokens
+        eviction_changed = $evidence.EvictionChanged
+        eviction_events = $evidence.EvictionEvents
         context_limit_errors = $evidence.ContextLimitErrors
         delegation_calls = $evidence.DelegationCalls
         external_failure = $externalFailure
@@ -375,7 +475,7 @@ try {
         compaction_triggers = $compactionTriggers.Count
         compaction_fallbacks = $compactionFallbacks.Count
         compaction_successes = $compactionSuccesses.Count
-        requested_model = $Model
+        requested_model = $RequestedModel
         actual_model = $evidence.Fields.model
         provider = $evidence.Fields.provider
         memory_scope = $evidence.Fields.memoryScope

@@ -72,6 +72,16 @@ public final class SweBenchDriver {
         List<String> continuationPrompts = args.length == 7
                 ? loadContinuationPrompts(Path.of(args[6]), continuationRounds)
                 : List.of();
+        String conversationProtocol = System.getProperty("devcli.benchmark.conversation.protocol", "continue");
+        if ("original-task-qa".equals(conversationProtocol)) {
+            if (!"solo".equals(mode) || !"compact".equals(contextMode)
+                    || continuationRounds < 2 || continuationRounds > 64 || args.length == 7) {
+                throw new IllegalArgumentException("original-task-qa requires solo compact, 2..64 rounds, no prompt overrides");
+            }
+            continuationPrompts = qaContinuationPrompts();
+        } else if (!"continue".equals(conversationProtocol)) {
+            throw new IllegalArgumentException("Unknown conversation protocol: " + conversationProtocol);
+        }
 
         DevCliConfig config = DevCliConfig.load();
         LlmClient client = LlmClientFactory.createFromConfig(config);
@@ -79,6 +89,11 @@ public final class SweBenchDriver {
             throw new IllegalStateException("no LLM client: check .env");
         }
         registerBenchmarkContextWindow(client);
+        if ("original-task-qa".equals(conversationProtocol)
+                && (!"openai".equals(client.getProviderName()) || !isSupportedQaModel(client.getModelName())
+                || com.devcli.context.ContextProfile.from(client).compressionTriggerTokens() != 64000)) {
+            throw new IllegalArgumentException("original-task-qa requires Luna/Terra and an effective 64000-token threshold");
+        }
 
         long started = System.currentTimeMillis();
         System.err.println("[driver] mode=" + mode + " contextMode=" + contextMode
@@ -88,7 +103,7 @@ public final class SweBenchDriver {
                 + " modelContextWindow=" + client.maxContextWindow() + " env={"
                 + environmentFingerprint(System.getProperties(), System.getenv()) + "}"
                 + " memoryScope=isolated toolScope=ISOLATED_PROJECT");
-        UsageCollector usage = new UsageCollector();
+        UsageCollector usage = new UsageCollector(outFile.toAbsolutePath().getParent().resolve("conversation.jsonl"));
         String previousCompaction = System.getProperty(ConversationHistoryCompactor.COMPACTION_ENABLED_PROPERTY);
         System.setProperty(ConversationHistoryCompactor.COMPACTION_ENABLED_PROPERTY,
                 Boolean.toString("compact".equals(contextMode)));
@@ -209,15 +224,57 @@ public final class SweBenchDriver {
 
     private static String runRounds(AgentSessionRuntime session, String prompt, int continuationRounds,
                                     UsageCollector usage, List<String> continuationPrompts) {
-        String output = session.runInCurrentContext(prompt).output();
-        emitRoundContextMetrics(session.agent(), 1);
-        for (int round = 2; round <= continuationRounds; round++) {
+        String sessionId = java.util.UUID.randomUUID().toString();
+        String output = "";
+        for (int round = 1; round <= continuationRounds; round++) {
             if (usage.externalFailure.get()) break;
-            System.err.println("[driver] continuation round=" + round);
-            output = session.runInCurrentContext(continuationPrompt(round, continuationPrompts)).output();
+            if (round > 1) System.err.println("[driver] continuation round=" + round);
+            String question = round == 1 ? prompt : continuationPrompt(round, continuationPrompts);
+            output = session.runInCurrentContext(question).output();
             emitRoundContextMetrics(session.agent(), round);
+            usage.recordTurn(sessionId, question, output, contextWindowSnapshot(session.agent(), round));
         }
         return output;
+    }
+
+    static List<String> qaContinuationPrompts() {
+        List<String> prompts = new ArrayList<>(63);
+        String prefix = "Continue the same SWE-bench issue. Use the current conversation and workspace evidence, "
+                + "preserve the original requirements, constraints, failures, decisions, and verified results. "
+                + "Do not introduce another issue, do not restart, and do not run unrelated full suites. ";
+        List<String> discovery = List.of("state confirmed facts and unknowns", "trace the next relevant code path",
+                "identify one missing piece of evidence", "check one concrete edge case",
+                "compare the current choice with an alternative", "verify unchanged behavior",
+                "report actual results and avoid unsupported claims");
+        for (int i = 0; i < 10; i++) {
+            prompts.add(prefix + "Focus on diagnosis step " + (i + 1) + ": "
+                    + discovery.get(i % discovery.size()) + ". If evidence is missing, say so and use only "
+                    + "the project tools needed to obtain it.");
+        }
+        List<String> execution = List.of(
+                "The context may have been compacted. Reconstruct the original task and inspect the current workspace before acting.",
+                "Implement the smallest production-code change that fixes the original issue; do not stop at analysis or documentation.",
+                "Add or update a focused regression test for the reported behavior, without changing unrelated tests.",
+                "Run the focused test for the original issue and inspect the actual failure output.",
+                "If the focused test fails, correct the implementation and rerun only the relevant test.",
+                "Verify non-regression constraints and confirm the patch is based on the original issue, not a new hypothesis.",
+                "Review the complete diff and remove unrelated edits; keep the fix minimal and production-ready.",
+                "Run the smallest additional validation needed to support the original acceptance criteria.",
+                "Confirm which requirements, root cause, evidence, decisions, files, and test results are represented in the final patch.",
+                "Finalize the original SWE-bench patch and report the actual implementation and test result; do not claim unrun tests.");
+        for (String action : execution) {
+            prompts.add(prefix + action);
+        }
+        for (int i = prompts.size(); i < 63; i++) {
+            prompts.add(prefix + "Continue the original task with one evidence-backed implementation or validation step. "
+                    + "If the patch is complete, inspect it and report actual results without rerunning unrelated suites. "
+                    + "Sequence " + i + ".");
+        }
+        return List.copyOf(prompts);
+    }
+
+    static boolean isSupportedQaModel(String model) {
+        return "gpt-5.6-luna".equals(model) || "gpt-5.6-terra".equals(model);
     }
 
     static ContextWindowSnapshot contextWindowSnapshot(Agent agent, int round) {
@@ -256,11 +313,39 @@ public final class SweBenchDriver {
     }
 
     static final class UsageCollector implements RunEventSink {
+        private final Path transcript;
+        private static final com.fasterxml.jackson.databind.ObjectMapper JSON =
+                new com.fasterxml.jackson.databind.ObjectMapper();
         private final LongAdder inputTokens = new LongAdder();
         private final LongAdder outputTokens = new LongAdder();
         private final LongAdder cachedInputTokens = new LongAdder();
         private final DoubleAdder estimatedCostCny = new DoubleAdder();
         private final AtomicBoolean externalFailure = new AtomicBoolean();
+
+        UsageCollector() {
+            transcript = null;
+        }
+
+        UsageCollector(Path transcript) throws java.io.IOException {
+            this.transcript = Files.createFile(transcript);
+        }
+
+        void recordTurn(String sessionId, String question, String answer, ContextWindowSnapshot context) {
+            if (transcript == null) return;
+            var row = JSON.createObjectNode();
+            row.put("session_id", sessionId).put("round", context.round())
+                    .put("question", question).put("answer", answer)
+                    .put("history_tokens", context.historyTokens()).put("trigger_tokens", context.triggerTokens())
+                    .put("input_tokens_cumulative", inputTokens.sum())
+                    .put("output_tokens_cumulative", outputTokens.sum())
+                    .put("external_failure", externalFailure.get());
+            try {
+                Files.writeString(transcript, JSON.writeValueAsString(row) + "\n", StandardCharsets.UTF_8,
+                        java.nio.file.StandardOpenOption.APPEND);
+            } catch (java.io.IOException error) {
+                throw new java.io.UncheckedIOException("Cannot preserve conversation evidence", error);
+            }
+        }
 
         @Override
         public void emit(RunEvent event) {

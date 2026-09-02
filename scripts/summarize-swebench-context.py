@@ -58,6 +58,119 @@ def read_json(path):
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
+def official_pending_reason(root):
+    """Classify a missing report without turning an evaluator outage into a score."""
+    status_path = root / "official-status.json"
+    if status_path.exists():
+        status = read_json(status_path)
+        if status.get("status") == "blocked_external":
+            return {
+                "reason": "external_failure",
+                "detail": status.get("reason") or status.get("status"),
+            }
+    return {"reason": "official_report_missing_or_error"}
+
+
+def compact_percentages(rows):
+    def percent(numerator, denominator):
+        return 100 * numerator / denominator if denominator else None
+
+    def test_rate(samples, prefix):
+        known = [r for r in samples if r.get(f"{prefix}_total") is not None]
+        return percent(sum(r[f"{prefix}_success"] for r in known),
+                       sum(r[f"{prefix}_total"] for r in known))
+
+    exposed = [r for r in rows if r.get("compaction_successes", 0) > 0]
+    micro_exposed = [r for r in rows if r.get("micro_cleanup_events")]
+    return {
+        "resolved_percent": percent(sum(r["official_resolved"] for r in rows), len(rows)),
+        "f2p_percent": test_rate(rows, "f2p"),
+        "p2p_retention_percent": test_rate(rows, "p2p"),
+        "semantic_compaction_exposure_percent": percent(len(exposed), len(rows)),
+        "micro_cleanup_exposure_percent": percent(len(micro_exposed), len(rows)),
+        "post_micro_cleanup_resolved_percent": percent(
+            sum(r["official_resolved"] for r in micro_exposed), len(micro_exposed)),
+        "post_compaction_sample_count": len(exposed),
+        "post_compaction_resolved_percent": percent(sum(r["official_resolved"] for r in exposed), len(exposed)),
+        "post_compaction_f2p_percent": test_rate(exposed, "f2p"),
+        "post_compaction_p2p_retention_percent": test_rate(exposed, "p2p"),
+        "quality_retention_vs_raw": None,
+    }
+
+
+def summarize_compact(root, instance_ids, model):
+    rows, excluded = [], []
+    dataset = {r["instance_id"]: r for r in read_json(root / "java-43-official-dataset.json")}
+    for instance_id in instance_ids:
+        directory = root / instance_id / "solo-compact"
+        result_path = directory / "result.json"
+        if not result_path.exists():
+            excluded.append({"instance_id": instance_id, "reason": "generation_missing"})
+            continue
+        usage = read_json(result_path)
+        if usage.get("external_failure") or not usage.get("valid_sample"):
+            excluded.append({"instance_id": instance_id,
+                             "reason": usage.get("failure_class") or "invalid_generation"})
+            continue
+        expected = {"test_type": "public", "actual_model": model, "provider": "openai",
+                    "mode": "solo", "context_mode": "compact", "compression_trigger_tokens": 64000,
+                    "conversation_protocol": "original-task-qa",
+                    "initial_prompt_source": "official_problem_statement"}
+        if usage.get("summary_usage_scope") not in {"compactor_only", "compactor_and_presummary"}:
+            raise ValueError(f"Unqualified summary usage scope: {instance_id}")
+        if "pre_summary_enabled" in usage and usage.get("pre_summary_enabled"):
+            raise ValueError(f"Pre-summary must be disabled for compact-only: {instance_id}")
+        if any(usage.get(k) != v for k, v in expected.items()):
+            raise ValueError(f"Unqualified compact-only provenance: {instance_id}")
+        turns = [json.loads(line) for line in (directory / "conversation.jsonl").read_text(encoding="utf-8").splitlines()]
+        original = dataset[instance_id]["problem_statement"]
+        if (len(turns) != usage["continuation_rounds"] or len({t["session_id"] for t in turns}) != 1
+                or [t["round"] for t in turns] != list(range(1, usage["continuation_rounds"] + 1))
+                or turns[0]["question"] != original
+                or usage["base_commit"] != dataset[instance_id]["base_commit"]
+                or any(len(t["question"]) >= 600 for t in turns[1:])):
+            raise ValueError(f"Original task / short QA / same-session contract broken: {instance_id}")
+        report = official_report(root, instance_id, "solo-compact", model)
+        if report is None:
+            pending = official_pending_reason(root)
+            excluded.append({"instance_id": instance_id, **pending})
+            continue
+        row = {"instance_id": instance_id, "base_commit": usage["base_commit"],
+               "source_sha256": usage.get("source_sha256"), "dataset_sha256": usage.get("dataset_sha256"),
+               **condition_metrics(usage, report)}
+        log = (directory / "agent.log").read_text(encoding="utf-8-sig")
+        row["history_by_round"] = [{k: t[k] for k in ("round", "history_tokens", "trigger_tokens")} for t in turns]
+        row["session_id"] = turns[0]["session_id"]
+        row["history_compactions"] = [
+            {"before_tokens": int(before), "after_tokens": int(after)}
+            for before, after in re.findall(
+                r"(?m)^\[context-compaction\] kind=history [^\r\n]*beforeTokens=(\d+) afterTokens=(\d+)", log)]
+        micro = re.findall(r"(?m)^\[context-compaction\] kind=micro beforeTokens=(\d+) afterTokens=(\d+) "
+                           r"clearedToolResults=(\d+) removedByTool=(\{[^\r\n]*?\}) "
+                           r"roleBefore=(\{[^\r\n]*?\}) roleAfter=(\{[^\r\n]*?\})", log)
+        row["micro_cleanup_events"] = []
+        for before, after, cleared, tools, roles_before, roles_after in micro:
+            if int(cleared) == 0:
+                continue
+            parse_map = lambda value: {k: int(v) for k, v in re.findall(r"([\w.-]+)=(\d+)", value)}
+            row["micro_cleanup_events"].append({
+                "before_tokens": int(before), "after_tokens": int(after), "cleared_tool_results": int(cleared),
+                "removed_by_tool": parse_map(tools), "role_tokens_before": parse_map(roles_before),
+                "role_tokens_after": parse_map(roles_after)})
+        rows.append(row)
+    external = sum(e["reason"] == "external_failure" for e in excluded)
+    return {
+        "test_type": "public_authoritative_dataset", "protocol": "original-task-qa",
+        "quality_source": "official_SWE_bench_harness_reports", "model": model,
+        "compression_trigger_tokens": 64000, "original_samples": len(instance_ids),
+        "excluded_or_pending": excluded, "external_failures": external, "core_scored_samples": len(rows),
+        "warning": "Affected by external failures; reference only" if external > len(instance_ids) * .1 else None,
+        "metrics": compact_percentages(rows), "samples": rows,
+        "limitations": "No raw control; no causal improvement or raw-relative retention claim. "
+                        "Unexposed tasks do not measure semantic compression quality. QA is a fixed multi-turn protocol, not the default single-turn leaderboard.",
+    }
+
+
 def official_report(root, instance_id, condition, model):
     run_id = f"paired-{condition}-{model}"
     model_id = f"devcli-{condition}-{model}"
@@ -93,7 +206,8 @@ def summarize(root, instance_ids, model):
             usages[context] = usage
             report = official_report(root, instance_id, condition, model)
             if report is None:
-                excluded.append({"instance_id": instance_id, "condition": condition, "reason": "official_report_missing_or_error"})
+                pending = official_pending_reason(root)
+                excluded.append({"instance_id": instance_id, "condition": condition, **pending})
                 continue
             metrics[context] = condition_metrics(usage, report)
             log = (result_file.parent / "agent.log").read_text(encoding="utf-8-sig")
@@ -131,8 +245,9 @@ def main():
     parser.add_argument("--instance-ids", nargs="+", required=True)
     parser.add_argument("--model", default="gpt-5.6-luna")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--compact-only", action="store_true")
     args = parser.parse_args()
-    result = summarize(args.run_root, args.instance_ids, args.model)
+    result = (summarize_compact if args.compact_only else summarize)(args.run_root, args.instance_ids, args.model)
     text = json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False)
     if args.output:
         with args.output.open("x", encoding="utf-8") as stream:
