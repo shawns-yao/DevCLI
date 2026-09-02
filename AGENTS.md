@@ -315,4 +315,12 @@ Execution Trace：ReAct 与 Plan/Team 全路径通过 `RunEventTraceSink` 把结
 
 公开配对实验新增测试入口 `PairedContextDriver`（实际调用生产 Compactor）、`MemoryEvidenceDriver`（隔离目录中的长期记忆与关键词检索）、`MemoryReaderDriver`（近期窗口/检索上下文对照）。它们不是完整Agent多轮评测；不测向量召回、自动记忆晋升或工具回读恢复。原始数据、抽样和成本边界见 `docs/benchmark-paired-run-20260830.md`；已有模型直测不得替代这些功能对照。`scripts/score-swebench-official.ps1` 与旧的自定义日志评分脚本不同，运行未修改官方Docker harness；Java43题批量和AgentDojo安全接入尚未完成。已完成结果跳过，中断记录保留且不自动付费重跑。
 
+AgentDojo 接入状态更新（2026-08-31）：MCP 桥接与生产 `AgentSessionRuntime → ToolExecutionPipeline → 官方 evaluator` 已接通。`benchmarks/agentdojo/run-paired.ps1` 固定四题，启动前写入数据来源、模型、预算、顺序及哈希清单，批次与条件目录禁止复用。驱动必须保留 `search_tools` 和 `read_tool_result`；预激活仅做初筛，不能截断后续发现。显式短词/中文工具查询保留原意，整句预激活另行过滤噪声。`auto-approve` 仅诊断效用和审批开销，`terminal` 复用生产人工审批；baseline 只旁路 HITL，不得声称比较了完整治理开关。本批次不覆盖沙箱或 PatchSet，安全收益仍未完成；不同版本或旧诊断结果不合并。
+
+MCP schema 清理保留 `anyOf` / `oneOf` 约束，不能把可空标量改为 object；2026-08-31 的 v7 日历公开题配对已验证合法 null 经真实工具链成功执行。受影响题目可通过 `-CaseId` 单独建立新批次，不与旧版本混算。
+
 形成稳定协作规则时直接补进本文件，不要只留在聊天记录里。详细实现细节补到 `docs/agents-reference.md`。
+
+效果报告统一给百分比并附分母：AgentDojo 主指标为官方 ASR、Utility 与 ASR 下降百分点，自动批准不可宣称安全收益。上下文新实验使用 `original-task-qa`：优先 Luna（不可用时记录实际回退模型）、SWE Java 原始 Issue、同一 Session、64000 阈值、compact-only、默认 20 轮，以真实达到阈值为准；禁止拼接源码包替代真实对话。`conversation.jsonl` 保存真实问答；官方质量与实际经历模型压缩的子集分开统计，未触发时不提供压缩保真成绩。
+
+微压缩替换前比较原结果与恢复引用的 Token，只有净减少时才替换和落盘；短确认结果保持原文。公开测试使用冻结源码快照，运行中发现并修复的问题不追溯修改旧批次成绩。

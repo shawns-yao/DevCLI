@@ -213,6 +213,26 @@ Checkpoint 保存执行图、执行产物、验收元数据、PatchSet 写前日
 
 失败统一提供原因、分类、下一步动作，以及重试、人工接手、接受部分结果和回滚选项。
 
+## AgentDojo 公开数据评测
+
+`benchmarks/agentdojo/run-paired.ps1 -BatchRoot <新目录>` 使用固定版本 AgentDojo 原始任务，经 `AgentSessionRuntime`、生产 MCP、`ToolExecutionPipeline` 执行后交由官方 evaluator 评分。来源、四道任务、Luna 模型、预算、执行顺序及产物哈希在启动前写入 `manifest.json`；已存在的批次和条件目录拒绝复用。
+
+驱动保留 `search_tools` 和 `read_tool_result`，未预激活的工具仍通过生产发现链路启用。显式短词和中文查询不会被停用词过滤；整句预激活单独过滤噪声词。测试源码与单元测试分目录。
+
+MCP 参数保留 `anyOf` / `oneOf` 联合类型，允许 schema 声明的 `null`，不放宽非法类型。修复后的受影响题目可通过 `-CaseId <任务组合标识>` 单独建立新批次，不重跑或混合其他题目。
+
+默认 `-ApprovalPolicy auto-approve` 仅诊断任务效用和审批开销，不能证明安全提升。`terminal` 复用生产人工审批；baseline 同样经过生产执行管线，仅旁路 HITL。本实验不覆盖 Docker 沙箱、PatchSet 或文件回滚，旧批次不得合并为正式总体成绩。
+
+治理主指标为官方攻击成功率 `ASR = attack_success / 有效攻击样本 × 100%`，越低越好；同时报告官方任务效用 `Utility = utility / 有效任务样本 × 100%` 及 `baseline ASR − treatment ASR`（百分点）。百分比必须附样本量、审批策略和外部失败数；两侧均无成功攻击不等于证明治理有效。
+
+## 上下文压缩问答评测
+
+`scripts/swe-bench-multilingual-java.ps1` 的 `-ConversationProtocol original-task-qa` 固定要求：Luna（不可用时记录实际回退模型）、公开原始 Issue、solo、compact-only、64000 Token 阈值、默认 20 轮（以实际达到阈值为准）。同一 Issue 的多轮复用同一 `AgentSessionRuntime`，首轮不追加源码包，后续问题覆盖需求、诊断、实现、验证及证据回顾；禁止自定义大文本替换任务。每题独立工作区，逐轮真实问答与历史窗口记录在 `conversation.jsonl`。
+
+最终补丁仍由 `scripts/score-swebench-official.ps1` 调用官方 harness。`scripts/summarize-swebench-context.py --compact-only` 输出 resolved、F2P、P2P 的百分比，另列实际触发模型压缩的样本比例及该子集的质量；没有触发时压缩后质量为 `null`，不能用普通任务成功代替压缩效果。微压缩、摘要 Token 和耗时单独记录；没有 raw 对照时不计算相对质量保持率。该固定问答协议是公开任务上的多轮实验，不冒充默认单轮榜单。
+
+微压缩仅在恢复引用比原工具结果更省 Token 时替换并落盘；短确认结果保持原文，避免清理后窗口反而增大。
+
 ## 设计原则
 
 1. 主 Agent 负责决策和最终验收，子 Agent 只承担边界清晰的子任务。
