@@ -73,7 +73,11 @@ public final class ToolSearchProvider implements ToolProvider {
         if (normalized.isBlank()) {
             return 0;
         }
-        List<String> terms = splitTerms(normalized);
+        List<String> terms = splitTerms(normalized).stream()
+                .filter(term -> !QUERY_STOP_WORDS.contains(term))
+                .filter(term -> !term.matches("[a-z]"))
+                .distinct()
+                .toList();
         if (terms.isEmpty()) {
             return 0;
         }
@@ -125,8 +129,6 @@ public final class ToolSearchProvider implements ToolProvider {
     private static List<String> splitTerms(String normalized) {
         return Arrays.stream(normalized.split("\\s+"))
                 .map(term -> term.replaceAll("^[^\\p{L}\\p{N}_-]+|[^\\p{L}\\p{N}_-]+$", ""))
-                .filter(term -> term.length() >= 3)
-                .filter(term -> !QUERY_STOP_WORDS.contains(term))
                 .filter(s -> !s.isBlank())
                 .toList();
     }
@@ -145,17 +147,25 @@ public final class ToolSearchProvider implements ToolProvider {
     private static int scoreTool(ToolSearchEntry entry, List<String> terms) {
         int score = 0;
         for (String term : terms) {
-            if (entry.searchName().contains(term)) {
+            if (matchesTerm(entry.searchName(), term)) {
                 score += 3;
             }
-            if (entry.searchDescription().contains(term)) {
+            if (matchesTerm(entry.searchDescription(), term)) {
                 score += 1;
             }
-            if (entry.searchSchema().contains(term)) {
+            if (matchesTerm(entry.searchSchema(), term)) {
                 score += 1;
             }
         }
         return score;
+    }
+
+    private static boolean matchesTerm(String text, String term) {
+        if (term.matches("[a-z]{1,2}")) {
+            return java.util.regex.Pattern.compile("(?<![a-z0-9])"
+                    + java.util.regex.Pattern.quote(term) + "(?![a-z0-9])").matcher(text).find();
+        }
+        return text.contains(term);
     }
 
     private static String oneLine(String value) {

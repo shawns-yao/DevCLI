@@ -50,27 +50,7 @@ public final class McpSchemaSanitizer {
             object.remove("$id");
             object.remove("$ref");
 
-            StringBuilder alternatives = new StringBuilder();
-            for (String keyword : new String[]{"anyOf", "oneOf"}) {
-                JsonNode union = object.remove(keyword);
-                if (union != null && union.isArray()) {
-                    if (!alternatives.isEmpty()) {
-                        alternatives.append("; ");
-                    }
-                    alternatives.append(keyword).append(" options: ");
-                    for (int i = 0; i < union.size(); i++) {
-                        if (i > 0) alternatives.append(", ");
-                        JsonNode option = union.get(i);
-                        alternatives.append(option.path("type").asText(option.toString()));
-                    }
-                }
-            }
-            if (!alternatives.isEmpty()) {
-                object.put("type", "object");
-                String existing = object.path("description").asText("");
-                object.put("description", truncateDescription(
-                        existing.isBlank() ? alternatives.toString() : existing + " (" + alternatives + ")"));
-            }
+            // Preserve unions: nullable scalar fields must not become object-only parameters.
 
             Iterator<Map.Entry<String, JsonNode>> fields = object.fields();
             while (fields.hasNext()) {

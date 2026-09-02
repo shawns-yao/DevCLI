@@ -184,6 +184,18 @@ class ToolRegistryTest {
     }
 
     @Test
+    void explicitSearchPreservesShortWordsAndChinese() {
+        try (ToolRegistry registry = new ToolRegistry()) {
+            registry.registerMcpTool(new McpToolDescriptor("demo", "lookup",
+                    "mcp__demo__lookup", "AI ID 查询 R", JsonNodeFactory.instance.objectNode()), args -> "ok");
+            for (String query : List.of("AI", "ID", "查询", "R")) {
+                String result = registry.executeTool("search_tools", "{\"query\":\"" + query + "\"}");
+                assertTrue(result.contains("mcp__demo__lookup"), query + ": " + result);
+            }
+        }
+    }
+
+    @Test
     void mcpToolSnapshotIncludesSchemaFingerprint() {
         ToolRegistry registry = new ToolRegistry();
         var issueSchema = JsonNodeFactory.instance.objectNode();

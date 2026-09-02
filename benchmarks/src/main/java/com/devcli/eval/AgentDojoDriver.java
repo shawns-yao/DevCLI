@@ -6,6 +6,7 @@ import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.hitl.HitlHandler;
 import com.devcli.hitl.HitlToolRegistry;
+import com.devcli.hitl.TerminalHitlHandler;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.OpenAiClient;
 import com.devcli.mcp.McpServer;
@@ -24,6 +25,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -44,9 +46,9 @@ public final class AgentDojoDriver {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 9) {
+        if (args.length != 9 && args.length != 10) {
             System.err.println("usage: AgentDojoDriver <python> <bridge.py> <harnessRoot> <outDir> "
-                    + "<baseline|treatment> <suite> <userTask> <injectionTask> <attack>");
+                    + "<baseline|treatment> <suite> <userTask> <injectionTask> <attack> [auto-approve|terminal]");
             System.exit(2);
         }
         Path python = Path.of(args[0]).toAbsolutePath().normalize();
@@ -58,7 +60,8 @@ public final class AgentDojoDriver {
         String userTask = args[6];
         String injectionTask = args[7];
         String attack = args[8];
-        Files.createDirectories(outDir);
+        String approvalPolicy = approvalPolicy(mode, args.length == 10 ? args[9] : "");
+        prepareOutputDirectory(outDir);
         Path projectDir = outDir.resolve("workspace");
         Files.createDirectories(projectDir);
         System.setProperty("devcli.memory.dir", outDir.resolve("memory").toString());
@@ -75,13 +78,20 @@ public final class AgentDojoDriver {
         result.put("injection_task_id", injectionTask);
         result.put("attack", attack);
         result.put("harness_root", harnessRoot.toString());
+        result.put("run_id", java.util.UUID.randomUUID().toString());
+        result.put("started_at", java.time.Instant.now().toString());
+        result.put("approval_policy", approvalPolicy);
+        result.put("comparison_scope", "HITL_only_shared_production_pipeline");
+        result.put("security_improvement_claim_eligible", false);
+        result.put("token_budget", System.getProperty("devcli.react.token.budget", "model_default"));
+        result.put("max_iterations", System.getProperty("devcli.react.hard.max.iterations", "100"));
 
-        CountingHitlHandler hitl = new CountingHitlHandler();
+        CountingHitlHandler hitl = new CountingHitlHandler("terminal".equals(approvalPolicy));
         UsageCollector usage = new UsageCollector();
         try (ToolRegistry registry = "treatment".equals(mode)
                 ? new HitlToolRegistry(hitl) : new ToolRegistry()) {
             registry.setProjectPath(projectDir.toString());
-            Path config = writeMcpConfig(outDir, python, bridge, suite, userTask, injectionTask, attack);
+            Path config = writeMcpConfig(outDir, python, bridge, harnessRoot, suite, userTask, injectionTask, attack);
             McpConfigLoader loader = new McpConfigLoader(
                     outDir.resolve("missing-user-mcp.json"), config, projectDir);
             try (McpServerManager manager = new McpServerManager(registry, projectDir, loader)) {
@@ -99,13 +109,11 @@ public final class AgentDojoDriver {
                 server.tools().stream()
                         .filter(tool -> !CONTROL_TOOLS.contains(tool.name()))
                         .forEach(tool -> allowedTools.add(tool.namespacedName()));
-                // 生产结果治理会把大型 MCP 结果折叠为 result_ref；必须保留正式恢复工具。
-                allowedTools.add("read_tool_result");
-                CONTROL_TOOLS.forEach(name -> registry.unregisterMcpTool(
-                        "mcp__" + SERVER + "__" + name));
-                registry.retainTools(allowedTools);
+                retainBenchmarkTools(registry, allowedTools);
                 result.put("registered_tool_count", allowedTools.size());
                 result.put("recovery_tool_enabled", registry.hasTool("read_tool_result"));
+                result.put("discovery_tool_enabled", registry.hasTool("search_tools"));
+                result.set("allowed_tools", MAPPER.valueToTree(allowedTools));
                 result.put("mcp_transport", server.transportName());
 
                 LlmClient client = lunaClient();
@@ -124,6 +132,8 @@ public final class AgentDojoDriver {
                     agent.setRunEventSink(usage);
                     output = registry.runWithToolAccess(ToolRegistry.ToolAccessScope.FULL,
                             () -> session.runInCurrentContext(metadata.path("prompt").asText()).output());
+                    result.set("final_visible_tools", MAPPER.valueToTree(
+                            registry.getToolDefinitions().stream().map(LlmClient.Tool::name).toList()));
                 }
                 Files.writeString(outDir.resolve("model-output.txt"), output, StandardCharsets.UTF_8);
                 boolean externalFailure = usage.externalFailure() || isExternalFailureText(output);
@@ -162,10 +172,30 @@ public final class AgentDojoDriver {
             result.put("cached_input_tokens", totals.cachedInputTokens());
             result.put("estimated_cost_cny", totals.estimatedCostCny());
             result.put("wall_ms", System.currentTimeMillis() - started);
+            result.set("tool_events", usage.toolEvents);
+            result.set("approval_events", hitl.events);
             Files.writeString(outDir.resolve("result.json"),
                     MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(result),
-                    StandardCharsets.UTF_8);
+                    StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW);
         }
+    }
+
+    static void prepareOutputDirectory(Path outDir) throws java.io.IOException {
+        Files.createDirectories(outDir.toAbsolutePath().getParent());
+        Files.createDirectory(outDir);
+    }
+
+    static void retainBenchmarkTools(ToolRegistry registry, Set<String> allowedTools) {
+        allowedTools.add("read_tool_result");
+        allowedTools.add("search_tools");
+        CONTROL_TOOLS.forEach(name -> registry.unregisterMcpTool("mcp__" + SERVER + "__" + name));
+        registry.retainTools(allowedTools);
+    }
+
+    static String approvalPolicy(String mode, String policy) {
+        if ("baseline".equals(mode) && policy.isBlank()) return "none";
+        if ("treatment".equals(mode) && Set.of("auto-approve", "terminal").contains(policy)) return policy;
+        throw new IllegalArgumentException("baseline uses no HITL; treatment requires explicit auto-approve or terminal");
     }
 
     static String normalizeMode(String raw) {
@@ -176,10 +206,12 @@ public final class AgentDojoDriver {
         return mode;
     }
 
-    private static Path writeMcpConfig(Path outDir, Path python, Path bridge, String suite,
+    private static Path writeMcpConfig(Path outDir, Path python, Path bridge, Path harnessRoot, String suite,
                                        String userTask, String injectionTask, String attack) throws Exception {
         ObjectNode server = MAPPER.createObjectNode();
         server.put("command", python.toString());
+        server.putObject("env").put("PYTHONPATH", harnessRoot.resolve("src").toString())
+                .put("PYTHONDONTWRITEBYTECODE", "1");
         var commandArgs = server.putArray("args");
         commandArgs.add(bridge.toString());
         commandArgs.add("--suite").add(suite);
@@ -230,12 +262,23 @@ public final class AgentDojoDriver {
 
     private static final class CountingHitlHandler implements HitlHandler {
         private final LongAdder approvals = new LongAdder();
+        private final TerminalHitlHandler terminal;
+        private final com.fasterxml.jackson.databind.node.ArrayNode events = MAPPER.createArrayNode();
         private volatile boolean enabled = true;
 
+        CountingHitlHandler(boolean interactive) {
+            terminal = interactive ? new TerminalHitlHandler(true) : null;
+        }
+
         @Override
-        public ApprovalResult requestApproval(ApprovalRequest request) {
+        public synchronized ApprovalResult requestApproval(ApprovalRequest request) {
             approvals.increment();
-            return ApprovalResult.approve();
+            long start = System.nanoTime();
+            ApprovalResult decision = terminal == null ? ApprovalResult.approve() : terminal.requestApproval(request);
+            events.addObject().put("tool", request.toolName()).put("arguments", request.arguments())
+                    .put("decision", decision.decision().name()).put("reason", decision.reason())
+                    .put("elapsed_ms", (System.nanoTime() - start) / 1_000_000);
+            return decision;
         }
 
         @Override
@@ -254,6 +297,7 @@ public final class AgentDojoDriver {
     }
 
     private static final class UsageCollector implements RunEventSink {
+        private final com.fasterxml.jackson.databind.node.ArrayNode toolEvents = MAPPER.createArrayNode();
         private final LongAdder inputTokens = new LongAdder();
         private final LongAdder outputTokens = new LongAdder();
         private final LongAdder cachedInputTokens = new LongAdder();
@@ -262,7 +306,7 @@ public final class AgentDojoDriver {
         private final AtomicReference<String> failureReason = new AtomicReference<>("");
 
         @Override
-        public void emit(RunEvent event) {
+        public synchronized void emit(RunEvent event) {
             if (event instanceof RunEvent.ModelUsage modelUsage) {
                 inputTokens.add(modelUsage.inputTokens());
                 outputTokens.add(modelUsage.outputTokens());
@@ -272,6 +316,12 @@ public final class AgentDojoDriver {
                     && isExternalFailureText(failure.reason())) {
                 externalFailure.set(true);
                 failureReason.set(failure.reason());
+            } else if (event instanceof RunEvent.ToolResults results) {
+                for (var tool : results.results()) {
+                    toolEvents.addObject().put("id", tool.id()).put("tool", tool.name())
+                            .put("arguments", tool.argumentsJson()).put("status", tool.status())
+                            .put("error_code", tool.errorCode()).put("elapsed_ms", tool.elapsedMillis());
+                }
             }
         }
 

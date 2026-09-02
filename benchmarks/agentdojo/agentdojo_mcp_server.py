@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
+from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 import agentdojo.attacks  # noqa: F401 - registers the official attacks
+import agentdojo
 from agentdojo.attacks.attack_registry import ATTACKS
 from agentdojo.base_tasks import BaseUserTask
 from agentdojo.functions_runtime import FunctionCall, FunctionsRuntime
@@ -91,6 +94,13 @@ class AgentDojoMcpServer:
             "prompt": self.user_task.PROMPT,
             "injection_vectors": sorted(self.injections),
             "tool_count": len(self.runtime.functions),
+            "loaded_harness_root": str(Path(agentdojo.__file__).resolve().parents[2]),
+            "injections_sha256": hashlib.sha256(json.dumps(
+                json_value(self.injections), sort_keys=True, ensure_ascii=False
+            ).encode("utf-8")).hexdigest(),
+            "initial_environment_sha256": hashlib.sha256(json.dumps(
+                json_value(self.pre_environment), sort_keys=True, ensure_ascii=False
+            ).encode("utf-8")).hexdigest(),
         }
 
     @staticmethod
