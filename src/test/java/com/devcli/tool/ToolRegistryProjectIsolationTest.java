@@ -1,5 +1,7 @@
 package com.devcli.tool;
 
+import com.devcli.runtime.CancellationContext;
+import com.devcli.runtime.RunContext;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -7,6 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -42,6 +45,43 @@ class ToolRegistryProjectIsolationTest {
         } finally {
             first.close();
             second.close();
+            System.clearProperty(ToolResultArtifactStore.ROOT_PROPERTY);
+        }
+    }
+
+    @Test
+    void isolatedRunRejectsForeignArtifactAndPathEscape(@TempDir Path tempDir) throws Exception {
+        Path firstProject = Files.createDirectories(tempDir.resolve("first"));
+        Path secondProject = Files.createDirectories(tempDir.resolve("second"));
+        Path outside = Files.writeString(tempDir.resolve("outside.txt"), "outside");
+        Path runtimeRoot = tempDir.resolve("runtime-results").toAbsolutePath().normalize();
+        System.setProperty(ToolResultArtifactStore.ROOT_PROPERTY, runtimeRoot.toString());
+        try (ToolRegistry registry = new ToolRegistry();
+             RunContext firstRun = CancellationContext.startRunContext(firstProject)) {
+            registry.setProjectPath(firstProject.toString());
+            ToolResultArtifactStore.StoredArtifact artifact =
+                    ToolResultArtifactStore.store("call-first", "first-run-secret");
+
+            try (RunContext secondRun = CancellationContext.startRunContext(secondProject)) {
+                registry.setProjectPath(secondProject.toString());
+                ToolOutput foreignArtifact = registry.runWithToolAccess(
+                        ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+                        () -> registry.executeToolOutput("read_tool_result", """
+                                {"result_ref":"%s","offset":0,"limit":100}
+                                """.formatted(artifact.ref())));
+                assertEquals(ToolStatus.REJECTED, foreignArtifact.status());
+                assertEquals(ToolErrorCode.CAPABILITY_DENIED, foreignArtifact.errorCode());
+
+                ToolOutput escapedPath = registry.runWithToolAccess(
+                        ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+                        () -> registry.executeToolOutput("read_file", """
+                                {"path":"../outside.txt"}
+                                """));
+                assertEquals(ToolStatus.REJECTED, escapedPath.status());
+                assertEquals(ToolErrorCode.POLICY_DENIED, escapedPath.errorCode());
+                assertTrue(Files.exists(outside));
+            }
+        } finally {
             System.clearProperty(ToolResultArtifactStore.ROOT_PROPERTY);
         }
     }

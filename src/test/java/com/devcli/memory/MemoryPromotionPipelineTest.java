@@ -230,6 +230,62 @@ class MemoryPromotionPipelineTest {
     }
 
     @Test
+    void promotionGateCombinesDeduplicationConfirmationSupersedeAndExpiry() {
+        try (LongTermMemory memory = new LongTermMemory(tempDir.toFile());
+             MemoryPromotionQueue queue = new MemoryPromotionQueue(tempDir)) {
+            MemoryCurator curated = ignored -> new IsolatedMemoryCurator.Decision(
+                    IsolatedMemoryCurator.Action.SAVE, "PROCEDURE", "项目默认测试命令是 mvn test",
+                    "PROJECT", "untrusted", "HIGH", List.of("evidence:1"), "");
+            MemoryPromotionPipeline pipeline = new MemoryPromotionPipeline(queue, curated, memory);
+
+            String firstJob = pipeline.enqueue(snapshot("task-gate-first"));
+            assertTrue(pipeline.processNext());
+            String firstMemoryId = queue.find(firstJob).orElseThrow().resultRef();
+
+            String duplicateJob = pipeline.enqueue(snapshot("task-gate-duplicate"));
+            assertTrue(pipeline.processNext());
+            assertEquals(MemoryPromotionQueue.State.COMMITTED,
+                    queue.find(duplicateJob).orElseThrow().state());
+            assertEquals(1, memory.getAll().stream()
+                    .filter(entry -> entry.getContent().equals("项目默认测试命令是 mvn test"))
+                    .count(), "重复事实只能保留一个 revision");
+
+            MemoryCurator pending = ignored -> new IsolatedMemoryCurator.Decision(
+                    IsolatedMemoryCurator.Action.SAVE, "PROCEDURE", "项目默认测试命令是 mvn verify",
+                    "PROJECT", "untrusted", "MEDIUM", List.of("evidence:1"), "待用户确认");
+            MemoryPromotionPipeline pendingPipeline = new MemoryPromotionPipeline(queue, pending, memory);
+            String pendingJob = pendingPipeline.enqueue(snapshot("task-gate-confirm"));
+            assertTrue(pendingPipeline.processNext());
+            assertEquals(MemoryPromotionQueue.State.AWAITING_CONFIRMATION,
+                    queue.find(pendingJob).orElseThrow().state());
+            assertTrue(memory.getAll().stream()
+                            .filter(entry -> entry.getContent().equals("项目默认测试命令是 mvn verify"))
+                            .noneMatch(MemoryEntry::isRecallable),
+                    "未确认候选不得进入可召回集合");
+
+            assertTrue(pendingPipeline.confirm(pendingJob, true, ""));
+            String confirmedId = queue.find(pendingJob).orElseThrow().resultRef();
+            assertEquals(MemoryPromotionQueue.State.COMMITTED,
+                    queue.find(pendingJob).orElseThrow().state());
+            MemoryEntry confirmed = memory.retrieve(confirmedId).orElseThrow();
+            assertTrue(confirmed.isRecallable());
+            assertEquals(1, confirmed.getValidatedUseCount());
+            assertFalse(memory.retrieve(firstMemoryId).orElseThrow().isActive(),
+                    "确认的新事实应 supersede 旧事实，但旧事实仍保留审计");
+
+            memory.storeManaged(confirmed.withLifecycle(
+                    confirmed.getRevision() + 1,
+                    Instant.now().minusSeconds(1),
+                    confirmed.getMetadata()));
+            assertTrue(memory.search("项目默认测试命令是 mvn verify", 5).isEmpty(),
+                    "过期事实不得继续被召回");
+            MemoryEntry archived = memory.retrieve(confirmedId).orElseThrow();
+            assertFalse(archived.isActive());
+            assertEquals("ARCHIVED", archived.getMetadata().get("lifecycle_state"));
+        }
+    }
+
+    @Test
     void sourceExcerptSurvivesPromotionQueueDeletionAndReload() {
         String memoryId;
         try (LongTermMemory memory = new LongTermMemory(tempDir.toFile());

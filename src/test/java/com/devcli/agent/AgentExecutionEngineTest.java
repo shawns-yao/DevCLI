@@ -246,6 +246,18 @@ class AgentExecutionEngineTest {
                 .map(RunEvent.FailureGuidance.class::cast)
                 .anyMatch(event -> "BUDGET_EXHAUSTED".equals(event.category())
                         && event.actions().size() == 4));
+        List<RunEvent.ExecutionState> terminalStates = delegate.runEvents.stream()
+                .filter(RunEvent.ExecutionStateChanged.class::isInstance)
+                .map(RunEvent.ExecutionStateChanged.class::cast)
+                .map(RunEvent.ExecutionStateChanged::state)
+                .filter(state -> state == RunEvent.ExecutionState.COMPLETED
+                        || state == RunEvent.ExecutionState.FAILED
+                        || state == RunEvent.ExecutionState.CANCELLED
+                        || state == RunEvent.ExecutionState.BUDGET_EXCEEDED
+                        || state == RunEvent.ExecutionState.ITERATION_LIMIT_REACHED)
+                .toList();
+        assertEquals(List.of(RunEvent.ExecutionState.BUDGET_EXCEEDED), terminalStates,
+                "advisory 只能继续提醒，硬熔断必须产生唯一终态");
     }
 
     @Test
