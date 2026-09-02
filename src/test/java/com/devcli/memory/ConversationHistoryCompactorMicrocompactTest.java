@@ -37,7 +37,7 @@ class ConversationHistoryCompactorMicrocompactTest {
     }
 
     @Test
-    void clearsOldOversizeToolResultAndKeepsMetadata() {
+    void clearsExactDuplicateToolResultAndKeepsMetadata() {
         ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 30_000, true);
         c.setMicrocompactOutputRoot(tempDir);
         List<LlmClient.Message> history = toolHistory(
@@ -46,15 +46,17 @@ class ConversationHistoryCompactorMicrocompactTest {
                 tool("r2", "grep_code"),
                 tool("r3", "list_dir"),
                 tool("r4", "search_code"));
-        history.set(2, new LlmClient.Message("tool", "x".repeat(30_000), null, null, "old"));
+        String duplicate = "x".repeat(30_000);
+        history.set(2, new LlmClient.Message("tool", duplicate, null, null, "old"));
+        history.set(3, new LlmClient.Message("tool", duplicate, null, null, "r1"));
 
         boolean changed = c.microcompactOversizeMessages(history);
 
         assertTrue(changed);
-        String compacted = history.get(2).content();
-        assertTrue(compacted.length() < 30_000, "旧工具结果应被回收");
+        String compacted = history.get(3).content();
+        assertTrue(compacted.length() < 30_000, "重复工具结果应被回收");
         assertTrue(compacted.contains("<microcompact_boundary>"));
-        assertEquals("old", history.get(2).toolCallId(), "回收不能丢失 toolCallId");
+        assertEquals("r1", history.get(3).toolCallId(), "回收不能丢失 toolCallId");
         assertEquals("tool", history.get(2).role());
     }
 
@@ -70,22 +72,23 @@ class ConversationHistoryCompactorMicrocompactTest {
                 tool("r3", "list_dir"),
                 tool("r4", "search_code"));
         history.set(2, new LlmClient.Message("tool", original, null, null, "call/with:unsafe"));
+        history.set(3, new LlmClient.Message("tool", original, null, null, "r1"));
 
         assertTrue(c.microcompactOversizeMessages(history));
 
-        String compacted = history.get(2).content();
+        String compacted = history.get(3).content();
         assertTrue(compacted.contains("storedPath=.devcli/microcompact_tool_outputs/"), compacted);
         assertFalse(compacted.contains(tempDir.toAbsolutePath().toString()),
                 "恢复提示不得暴露 Docker 无法访问的宿主机绝对路径");
         Path output = tempDir.resolve(ConversationHistoryCompactor.MICROCOMPACT_OUTPUTS_DIR)
                 .resolve(ConversationHistoryCompactor.microcompactSessionId())
-                .resolve("call_with_unsafe.txt");
+                .resolve("r1.txt");
         assertTrue(Files.isRegularFile(output));
         assertEquals(original, Files.readString(output));
     }
 
     @Test
-    void keepsMostRecentToolResultsByCount() {
+    void doesNotEvictUniqueResultsByRecencyHeuristic() {
         ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 30_000, true);
         c.setMicrocompactOutputRoot(tempDir);
         List<LlmClient.Message> history = toolHistory(
@@ -95,16 +98,14 @@ class ConversationHistoryCompactorMicrocompactTest {
                 tool("recent-3", "list_dir"),
                 tool("recent-4", "search_code"));
 
-        assertTrue(c.microcompactOversizeMessages(history));
-
-        assertTrue(history.get(2).content().contains("<microcompact_boundary>"));
-        for (int i = 1; i <= ConversationHistoryCompactor.MICRO_COMPACT_RETAIN_RECENT_TOOL_RESULTS; i++) {
-            assertEquals("result-recent-" + i, history.get(2 + i).content());
+        assertFalse(c.microcompactOversizeMessages(history));
+        for (int i = 0; i < 5; i++) {
+            assertEquals("result-" + (i == 0 ? "old" : "recent-" + i), history.get(2 + i).content());
         }
     }
 
     @Test
-    void protectsCriticalExternalAndFailedCommandResults() {
+    void doesNotClassifyEvidenceByToolNameOrResultText() {
         ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 30_000, true);
         c.setMicrocompactOutputRoot(tempDir);
         List<LlmClient.Message> history = toolHistory(
@@ -120,17 +121,16 @@ class ConversationHistoryCompactorMicrocompactTest {
         history.set(5, new LlmClient.Message("tool",
                 "命令执行完成 (exit code: 1)\nBUILD FAILURE", null, null, "failed"));
 
-        assertTrue(c.microcompactOversizeMessages(history));
-
+        assertFalse(c.microcompactOversizeMessages(history));
         assertEquals("result-memory", history.get(2).content());
         assertEquals("result-mcp", history.get(3).content());
         assertEquals("result-web", history.get(4).content());
         assertTrue(history.get(5).content().contains("exit code: 1"));
-        assertTrue(history.get(6).content().contains("<microcompact_boundary>"));
+        assertEquals("result-old-read", history.get(6).content());
     }
 
     @Test
-    void supportsConfiguredToolExclusions() {
+    void ignoresLegacyToolExclusionConfiguration() {
         ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 30_000, true);
         c.setMicrocompactOutputRoot(tempDir);
         List<LlmClient.Message> history = toolHistory(
@@ -145,7 +145,7 @@ class ConversationHistoryCompactorMicrocompactTest {
         try {
             System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_EXCLUDE_TOOLS_PROPERTY,
                     "read_file");
-            assertTrue(c.microcompactOversizeMessages(history));
+            assertFalse(c.microcompactOversizeMessages(history));
         } finally {
             if (previous == null) {
                 System.clearProperty(ConversationHistoryCompactor.MICRO_COMPACT_EXCLUDE_TOOLS_PROPERTY);
@@ -155,7 +155,7 @@ class ConversationHistoryCompactorMicrocompactTest {
         }
 
         assertEquals("result-protected-read", history.get(2).content());
-        assertTrue(history.get(3).content().contains("<microcompact_boundary>"));
+        assertEquals("result-clearable-grep", history.get(3).content());
     }
 
     @Test
@@ -168,7 +168,9 @@ class ConversationHistoryCompactorMicrocompactTest {
                 tool("r2", "grep_code"),
                 tool("r3", "list_dir"),
                 tool("r4", "search_code"));
-        history.set(2, new LlmClient.Message("tool", "large-output-".repeat(3_000), null, null, "old"));
+        String duplicate = "large-output-".repeat(3_000);
+        history.set(2, new LlmClient.Message("tool", duplicate, null, null, "old"));
+        history.set(3, new LlmClient.Message("tool", duplicate, null, null, "r1"));
 
         assertTrue(c.microcompactOversizeMessages(history));
 
@@ -182,7 +184,27 @@ class ConversationHistoryCompactorMicrocompactTest {
     }
 
     @Test
-    void microcompactAloneAvoidsLlmSummarization() {
+    void evictsReadSnapshotOnlyAfterSamePathIsWritten(@TempDir Path tempDir) {
+        ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 30_000, true);
+        c.setMicrocompactOutputRoot(tempDir);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.user("inspect and update"));
+        history.add(LlmClient.Message.assistant(null, null, List.of(new LlmClient.ToolCall(
+                "read-1", new LlmClient.ToolCall.Function("read_file", "{\"path\":\"src/A.java\"}")))));
+        history.add(new LlmClient.Message("tool", "old snapshot ".repeat(2_000), null, null, "read-1"));
+        history.add(LlmClient.Message.user("apply change"));
+        history.add(LlmClient.Message.assistant(null, null, List.of(new LlmClient.ToolCall(
+                "write-1", new LlmClient.ToolCall.Function("write_file",
+                "{\"path\":\"src/A.java\",\"content\":\"new\"}")))));
+        history.add(new LlmClient.Message("tool", "written", null, null, "write-1"));
+
+        assertTrue(c.microcompactOversizeMessages(history));
+        assertTrue(history.get(2).content().contains("reason=superseded"));
+        assertTrue(history.get(2).content().contains("sourceToolCallId=read-1"));
+    }
+
+    @Test
+    void thresholdTriggerRunsSemanticCompactionAfterDeterministicEviction() {
         AtomicInteger summarizeCalls = new AtomicInteger();
         ConversationHistoryCompactor c = summaryCountingCompactor(summarizeCalls);
         c.setMicrocompactOutputRoot(tempDir);
@@ -193,10 +215,12 @@ class ConversationHistoryCompactorMicrocompactTest {
                 tool("r3", "list_dir"),
                 tool("r4", "search_code"));
         history.set(2, new LlmClient.Message("tool", "x".repeat(120_000), null, null, "old"));
+        history.set(3, new LlmClient.Message("tool", "x".repeat(120_000), null, null, "r1"));
+        history.add(LlmClient.Message.user("follow-up"));
+        history.add(LlmClient.Message.assistant("ready"));
 
-        assertFalse(c.compactIfNeeded(history, 5_000));
-        assertEquals(0, summarizeCalls.get());
-        assertTrue(TokenBudget.estimateMessagesTokens(history) < 5_000);
+        assertTrue(c.compactIfNeeded(history, 5_000));
+        assertEquals(1, summarizeCalls.get());
     }
 
     @Test
@@ -219,7 +243,7 @@ class ConversationHistoryCompactorMicrocompactTest {
     }
 
     private static ConversationHistoryCompactor summaryCountingCompactor(AtomicInteger calls) {
-        return new ConversationHistoryCompactor(null, 30_000, true) {
+        return new ConversationHistoryCompactor(null, 2, true) {
             @Override
             protected String summarize(List<LlmClient.Message> messages) {
                 calls.incrementAndGet();

@@ -2,6 +2,9 @@ package com.devcli.memory;
 
 import com.devcli.context.ContextProfile;
 import com.devcli.llm.LlmClient;
+import com.devcli.tool.ToolResultArtifactStore;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -9,16 +12,18 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
+import java.util.UUID;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -26,19 +31,21 @@ import java.util.function.Supplier;
  * 压缩 ReAct 主循环里的 {@code conversationHistory}（即 {@code List<LlmClient.Message>}）。
  *
  * <p>v3 重构（路径 B）：旧版本曾与 {@code ContextCompressor + ConversationMemory} 双轨并存，
- * 后者只压旁路笔记本不影响 LLM 输入，已删除。本类是真正治理 LLM 输入窗口的唯一压缩点。
+ * 后者只压旁路笔记本不影响 LLM 输入，已删除。本类是真正治理 LLM 输入窗口的语义压缩点。
  *
- * <p>第 0 层 microcompact：在任何 LLM 摘要之前，只回收已经离开最近保护区的旧工具结果，
- * 不调用 LLM，也不修改 user / assistant 消息。完整工具结果落盘，并在上下文中保留项目相对路径。
+ * <p>写入阶段的工具结果尺寸治理由 {@code ToolResultSizeManager} 负责；本类只在达到
+ * 压缩触发阈值后执行确定性淘汰，再调用 LLM 做语义压缩。确定性淘汰不修改 user /
+ * assistant 消息，完整工具结果由 artifact store 保留。
  *
  * 算法：
  * 1. 估算 conversationHistory 当前 token，未达 trigger 直接返回 false
- * 2. <b>token 预算保留区</b>：从尾巴往前累计 token，到 retainRecentTokens 时停在
+ * 2. 触发后执行一次确定性 tool-result 淘汰；即使淘汰后低于 trigger，也继续语义压缩
+ * 3. <b>token 预算保留区</b>：从尾巴往前累计 token，到 retainRecentTokens 时停在
  *    最近的 user 消息边界，作为 splitIdx
- * 3. <b>增量摘要</b>：识别 history 头部是否已有"上一轮摘要"标记
+ * 4. <b>增量摘要</b>：识别 history 头部是否已有"上一轮摘要"标记
  *    （首条 user 内容以 {@link #SUMMARY_MARKER} 开头），如有则只把"上次摘要之后到 splitIdx 之间"
  *    的新消息送 LLM，老摘要作为 base 并入；如无则走 Map-Reduce 全量摘要
- * 4. 重建：[system] + [user("[已压缩的历史对话摘要]\n" + summary)] +
+ * 5. 重建：[system] + [user("[已压缩的历史对话摘要]\n" + summary)] +
  *         [assistant("好的，已了解上下文。请继续。")] + [尾部保留消息]
  *
  * 关键约束：分割点必然落在 user message 边界，避免切断 tool_call / tool_result 的成对协议。
@@ -53,6 +60,7 @@ import java.util.function.Supplier;
 public class ConversationHistoryCompactor {
 
     private static final Logger log = LoggerFactory.getLogger(ConversationHistoryCompactor.class);
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     /** 实验与诊断用：默认保持生产压缩行为，可显式关闭形成 raw 对照。 */
     public static final String COMPACTION_ENABLED_PROPERTY = "devcli.context.compaction.enabled";
@@ -67,16 +75,17 @@ public class ConversationHistoryCompactor {
     private static final int DEFAULT_RETAIN_RECENT_ROUNDS = 3;
     private static final double DEFAULT_RETAIN_WINDOW_RATIO = 0.15;
 
-    // ── microcompact（第 0 层）：旧工具结果 GC，不调 LLM ──
+    /**
+     * 旧版配置仅保留编译兼容，不再驱动压缩决策。确定性淘汰不按最近数量或工具名单猜测语义。
+     */
+    @Deprecated
     static final int MICRO_COMPACT_RETAIN_RECENT_TOOL_RESULTS = 4;
+    @Deprecated
     static final String MICRO_COMPACT_KEEP_RECENT_PROPERTY =
             "devcli.context.microcompact.keep.recent.tool.results";
-    static final String MICRO_COMPACT_KEEP_RECENT_ENV =
-            "DEVCLI_CONTEXT_MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS";
+    @Deprecated
     static final String MICRO_COMPACT_EXCLUDE_TOOLS_PROPERTY =
             "devcli.context.microcompact.exclude.tools";
-    static final String MICRO_COMPACT_EXCLUDE_TOOLS_ENV =
-            "DEVCLI_CONTEXT_MICROCOMPACT_EXCLUDE_TOOLS";
 
     /**
      * Reduce 阶段最多合并多少片摘要。如果片数 > 此值，会先做"二次 Map"
@@ -166,6 +175,11 @@ public class ConversationHistoryCompactor {
 
             要求：任务状态、待办事项和下一步由 Session Memory 提供，不写入摘要；
             精确实体（文件名/路径/数字/错误码）保留原文；决策被覆盖时只保留最终值；
+            未解决事项必须标记为 lifecycle=UNRESOLVED，已被覆盖的事实必须标记为
+            lifecycle=SUPERSEDED 并保留 supersededBy；有工具或消息来源时填写 evidenceRefs。
+            能够结构化表示时，在事实前使用
+            <!-- summary-item {"id":"...","subject":"...","lifecycle":"...","evidenceRefs":[]} -->
+            标记；无法结构化时仍保留精确事实文本。
             "逐条用户消息"按时间列每条用户消息的要点（不复述全文）；不保留过渡话术；不加段落外的前缀或元描述。
 
             === 待压缩的对话 ===
@@ -179,6 +193,7 @@ public class ConversationHistoryCompactor {
             2. Agent 在本片段中已完成的关键工具调用与结果
             3. 本片段中提到的精确实体（文件名、路径、数字常量、错误码、配置值）必须保留原文
             4. 本片段中达成或修改的决策
+            5. 未解决事项、失败证据和证据来源引用必须保留，不能把未解决误写成已完成
 
             不要复述每条原文，不要发明片段外的信息。输出 2-4 段中文，不加前缀。
 
@@ -198,7 +213,9 @@ public class ConversationHistoryCompactor {
             ## 逐条用户消息
 
             要求：任务状态、待办事项和下一步由 Session Memory 提供，不写入摘要；
-            所有片段里的精确实体（文件名/路径/数字/错误码）必须以原文出现；决策被覆盖（先 A 后 B 最终 C）只保留"最终是 C"；不遗漏任何片段事实；不加段落外前缀。
+            所有片段里的精确实体（文件名/路径/数字/错误码）必须以原文出现；决策被覆盖（先 A 后 B 最终 C）只保留"最终是 C"；
+            未解决事项保持 lifecycle=UNRESOLVED，已被覆盖事实保持 lifecycle=SUPERSEDED，能够定位时保留 evidenceRefs；
+            不遗漏任何片段事实；不加段落外前缀。
 
             === 各片段摘要 ===
             %s
@@ -251,6 +268,8 @@ public class ConversationHistoryCompactor {
     private Supplier<CompactBoundaryRuntimeState> compactBoundaryRuntimeStateSupplier;
     private Path microcompactOutputRoot;
     private MicrocompactStats lastMicrocompactStats = MicrocompactStats.empty();
+    private CompactionTriggerStateStore triggerStateStore =
+            new CompactionTriggerStateStore(defaultCompactionStatePath());
 
     public record MicrocompactStats(int beforeTokens,
                                     int afterTokens,
@@ -334,6 +353,16 @@ public class ConversationHistoryCompactor {
         this.microcompactOutputRoot = microcompactOutputRoot == null
                 ? null
                 : microcompactOutputRoot.toAbsolutePath().normalize();
+        if (this.microcompactOutputRoot != null) {
+            this.triggerStateStore = new CompactionTriggerStateStore(
+                    defaultCompactionStatePath(this.microcompactOutputRoot));
+        }
+    }
+
+    void setCompactionTriggerStatePath(Path statePath) {
+        this.triggerStateStore = statePath == null
+                ? new CompactionTriggerStateStore(defaultCompactionStatePath())
+                : new CompactionTriggerStateStore(statePath);
     }
 
     public MicrocompactStats lastMicrocompactStats() {
@@ -349,8 +378,7 @@ public class ConversationHistoryCompactor {
      *
      * @param history       Agent 主循环的 conversationHistory，调用结束后可能被替换为更短列表
      * @param triggerTokens 触发压缩的 token 阈值（通常是 ContextProfile.compressionTriggerTokens()）
-     * @return 是否做了历史级压缩（LLM 摘要或降级截断）；仅 microcompact 回收旧工具结果
-     *         不改变历史结构，返回 false（回收已在 content 留标记 + log，调用方无需提示）
+     * @return 是否做了历史级压缩（LLM 摘要或降级截断）；未达阈值时不会改写旧 history。
      */
     public boolean compactIfNeeded(List<LlmClient.Message> history, int triggerTokens) {
         if (history == null || history.isEmpty()) return false;
@@ -363,22 +391,35 @@ public class ConversationHistoryCompactor {
                     enabled, preCompactionTokens, triggerTokens);
         }
         if (!enabled) return false;
-        if (metrics && preCompactionTokens >= triggerTokens) {
+        CompactionTriggerStateStore.State pendingTrigger = triggerStateStore.load().orElse(null);
+        boolean crossed = preCompactionTokens >= triggerTokens;
+        if (!crossed && pendingTrigger == null) {
+            return false;
+        }
+        if (pendingTrigger == null) {
+            pendingTrigger = triggerStateStore.begin(
+                    triggerTokens, preCompactionTokens, historyFingerprint(history));
+            if (!triggerStateStore.isDurable()) {
+                log.warn("compaction trigger state could not be persisted; continuing with in-memory guard");
+                if (metrics) {
+                    System.err.println("[context-compaction] kind=state-error operation=begin");
+                }
+            }
+        }
+        if (metrics && crossed) {
             System.err.printf(Locale.ROOT,
                     "[context-compaction] kind=trigger beforeTokens=%d triggerTokens=%d%n",
                     preCompactionTokens, triggerTokens);
         }
 
-        // 第 0 层 microcompact：只回收旧工具结果，不改 user / assistant 语义消息。
-        // 回收后仍超过阈值才进入模型摘要；熔断/冷却期也可执行这层低成本 Tool Result GC。
+        // 历史淘汰只属于一次已经发生的触发事件。不要用淘汰后的 token 再次决定
+        // 是否触发语义压缩，否则微压缩会把 crossed 状态悄悄清掉，导致模型摘要永远不执行。
         boolean microChanged = microcompactOversizeMessages(history);
-        if (TokenBudget.estimateMessagesTokens(history) < triggerTokens) {
-            if (microChanged) {
-                log.info("microcompact alone brought conversation below trigger; skip LLM summarization");
-            }
-            // micro 只替换旧 tool_result 正文、不改变消息结构，不视为"历史压缩"；
-            // 返回 false 避免调用方打印"已压缩为摘要"的误导提示。
-            return false;
+        int afterEvictionTokens = TokenBudget.estimateMessagesTokens(history);
+        if (metrics) {
+            System.err.printf(Locale.ROOT,
+                    "[context-compaction] kind=eviction beforeTokens=%d afterTokens=%d changed=%s%n",
+                    preCompactionTokens, afterEvictionTokens, microChanged);
         }
 
         // 检查是否在降级冷却期内
@@ -391,6 +432,7 @@ public class ConversationHistoryCompactor {
                 boolean truncated = fallbackTruncate(history, triggerTokens);
                 if (truncated) {
                     lastFallbackTimestamp = now;
+                    triggerStateStore.clear();
                     if (metrics) {
                         System.err.printf(Locale.ROOT,
                                 "[context-compaction] kind=fallback beforeTokens=%d triggerTokens=%d%n",
@@ -409,6 +451,7 @@ public class ConversationHistoryCompactor {
             if (truncated) {
                 lastFallbackTimestamp = now;
                 consecutiveFailures = 0; // 重置计数器
+                triggerStateStore.clear();
                 if (metrics) {
                     System.err.printf(Locale.ROOT,
                             "[context-compaction] kind=fallback beforeTokens=%d triggerTokens=%d%n",
@@ -474,6 +517,10 @@ public class ConversationHistoryCompactor {
                     summaryBase, history, splitIdx, oldMsgs);
             if (attempt.terminated()) {
                 // attempt 内部已经 recordFailure
+                triggerStateStore.recordRetry(pendingTrigger);
+                if (!triggerStateStore.isDurable()) {
+                    log.warn("compaction retry state could not be persisted");
+                }
                 return false;
             }
             summary = attempt.summary();
@@ -536,6 +583,7 @@ public class ConversationHistoryCompactor {
                 SUMMARY_MARKER + metadata.renderBoundaryBlock() + "\n" + summary.trim()));
         history.clear();
         history.addAll(rebuilt);
+        triggerStateStore.clear();
         // 成功压缩：清零失败计数，让下次失败重新累计
         if (consecutiveFailures > 0) {
             log.info("conversation compaction succeeded; reset failure counter from {}", consecutiveFailures);
@@ -601,8 +649,9 @@ public class ConversationHistoryCompactor {
     }
 
     /**
-     * 第 0 层 microcompact：仅回收旧 tool_result。user、assistant、任务状态与决策文本不参与规则删除。
-     * 最近 N 个工具结果、显式排除工具、记忆/外部查询工具和仍携带失败信号的结果受到保护。
+     * 触发阶段的确定性淘汰：只处理可证明重复或已被同一路径写入覆盖的 tool_result。
+     * 不按工具类型、错误文本或“看起来重要”做语义判断，也不修改 user / assistant 消息。
+     * 只依据内容指纹和同路径后续写入事实决定是否处理；记忆、外部查询和失败证据不由规则猜测。
      */
     boolean microcompactOversizeMessages(List<LlmClient.Message> history) {
         if (history == null || history.isEmpty()) {
@@ -611,7 +660,8 @@ public class ConversationHistoryCompactor {
         }
         int beforeTokens = TokenBudget.estimateMessagesTokens(history);
         Map<String, Integer> roleBefore = roleTokens(history);
-        Map<String, String> toolNames = toolNamesByCallId(history);
+        Map<String, ToolInvocation> invocations = toolInvocations(history);
+        Map<String, Integer> firstByContent = new LinkedHashMap<>();
         List<Integer> toolResultIndexes = new ArrayList<>();
         for (int i = 0; i < history.size(); i++) {
             LlmClient.Message message = history.get(i);
@@ -620,25 +670,29 @@ public class ConversationHistoryCompactor {
             }
         }
 
-        int keepRecent = configuredKeepRecentToolResults();
-        int firstClearablePosition = Math.max(0, toolResultIndexes.size() - keepRecent);
-        Set<Integer> recentIndexes = new LinkedHashSet<>(
-                toolResultIndexes.subList(firstClearablePosition, toolResultIndexes.size()));
         Map<String, Integer> removedByTool = new LinkedHashMap<>();
         int cleared = 0;
         if (microcompactOutputRoot != null) {
             for (int index : toolResultIndexes) {
-                if (recentIndexes.contains(index)) continue;
                 LlmClient.Message message = history.get(index);
                 String content = message.content();
-                String toolName = toolNames.getOrDefault(message.toolCallId(), "unknown");
+                ToolInvocation invocation = invocations.get(message.toolCallId());
+                String toolName = invocation == null ? "unknown" : invocation.name();
                 if (content == null || content.isBlank()
-                        || content.contains("<microcompact_boundary>")
-                        || isProtectedToolResult(toolName, content)) {
+                        || content.contains("<microcompact_boundary>")) {
                     continue;
                 }
+                String fingerprint = sha256(content);
+                Integer firstIndex = firstByContent.putIfAbsent(fingerprint, index);
+                boolean duplicate = firstIndex != null && firstIndex != index;
+                boolean dead = invocation != null && isProvablyDead(invocation, index, invocations);
+                if (!duplicate && !dead) continue;
+                String sourceToolCallId = duplicate
+                        ? history.get(firstIndex).toolCallId() : message.toolCallId();
                 int before = TokenBudget.estimateMessagesTokens(List.of(message));
-                String compacted = collapseOldToolResultContent(message.toolCallId(), toolName, content);
+                String compacted = collapseOldToolResultContent(
+                        message.toolCallId(), toolName, content, sourceToolCallId,
+                        duplicate ? "duplicate" : "superseded");
                 if (compacted.equals(content)) continue;
                 LlmClient.Message replacement = new LlmClient.Message(
                         message.role(), compacted, message.reasoningContent(), message.toolCalls(),
@@ -665,17 +719,21 @@ public class ConversationHistoryCompactor {
         return cleared > 0;
     }
 
-    private static Map<String, String> toolNamesByCallId(List<LlmClient.Message> history) {
-        Map<String, String> names = new LinkedHashMap<>();
+    private static Map<String, ToolInvocation> toolInvocations(List<LlmClient.Message> history) {
+        Map<String, ToolInvocation> invocations = new LinkedHashMap<>();
+        int messageIndex = 0;
         for (LlmClient.Message message : history) {
-            if (message.toolCalls() == null) continue;
-            for (LlmClient.ToolCall call : message.toolCalls()) {
-                if (call.id() != null && call.function() != null && call.function().name() != null) {
-                    names.put(call.id(), call.function().name());
+            if (message.toolCalls() != null) {
+                for (LlmClient.ToolCall call : message.toolCalls()) {
+                    if (call.id() != null && call.function() != null && call.function().name() != null) {
+                        invocations.put(call.id(), new ToolInvocation(
+                                call.id(), call.function().name(), call.function().arguments(), messageIndex));
+                    }
                 }
             }
+            messageIndex++;
         }
-        return names;
+        return invocations;
     }
 
     private static Map<String, Integer> roleTokens(List<LlmClient.Message> history) {
@@ -687,67 +745,40 @@ public class ConversationHistoryCompactor {
         return tokens;
     }
 
-    private static int configuredKeepRecentToolResults() {
-        String configured = System.getProperty(MICRO_COMPACT_KEEP_RECENT_PROPERTY);
-        if (configured == null || configured.isBlank()) {
-            configured = System.getenv(MICRO_COMPACT_KEEP_RECENT_ENV);
-        }
-        if (configured == null || configured.isBlank()) {
-            return MICRO_COMPACT_RETAIN_RECENT_TOOL_RESULTS;
-        }
+    private static boolean isProvablyDead(ToolInvocation invocation, int resultIndex,
+                                          Map<String, ToolInvocation> invocations) {
+        if (!"read_file".equals(invocation.name())) return false;
+        String path = jsonText(invocation.arguments(), "path");
+        if (path == null || path.isBlank()) return false;
+        return invocations.values().stream()
+                .anyMatch(next -> next.messageIndex() > resultIndex
+                        && ("write_file".equals(next.name()) || "edit_file".equals(next.name()))
+                        && path.equals(jsonText(next.arguments(), "path")));
+    }
+
+    private static String jsonText(String arguments, String field) {
+        if (arguments == null || arguments.isBlank()) return null;
         try {
-            return Math.max(0, Integer.parseInt(configured.trim()));
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException(MICRO_COMPACT_KEEP_RECENT_PROPERTY
-                    + " must be a non-negative integer, got: " + configured, e);
+            JsonNode node = JSON.readTree(arguments).get(field);
+            return node == null || !node.isTextual() ? null : node.asText();
+        } catch (IOException | RuntimeException ignored) {
+            return null;
         }
     }
 
-    private static boolean isProtectedToolResult(String toolName, String content) {
-        String normalizedName = toolName == null ? "" : toolName.trim().toLowerCase(Locale.ROOT);
-        if (normalizedName.equals("save_memory") || normalizedName.equals("confirm_memory")
-                || normalizedName.equals("list_memory")
-                || normalizedName.equals("web_search") || normalizedName.equals("web_fetch")
-                || (normalizedName.startsWith("mcp__")
-                && (normalizedName.contains("memory") || normalizedName.contains("recall")))) {
-            return true;
-        }
-        if (isConfiguredExcludedTool(normalizedName)) {
-            return true;
-        }
-        String normalizedContent = content.toLowerCase(Locale.ROOT);
-        return normalizedContent.contains("toolstatus=error")
-                || normalizedContent.contains("execution_failed")
-                || normalizedContent.matches("(?s).*exit code:\\s*[1-9][0-9]*.*")
-                || normalizedContent.contains("build failure")
-                || normalizedContent.contains("工具执行失败")
-                || normalizedContent.contains("命令执行失败");
-    }
-
-    private static boolean isConfiguredExcludedTool(String toolName) {
-        String configured = System.getProperty(MICRO_COMPACT_EXCLUDE_TOOLS_PROPERTY);
-        if (configured == null || configured.isBlank()) {
-            configured = System.getenv(MICRO_COMPACT_EXCLUDE_TOOLS_ENV);
-        }
-        if (configured == null || configured.isBlank()) return false;
-        for (String raw : configured.split(",")) {
-            String pattern = raw.trim().toLowerCase(Locale.ROOT);
-            if (pattern.isEmpty()) continue;
-            if (pattern.endsWith("*") && toolName.startsWith(pattern.substring(0, pattern.length() - 1))) {
-                return true;
-            }
-            if (toolName.equals(pattern)) return true;
-        }
-        return false;
-    }
-
-    private String collapseOldToolResultContent(String toolCallId, String toolName, String content) {
-        Path outputFile = persistMicrocompactToolOutput(toolCallId, content);
-        if (outputFile == null) {
+    private String collapseOldToolResultContent(String toolCallId, String toolName, String content,
+                                                String sourceToolCallId, String reason) {
+        Path outputFile = microcompactOutputRoot.resolve(MICROCOMPACT_OUTPUTS_DIR)
+                .resolve(MICROCOMPACT_SESSION_ID).resolve(sanitizeFileName(toolCallId) + ".txt")
+                .toAbsolutePath().normalize();
+        String compacted = renderMicrocompactBoundary(toolCallId, toolName, content.length(), outputFile,
+                sourceToolCallId, reason)
+                + "[旧工具结果已回收；可用 read_file 读取 storedPath。]";
+        // 短结果原地保留，避免恢复引用更长，也避免创建没有节省收益的落盘文件。
+        if (MemoryEntry.estimateTokens(compacted) >= MemoryEntry.estimateTokens(content)) {
             return content;
         }
-        return renderMicrocompactBoundary(toolCallId, toolName, content.length(), outputFile)
-                + "[旧工具结果已回收；可用 read_file 读取 storedPath。]";
+        return persistMicrocompactToolOutput(toolCallId, content) == null ? content : compacted;
     }
 
     private Path persistMicrocompactToolOutput(String toolCallId, String content) {
@@ -777,7 +808,9 @@ public class ConversationHistoryCompactor {
     private String renderMicrocompactBoundary(String toolCallId,
                                               String toolName,
                                               int originalChars,
-                                              Path outputFile) {
+                                              Path outputFile,
+                                              String sourceToolCallId,
+                                              String reason) {
         String storedPath = microcompactOutputRoot.relativize(outputFile)
                 .toString().replace('\\', '/');
         return "<microcompact_boundary>\n"
@@ -785,8 +818,13 @@ public class ConversationHistoryCompactor {
                 + "toolCallId=" + toolCallId + "\n"
                 + "toolName=" + toolName + "\n"
                 + "originalChars=" + originalChars + "\n"
+                + "reason=" + reason + "\n"
+                + "sourceToolCallId=" + sourceToolCallId + "\n"
                 + "storedPath=" + storedPath + "\n"
                 + "</microcompact_boundary>\n";
+    }
+
+    private record ToolInvocation(String id, String name, String arguments, int messageIndex) {
     }
 
     private static String sanitizeFileName(String value) {
@@ -1423,6 +1461,38 @@ public class ConversationHistoryCompactor {
             toRemove, currentTokens, afterTokens, keptMessages);
 
         return true;
+    }
+
+    private static Path defaultCompactionStatePath() {
+        return ToolResultArtifactStore.rootDirectory().resolve("compaction-trigger-"
+                + UUID.randomUUID().toString().replace("-", "") + ".properties");
+    }
+
+    private static Path defaultCompactionStatePath(Path projectPath) {
+        String fingerprint = sha256(projectPath.toAbsolutePath().normalize().toString());
+        return ToolResultArtifactStore.rootDirectory().resolve("compaction-trigger-" + fingerprint + ".properties");
+    }
+
+    private static String historyFingerprint(List<LlmClient.Message> history) {
+        StringBuilder value = new StringBuilder();
+        for (LlmClient.Message message : history) {
+            value.append(message.role()).append('\n')
+                    .append(message.content()).append('\n')
+                    .append(message.reasoningContent()).append('\n')
+                    .append(message.toolCallId()).append('\n')
+                    .append(message.toolCalls()).append('\n');
+        }
+        return sha256(value.toString());
+    }
+
+    private static String sha256(String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 不可用", e);
+        }
     }
 
     public int retainRecentTokens() {

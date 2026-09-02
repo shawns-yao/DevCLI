@@ -4,8 +4,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -38,8 +43,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * DevCLI 选择全局阈值 + 白名单——简单，且 DevCLI 工具数量小（9 个内置 + MCP 动态），
  * 不需要细粒度配置。
  *
- * <p>线程安全：{@link #process} 静态调用，无可变状态。落盘时按 {@code toolUseId}
- * 命名文件，并行工具调用不会冲突。
+ * <p>线程安全：尺寸预算和本轮精确重复索引均为线程隔离状态；并行工具线程共享父轮快照。
+ * 落盘时按 {@code toolUseId} 命名文件，并行工具调用不会冲突。
  */
 public final class ToolResultSizeManager {
 
@@ -78,6 +83,20 @@ public final class ToolResultSizeManager {
                 @Override
                 protected AtomicInteger childValue(AtomicInteger parentValue) {
                     return parentValue == null ? new AtomicInteger(0) : parentValue;
+                }
+            };
+
+    /** 本轮已落盘结果索引；只用于新结果写入时的精确重复引用。 */
+    private static final InheritableThreadLocal<Map<String, ToolResultArtifact>> recentArtifacts =
+            new InheritableThreadLocal<>() {
+                @Override
+                protected Map<String, ToolResultArtifact> initialValue() {
+                    return new ConcurrentHashMap<>();
+                }
+
+                @Override
+                protected Map<String, ToolResultArtifact> childValue(Map<String, ToolResultArtifact> parentValue) {
+                    return parentValue == null ? new ConcurrentHashMap<>() : parentValue;
                 }
             };
 
@@ -129,6 +148,19 @@ public final class ToolResultSizeManager {
             return new ManagedResult("(" + label + " 执行完毕无输出)", null);
         }
         CollapseClassification classification = classify(toolName, hasImages, result);
+        if (classification != CollapseClassification.IMAGE_PASSTHROUGH
+                && classification != CollapseClassification.PASSTHROUGH
+                && classification != CollapseClassification.INLINE) {
+            String duplicateKey = duplicateKey(toolName, result);
+            ToolResultArtifact previous = recentArtifacts.get().get(duplicateKey);
+            if (previous != null && !previous.artifactRef().isBlank()) {
+                String reference = duplicateReference(toolName, result.length(), previous);
+                if (estimateTokens(reference) < estimateTokens(result)) {
+                    currentBudget().addAndGet(reference.length());
+                    return new ManagedResult(reference, previous);
+                }
+            }
+        }
         if (classification == CollapseClassification.IMAGE_PASSTHROUGH
                 || classification == CollapseClassification.PASSTHROUGH
                 || classification == CollapseClassification.INLINE) {
@@ -156,12 +188,13 @@ public final class ToolResultSizeManager {
             ToolResultArtifactStore.StoredArtifact stored =
                     ToolResultArtifactStore.store(toolUseId, result);
             int kept = Math.min(previewChars, result.length());
-            String preview = result.substring(0, kept);
+            String preview = diagnosticPreview(result, kept);
             int dropped = result.length() - kept;
             String nextCursor = dropped > 0 ? Integer.toString(kept) : "";
             ToolResultArtifact artifact = new ToolResultArtifact(
                     classification.name(), stored.chars(), stored.bytes(), kept,
                     stored.ref(), nextCursor, stored.sha256());
+            recentArtifacts.get().putIfAbsent(duplicateKey(toolName, result), artifact);
             String managed = renderArtifactPreview(
                     preview, dropped, result.length(), classification, artifact);
             currentBudget().addAndGet(managed.length() - reservedBudget);
@@ -185,6 +218,7 @@ public final class ToolResultSizeManager {
     /** Agent 每轮工具执行前调用，重置聚合预算计数器。 */
     public static void resetTurnBudget() {
         currentTurnUsedBudget.set(new AtomicInteger(0));
+        recentArtifacts.set(new ConcurrentHashMap<>());
     }
 
     private static AtomicInteger currentBudget() {
@@ -224,16 +258,54 @@ public final class ToolResultSizeManager {
         return managedResult + "\n[工具结果折叠分类: " + classification + "]";
     }
 
+    private static String duplicateKey(String toolName, String result) {
+        return (toolName == null ? "" : toolName) + "\n" + sha256(result);
+    }
+
+    private static String duplicateReference(String toolName, int chars, ToolResultArtifact artifact) {
+        return String.format(Locale.ROOT,
+                "[重复工具结果已折叠: tool=%s, original_chars=%d, result_ref=%s, sha256=%s；复用前一次结果]",
+                toolName == null ? "unknown" : toolName, chars,
+                artifact.artifactRef(), artifact.sha256());
+    }
+
+    private static int estimateTokens(String value) {
+        return Math.max(1, (value == null ? 0 : value.length() + 3) / 4);
+    }
+
+    private static String sha256(String value) {
+        try {
+            return java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 不可用", e);
+        }
+    }
+
     /**
-     * 中间档：头部截断到 {@code keepChars}，加截断提示。
+     * 中间档：保留头部和有限尾部预览，加截断提示。
      */
     static String truncateInline(String result, int keepChars) {
         int total = result.length();
         int kept = Math.min(keepChars, total);
         int dropped = total - kept;
-        return result.substring(0, kept)
+        return diagnosticPreview(result, kept)
                 + "\n\n...(已截断 " + dropped + " 字符 / 共 " + total
                 + " 字符；使用 search_code 或 grep 进一步过滤可避免截断)";
+    }
+
+    /**
+     * 保留完整头部预览，并追加有限尾部预览。头部长度保持原有预算语义，
+     * 尾部用于暴露命令最终退出信息、测试失败摘要等诊断内容。
+     */
+    private static String diagnosticPreview(String result, int headChars) {
+        if (result == null || result.length() <= headChars) {
+            return result == null ? "" : result;
+        }
+        int tailChars = Math.min(1_000, result.length() - headChars);
+        return result.substring(0, headChars)
+                + "\n\n...[中间内容已省略，保留尾部 " + tailChars + " 字符]...\n\n"
+                + result.substring(result.length() - tailChars);
     }
 
     private static String renderArtifactPreview(

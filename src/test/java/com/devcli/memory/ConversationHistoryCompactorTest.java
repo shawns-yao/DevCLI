@@ -19,6 +19,115 @@ import static org.junit.jupiter.api.Assertions.*;
 class ConversationHistoryCompactorTest {
 
     @Test
+    void microcompactLeavesShortResultsInlineWithoutCreatingArtifacts(@TempDir Path tempDir) throws IOException {
+        ConversationHistoryCompactor compactor = new ConversationHistoryCompactor(null);
+        compactor.setMicrocompactOutputRoot(tempDir);
+        List<LlmClient.Message> history = new ArrayList<>(List.of(
+                LlmClient.Message.user("Keep the original requirement"),
+                LlmClient.Message.assistant(null, null, List.of(new LlmClient.ToolCall("small-result",
+                        new LlmClient.ToolCall.Function("edit_file", "{}")))),
+                new LlmClient.Message("tool", "File updated successfully", null, null, "small-result")));
+        List<LlmClient.Message> original = List.copyOf(history);
+        String previous = System.getProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY);
+        try {
+            System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY, "0");
+            assertFalse(compactor.microcompactOversizeMessages(history));
+            assertEquals(original, history);
+            assertEquals(0, compactor.lastMicrocompactStats().clearedToolResults());
+            try (var files = Files.list(tempDir)) {
+                assertEquals(0, files.count(), "No recovery file is needed when cleanup saves no tokens");
+            }
+        } finally {
+            if (previous == null) System.clearProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY);
+            else System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY, previous);
+        }
+    }
+
+    @Test
+    void semanticCompactionRunsWhenTriggerWasCrossedBeforeEviction(@TempDir Path tempDir) {
+        StubCompactor compactor = new StubCompactor("SEMANTIC SUMMARY", 2, true);
+        compactor.setMicrocompactOutputRoot(tempDir);
+        List<LlmClient.Message> history = new ArrayList<>(List.of(
+                LlmClient.Message.system("SYSTEM"),
+                LlmClient.Message.user("Original requirement"),
+                LlmClient.Message.assistant(null, null, List.of(new LlmClient.ToolCall(
+                        "old-tool", new LlmClient.ToolCall.Function("read_file", "{\"path\":\"a\"}")))),
+                new LlmClient.Message("tool", "old result ".repeat(4_000), null, null, "old-tool"),
+                LlmClient.Message.user("Recent question"),
+                LlmClient.Message.assistant("Recent answer")));
+        String duplicateResult = history.get(3).content();
+        history.add(4, LlmClient.Message.assistant(null, null, List.of(new LlmClient.ToolCall(
+                "duplicate-tool", new LlmClient.ToolCall.Function("read_file", "{\"path\":\"a\"}")))));
+        history.add(5, new LlmClient.Message("tool", duplicateResult, null, null, "duplicate-tool"));
+        String previousKeep = System.getProperty(
+                ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY);
+        try {
+            System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY, "0");
+            int before = TokenBudget.estimateMessagesTokens(history);
+            List<LlmClient.Message> evicted = new ArrayList<>(history);
+            assertTrue(compactor.microcompactOversizeMessages(evicted));
+            int afterEviction = TokenBudget.estimateMessagesTokens(evicted);
+            int trigger = afterEviction + 1;
+            assertTrue(before >= trigger);
+            assertTrue(afterEviction < trigger);
+
+            assertTrue(compactor.compactIfNeeded(history, trigger));
+            assertEquals(1, compactor.summarizeCalls.get(),
+                    "越过阈值后即使确定性淘汰降到阈值以下，也必须执行语义压缩");
+        } finally {
+            if (previousKeep == null) {
+                System.clearProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY);
+            } else {
+                System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY, previousKeep);
+            }
+        }
+    }
+
+    @Test
+    void pendingTriggerSurvivesCompactorRecreation(@TempDir Path tempDir) {
+        Path state = tempDir.resolve("compaction-trigger.properties");
+        ConversationHistoryCompactor failing = new ConversationHistoryCompactor(null, 2, true) {
+            @Override
+            protected String summarize(List<LlmClient.Message> messages) throws IOException {
+                throw new IOException("summary unavailable");
+            }
+        };
+        failing.setCompactionTriggerStatePath(state);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("SYSTEM"));
+        for (int i = 0; i < 5; i++) {
+            history.add(LlmClient.Message.user("Q" + i + " " + longText(2_000)));
+            history.add(LlmClient.Message.assistant("A" + i + " " + longText(2_000)));
+        }
+
+        assertFalse(failing.compactIfNeeded(history, 100), "首次摘要失败时不应伪装成成功");
+        assertTrue(Files.isRegularFile(state), "未完成的触发必须持久化");
+
+        StubCompactor recovered = new StubCompactor("RECOVERED SUMMARY", 2, true);
+        recovered.setCompactionTriggerStatePath(state);
+        assertTrue(recovered.compactIfNeeded(history, Integer.MAX_VALUE),
+                "恢复时即使当前 history 低于阈值，也必须继续未完成的语义压缩");
+        assertEquals(1, recovered.summarizeCalls.get());
+        assertFalse(Files.exists(state), "语义压缩提交后应清理 pending 状态");
+    }
+
+    @Test
+    void malformedPendingTriggerFailsClosedIntoSemanticCompaction(@TempDir Path tempDir) throws IOException {
+        Path state = tempDir.resolve("corrupt-trigger.properties");
+        Files.writeString(state, "triggerTokens=not-a-number\n");
+        StubCompactor compactor = new StubCompactor("RECOVERED SUMMARY", 2, true);
+        compactor.setCompactionTriggerStatePath(state);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.user("old requirement"));
+        history.add(LlmClient.Message.assistant("old decision"));
+        history.add(LlmClient.Message.user("new question"));
+        history.add(LlmClient.Message.assistant("new answer"));
+
+        assertTrue(compactor.compactIfNeeded(history, Integer.MAX_VALUE));
+        assertEquals(1, compactor.summarizeCalls.get());
+    }
+
+    @Test
     void doesNothingWhenBelowTrigger() {
         StubCompactor c = new StubCompactor("MOCK SUMMARY", 3);
         List<LlmClient.Message> history = new ArrayList<>();
@@ -152,8 +261,8 @@ class ConversationHistoryCompactorTest {
         history.add(LlmClient.Message.assistant(null, null, List.of(
                 new LlmClient.ToolCall("old-1", new LlmClient.ToolCall.Function("read_file", "{\"path\":\"a\"}")),
                 new LlmClient.ToolCall("old-2", new LlmClient.ToolCall.Function("list_dir", "{\"path\":\".\"}")))));
-        history.add(new LlmClient.Message("tool", "old result body 1", null, null, "old-1"));
-        history.add(new LlmClient.Message("tool", "old result body 2", null, null, "old-2"));
+        history.add(new LlmClient.Message("tool", "old result body 1".repeat(100), null, null, "old-1"));
+        history.add(new LlmClient.Message("tool", "old result body 1".repeat(100), null, null, "old-2"));
         history.add(LlmClient.Message.assistant("old done"));
         history.add(LlmClient.Message.user("RecentQ1"));
         history.add(LlmClient.Message.assistant(null, null, List.of(
@@ -177,14 +286,13 @@ class ConversationHistoryCompactorTest {
         }
 
         assertTrue(changed);
-        assertTrue(history.get(3).content().contains("<microcompact_boundary>"), history.get(3).content());
-        assertTrue(history.get(3).content().contains("toolCallId=old-1"), history.get(3).content());
-        assertFalse(history.get(3).content().contains("old result body 1"), history.get(3).content());
+        assertEquals("old result body 1".repeat(100), history.get(3).content());
         assertTrue(history.get(4).content().contains("toolCallId=old-2"), history.get(4).content());
+        assertFalse(history.get(4).content().contains("old result body 1"), history.get(4).content());
         assertEquals("recent result body", history.get(8).content());
         assertTrue(Files.exists(tempDir.resolve(ConversationHistoryCompactor.MICROCOMPACT_OUTPUTS_DIR)
                 .resolve(ConversationHistoryCompactor.microcompactSessionId())
-                .resolve("old-1.txt")));
+                .resolve("old-2.txt")));
     }
 
     @Test

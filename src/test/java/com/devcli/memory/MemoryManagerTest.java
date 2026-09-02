@@ -343,6 +343,25 @@ class MemoryManagerTest {
     }
 
     @Test
+    void explicitPreSummaryDisableKeepsCompactionExperimentModelCallFreeUntilTrigger() {
+        String key = MemoryManager.SESSION_PRE_SUMMARY_ENABLED_PROPERTY;
+        String previous = System.getProperty(key);
+        System.setProperty(key, "false");
+        StubGLMClient client = new StubGLMClient(List.of(
+                new LlmClient.ChatResponse("assistant", "UNEXPECTED PRE SUMMARY", null, 100, 20)));
+        try (LongTermMemory ltm = new LongTermMemory(tempDir.toFile());
+             MemoryManager manager = new MemoryManager(client, 4096, 128000, ltm)) {
+            assertEquals(MemoryManager.SessionPreSummaryMaintenanceResult.SKIPPED_DISABLED,
+                    manager.maintainSessionPreSummaryAfterTurn(
+                            List.of(LlmClient.Message.user(longText(10_000))), 4, 12_000));
+            assertTrue(client.messagesByCall.isEmpty());
+        } finally {
+            if (previous == null) System.clearProperty(key);
+            else System.setProperty(key, previous);
+        }
+    }
+
+    @Test
     void preSummaryReportsActualUsageEvenForEmptySummary() {
         String key = ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY;
         String previous = System.getProperty(key);
@@ -358,7 +377,7 @@ class MemoryManagerTest {
                     manager.maintainSessionPreSummaryAfterTurn(
                             List.of(LlmClient.Message.user("task")), 4, 0));
             assertTrue(captured.toString(java.nio.charset.StandardCharsets.UTF_8).contains(
-                    "kind=summary-call inputTokens=100 outputTokens=20 cachedInputTokens=30 source=pre-summary"));
+                    "kind=pre-summary-call inputTokens=100 outputTokens=20 cachedInputTokens=30"));
         } finally {
             System.setErr(originalErr);
             if (previous == null) System.clearProperty(key);

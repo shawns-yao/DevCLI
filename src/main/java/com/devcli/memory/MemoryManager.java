@@ -39,6 +39,9 @@ import java.util.function.Supplier;
  * </ul>
  */
 public class MemoryManager implements AutoCloseable {
+    /** 预摘要是可选的会话缓存优化，不属于阈值触发的语义压缩本身。 */
+    public static final String SESSION_PRE_SUMMARY_ENABLED_PROPERTY =
+            "devcli.context.pre-summary.enabled";
     private static final Logger log = LoggerFactory.getLogger(MemoryManager.class);
     private static final int SESSION_PRE_SUMMARY_TOKEN_DELTA = 2_000;
     private static final int SESSION_PRE_SUMMARY_TOOL_CALLS = 4;
@@ -926,6 +929,9 @@ public class MemoryManager implements AutoCloseable {
             List<LlmClient.Message> history,
             int turnToolCalls,
             int largestToolResultChars) {
+        if (!Boolean.parseBoolean(System.getProperty(SESSION_PRE_SUMMARY_ENABLED_PROPERTY, "true"))) {
+            return SessionPreSummaryMaintenanceResult.SKIPPED_DISABLED;
+        }
         if (!ConversationHistoryCompactor.isCompactionEnabled(System.getProperties(), System.getenv())) {
             return SessionPreSummaryMaintenanceResult.SKIPPED_DISABLED;
         }
@@ -981,7 +987,7 @@ public class MemoryManager implements AutoCloseable {
             if (Boolean.parseBoolean(System.getProperty(
                     ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY, "false"))) {
                 System.err.printf(java.util.Locale.ROOT,
-                        "[context-compaction] kind=summary-call inputTokens=%d outputTokens=%d cachedInputTokens=%d source=pre-summary%n",
+                        "[context-compaction] kind=pre-summary-call inputTokens=%d outputTokens=%d cachedInputTokens=%d%n",
                         response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
             }
             String summary = response.content();
@@ -1011,7 +1017,7 @@ public class MemoryManager implements AutoCloseable {
             if (e instanceof com.devcli.llm.LlmException failure && Boolean.parseBoolean(System.getProperty(
                     ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY, "false"))) {
                 System.err.printf(java.util.Locale.ROOT,
-                        "[context-compaction] kind=summary-error code=%s status=%d source=pre-summary%n",
+                        "[context-compaction] kind=pre-summary-error code=%s status=%d%n",
                         failure.code(), failure.statusCode());
             }
             log.warn("session pre-summary maintenance failed", e);

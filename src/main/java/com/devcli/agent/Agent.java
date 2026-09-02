@@ -668,14 +668,20 @@ public class Agent implements AutoCloseable {
     }
 
     private void maintainSessionPreSummaryAfterTurn(int turnToolCalls, int largestToolResultChars) {
-        MemoryManager.SessionPreSummaryMaintenanceResult result =
-                memoryManager.maintainSessionPreSummaryAfterTurn(
+        // 预摘要只用于为未来的语义压缩准备可复用缓存，不能阻塞主 Agent turn。
+        // Provider 连接可能因半关闭的 SSE 响应等待到 callTimeout；主链路应继续执行，
+        // 真正达到阈值时由 ConversationHistoryCompactor 自己负责有界重试/降级。
+        memoryManager.maintainSessionPreSummaryAfterTurnAsync(
                         conversationHistory,
                         turnToolCalls,
-                        largestToolResultChars);
-        if (result == MemoryManager.SessionPreSummaryMaintenanceResult.MAINTAINED) {
-            log.debug("session pre-summary refreshed after ReAct turn");
-        }
+                        largestToolResultChars)
+                .whenComplete((result, error) -> {
+                    if (error != null) {
+                        log.debug("session pre-summary maintenance finished asynchronously with error", error);
+                    } else if (result == MemoryManager.SessionPreSummaryMaintenanceResult.MAINTAINED) {
+                        log.debug("session pre-summary refreshed after ReAct turn");
+                    }
+                });
     }
 
     private String buildExternalContext() {

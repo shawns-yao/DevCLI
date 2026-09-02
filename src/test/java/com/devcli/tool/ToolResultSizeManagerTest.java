@@ -60,6 +60,17 @@ class ToolResultSizeManagerTest {
     }
 
     @Test
+    void mediumResultKeepsHeadAndTailForDiagnosticContext() {
+        String medium = "HEAD\n" + "middle\n".repeat(3_000) + "TAIL\n";
+
+        String out = ToolResultSizeManager.process(
+                "execute_command", "call_head_tail", tempDir.toString(), false, medium);
+
+        assertTrue(out.startsWith("HEAD\n"), "预览必须保留结果头部");
+        assertTrue(out.contains("TAIL\n"), "预览必须保留结果尾部，便于定位最终错误");
+    }
+
+    @Test
     void largeResultIsPersistedAndPreviewed() throws IOException {
         // > 50K 完整落盘，messages 只放预览 + 路径
         String large = "z".repeat(80_000);
@@ -74,6 +85,21 @@ class ToolResultSizeManagerTest {
         // 验证文件真的写到磁盘
         Path file = firstStoredTextArtifact();
         assertEquals(large, Files.readString(file), "落盘内容应为完整原文");
+    }
+
+    @Test
+    void exactDuplicateLargeResultReusesEarlierArtifact() {
+        String large = "duplicate-output-".repeat(5_000);
+        String first = ToolResultSizeManager.process(
+                "execute_command", "call_first", tempDir.toString(), false, large);
+        String second = ToolResultSizeManager.process(
+                "execute_command", "call_second", tempDir.toString(), false, large);
+
+        assertTrue(first.contains("result_ref"), first);
+        assertTrue(second.contains("重复工具结果已折叠"), second);
+        assertTrue(second.contains("复用前一次结果"), second);
+        assertTrue(second.contains("result_ref="), second);
+        assertTrue(second.length() < first.length(), "重复结果应只保留引用");
     }
 
     @Test
@@ -208,7 +234,8 @@ class ToolResultSizeManagerTest {
     void aggregateBudgetIsSharedWithParallelToolThreads() throws Exception {
         String medium = "p".repeat(20_000);
         for (int i = 0; i < 4; i++) {
-            ToolResultSizeManager.process("execute_command", "call_parent_" + i, tempDir.toString(), false, medium);
+            ToolResultSizeManager.process("execute_command", "call_parent_" + i, tempDir.toString(), false,
+                    medium + i);
         }
         assertTrue(ToolResultSizeManager.turnUsedBudget() > ToolResultSizeManager.AGGREGATE_LIMIT_CHARS);
 
