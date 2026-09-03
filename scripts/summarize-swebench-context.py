@@ -34,6 +34,13 @@ def condition_metrics(usage, report):
         "compaction_successes": usage.get("compaction_successes"),
         "compaction_fallbacks": usage.get("compaction_fallbacks"),
         "peak_history_tokens": usage.get("peak_history_tokens"),
+        "compaction_before_tokens": usage.get("compaction_before_tokens"),
+        "compaction_after_tokens": usage.get("compaction_after_tokens"),
+        "compaction_tail_budget_tokens": usage.get("compaction_tail_budget_tokens"),
+        "compaction_summary_input_budget_tokens": usage.get("compaction_summary_input_budget_tokens"),
+        "compaction_summary_tokens": usage.get("compaction_summary_tokens"),
+        "compaction_retained_tail_tokens": usage.get("compaction_retained_tail_tokens"),
+        "post_compaction_history_tokens": usage.get("post_compaction_history_tokens"),
         "context_limit_errors": usage.get("context_limit_errors"),
         "wall_ms": usage["agent_wall_ms"],
     }

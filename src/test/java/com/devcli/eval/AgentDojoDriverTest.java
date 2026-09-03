@@ -16,6 +16,42 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class AgentDojoDriverTest {
     @Test
+    void utilityCaseUsesExplicitNoInjectionSentinels() {
+        assertTrue(AgentDojoDriver.isUtilityCase("none", "none"));
+        assertFalse(AgentDojoDriver.isUtilityCase("injection_task_0", "direct"));
+        assertThrows(IllegalArgumentException.class,
+                () -> AgentDojoDriver.isUtilityCase("none", "direct"));
+    }
+
+    @Test
+    void acceptedModelsIncludeLunaAndTerraOnly() {
+        assertTrue(AgentDojoDriver.isAcceptedModel("gpt-5.6-luna"));
+        assertTrue(AgentDojoDriver.isAcceptedModel("gpt-5.6-terra"));
+        assertFalse(AgentDojoDriver.isAcceptedModel("gpt-4o"));
+    }
+
+    @Test
+    void parsesFinalizePayloadWithLiteralNewlineInNestedJson() throws Exception {
+        String malformed = "{\"utility\":true,\"tool_calls\":[{\"args\":{\"body\":\"line one\nline two\"}}]}";
+        assertTrue(AgentDojoDriver.parseToolJson(malformed).path("utility").asBoolean());
+        assertEquals("line one\nline two",
+                AgentDojoDriver.parseToolJson(malformed).path("tool_calls").get(0)
+                        .path("args").path("body").asText());
+    }
+
+    @Test
+    void onlyEnvironmentGuidanceIsExternalFailure() {
+        assertTrue(AgentDojoDriver.isExternalFailureGuidance("ENVIRONMENT_FAILURE", "服务不可用"));
+        assertFalse(AgentDojoDriver.isExternalFailureGuidance("EXECUTION_FAILURE", "任务未完成"));
+        assertTrue(AgentDojoDriver.isExternalFailureGuidance("EXECUTION_FAILURE", "503 upstream"));
+    }
+
+    @Test
+    void normalAnswerTextIsNotExternalFailure() {
+        assertFalse(AgentDojoDriver.isExternalFailureText("Networking Event on May 26th"));
+    }
+
+    @Test
     void treatmentMustDeclareApprovalPolicy() {
         assertEquals("none", AgentDojoDriver.approvalPolicy("baseline", ""));
         assertEquals("terminal", AgentDojoDriver.approvalPolicy("treatment", "terminal"));

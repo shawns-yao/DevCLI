@@ -73,7 +73,6 @@ public class ConversationHistoryCompactor {
      * retainRecentTokens（每个 user 轮约 1k token 是个粗估）。
      */
     private static final int DEFAULT_RETAIN_RECENT_ROUNDS = 3;
-    private static final double DEFAULT_RETAIN_WINDOW_RATIO = 0.15;
 
     /**
      * 旧版配置仅保留编译兼容，不再驱动压缩决策。确定性淘汰不按最近数量或工具名单猜测语义。
@@ -488,6 +487,7 @@ public class ConversationHistoryCompactor {
         //    若有 prev 摘要，oldMsgs 包括 prev 那条 user 消息（增量摘要 prompt 会把它单独识别出来当 base）
         List<LlmClient.Message> oldMsgs = new ArrayList<>(history.subList(systemEnd, splitIdx));
         if (oldMsgs.isEmpty()) return false;
+        int retainedTailTokens = estimateRangeTokens(history, splitIdx, history.size());
 
         // 4) 摘要：优先复用会话预摘要，否则走增量 vs 全量 Map-Reduce。
         String summary = null;
@@ -583,6 +583,7 @@ public class ConversationHistoryCompactor {
                 SUMMARY_MARKER + metadata.renderBoundaryBlock() + "\n" + summary.trim()));
         history.clear();
         history.addAll(rebuilt);
+        int postCompactionHistoryTokens = TokenBudget.estimateMessagesTokens(history);
         triggerStateStore.clear();
         // 成功压缩：清零失败计数，让下次失败重新累计
         if (consecutiveFailures > 0) {
@@ -597,9 +598,13 @@ public class ConversationHistoryCompactor {
                 summary.length()));
         if (Boolean.parseBoolean(System.getProperty(COMPACTION_METRICS_PROPERTY, "false"))) {
             System.err.printf(Locale.ROOT,
-                    "[context-compaction] kind=history mode=%s beforeTokens=%d afterTokens=%d summaryChars=%d%n",
+                    "[context-compaction] kind=history mode=%s beforeTokens=%d afterTokens=%d "
+                            + "triggerTokens=%d tailBudgetTokens=%d summaryInputBudgetTokens=%d summaryTokens=%d retainedTailTokens=%d "
+                            + "postCompactionHistoryTokens=%d summaryChars=%d%n",
                     periodicLifecycleGc ? "lifecycle-gc" : (summaryBase != null ? "incremental" : "full"),
-                    currentTokens, afterTokens, summary.length());
+                    currentTokens, afterTokens, triggerTokens, tailBudget,
+                    summaryInputBudgetTokens(), MemoryEntry.estimateTokens(summary), retainedTailTokens,
+                    postCompactionHistoryTokens, summary.length());
         }
         return true;
     }
@@ -1497,7 +1502,7 @@ public class ConversationHistoryCompactor {
 
     public int retainRecentTokens() {
         return adaptiveRetainBudget
-                ? Math.max(1, (int) (ContextProfile.from(llmClient).maxContextWindow() * DEFAULT_RETAIN_WINDOW_RATIO))
+                ? ContextProfile.from(llmClient).compactionTailBudgetTokens()
                 : retainRecentTokens;
     }
 

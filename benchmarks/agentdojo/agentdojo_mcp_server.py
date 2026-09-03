@@ -45,8 +45,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--suite", required=True)
     parser.add_argument("--version", default="v1.2.2")
     parser.add_argument("--user-task", required=True)
-    parser.add_argument("--injection-task", required=True)
+    parser.add_argument("--injection-task")
     parser.add_argument("--attack", default="direct")
+    parser.add_argument("--no-injection", action="store_true")
     return parser.parse_args()
 
 
@@ -69,19 +70,25 @@ class AgentDojoMcpServer:
     def __init__(self, args: argparse.Namespace) -> None:
         self.suite = get_suite(args.version, args.suite)
         self.user_task = self.suite.get_user_task_by_id(args.user_task)
-        self.injection_task = self.suite.get_injection_task_by_id(args.injection_task)
-        attack_type = ATTACKS.get(args.attack)
-        if attack_type is None:
-            raise ValueError(f"Unknown official AgentDojo attack: {args.attack}")
-        self.attack = attack_type(self.suite, None)
-        self.injections = self.attack.attack(self.user_task, self.injection_task)
+        self.injection_task = None
+        self.attack = None
+        self.injections: dict[str, str] = {}
+        if not args.no_injection:
+            if not args.injection_task or args.attack == "none":
+                raise ValueError("attack cases require --injection-task and a non-none --attack")
+            self.injection_task = self.suite.get_injection_task_by_id(args.injection_task)
+            attack_type = ATTACKS.get(args.attack)
+            if attack_type is None:
+                raise ValueError(f"Unknown official AgentDojo attack: {args.attack}")
+            self.attack = attack_type(self.suite, None)
+            self.injections = self.attack.attack(self.user_task, self.injection_task)
         environment = self.suite.load_and_inject_default_environment(self.injections)
         self.environment = self.user_task.init_environment(environment)
         self.pre_environment = self.environment.model_copy(deep=True)
         self.runtime = FunctionsRuntime(self.suite.tools)
         self.traces: list[FunctionCall] = []
         self.version = args.version
-        self.attack_name = args.attack
+        self.attack_name = None if args.no_injection else args.attack
 
     def metadata(self) -> dict[str, Any]:
         return {
@@ -89,8 +96,9 @@ class AgentDojoMcpServer:
             "benchmark_version": self.version,
             "suite": self.suite.name,
             "user_task_id": self.user_task.ID,
-            "injection_task_id": self.injection_task.ID,
+            "injection_task_id": None if self.injection_task is None else self.injection_task.ID,
             "attack": self.attack_name,
+            "evaluation_scope": "utility_only" if self.injection_task is None else "utility_and_attack",
             "prompt": self.user_task.PROMPT,
             "injection_vectors": sorted(self.injections),
             "tool_count": len(self.runtime.functions),
@@ -159,22 +167,24 @@ class AgentDojoMcpServer:
                 self.environment,
                 self.traces,
             )
-            attack_success = self.suite._check_injection_task_security(
-                self.injection_task,
-                content,
-                self.pre_environment,
-                self.environment,
-                self.traces,
-            )
-            return text_result(
-                {
-                    **self.metadata(),
-                    "utility": bool(utility),
+            evaluation = {
+                **self.metadata(),
+                "utility": bool(utility),
+                "tool_calls": [call.model_dump(mode="json") for call in self.traces],
+            }
+            if self.injection_task is not None:
+                attack_success = self.suite._check_injection_task_security(
+                    self.injection_task,
+                    content,
+                    self.pre_environment,
+                    self.environment,
+                    self.traces,
+                )
+                evaluation.update({
                     "attack_success": bool(attack_success),
                     "security_pass": not bool(attack_success),
-                    "tool_calls": [call.model_dump(mode="json") for call in self.traces],
-                }
-            )
+                })
+            return text_result(evaluation)
         if name not in self.runtime.functions:
             return text_result(f"Unknown AgentDojo tool: {name}", is_error=True)
         call = FunctionCall(function=name, args=arguments)

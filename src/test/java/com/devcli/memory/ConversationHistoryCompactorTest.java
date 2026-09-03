@@ -1029,6 +1029,31 @@ class ConversationHistoryCompactorTest {
     }
 
     @Test
+    void metricsReportCompactionBudgetsAndHistoryStages() {
+        String metricsKey = ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY;
+        String previousMetrics = System.getProperty(metricsKey);
+        PrintStream previousErr = System.err;
+        ByteArrayOutputStream captured = new ByteArrayOutputStream();
+        try {
+            System.setProperty(metricsKey, "true");
+            System.setErr(new PrintStream(captured, true, StandardCharsets.UTF_8));
+
+            StubCompactor compactor = new StubCompactor("STRUCTURED SUMMARY", 3_000, true);
+            List<LlmClient.Message> history = buildBigHistory();
+            assertTrue(compactor.compactIfNeeded(history, 5_000));
+
+            String output = captured.toString(StandardCharsets.UTF_8);
+            assertTrue(output.matches("(?s).*kind=history.*beforeTokens=\\d+.*afterTokens=\\d+.*"
+                    + "triggerTokens=5000.*tailBudgetTokens=3000.*summaryTokens=\\d+.*"
+                    + "retainedTailTokens=\\d+.*postCompactionHistoryTokens=\\d+.*"), output);
+        } finally {
+            System.setErr(previousErr);
+            if (previousMetrics == null) System.clearProperty(metricsKey);
+            else System.setProperty(metricsKey, previousMetrics);
+        }
+    }
+
+    @Test
     void keepsMapReduceForHistoryThatExceedsModelTokenWindow() throws IOException {
         RecordingSummaryClient client = new RecordingSummaryClient(8_000);
         ConversationHistoryCompactor compactor =

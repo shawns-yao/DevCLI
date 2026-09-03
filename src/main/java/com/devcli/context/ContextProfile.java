@@ -41,6 +41,12 @@ public record ContextProfile(
     private static final int DEFAULT_MAX_OUTPUT_TOKENS = 8_192;
     /** 压缩后至少预留给"模型输出 + 估算误差 + 突发"的 token 经验下限 */
     private static final int MIN_OUTPUT_RESERVE = 20_000;
+    /** 压缩后保留的最近原文尾部默认占上下文窗口 8%。 */
+    private static final double DEFAULT_COMPACTION_TAIL_RATIO = 0.08;
+    /** 小窗口仍需保留当前决策和正在处理的文件上下文。 */
+    private static final int MIN_COMPACTION_TAIL_TOKENS = 4_000;
+    /** 大窗口不让原文尾部无限膨胀，避免稀释语义压缩收益。 */
+    private static final int MAX_COMPACTION_TAIL_TOKENS = 32_000;
 
     public static ContextProfile from(LlmClient llmClient) {
         int window = Math.max(MIN_WINDOW, llmClient == null ? 128_000 : llmClient.maxContextWindow());
@@ -123,6 +129,18 @@ public record ContextProfile(
     public int historyTriggerTokens(int additionalRequestTokens) {
         int additional = Math.max(0, additionalRequestTokens);
         return Math.max(1, compressionTriggerTokens() - additional);
+    }
+
+    /**
+     * 根据模型上下文窗口计算压缩后保留的最近原文预算。
+     *
+     * <p>该预算只约束未压缩的尾部消息；模型生成的结构化摘要另有独立预算。
+     * 调用方还应将其限制在本次触发阈值的一半以内，确保仍有可压缩的历史前缀。
+     */
+    public int compactionTailBudgetTokens() {
+        int proportional = (int) Math.floor(maxContextWindow * DEFAULT_COMPACTION_TAIL_RATIO);
+        return Math.max(MIN_COMPACTION_TAIL_TOKENS,
+                Math.min(MAX_COMPACTION_TAIL_TOKENS, proportional));
     }
 
     public String summary() {

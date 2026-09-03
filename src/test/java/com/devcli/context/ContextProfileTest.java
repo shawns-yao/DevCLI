@@ -121,6 +121,14 @@ class ContextProfileTest {
     }
 
     @Test
+    void compactionTailBudgetScalesWithWindowAndClampsBothEnds() {
+        assertEquals(4_000, ContextProfile.custom(32_000, 4_000).compactionTailBudgetTokens());
+        assertEquals(10_240, ContextProfile.custom(128_000, 4_000).compactionTailBudgetTokens());
+        assertEquals(20_480, ContextProfile.custom(256_000, 4_000).compactionTailBudgetTokens());
+        assertEquals(32_000, ContextProfile.custom(1_000_000, 4_000).compactionTailBudgetTokens());
+    }
+
+    @Test
     void explicitCompressionTriggerOverrideIsBoundedAndApplied() {
         String key = ContextProfile.COMPRESSION_TRIGGER_TOKENS_PROPERTY;
         String previous = System.getProperty(key);

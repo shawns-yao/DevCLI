@@ -17,6 +17,13 @@ $rounds = @([regex]::Matches($text, '(?m)^\[driver\] context round=(\d+) history
     [ordered]@{ round=[int]$_.Groups[1].Value; history_tokens=[int]$_.Groups[2].Value; trigger_tokens=[int]$_.Groups[3].Value }
 })
 $summaryUsage = [regex]::Matches($text, '(?m)^\[context-compaction\] kind=summary-call inputTokens=(\d+) outputTokens=(\d+) cachedInputTokens=(\d+)')
+$compactions = @([regex]::Matches($text, '(?m)^\[context-compaction\] kind=history mode=(\S+) beforeTokens=(\d+) afterTokens=(\d+) triggerTokens=(\d+) tailBudgetTokens=(\d+) summaryInputBudgetTokens=(\d+) summaryTokens=(\d+) retainedTailTokens=(\d+) postCompactionHistoryTokens=(\d+) summaryChars=(\d+)') | ForEach-Object {
+    [ordered]@{ mode=$_.Groups[1].Value; before_tokens=[long]$_.Groups[2].Value; after_tokens=[long]$_.Groups[3].Value;
+        trigger_tokens=[long]$_.Groups[4].Value; tail_budget_tokens=[long]$_.Groups[5].Value;
+        summary_input_budget_tokens=[long]$_.Groups[6].Value; summary_tokens=[long]$_.Groups[7].Value;
+        retained_tail_tokens=[long]$_.Groups[8].Value;
+        post_compaction_history_tokens=[long]$_.Groups[9].Value; summary_chars=[long]$_.Groups[10].Value }
+})
 $summaryInput = 0L; $summaryOutput = 0L; $summaryCached = 0L
 foreach ($call in $summaryUsage) {
     $summaryInput += [long]$call.Groups[1].Value
@@ -53,6 +60,14 @@ $agentCached = if ($usage.Success) { [long]$usage.Groups[3].Value } else { $null
     compaction_triggers=[regex]::Matches($text, '(?m)^\[context-compaction\] kind=trigger ').Count
     compaction_fallbacks=[regex]::Matches($text, '(?m)^\[context-compaction\] kind=fallback ').Count
     compaction_successes=[regex]::Matches($text, '(?m)^\[context-compaction\] kind=history ').Count
+    compaction_events=$compactions
+    compaction_before_tokens=if ($compactions.Count) { (($compactions | ForEach-Object before_tokens) | Measure-Object -Maximum).Maximum } else { $null }
+    compaction_after_tokens=if ($compactions.Count) { ($compactions | Select-Object -Last 1).after_tokens } else { $null }
+    compaction_tail_budget_tokens=if ($compactions.Count) { ($compactions | Select-Object -Last 1).tail_budget_tokens } else { $null }
+    compaction_summary_input_budget_tokens=if ($compactions.Count) { ($compactions | Select-Object -Last 1).summary_input_budget_tokens } else { $null }
+    compaction_summary_tokens=if ($compactions.Count) { ($compactions | Select-Object -Last 1).summary_tokens } else { $null }
+    compaction_retained_tail_tokens=if ($compactions.Count) { ($compactions | Select-Object -Last 1).retained_tail_tokens } else { $null }
+    post_compaction_history_tokens=if ($compactions.Count) { ($compactions | Select-Object -Last 1).post_compaction_history_tokens } else { $null }
     peak_history_tokens=if ($historySamples.Count) { ($historySamples | Measure-Object -Maximum).Maximum } else { $null }
     round_history_tokens=$rounds
     summary_calls=$summaryUsage.Count; summary_input_tokens=$summaryInput; summary_output_tokens=$summaryOutput; summary_cached_input_tokens=$summaryCached

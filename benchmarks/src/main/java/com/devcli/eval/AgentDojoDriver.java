@@ -20,6 +20,8 @@ import com.devcli.runtime.event.RunEventSink;
 import com.devcli.tool.ToolRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.json.JsonReadFeature;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.nio.charset.StandardCharsets;
@@ -39,6 +41,10 @@ import java.util.concurrent.atomic.LongAdder;
 /** AgentDojo v1.2.2 真实链路 driver：Luna Agent → MCP → ToolExecutionPipeline → 官方 evaluator。 */
 public final class AgentDojoDriver {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final ObjectMapper LENIENT_JSON = new ObjectMapper(
+            JsonFactory.builder()
+                    .enable(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS)
+                    .build());
     private static final String SERVER = "agentdojo";
     private static final Set<String> CONTROL_TOOLS = Set.of("agentdojo_metadata", "agentdojo_finalize");
 
@@ -48,7 +54,7 @@ public final class AgentDojoDriver {
     public static void main(String[] args) throws Exception {
         if (args.length != 9 && args.length != 10) {
             System.err.println("usage: AgentDojoDriver <python> <bridge.py> <harnessRoot> <outDir> "
-                    + "<baseline|treatment> <suite> <userTask> <injectionTask> <attack> [auto-approve|terminal]");
+                    + "<baseline|treatment> <suite> <userTask> <injectionTask|none> <attack|none> [auto-approve|terminal]");
             System.exit(2);
         }
         Path python = Path.of(args[0]).toAbsolutePath().normalize();
@@ -60,6 +66,7 @@ public final class AgentDojoDriver {
         String userTask = args[6];
         String injectionTask = args[7];
         String attack = args[8];
+        boolean utilityCase = isUtilityCase(injectionTask, attack);
         String approvalPolicy = approvalPolicy(mode, args.length == 10 ? args[9] : "");
         prepareOutputDirectory(outDir);
         Path projectDir = outDir.resolve("workspace");
@@ -75,8 +82,13 @@ public final class AgentDojoDriver {
         result.put("mode", mode);
         result.put("suite", suite);
         result.put("user_task_id", userTask);
-        result.put("injection_task_id", injectionTask);
-        result.put("attack", attack);
+        result.putNull("injection_task_id");
+        result.putNull("attack");
+        if (!utilityCase) {
+            result.put("injection_task_id", injectionTask);
+            result.put("attack", attack);
+        }
+        result.put("evaluation_scope", utilityCase ? "utility_only" : "utility_and_attack");
         result.put("harness_root", harnessRoot.toString());
         result.put("run_id", java.util.UUID.randomUUID().toString());
         result.put("started_at", java.time.Instant.now().toString());
@@ -91,7 +103,8 @@ public final class AgentDojoDriver {
         try (ToolRegistry registry = "treatment".equals(mode)
                 ? new HitlToolRegistry(hitl) : new ToolRegistry()) {
             registry.setProjectPath(projectDir.toString());
-            Path config = writeMcpConfig(outDir, python, bridge, harnessRoot, suite, userTask, injectionTask, attack);
+            Path config = writeMcpConfig(outDir, python, bridge, harnessRoot, suite, userTask,
+                    injectionTask, attack, utilityCase);
             McpConfigLoader loader = new McpConfigLoader(
                     outDir.resolve("missing-user-mcp.json"), config, projectDir);
             try (McpServerManager manager = new McpServerManager(registry, projectDir, loader)) {
@@ -120,8 +133,9 @@ public final class AgentDojoDriver {
                 result.put("provider", client.getProviderName());
                 result.put("actual_model", client.getModelName());
                 result.put("model_is_luna", "gpt-5.6-luna".equals(client.getModelName()));
-                if (!"gpt-5.6-luna".equals(client.getModelName())) {
-                    throw new IllegalStateException("AgentDojo 正式运行必须使用 gpt-5.6-luna，实际为 "
+                result.put("model_is_terra", "gpt-5.6-terra".equals(client.getModelName()));
+                if (!isAcceptedModel(client.getModelName())) {
+                    throw new IllegalStateException("AgentDojo 正式运行仅允许 gpt-5.6-luna 或 gpt-5.6-terra，实际为 "
                             + client.getModelName());
                 }
 
@@ -136,7 +150,7 @@ public final class AgentDojoDriver {
                             registry.getToolDefinitions().stream().map(LlmClient.Tool::name).toList()));
                 }
                 Files.writeString(outDir.resolve("model-output.txt"), output, StandardCharsets.UTF_8);
-                boolean externalFailure = usage.externalFailure() || isExternalFailureText(output);
+                boolean externalFailure = usage.externalFailure();
                 if (externalFailure) {
                     result.put("valid_sample", false);
                     result.put("external_failure", true);
@@ -152,6 +166,7 @@ public final class AgentDojoDriver {
                     result.put("external_failure", false);
                 }
                 result.put("approval_count", hitl.approvals.sum());
+                result.set("failure_events", usage.failureEvents);
                 List<AuditLog.AuditEntry> audit = registry.getAuditLog().readRecent(10_000);
                 result.put("audit_count", audit.size());
                 result.put("audit_allow_count", audit.stream()
@@ -207,7 +222,8 @@ public final class AgentDojoDriver {
     }
 
     private static Path writeMcpConfig(Path outDir, Path python, Path bridge, Path harnessRoot, String suite,
-                                       String userTask, String injectionTask, String attack) throws Exception {
+                                       String userTask, String injectionTask, String attack,
+                                       boolean utilityCase) throws Exception {
         ObjectNode server = MAPPER.createObjectNode();
         server.put("command", python.toString());
         server.putObject("env").put("PYTHONPATH", harnessRoot.resolve("src").toString())
@@ -217,8 +233,12 @@ public final class AgentDojoDriver {
         commandArgs.add("--suite").add(suite);
         commandArgs.add("--version").add("v1.2.2");
         commandArgs.add("--user-task").add(userTask);
-        commandArgs.add("--injection-task").add(injectionTask);
-        commandArgs.add("--attack").add(attack);
+        if (utilityCase) {
+            commandArgs.add("--no-injection");
+        } else {
+            commandArgs.add("--injection-task").add(injectionTask);
+            commandArgs.add("--attack").add(attack);
+        }
         server.put("trustReadOnlyAnnotations", true);
         ObjectNode root = MAPPER.createObjectNode();
         root.putObject("mcpServers").set(SERVER, server);
@@ -237,22 +257,41 @@ public final class AgentDojoDriver {
         return new OpenAiClient(key, config.getModel("openai"), config.getBaseUrl("openai"));
     }
 
-    private static JsonNode parseToolJson(String text) throws Exception {
-        return MAPPER.readTree(text);
+    static boolean isUtilityCase(String injectionTask, String attack) {
+        boolean noInjection = "none".equalsIgnoreCase(injectionTask);
+        boolean noAttack = "none".equalsIgnoreCase(attack);
+        if (noInjection != noAttack) {
+            throw new IllegalArgumentException("utility case must use injectionTask=none and attack=none together");
+        }
+        return noInjection;
+    }
+
+    static boolean isAcceptedModel(String model) {
+        return "gpt-5.6-luna".equals(model) || "gpt-5.6-terra".equals(model);
+    }
+
+    static JsonNode parseToolJson(String text) throws Exception {
+        try {
+            return MAPPER.readTree(text);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException strictFailure) {
+            // Some MCP bridges return a JSON string containing a second JSON document
+            // with literal line breaks. Accept that protocol-boundary defect only for
+            // benchmark control responses; normal project JSON remains strict.
+            return LENIENT_JSON.readTree(text);
+        }
     }
 
     private static boolean isExternalFailure(Exception error) {
         return isExternalFailureText(safeMessage(error));
     }
 
-    private static boolean isExternalFailureText(String value) {
+    static boolean isExternalFailureText(String value) {
         String message = value == null ? "" : value.toLowerCase(Locale.ROOT);
         return message.contains("503") || message.contains("model_not_found")
                 || message.contains("timeout") || message.contains("timed out")
-                || message.contains("connection") || message.contains("network")
+                || message.contains("connection refused") || message.contains("network error")
                 || message.contains("mcp 未就绪") || message.contains("upstream_stream_break")
-                || message.contains("upstream stream ended prematurely")
-                || message.contains("safe to retry");
+                || message.contains("upstream stream ended prematurely");
     }
 
     private static String safeMessage(Throwable error) {
@@ -298,6 +337,7 @@ public final class AgentDojoDriver {
 
     private static final class UsageCollector implements RunEventSink {
         private final com.fasterxml.jackson.databind.node.ArrayNode toolEvents = MAPPER.createArrayNode();
+        private final com.fasterxml.jackson.databind.node.ArrayNode failureEvents = MAPPER.createArrayNode();
         private final LongAdder inputTokens = new LongAdder();
         private final LongAdder outputTokens = new LongAdder();
         private final LongAdder cachedInputTokens = new LongAdder();
@@ -313,9 +353,12 @@ public final class AgentDojoDriver {
                 cachedInputTokens.add(modelUsage.cachedInputTokens());
                 estimatedCostCny.add(modelUsage.estimatedCostCny());
             } else if (event instanceof RunEvent.FailureGuidance failure
-                    && isExternalFailureText(failure.reason())) {
+                    && isExternalFailureGuidance(failure.category(), failure.reason())) {
+                failureEvents.addObject().put("category", failure.category()).put("reason", failure.reason());
                 externalFailure.set(true);
                 failureReason.set(failure.reason());
+            } else if (event instanceof RunEvent.FailureGuidance failure) {
+                failureEvents.addObject().put("category", failure.category()).put("reason", failure.reason());
             } else if (event instanceof RunEvent.ToolResults results) {
                 for (var tool : results.results()) {
                     toolEvents.addObject().put("id", tool.id()).put("tool", tool.name())
@@ -337,5 +380,14 @@ public final class AgentDojoDriver {
             return new UsageSnapshot(inputTokens.sum(), outputTokens.sum(),
                     cachedInputTokens.sum(), estimatedCostCny.sum());
         }
+    }
+
+    static boolean isExternalFailureGuidance(String category, String reason) {
+        if ("ENVIRONMENT_FAILURE".equalsIgnoreCase(category)) {
+            return true;
+        }
+        String message = reason == null ? "" : reason.toLowerCase(Locale.ROOT);
+        return message.contains("503") || message.contains("model_not_found")
+                || message.contains("upstream_stream_break");
     }
 }

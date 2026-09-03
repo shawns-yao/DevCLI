@@ -19,7 +19,11 @@ conversationHistory 有效触发阈值 = 基础触发阈值 - 当前工具定义
 
 `ConversationHistoryCompactor` 使用 token 预算从最新消息向前填充原文尾部，并在 `user` 边界切分，避免拆开 assistant tool call 与 tool result。
 
-默认尾部预算为当前模型窗口的 15%，且不超过当次 history 触发阈值的一半；切换模型后重新计算。显式传入的尾部 Token 预算保持原语义，供调用方和实验固定参数。
+默认尾部预算为当前模型窗口的 8%，并夹在 4K～32K 之间；同时不超过当次 history 触发阈值的一半。切换模型后重新计算。显式传入的尾部 Token 预算保持原语义，供调用方和实验固定参数。
+
+尾部原文预算、模型摘要预算和压缩后总 history 预算是三个独立概念。尾部预算只决定保留多少最近原文，不代表最终压缩结果的总大小；语义摘要必须单独记录其输入、输出和事实保真结果。
+
+公开评测日志分别记录 `triggerTokens`、`tailBudgetTokens`、`summaryInputBudgetTokens`、`summaryTokens`、`retainedTailTokens` 和 `postCompactionHistoryTokens`。其中 Token 体积只解释压缩结构，效果结论仍以结构化关键事实保留率和压缩后 SWE-bench 官方结果为准。
 
 如果边界对齐后仍然超出原文预算，只继续把最旧的保留轮次前移到摘要区；规则层不得截断 user、assistant、任务状态或决策文本。
 

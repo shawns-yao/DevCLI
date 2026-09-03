@@ -23,9 +23,9 @@ class ConversationHistoryCompactorWindowTest {
         BudgetClient small = new BudgetClient(8_000, request -> SUMMARY);
         BudgetClient large = new BudgetClient(128_000, request -> SUMMARY);
         var adaptive = new ConversationHistoryCompactor(small);
-        assertEquals(1_200, adaptive.retainRecentTokens());
+        assertEquals(4_000, adaptive.retainRecentTokens());
         adaptive.setLlmClient(large);
-        assertEquals(19_200, adaptive.retainRecentTokens());
+        assertEquals(10_240, adaptive.retainRecentTokens());
         var explicit = new ConversationHistoryCompactor(small, 2_048, true);
         explicit.setLlmClient(large);
         assertEquals(2_048, explicit.retainRecentTokens());

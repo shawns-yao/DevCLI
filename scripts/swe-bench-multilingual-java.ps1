@@ -165,6 +165,21 @@ function Get-DriverEvidence([string]$LogPath) {
       [pscustomobject]@{ before_tokens = [long]$_.Groups[1].Value; after_tokens = [long]$_.Groups[2].Value;
         changed = [bool]::Parse($_.Groups[3].Value) }
     })
+  $compactions = @([regex]::Matches($text, '(?m)^\[context-compaction\] kind=history mode=(\S+) beforeTokens=(\d+) afterTokens=(\d+) triggerTokens=(\d+) tailBudgetTokens=(\d+) summaryInputBudgetTokens=(\d+) summaryTokens=(\d+) retainedTailTokens=(\d+) postCompactionHistoryTokens=(\d+) summaryChars=(\d+)') |
+    ForEach-Object {
+      [pscustomobject]@{
+        mode = $_.Groups[1].Value
+        before_tokens = [long]$_.Groups[2].Value
+        after_tokens = [long]$_.Groups[3].Value
+        trigger_tokens = [long]$_.Groups[4].Value
+        tail_budget_tokens = [long]$_.Groups[5].Value
+        summary_input_budget_tokens = [long]$_.Groups[6].Value
+        summary_tokens = [long]$_.Groups[7].Value
+        retained_tail_tokens = [long]$_.Groups[8].Value
+        post_compaction_history_tokens = [long]$_.Groups[9].Value
+        summary_chars = [long]$_.Groups[10].Value
+      }
+    })
   $externalCodes = @([regex]::Matches($text, '(?m)^\[driver\] failure code=(\w+) external=true') |
     ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
   $externalCodes += @([regex]::Matches($text, '(?m)^\[context-compaction\] kind=summary-error code=(AUTHENTICATION|RATE_LIMITED|OVERLOADED|TIMEOUT|NETWORK|SERVER_ERROR)\b') |
@@ -193,6 +208,13 @@ function Get-DriverEvidence([string]$LogPath) {
     EvictionBeforeTokens = if ($evictions.Count) { ($evictions | Measure-Object before_tokens -Maximum).Maximum } else { $null }
     EvictionAfterTokens = if ($evictions.Count) { $evictions[-1].after_tokens } else { $null }
     EvictionChanged = if ($evictions.Count) { [bool]($evictions | Where-Object changed).Count } else { $null }
+    CompactionEvents = $compactions
+    CompactionBeforeTokens = if ($compactions.Count) { (($compactions | ForEach-Object before_tokens) | Measure-Object -Maximum).Maximum } else { $null }
+    CompactionAfterTokens = if ($compactions.Count) { ($compactions | Select-Object -Last 1).after_tokens } else { $null }
+    CompactionTailBudgetTokens = if ($compactions.Count) { ($compactions | Select-Object -Last 1).tail_budget_tokens } else { $null }
+    CompactionSummaryTokens = if ($compactions.Count) { ($compactions | Select-Object -Last 1).summary_tokens } else { $null }
+    CompactionRetainedTailTokens = if ($compactions.Count) { ($compactions | Select-Object -Last 1).retained_tail_tokens } else { $null }
+    PostCompactionHistoryTokens = if ($compactions.Count) { ($compactions | Select-Object -Last 1).post_compaction_history_tokens } else { $null }
     ExternalCodes = @($externalCodes | Sort-Object -Unique)
     ContextLimitErrors = [regex]::Matches($text, '(?m)^(?:\[driver\] failure |\[context-compaction\] kind=summary-error )code=CONTEXT_LENGTH\b').Count
     DelegationCalls = [regex]::Matches($text, '(?m)^\[driver\] delegation-call\r?$').Count
@@ -466,6 +488,14 @@ try {
         eviction_after_tokens = $evidence.EvictionAfterTokens
         eviction_changed = $evidence.EvictionChanged
         eviction_events = $evidence.EvictionEvents
+        compaction_events = $evidence.CompactionEvents
+        compaction_before_tokens = $evidence.CompactionBeforeTokens
+        compaction_after_tokens = $evidence.CompactionAfterTokens
+        compaction_tail_budget_tokens = $evidence.CompactionTailBudgetTokens
+        compaction_summary_input_budget_tokens = if ($evidence.CompactionEvents.Count) { ($evidence.CompactionEvents | Select-Object -Last 1).summary_input_budget_tokens } else { $null }
+        compaction_summary_tokens = $evidence.CompactionSummaryTokens
+        compaction_retained_tail_tokens = $evidence.CompactionRetainedTailTokens
+        post_compaction_history_tokens = $evidence.PostCompactionHistoryTokens
         context_limit_errors = $evidence.ContextLimitErrors
         delegation_calls = $evidence.DelegationCalls
         external_failure = $externalFailure
