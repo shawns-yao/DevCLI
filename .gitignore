@@ -16,6 +16,8 @@ target/
 
 # 日志、测试数据与运行时临时目录
 *.log
+__pycache__/
+*.pyc
 Log/
 Temp/
 /Test/
