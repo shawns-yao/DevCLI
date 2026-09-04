@@ -31,6 +31,7 @@ import java.util.Deque;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
@@ -68,22 +69,25 @@ final class DelegationSession implements DelegateTaskTool.Handler {
 
     @Override
     public ToolOutput execute(Map<String, String> arguments, ToolExecutionContext context) {
+        String id = "delegate-" + UUID.randomUUID().toString().substring(0, 12);
         String role = arguments.getOrDefault("role", "").toLowerCase(Locale.ROOT);
         if (!java.util.Set.of("explorer", "planner", "worker", "reviewer").contains(role)
                 || arguments.getOrDefault("task", "").isBlank()) {
-            return ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS, "需要有效角色和非空子任务", false);
+            return reportFailure(id, ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS,
+                    "需要有效角色和非空子任务", false), "failed");
         }
         if (parent.currentToolAccessScope() != ToolRegistry.ToolAccessScope.FULL) {
-            return ToolOutput.rejected(ToolErrorCode.CAPABILITY_DENIED, "受限子任务不能继续委派");
+            return reportFailure(id, ToolOutput.rejected(ToolErrorCode.CAPABILITY_DENIED,
+                    "受限子任务不能继续委派"), "blocked");
         }
         AgentBudget budget = parentBudget.fork();
         if (budget.check() != AgentBudget.ExitReason.WITHIN_BUDGET) {
-            return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED, budget.describeExit(budget.check()), false);
+            return reportFailure(id, ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                    budget.describeExit(budget.check()), false), "blocked");
         }
-        String id = "delegate-" + UUID.randomUUID().toString().substring(0, 12);
         ToolOutput result;
         events.emit(new RunEvent.CustomMessage("delegation.started", "子任务开始",
-                Map.of("child_id", id, "role", role)));
+                Map.of("child_id", id, "report_id", id, "role", role)));
         try {
             context.throwIfCancelled();
             String rolePrompt = prompts.loadRequired("modes/delegate-" + role + ".md");
@@ -111,8 +115,8 @@ final class DelegationSession implements DelegateTaskTool.Handler {
                                 ToolOutput review = runIndependentReview(report.toString(), arguments, context);
                                 DelegationReviewProtocol.Decision decision = DelegationReviewProtocol.evaluate(review.text());
                                 if (!review.isSuccess() || !decision.protocolValid() || !decision.approved()) {
-                                    return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
-                                            "独立 Reviewer 未通过: " + decision.summary(), false);
+                                    return reportFailure(id, ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                                            "独立 Reviewer 未通过: " + decision.summary(), false), "failed");
                                 }
                                 report.put("independent_review", "APPROVED");
                                 if (decision.advisories() > 0) {
@@ -122,7 +126,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
                             } else {
                                 report.put("independent_review", "NOT_REQUIRED");
                             }
-                            report.put("report_id", id);
+                            report.put("report_id", id).put("status", "done");
                             storeReport(id, report.toString());
                             result = ToolOutput.success(report.toString()).withModifiedResources(applied.modifiedResources());
                         } else {
@@ -135,7 +139,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
                 try (ToolRegistry child = parent.forkForProject(Path.of(parent.getProjectPath()))) {
                     result = executeChild(child, client, budget, id, role, rolePrompt,
                             arguments, context, ToolRegistry.ToolAccessScope.READ_ONLY);
-                    if (result.isSuccess() && !role.equals("reviewer")) {
+                    if (result.isSuccess()) {
                         result = registerChildReport(id, result);
                     }
                 }
@@ -148,9 +152,81 @@ final class DelegationSession implements DelegateTaskTool.Handler {
         } finally {
             parent.forgetStaleWriteScope(id);
         }
+        result = ensureReport(id, result, arguments);
         events.emit(new RunEvent.CustomMessage("delegation.completed", "子任务结束",
-                Map.of("child_id", id, "role", role, "status", result.status().name())));
+                Map.of("child_id", id, "report_id", id, "role", role,
+                        "status", result.status().name())));
         return result;
+    }
+
+    private ToolOutput ensureReport(String id, ToolOutput result, Map<String, String> arguments) {
+        if (result == null) {
+            return reportFailure(id, ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                    "子任务返回空结果", false), "failed");
+        }
+        try {
+            JsonNode root = JSON.readTree(result.text());
+            if (root != null && root.isObject() && root.has("report_id") && root.has("status")) {
+                ObjectNode report = (ObjectNode) root;
+                appendRequestMetadata(report, arguments);
+                String normalized = report.toString();
+                storeReport(id, normalized);
+                return new ToolOutput(result.status(), result.errorCode(), result.retryable(), normalized,
+                        result.imageParts(), result.modifiedResources(), result.sideChannels());
+            }
+        } catch (IOException ignored) {
+        }
+        return result.isSuccess()
+                ? registerChildReport(id, result)
+                : reportFailure(id, result, result.status() == com.devcli.tool.ToolStatus.CANCELLED
+                        ? "blocked" : "failed");
+    }
+
+    private void appendRequestMetadata(ObjectNode report, Map<String, String> arguments) {
+        if (arguments == null || arguments.isEmpty()) return;
+        ObjectNode request = report.with("request");
+        copyRequestValue(request, "task", arguments.get("task"));
+        copyRequestValue(request, "context", arguments.get("context"));
+        copyRequestValue(request, "deliverable", arguments.get("deliverable"));
+        copyRequestValue(request, "constraints", arguments.get("constraints"));
+        copyRequestValue(request, "entry_points", arguments.get("entry_points"));
+        copyRequestValue(request, "allowed_tools", arguments.get("allowed_tools"));
+        copyRequestValue(request, "allowed_write_paths", arguments.get("allowed_write_paths"));
+        copyRequestValue(request, "budget", arguments.get("budget"));
+        copyRequestValue(request, "upstream_report_id", arguments.get("upstream_report_id"));
+    }
+
+    private void copyRequestValue(ObjectNode request, String name, String raw) {
+        if (raw == null || raw.isBlank()) return;
+        try {
+            JsonNode parsed = JSON.readTree(raw);
+            if (parsed != null && (parsed.isArray() || parsed.isObject())) {
+                request.set(name, parsed);
+                return;
+            }
+        } catch (IOException ignored) {
+        }
+        request.put(name, raw);
+    }
+
+    private ToolOutput reportFailure(String id, ToolOutput output, String status) {
+        ObjectNode report = JSON.createObjectNode();
+        report.put("report_id", id).put("status", status == null ? "failed" : status)
+                .put("summary", bounded(output == null ? "" : output.text()))
+                .put("transcript_ref", "delegation:" + id);
+        if (output != null) {
+            report.put("error_code", output.errorCode().name()).put("retryable", output.retryable());
+            output.modifiedResources().forEach(report.withArray("modified_resources")::add);
+        }
+        report.putArray("evidence");
+        report.putArray("dead_ends");
+        report.putArray("open_questions");
+        report.putArray("facts_discovered");
+        String normalized = report.toString();
+        storeReport(id, normalized);
+        if (output == null) return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED, normalized, false);
+        return new ToolOutput(output.status(), output.errorCode(), output.retryable(), normalized,
+                output.imageParts(), output.modifiedResources(), output.sideChannels());
     }
 
     private boolean childEverHadMutationFailure(ToolOutput result) {
@@ -179,6 +255,14 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             if (root != null && root.isObject()) {
                 ObjectNode report = (ObjectNode) root;
                 report.put("report_id", id);
+                if (!report.has("status")) report.put("status", "done");
+                if (!report.has("summary")) report.put("summary", bounded(result.text()));
+                if (!report.has("transcript_ref")) report.put("transcript_ref", "delegation:" + id);
+                if (!report.has("modified_resources")) report.putArray("modified_resources");
+                if (!report.has("evidence")) report.set("evidence", report.path("tool_evidence").deepCopy());
+                if (!report.has("dead_ends")) report.putArray("dead_ends");
+                if (!report.has("open_questions")) report.putArray("open_questions");
+                if (!report.has("facts_discovered")) report.putArray("facts_discovered");
                 String normalized = report.toString();
                 storeReport(id, normalized);
                 return ToolOutput.success(normalized).withModifiedResources(result.modifiedResources());
@@ -187,7 +271,12 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             // Preserve a bounded textual report when a child did not use the structured format.
         }
         ObjectNode wrapper = JSON.createObjectNode();
-        wrapper.put("child_id", id).put("report_id", id).put("summary", bounded(result.text()));
+        wrapper.put("child_id", id).put("report_id", id).put("status", "done")
+                .put("summary", bounded(result.text())).put("transcript_ref", "delegation:" + id);
+        wrapper.putArray("evidence");
+        wrapper.putArray("dead_ends");
+        wrapper.putArray("open_questions");
+        wrapper.putArray("facts_discovered");
         String normalized = wrapper.toString();
         storeReport(id, normalized);
         return ToolOutput.success(normalized).withModifiedResources(result.modifiedResources());
@@ -233,12 +322,21 @@ final class DelegationSession implements DelegateTaskTool.Handler {
     private ToolOutput executeChild(ToolRegistry registry, LlmClient client, AgentBudget budget,
                                     String id, String role, String rolePrompt, Map<String, String> arguments,
                                     ToolExecutionContext context, ToolRegistry.ToolAccessScope scope) {
+        return registry.runWithAllowedTools(parseStringSet(arguments.get("allowed_tools")),
+                () -> registry.runWithAllowedWritePaths(parseStringList(arguments.get("allowed_write_paths")),
+                        () -> executeChildInternal(registry, client, budget, id, role, rolePrompt,
+                                arguments, context, scope)));
+    }
+
+    private ToolOutput executeChildInternal(ToolRegistry registry, LlmClient client, AgentBudget budget,
+                                             String id, String role, String rolePrompt, Map<String, String> arguments,
+                                             ToolExecutionContext context, ToolRegistry.ToolAccessScope scope) {
         var skillBuffer = parent.activeSkillContextBuffer();
         registry.restrictForDelegation();
         if (skillBuffer != null) registry.setSkillContextBuffer(skillBuffer.copy());
         registry.setContextProfile(ContextProfile.from(client));
         List<LlmClient.Tool> tools = registry.runWithToolAccess(scope,
-                () -> toolSnapshots.computeIfAbsent(role, ignored -> {
+                () -> toolSnapshots.computeIfAbsent(role + "|" + String.join(",", parseStringSet(arguments.get("allowed_tools"))), ignored -> {
                     registry.prefetchToolDefinitionsForInput(arguments.get("task"));
                     return List.copyOf(registry.getToolDefinitions());
                 }));
@@ -247,7 +345,8 @@ final class DelegationSession implements DelegateTaskTool.Handler {
                      cancelled -> run.cancellationToken().cancel(cancelled.reason(), cancelled.message()))) {
             return registry.runWithToolAccess(scope, () -> registry.runWithResourceLease(id, () -> {
                 try {
-                    return new ChildLoop(registry, client, budget, id, rolePrompt, arguments, context, tools).run();
+                    return new ChildLoop(registry, client, budget, id, rolePrompt, arguments, context, tools,
+                            childMaxIterations(arguments)).run();
                 } finally {
                     registry.releaseResourceLeases(id);
                 }
@@ -264,25 +363,35 @@ final class DelegationSession implements DelegateTaskTool.Handler {
         private final List<LlmClient.Tool> tools;
         private final List<LlmClient.Message> history = new ArrayList<>();
         private final List<String> evidence = new ArrayList<>();
+        private final int childMaxIterations;
         private final java.util.Set<String> unresolvedMutations = new java.util.HashSet<>();
         private boolean everHadMutationFailure;
         private final ConversationHistoryCompactor compactor;
 
         ChildLoop(ToolRegistry registry, LlmClient client, AgentBudget budget, String id,
                   String rolePrompt, Map<String, String> arguments, ToolExecutionContext context,
-                  List<LlmClient.Tool> tools) {
+                  List<LlmClient.Tool> tools, int childMaxIterations) {
             this.registry = registry;
             this.client = client;
             this.budget = budget;
             this.id = id;
             this.context = context;
             this.tools = tools;
+            this.childMaxIterations = childMaxIterations;
             history.add(LlmClient.Message.system(systemPrompt + "\n\n你是受主 Agent 委派的子 Agent。"
                     + rolePrompt + "\n只完成下述子任务，不能继续委派或扩大授权范围。"
                     + "所有文件路径相对于当前工作区：" + registry.getProjectPath()
                     + "\n返回简洁结果、修改文件、验证证据和未完成项；不要把未执行的检查称为通过。"));
-            String task = "任务：" + arguments.get("task")
-                    + "\n必要背景：" + arguments.getOrDefault("context", "");
+            StringBuilder taskBuilder = new StringBuilder("任务：")
+                    .append(arguments.get("task"))
+                    .append("\n必要背景：").append(arguments.getOrDefault("context", ""));
+            appendBriefField(taskBuilder, "交付物", arguments.get("deliverable"));
+            appendBriefField(taskBuilder, "约束", arguments.get("constraints"));
+            appendBriefField(taskBuilder, "入口文件/符号", arguments.get("entry_points"));
+            appendBriefField(taskBuilder, "允许工具", arguments.get("allowed_tools"));
+            appendBriefField(taskBuilder, "允许写入路径", arguments.get("allowed_write_paths"));
+            appendBriefField(taskBuilder, "预算", arguments.get("budget"));
+            String task = taskBuilder.toString();
             String upstreamReportId = arguments.getOrDefault("upstream_report_id", "").trim();
             if (!upstreamReportId.isBlank()) {
                 String upstreamReport = reportStore.get(upstreamReportId);
@@ -307,7 +416,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
         @Override public List<LlmClient.Message> history() { return history; }
         @Override public List<LlmClient.Tool> toolDefinitions(int iteration) { return tools; }
         @Override public LlmClient.StreamListener streamListener() { return LlmClient.StreamListener.NO_OP; }
-        @Override public int maxIterations() { return maxChildIterations; }
+        @Override public int maxIterations() { return childMaxIterations; }
         @Override public boolean isCancelled() { return context.isCancelled() || CancellationContext.isCancelled(); }
         @Override public RunEventSink eventSink() {
             // 子循环终态不能变成父运行终态，文本和历史也不混入父模型上下文。
@@ -353,28 +462,91 @@ final class DelegationSession implements DelegateTaskTool.Handler {
         @Override public String contextScope() { return id; }
         @Override public ToolOutput completed(LlmClient.ChatResponse response, AgentBudget currentBudget) {
             ObjectNode report = JSON.createObjectNode();
-            report.put("child_id", id).put("model", client.getModelName())
+            report.put("child_id", id).put("report_id", id).put("status", "done")
+                    .put("model", client.getModelName())
                     .put("summary", bounded(response.content())).put("iterations", currentBudget.iteration());
             var checks = report.putArray("tool_evidence");
             evidence.forEach(checks::add);
+            report.set("evidence", checks.deepCopy());
+            report.putArray("dead_ends");
+            report.putArray("open_questions");
+            report.putArray("facts_discovered");
+            report.putArray("modified_resources");
+            report.put("transcript_ref", "delegation:" + id);
             report.put("verification", "工具状态仅表示执行结果；主 Agent 仍需核对任务验收条件");
             report.put("ever_had_mutation_failure", everHadMutationFailure);
             if (registry.currentToolAccessScope() == ToolRegistry.ToolAccessScope.ISOLATED_PROJECT
                     && !unresolvedMutations.isEmpty()) {
-                report.put("error", "仍有未解决的副作用工具失败，未应用工作区修改");
+                report.put("status", "failed").put("error", "仍有未解决的副作用工具失败，未应用工作区修改");
                 return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED, report.toString(), false);
             }
             return ToolOutput.success(report.toString());
         }
-        @Override public ToolOutput cancelled(AgentBudget currentBudget) { return ToolOutput.cancelled("子任务已取消"); }
+        @Override public ToolOutput cancelled(AgentBudget currentBudget) {
+            return terminalReport("cancelled", "子任务已取消", ToolErrorCode.CANCELLED, false);
+        }
         @Override public ToolOutput budgetExceeded(AgentBudget.ExitReason reason, AgentBudget currentBudget) {
-            return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED, currentBudget.describeExit(reason), false);
+            return terminalReport("partial", currentBudget.describeExit(reason), ToolErrorCode.EXECUTION_FAILED, false);
         }
         @Override public ToolOutput iterationLimitReached(AgentBudget currentBudget) {
-            return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED, "子任务达到 " + maxChildIterations + " 轮上限", false);
+            return terminalReport("partial", "子任务达到 " + childMaxIterations + " 轮上限",
+                    ToolErrorCode.EXECUTION_FAILED, false);
         }
         @Override public ToolOutput failed(IOException error, AgentBudget currentBudget) {
-            return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED, "子任务模型调用失败: " + error.getMessage(), false);
+            return terminalReport("failed", "子任务模型调用失败: " + error.getMessage(),
+                    ToolErrorCode.EXECUTION_FAILED, false);
+        }
+
+        private ToolOutput terminalReport(String status, String summary,
+                                           ToolErrorCode errorCode, boolean retryable) {
+            ObjectNode report = JSON.createObjectNode();
+            report.put("child_id", id).put("report_id", id).put("status", status)
+                    .put("summary", bounded(summary)).put("transcript_ref", "delegation:" + id);
+            report.putArray("modified_resources");
+            report.putArray("evidence");
+            report.putArray("dead_ends");
+            report.putArray("open_questions");
+            report.putArray("facts_discovered");
+            com.devcli.tool.ToolStatus toolStatus = "cancelled".equals(status)
+                    ? com.devcli.tool.ToolStatus.CANCELLED : com.devcli.tool.ToolStatus.ERROR;
+            return new ToolOutput(toolStatus, errorCode, retryable,
+                    report.toString(), List.of(), List.of(), List.of());
+        }
+
+        private void appendBriefField(StringBuilder task, String label, String value) {
+            if (value != null && !value.isBlank()) {
+                task.append("\n").append(label).append("：").append(value);
+            }
+        }
+    }
+
+    private int childMaxIterations(Map<String, String> arguments) {
+        String raw = arguments.get("budget");
+        if (raw == null || raw.isBlank()) return maxChildIterations;
+        try {
+            int requested = JSON.readTree(raw).path("max_iterations").asInt(maxChildIterations);
+            return Math.max(1, Math.min(maxChildIterations, requested));
+        } catch (IOException | RuntimeException ignored) {
+            return maxChildIterations;
+        }
+    }
+
+    private Set<String> parseStringSet(String raw) {
+        return new java.util.LinkedHashSet<>(parseStringList(raw));
+    }
+
+    private List<String> parseStringList(String raw) {
+        if (raw == null || raw.isBlank()) return List.of();
+        try {
+            JsonNode node = JSON.readTree(raw);
+            if (!node.isArray()) return List.of();
+            List<String> values = new ArrayList<>();
+            node.forEach(item -> {
+                if (item.isTextual() && !item.asText().isBlank()) values.add(item.asText());
+            });
+            return List.copyOf(values);
+        } catch (IOException ignored) {
+            return List.of();
         }
     }
 

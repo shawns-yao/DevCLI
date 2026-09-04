@@ -92,6 +92,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private SkillContextBuffer skillContextBuffer;
     private final ThreadLocal<SkillContextBuffer> skillContextBufferOverride = new ThreadLocal<>();
     private final ThreadLocal<ToolAccessScope> toolAccessScope = new ThreadLocal<>();
+    private final ThreadLocal<Set<String>> allowedToolNames = new ThreadLocal<>();
+    private final ThreadLocal<List<String>> allowedWriteGlobs = new ThreadLocal<>();
     private final ThreadLocal<DelegateTaskTool.Handler> delegationHandler = new ThreadLocal<>();
     private boolean delegatedChild;
     private final ResourceLeaseManager resourceLeaseManager = new ResourceLeaseManager();
@@ -511,6 +513,53 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         }
     }
 
+    /** 委派 brief 的工具白名单只能收窄权限，不能扩大 ToolAccessScope。 */
+    public <T> T runWithAllowedTools(Set<String> names, java.util.function.Supplier<T> action) {
+        Set<String> previous = allowedToolNames.get();
+        if (names == null || names.isEmpty()) allowedToolNames.remove();
+        else allowedToolNames.set(Set.copyOf(names));
+        try {
+            return action == null ? null : action.get();
+        } finally {
+            if (previous == null) allowedToolNames.remove();
+            else allowedToolNames.set(previous);
+        }
+    }
+
+    /** 委派 Worker 的写路径白名单，使用项目相对路径 glob。 */
+    public <T> T runWithAllowedWritePaths(List<String> globs, java.util.function.Supplier<T> action) {
+        List<String> previous = allowedWriteGlobs.get();
+        if (globs == null || globs.isEmpty()) allowedWriteGlobs.remove();
+        else allowedWriteGlobs.set(List.copyOf(globs));
+        try {
+            return action == null ? null : action.get();
+        } finally {
+            if (previous == null) allowedWriteGlobs.remove();
+            else allowedWriteGlobs.set(previous);
+        }
+    }
+
+    @Override
+    public boolean isWritePathAllowed(String path) {
+        List<String> globs = allowedWriteGlobs.get();
+        if (globs == null || globs.isEmpty()) return true;
+        try {
+            String relative = contextResourceKey(resolveSafePath(path));
+            Path relativePath = Path.of(relative);
+            return globs.stream().anyMatch(pattern -> {
+                try {
+                    return java.nio.file.FileSystems.getDefault()
+                            .getPathMatcher("glob:" + pattern.replace('/', java.io.File.separatorChar))
+                            .matches(relativePath);
+                } catch (RuntimeException ignored) {
+                    return false;
+                }
+            });
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
     /** 评测 / 受限运行入口：只保留显式允许的工具，包含当前未激活或暂时不可见的工具。 */
     public synchronized void retainTools(Set<String> allowedToolNames) {
         Set<String> allowed = allowedToolNames == null ? Set.of() : Set.copyOf(allowedToolNames);
@@ -789,6 +838,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         return tools.values().stream()
                 .filter(tool -> isToolDefinitionVisible(tool.name()))
                 .filter(tool -> scope.permits(tool.effect()))
+                .filter(tool -> allowedToolNames.get() == null || allowedToolNames.get().contains(tool.name()))
                 .map(t -> new com.devcli.llm.LlmClient.Tool(t.name(), t.description(), t.parameters()))
                 .toList();
     }
@@ -1080,7 +1130,9 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         executionPipeline.register(ToolExecutionPipeline.Stage.CAPABILITY, (context, chain) -> {
             Tool tool = tools.get(context.name());
             ToolAccessScope scope = currentToolAccessScope();
-            if (tool != null && (!scope.permits(tool.effect()) || restrictedInDelegation(context.name()))) {
+            Set<String> allowlist = allowedToolNames.get();
+            if (tool != null && (allowlist != null && !allowlist.contains(context.name())
+                    || !scope.permits(tool.effect()) || restrictedInDelegation(context.name()))) {
                 return ToolOutput.rejected(ToolErrorCode.CAPABILITY_DENIED,
                         "工具能力被当前执行范围拒绝: " + context.name()
                                 + " (scope=" + scope + ", effect=" + tool.effect() + ")");
@@ -1207,7 +1259,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         }
         Map<String, String> argMap = new HashMap<>();
         parsedArgs.fields().forEachRemaining(entry ->
-                argMap.put(entry.getKey(), entry.getValue().asText()));
+                argMap.put(entry.getKey(), entry.getValue().isTextual()
+                        ? entry.getValue().asText() : entry.getValue().toString()));
         return tool.executor().executeOutput(argMap, context.executionContext());
     }
 
@@ -1398,6 +1451,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         int parallelism = Math.min(invocations.size(), MAX_PARALLEL_TOOLS);
         SkillContextBuffer activeSkillBuffer = activeSkillContextBuffer();
         ToolAccessScope activeAccessScope = currentToolAccessScope();
+        Set<String> activeAllowedTools = allowedToolNames.get();
+        List<String> activeAllowedWriteGlobs = allowedWriteGlobs.get();
         DelegateTaskTool.Handler activeDelegation = delegationHandler.get();
         String activeResourceLeaseStep = resourceLeaseStep.get();
         ExecutorService executor = Executors.newFixedThreadPool(parallelism, r -> {
@@ -1429,14 +1484,16 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                         ? deadlineAfterSeconds(batchStartedAt,
                                 Math.max(toolBatchTimeoutSeconds, toolTimeoutSeconds(invocation.name())))
                         : batchDeadlineNanos;
-                futures.add(executor.submit(() -> runWithDelegation(activeDelegation, () -> executeInvocation(
-                        invocation,
-                        callToken,
-                        invocationDeadline,
-                        deadlineExecutor,
-                        activeSkillBuffer,
-                        activeAccessScope,
-                        activeResourceLeaseStep))));
+                futures.add(executor.submit(() -> runWithDelegation(activeDelegation, () ->
+                        runWithAllowedTools(activeAllowedTools, () ->
+                                runWithAllowedWritePaths(activeAllowedWriteGlobs, () -> executeInvocation(
+                                        invocation,
+                                        callToken,
+                                        invocationDeadline,
+                                        deadlineExecutor,
+                                        activeSkillBuffer,
+                                        activeAccessScope,
+                                        activeResourceLeaseStep))))));
             }
 
             List<ToolExecutionResult> results = new ArrayList<>();

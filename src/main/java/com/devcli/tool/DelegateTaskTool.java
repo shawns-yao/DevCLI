@@ -28,6 +28,22 @@ public final class DelegateTaskTool {
                 .put("description", "可选的必要背景与相关文件；不会自动复制父会话历史");
         properties.putObject("upstream_report_id").put("type", "string").put("maxLength", 128)
                 .put("description", "可选的上游结构化报告 ID；由程序原样注入，不要复制报告正文");
+        properties.putObject("deliverable").put("type", "string").put("maxLength", 8000)
+                .put("description", "子任务必须交付的结果");
+        properties.putObject("constraints").put("type", "array").put("maxItems", 32)
+                .putObject("items").put("type", "string").put("maxLength", 1000);
+        properties.putObject("entry_points").put("type", "array").put("maxItems", 64)
+                .putObject("items").put("type", "string").put("maxLength", 500);
+        properties.putObject("allowed_tools").put("type", "array").put("maxItems", 32)
+                .put("description", "工具偏好；仍受执行范围与 Skill 权限约束")
+                .putObject("items").put("type", "string").put("maxLength", 128);
+        properties.putObject("allowed_write_paths").put("type", "array").put("maxItems", 128)
+                .put("description", "Worker 可修改的项目相对路径 glob；为空表示不额外限制")
+                .putObject("items").put("type", "string").put("maxLength", 500);
+        ObjectNode budget = properties.putObject("budget").put("type", "object")
+                .put("additionalProperties", false);
+        ObjectNode budgetProperties = budget.putObject("properties");
+        budgetProperties.putObject("max_iterations").put("type", "integer").put("minimum", 1).put("maximum", 100);
         schema.putArray("required").add("role").add("task");
         return ToolRegistry.Tool.contextualStructured(NAME,
                 "按需委派一个独立子任务。explorer/planner/reviewer 只读；worker 在隔离工作区修改，"
