@@ -56,6 +56,7 @@ public class SummaryLifecycleReducer {
                     throw new IllegalArgumentException("未知目标分段: " + target);
                 }
                 String content = text(node, "content");
+                String targetId = text(node, "target_id");
                 if (requiresContent(action) && content.isBlank()) {
                     throw new IllegalArgumentException(action + " 缺少 content");
                 }
@@ -74,7 +75,7 @@ public class SummaryLifecycleReducer {
                         }
                     });
                 }
-                operations.add(new SummaryOperation(action, section, target, subject,
+                operations.add(new SummaryOperation(action, section, target, targetId, subject,
                         content, lifecycle, importance, List.copyOf(refs)));
             }
             return operations;
@@ -92,7 +93,15 @@ public class SummaryLifecycleReducer {
         if (RollingSummary.isProjectionOnlySection(operation.section()) && !resolvesIntoHistory) {
             return;
         }
-        Optional<SummaryItem> current = summary.findItem(operation.section(), operation.subject());
+        Optional<SummaryItem> current = operation.targetId().isBlank()
+                ? summary.findItem(operation.section(), operation.subject())
+                : summary.allItems().stream()
+                        .filter(item -> item.id().equals(operation.targetId()))
+                        .findFirst();
+        if (operation.action() != SummaryOperation.Action.ADD
+                && !operation.targetId().isBlank() && current.isEmpty()) {
+            throw new IllegalArgumentException("摘要 target_id 不存在: " + operation.targetId());
+        }
         switch (operation.action()) {
             case ADD -> {
                 SummaryItem added = newItem(operation, operation.section(),

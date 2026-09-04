@@ -4,6 +4,7 @@ import com.devcli.agent.AgentTurnInbox;
 import com.devcli.config.ConfigResolver;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.CompactBoundaryMetadata;
+import com.devcli.memory.ContextProjectionBuilder;
 import com.devcli.runtime.event.RunEvent;
 import com.devcli.runtime.store.RunStore;
 import com.devcli.runtime.store.SqliteRunStore;
@@ -18,8 +19,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.*;
 import java.time.Instant;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -416,6 +420,46 @@ public class RuntimeThreadStore implements RunStore {
         }
     }
 
+    /** 返回当前 thread 最近一段未压缩事件的持久游标与内容哈希。 */
+    public synchronized com.devcli.memory.ConversationHistoryCompactor.CompactionSourceCursor
+    compactionSourceCursor(String threadId) {
+        List<RuntimeEvent> visible = events(threadId, 0);
+        long start = 0L;
+        for (RuntimeEvent event : visible) {
+            if (!"context.compacted".equals(event.type())) continue;
+            try {
+                JsonNode data = MAPPER.readTree(event.data());
+                start = Math.max(start, data.path("source_event_end").asLong(0L));
+            } catch (Exception ignored) {
+                // 损坏的 compaction marker 不会扩大本次来源范围。
+            }
+        }
+        long end = visible.stream().mapToLong(RuntimeEvent::id).max().orElse(0L);
+        if (end <= start) {
+            return com.devcli.memory.ConversationHistoryCompactor.CompactionSourceCursor.none();
+        }
+        return new com.devcli.memory.ConversationHistoryCompactor.CompactionSourceCursor(
+                start + 1, end, eventRangeHash(visible, start, end));
+    }
+
+    private static String eventRangeHash(List<RuntimeEvent> events, long start, long end) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            for (RuntimeEvent event : events) {
+                if (event.id() <= start || event.id() > end) continue;
+                digest.update(Long.toString(event.id()).getBytes(StandardCharsets.UTF_8));
+                digest.update((byte) 0);
+                digest.update(event.type().getBytes(StandardCharsets.UTF_8));
+                digest.update((byte) 0);
+                digest.update((event.data() == null ? "" : event.data()).getBytes(StandardCharsets.UTF_8));
+                digest.update((byte) '\n');
+            }
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (Exception e) {
+            throw new IllegalStateException("计算 runtime event range hash 失败", e);
+        }
+    }
+
     public synchronized List<RuntimeEvent> events(String threadId, long afterId) {
         List<RuntimeEvent> allEvents = new ArrayList<>();
         try (PreparedStatement ps = connection.prepareStatement("""
@@ -481,6 +525,18 @@ public class RuntimeThreadStore implements RunStore {
             }
         }
         return history;
+    }
+
+    /** 从原始 turn 事件重建不含摘要投影的对话，供周期性摘要纠错使用。 */
+    public synchronized List<LlmClient.Message> originalConversationMessages(String threadId) {
+        List<LlmClient.Message> messages = new ArrayList<>();
+        for (TurnRecord turn : turnHistory(threadId)) {
+            messages.add(LlmClient.Message.user(turn.input()));
+            if (!turn.output().isBlank()) {
+                messages.add(LlmClient.Message.assistant(turn.output()));
+            }
+        }
+        return List.copyOf(messages);
     }
 
     public synchronized ContextView contextView(String threadId) {
@@ -853,6 +909,26 @@ public class RuntimeThreadStore implements RunStore {
                         List<TurnRunner.MessageTreeNode> messageTree = MAPPER.readValue(
                                 rs.getString("message_tree_json"),
                                 new TypeReference<List<TurnRunner.MessageTreeNode>>() {});
+                        if (!"none".equalsIgnoreCase(metadata.projectionHash())) {
+                            String actualProjectionHash = ContextProjectionBuilder.fingerprintOf(messages);
+                            if (!metadata.projectionHash().equalsIgnoreCase(actualProjectionHash)) {
+                                throw new IllegalStateException("checkpoint projection hash mismatch");
+                            }
+                        }
+                        if (metadata.sourceEventEnd() > 0
+                                && !"none".equalsIgnoreCase(metadata.sourceHash())) {
+                            List<RuntimeEvent> visible = events(threadId, 0);
+                            long start = metadata.sourceEventStart();
+                            long end = metadata.sourceEventEnd();
+                            // sourceEventStart/sourceEventEnd 是闭区间；内部哈希函数的 start 参数为排除边界。
+                            String actualSourceHash = eventRangeHash(visible, Math.max(0L, start - 1L), end);
+                            if (!metadata.sourceHash().equalsIgnoreCase(actualSourceHash)) {
+                                throw new IllegalStateException("checkpoint source event hash mismatch");
+                            }
+                            if (!hasMatchingCompactionEvent(visible, metadata)) {
+                                throw new IllegalStateException("checkpoint compaction event marker missing");
+                            }
+                        }
                         return Optional.of(new RuntimeCheckpoint(
                                 rs.getLong("id"),
                                 rs.getString("thread_id"),
@@ -864,7 +940,8 @@ public class RuntimeThreadStore implements RunStore {
                                 messageTree,
                                 Instant.parse(rs.getString("created_at"))));
                     } catch (Exception corrupted) {
-                        log.warn("解析 runtime checkpoint 失败，回退更早检查点: id={}", rs.getLong("id"));
+                        log.warn("解析 runtime checkpoint 失败，回退更早检查点: id={}, reason={}",
+                                rs.getLong("id"), corrupted.getMessage());
                     }
                 }
             }
@@ -872,6 +949,25 @@ public class RuntimeThreadStore implements RunStore {
         } catch (SQLException e) {
             throw new IllegalStateException("读取 runtime checkpoint 失败: " + e.getMessage(), e);
         }
+    }
+
+    private static boolean hasMatchingCompactionEvent(List<RuntimeEvent> visible,
+                                                      CompactBoundaryMetadata metadata) {
+        for (RuntimeEvent event : visible) {
+            if (!"context.compacted".equals(event.type())) continue;
+            try {
+                JsonNode data = MAPPER.readTree(event.data());
+                if (data.path("source_event_start").asLong(-1L) == metadata.sourceEventStart()
+                        && data.path("source_event_end").asLong(-1L) == metadata.sourceEventEnd()
+                        && metadata.sourceHash().equalsIgnoreCase(data.path("source_hash").asText(""))
+                        && metadata.projectionHash().equalsIgnoreCase(data.path("projection_hash").asText(""))) {
+                    return true;
+                }
+            } catch (Exception ignored) {
+                // Ignore malformed markers and continue searching older valid ones.
+            }
+        }
+        return false;
     }
 
     private List<RuntimeEvent> filterVisibleEvents(String threadId, List<RuntimeEvent> events) {

@@ -230,6 +230,20 @@ class MemoryPromotionPipelineTest {
     }
 
     @Test
+    void lateFailureCannotOverwriteCommittedPromotion() {
+        try (MemoryPromotionQueue queue = new MemoryPromotionQueue(tempDir)) {
+            String jobId = queue.enqueue(snapshot("task-race"));
+            queue.claimNext().orElseThrow();
+            queue.markCommitted(jobId, "memory-race");
+
+            queue.markFailedRetryable(jobId, "late curator failure");
+
+            assertEquals(MemoryPromotionQueue.State.COMMITTED,
+                    queue.find(jobId).orElseThrow().state());
+        }
+    }
+
+    @Test
     void promotionGateCombinesDeduplicationConfirmationSupersedeAndExpiry() {
         try (LongTermMemory memory = new LongTermMemory(tempDir.toFile());
              MemoryPromotionQueue queue = new MemoryPromotionQueue(tempDir)) {

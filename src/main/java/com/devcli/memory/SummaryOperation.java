@@ -7,6 +7,7 @@ record SummaryOperation(
         Action action,
         String section,
         String targetSection,
+        String targetId,
         String subject,
         String content,
         SummaryItem.Lifecycle lifecycle,

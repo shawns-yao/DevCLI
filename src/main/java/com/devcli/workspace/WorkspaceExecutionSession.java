@@ -14,15 +14,18 @@ public final class WorkspaceExecutionSession implements AutoCloseable {
     private final Path projectRoot;
     private final IsolatedWorkspace workspace;
     private final ToolRegistry toolRegistry;
+    private final ToolRegistry parentToolRegistry;
     private final String stepId;
 
     private WorkspaceExecutionSession(Path projectRoot,
                                       IsolatedWorkspace workspace,
                                       ToolRegistry toolRegistry,
+                                      ToolRegistry parentToolRegistry,
                                       String stepId) {
         this.projectRoot = projectRoot;
         this.workspace = workspace;
         this.toolRegistry = toolRegistry;
+        this.parentToolRegistry = parentToolRegistry;
         this.stepId = stepId;
     }
 
@@ -32,7 +35,7 @@ public final class WorkspaceExecutionSession implements AutoCloseable {
         IsolatedWorkspace workspace = IsolatedWorkspace.create(projectRoot, stepId);
         try {
             ToolRegistry fork = parent.forkForProject(workspace.path());
-            return new WorkspaceExecutionSession(projectRoot, workspace, fork, stepId);
+            return new WorkspaceExecutionSession(projectRoot, workspace, fork, parent, stepId);
         } catch (Exception e) {
             workspace.close();
             throw e;
@@ -85,6 +88,7 @@ public final class WorkspaceExecutionSession implements AutoCloseable {
             beforeApply.prepare(effectivePatchSet);
             PatchSet.ApplyResult result = effectivePatchSet.apply(projectRoot);
             if (result.applied()) {
+                parentToolRegistry.invalidateToolResultCache();
                 toolRegistry.contextVersionLedger().publishPatchSet(stepId, effectivePatchSet, projectRoot);
                 toolRegistry.markRagIndexDirty(effectivePatchSet.changes().stream()
                         .map(PatchSet.FileChange::relativePath)

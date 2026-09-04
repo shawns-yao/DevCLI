@@ -132,6 +132,12 @@ public final class RunEventJsonCodec {
         } else if (event instanceof RunEvent.CheckpointFailed checkpoint) {
             payload.put("covered_through_event_id", checkpoint.coveredThroughEventId());
             payload.put("error", checkpoint.error());
+        } else if (event instanceof RunEvent.ContextCompacted compacted) {
+            payload.put("source_event_start", compacted.sourceEventStart());
+            payload.put("source_event_end", compacted.sourceEventEnd());
+            payload.put("source_hash", compacted.sourceHash());
+            payload.put("projection_hash", compacted.projectionHash());
+            payload.put("mode", compacted.mode());
         } else {
             throw new IllegalArgumentException("不支持的运行事件: " + event.getClass().getName());
         }

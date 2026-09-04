@@ -159,7 +159,7 @@ public class MemoryEntry {
     public Instant getLastValidatedAt() { return lastValidatedAt; }
 
     public boolean isRecallable() {
-        return active && evidence.isRecallable()
+        return active && !isExpired(Instant.now()) && evidence.isRecallable()
                 && MemoryWriteProtocol.structureState(this)
                 != MemoryWriteProtocol.StructureState.PENDING_CONFIRMATION;
     }

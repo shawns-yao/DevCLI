@@ -32,9 +32,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       受控运行时结果目录，messages 里只保留 1.5K 预览 + result_ref</li>
  * </ol>
  *
- * <p><b>不参与治理的工具白名单</b>（{@link #PASSTHROUGH_TOOLS}）：
+ * <p><b>不参与尺寸治理的工具白名单</b>（{@link #PASSTHROUGH_TOOLS}）：
  * <ul>
- *   <li>{@code list_dir}：目录树本身就是结构化短输出，截断会破坏可读性</li>
  *   <li>{@code revert_turn}：状态控制工具，结果是简单确认信息</li>
  *   <li>image-bearing 结果（含 imageParts）：图片 part 不能截断</li>
  * </ul>
@@ -51,11 +50,7 @@ public final class ToolResultSizeManager {
     private static final Logger log = LoggerFactory.getLogger(ToolResultSizeManager.class);
 
     /** 不参与尺寸治理的工具名白名单。 */
-    private static final Set<String> PASSTHROUGH_TOOLS = Set.of(
-            "list_dir",      // 短结构化输出
-            "revert_turn",    // 状态控制
-            "search_code"    // 尾部含 RAG 证据 JSON，截断会破坏 SessionMemory 解析
-    );
+    private static final Set<String> PASSTHROUGH_TOOLS = Set.of("revert_turn");
 
     /** ≤ 此字符数的结果直接原文返回，不做任何处理。 */
     public static final int INLINE_THRESHOLD_CHARS = 5_000;

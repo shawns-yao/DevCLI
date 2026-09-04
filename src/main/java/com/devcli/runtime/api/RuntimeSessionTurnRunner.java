@@ -54,6 +54,8 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
     @Override
     public TurnResult run(String threadId, String input, RunEventSink eventSink) {
         AgentSessionRuntime session = session(threadId);
+        session.agent().setCompactionSourceCursorSupplier(() -> store.compactionSourceCursor(threadId));
+        session.agent().setOriginalHistorySupplier(() -> store.originalConversationMessages(threadId));
         session.setRunEventSink(eventSink);
         eventSink.emit(new com.devcli.runtime.event.RunEvent.SessionStateChanged(
                 threadId, "running", "turn_started"));
@@ -64,6 +66,9 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
                     && session.agent().compactHistoryForPersistence(checkpointTriggerTokens);
             List<LlmClient.Message> history = session.agent().getConversationHistory();
             compacted |= hasNewCompactionBoundary(before, history);
+            if (compacted) {
+                emitCompactionBoundary(history, eventSink);
+            }
             TurnRunner.CheckpointCandidate checkpoint = RuntimeCheckpointCandidateFactory
                     .fromHistory(history, compacted)
                     .orElse(null);
@@ -158,6 +163,21 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
             }
         }
         return latest;
+    }
+
+    private static void emitCompactionBoundary(List<LlmClient.Message> history,
+                                               RunEventSink eventSink) {
+        String boundary = latestCompactionBoundary(history);
+        CompactBoundaryMetadata.parseFromSummaryMessage(boundary).ifPresent(metadata -> {
+            if (metadata.sourceEventEnd() > 0) {
+                eventSink.emit(new com.devcli.runtime.event.RunEvent.ContextCompacted(
+                        metadata.sourceEventStart(),
+                        metadata.sourceEventEnd(),
+                        metadata.sourceHash(),
+                        metadata.projectionHash(),
+                        metadata.mode()));
+            }
+        });
     }
 
     private static String latestAssistantContent(List<LlmClient.Message> history) {

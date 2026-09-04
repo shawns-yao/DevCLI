@@ -32,6 +32,10 @@ final class ToolResultCache {
 
     synchronized void put(String key, ToolOutput output) {
         if (key == null || output == null || !output.isSuccess() || output.hasImageParts()) return;
+        if (output.text().contains("result_ref=")
+                || output.sideChannels().stream().anyMatch(ToolResultArtifact.class::isInstance)) {
+            return;
+        }
         entries.put(key, new Entry(output, System.currentTimeMillis()));
         while (entries.size() > maxEntries) {
             String eldest = entries.entrySet().iterator().next().getKey();

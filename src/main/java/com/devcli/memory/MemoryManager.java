@@ -46,6 +46,7 @@ public class MemoryManager implements AutoCloseable {
     private static final int SESSION_PRE_SUMMARY_TOKEN_DELTA = 2_000;
     private static final int SESSION_PRE_SUMMARY_TOOL_CALLS = 4;
     private static final int SESSION_PRE_SUMMARY_LARGE_TOOL_CHARS = 12_000;
+    private static final int SESSION_PRE_SUMMARY_MAX_RENDER_CHARS = 64_000;
     private final SessionMemory sessionMemory;
     private final CompactionSummaryCache compactionSummaryCache;
     private final LongTermMemory longTermMemory;
@@ -145,12 +146,19 @@ public class MemoryManager implements AutoCloseable {
         if (content == null || content.isBlank()) return;
         if (hasIgnoreMemoryIntent(content)) {
             memoryIgnored = true;
+            // “忽略记忆”是当前任务级开关；不要把触发该开关的消息本身再写入工作记忆。
+            return;
+        }
+        if (memoryIgnored) {
+            return;
         }
         // 取首 60 字符做 fact，避免 prompt 膨胀
         String preview = content.length() > 60 ? content.substring(0, 60) + "..." : content;
         sessionMemory.accept(new SessionMemory.KeyEvent(
                 "用户最新输入: " + preview, 90, "user", "",
                 sessionEventSequence.incrementAndGet()));
+        sessionMemory.addProtectedConstraints(CompactionSemanticGuard.extractConstraints(
+                List.of(LlmClient.Message.user(content))));
     }
 
     /**
@@ -179,7 +187,7 @@ public class MemoryManager implements AutoCloseable {
 
     public void addToolResult(String toolName, String argsJson, String result,
                               List<ToolSideChannel> sideChannels) {
-        if (toolName == null || result == null) return;
+        if (memoryIgnored || toolName == null || result == null) return;
         sessionMemory.accept(new SessionMemory.ToolResultObserved(
                 toolName, argsJson, result, sideChannels, currentAgentId(), currentEvidenceScope(),
                 currentEvidenceOrigin(), currentContextEpoch(),
@@ -416,8 +424,13 @@ public class MemoryManager implements AutoCloseable {
     }
 
     /** 开始明确任务；新的 taskId 会轮换掉上一任务的短期运行投影。 */
-    public void beginTask(String taskId) {
-        sessionMemory.beginTask(taskId);
+    public synchronized void beginTask(String taskId) {
+        String normalized = taskId == null ? "" : taskId.trim();
+        if (normalized.isBlank()) return;
+        if (!normalized.equals(sessionMemory.snapshot().taskId())) {
+            memoryIgnored = false;
+        }
+        sessionMemory.beginTask(normalized);
     }
 
     /** 标记明确任务结束；投影保留到下一任务开始，避免最终答复丢失证据。 */
@@ -431,6 +444,7 @@ public class MemoryManager implements AutoCloseable {
      */
     public String completeTask(String taskId, String userRequest,
                                String finalResult, String projectScope) {
+        if (memoryIgnored) return "";
         MemoryPromotionPipeline pipeline = memoryPromotionPipeline;
         if (pipeline == null) return "";
         TaskMemorySnapshot snapshot = TaskMemorySnapshot.capture(taskId, projectScope,
@@ -444,8 +458,24 @@ public class MemoryManager implements AutoCloseable {
         if (memoryPromotionPipeline == null || memoryPromotionExecutor.isShutdown()) return;
         memoryPromotionExecutor.submit(() -> {
             MemoryPromotionPipeline pipeline = memoryPromotionPipeline;
-            while (pipeline != null && pipeline.processNext()) {
-                pipeline = memoryPromotionPipeline;
+            int consecutiveFailures = 0;
+            while (pipeline != null) {
+                boolean processed = pipeline.processNext();
+                if (processed) {
+                    consecutiveFailures = 0;
+                    pipeline = memoryPromotionPipeline;
+                    continue;
+                }
+                if (!memoryPromotionQueue.hasRunnableJobs() || consecutiveFailures >= 3) {
+                    break;
+                }
+                consecutiveFailures++;
+                try {
+                    Thread.sleep(100L * (1L << Math.min(3, consecutiveFailures - 1)));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
             }
         });
     }
@@ -455,9 +485,10 @@ public class MemoryManager implements AutoCloseable {
         if (jobs.isEmpty()) return "没有待确认的长期记忆候选。";
         StringBuilder output = new StringBuilder("待确认的长期记忆候选：\n");
         for (MemoryPromotionQueue.Job job : jobs) {
-            output.append("- id=").append(job.id())
-                    .append(", task=").append(job.snapshot().taskId())
-                    .append("\n  candidate=").append(truncateForPrompt(job.detail(), 300))
+            output.append("- id=").append(SensitiveDataRedactor.redact(job.id()))
+                    .append(", task=").append(SensitiveDataRedactor.redact(job.snapshot().taskId()))
+                    .append("\n  candidate=").append(truncateForPrompt(
+                            SensitiveDataRedactor.redact(job.detail()), 300))
                     .append('\n');
         }
         return output.toString().trim();
@@ -723,15 +754,16 @@ public class MemoryManager implements AutoCloseable {
         }
         StringBuilder sb = new StringBuilder("长期记忆（LongTermMemory）当前持久化条目：\n");
         for (MemoryEntry entry : entries) {
-            sb.append("- id=").append(entry.getId())
+            sb.append("- id=").append(SensitiveDataRedactor.redact(entry.getId()))
                     .append(", type=").append(entry.getType())
                     .append(", confidence=").append(entry.getEvidence().confidence())
                     .append(", review=").append(entry.getEvidence().reviewState());
             if (!entry.getSubject().isBlank()) {
-                sb.append(", subject=").append(entry.getSubject());
+                sb.append(", subject=").append(SensitiveDataRedactor.redact(entry.getSubject()));
             }
             if (!entry.isActive()) {
-                sb.append(", active=false, superseded_by=").append(entry.getSupersededBy());
+                sb.append(", active=false, superseded_by=").append(SensitiveDataRedactor.redact(
+                        entry.getSupersededBy()));
             }
             sb.append(", created_at=").append(entry.getTimestamp())
                     .append("\n  content: ").append(SensitiveDataRedactor.redact(entry.getContent()));
@@ -740,13 +772,16 @@ public class MemoryManager implements AutoCloseable {
                         SensitiveDataRedactor.redact(entry.getEvidence().sourceQuote()), 200));
             }
             if (!entry.getEvidence().reasoning().isBlank()) {
-                sb.append("\n  reasoning: ").append(entry.getEvidence().reasoning());
+                sb.append("\n  reasoning: ").append(SensitiveDataRedactor.redact(
+                        entry.getEvidence().reasoning()));
             }
             if (!entry.getEvidence().conflictsWith().isEmpty()) {
-                sb.append("\n  conflicts_with: ").append(entry.getEvidence().conflictsWith());
+                sb.append("\n  conflicts_with: ").append(SensitiveDataRedactor.redact(
+                        entry.getEvidence().conflictsWith().toString()));
             }
             if (!entry.getMetadata().isEmpty()) {
-                sb.append("\n  metadata: ").append(entry.getMetadata());
+                sb.append("\n  metadata: ").append(SensitiveDataRedactor.redact(
+                        entry.getMetadata().toString()));
             }
             sb.append("\n");
         }
@@ -770,6 +805,9 @@ public class MemoryManager implements AutoCloseable {
      * 直接注入，不参与 query-based 检索。
      */
     public List<MemoryEntry> retrieveRelevant(String query, int limit) {
+        if (memoryIgnored) {
+            return List.of();
+        }
         return retriever.retrieveLongTerm(query, limit, activeScopeKeys);
     }
 
@@ -901,14 +939,23 @@ public class MemoryManager implements AutoCloseable {
      * 压缩成功后恢复给 messages 的结构化短上下文。
      */
     public String buildPostCompactRestoreSection() {
+        if (memoryIgnored) {
+            return "";
+        }
         return sessionMemory.renderForPostCompactRestore();
     }
 
     public String buildPostCompactRestoreSectionForAgent(String agentType) {
+        if (memoryIgnored) {
+            return "";
+        }
         return sessionMemory.renderForPostCompactRestore(viewForAgent(agentType));
     }
 
     public String currentRagEpochSnapshot() {
+        if (memoryIgnored) {
+            return "none";
+        }
         LinkedHashSet<String> epochs = new LinkedHashSet<>();
         for (SessionMemory.RagEvidence evidence : sessionMemory.getRagEvidenceMemory()) {
             String epoch = evidence.indexEpoch();
@@ -983,6 +1030,11 @@ public class MemoryManager implements AutoCloseable {
                                 + renderMessagesForPreSummary(coveredMessages))
                 );
             }
+            if (TokenBudget.estimateMessagesTokens(summaryRequest)
+                    > Math.max(256, contextProfile.compressionTriggerTokens())) {
+                log.info("skip session pre-summary because request exceeds the local input budget");
+                return SessionPreSummaryMaintenanceResult.SKIPPED_INPUT_TOO_LARGE;
+            }
             LlmClient.ChatResponse response = llmClient.chat(summaryRequest, List.of());
             if (Boolean.parseBoolean(System.getProperty(
                     ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY, "false"))) {
@@ -992,6 +1044,14 @@ public class MemoryManager implements AutoCloseable {
             }
             String summary = response.content();
             if (summary == null || summary.isBlank()) {
+                preSummaryFailureCount.incrementAndGet();
+                return SessionPreSummaryMaintenanceResult.FAILED;
+            }
+            CompactionSemanticGuard.Validation validation = CompactionSemanticGuard.validateAndRepair(
+                    coveredMessages, summary, ConversationHistoryCompactor.MAX_SUMMARY_CHARS);
+            summary = validation.repairedSummary();
+            if (summary == null || summary.isBlank()
+                    || summary.length() > ConversationHistoryCompactor.MAX_SUMMARY_CHARS) {
                 preSummaryFailureCount.incrementAndGet();
                 return SessionPreSummaryMaintenanceResult.FAILED;
             }
@@ -1046,7 +1106,13 @@ public class MemoryManager implements AutoCloseable {
                 sb.append("toolCalls=");
                 for (LlmClient.ToolCall toolCall : message.toolCalls()) {
                     if (toolCall.function() != null) {
-                        sb.append(toolCall.function().name()).append(' ');
+                        sb.append(toolCall.function().name());
+                        if (toolCall.function().arguments() != null
+                                && !toolCall.function().arguments().isBlank()) {
+                            sb.append(" args=")
+                                    .append(truncateForPrompt(toolCall.function().arguments(), 1_000));
+                        }
+                        sb.append(' ');
                     }
                 }
             }
@@ -1055,6 +1121,10 @@ public class MemoryManager implements AutoCloseable {
                 sb.append(truncateForPrompt(content, 2_000));
             }
             sb.append("\n\n");
+            if (sb.length() >= SESSION_PRE_SUMMARY_MAX_RENDER_CHARS) {
+                sb.append("[预摘要输入超过上限，未继续展开更早消息]");
+                break;
+            }
         }
         return sb.toString().trim();
     }
@@ -1121,6 +1191,7 @@ public class MemoryManager implements AutoCloseable {
         sessionMemory.clear();
         compactionSummaryCache.clearPreSummary();
         sessionEventSequence.set(0);
+        memoryIgnored = false;
     }
 
     /** 清空长期记忆（用于 /memory clear 命令）。 */
@@ -1180,6 +1251,7 @@ public class MemoryManager implements AutoCloseable {
         SKIPPED_DISABLED,
         SKIPPED_EMPTY_HISTORY,
         SKIPPED_BELOW_THRESHOLD,
+        SKIPPED_INPUT_TOO_LARGE,
         SKIPPED_ALREADY_CURRENT,
         FAILED
     }

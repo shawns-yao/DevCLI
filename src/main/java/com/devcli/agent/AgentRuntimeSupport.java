@@ -52,6 +52,22 @@ final class AgentRuntimeSupport {
         compactor.setMicrocompactOutputRoot(Path.of(toolRegistry.getProjectPath()));
     }
 
+    static void bindCompactionBudget(ConversationHistoryCompactor compactor,
+                                     AgentBudget budget,
+                                     MemoryManager memoryManager) {
+        if (compactor == null || budget == null) return;
+        compactor.setSummaryCallGuard(() ->
+                (long) budget.totalInputTokens() + budget.totalOutputTokens() < budget.tokenBudget());
+        compactor.setSummaryUsageConsumer(response -> {
+            if (response == null) return;
+            budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
+            if (memoryManager != null) {
+                memoryManager.recordTokenUsage(response.inputTokens(), response.outputTokens(),
+                        response.cachedInputTokens());
+            }
+        });
+    }
+
     static String buildSkillIndex(SkillRegistry skillRegistry, String activationText,
                                   ToolRegistry toolRegistry, Logger log) {
         if (skillRegistry == null) {

@@ -2,6 +2,7 @@ package com.devcli.memory;
 
 import com.devcli.rag.RagEvidencePayload;
 import com.devcli.rag.RagEvidenceSideChannel;
+import com.devcli.policy.SensitiveDataRedactor;
 import com.devcli.tool.ToolResultArtifact;
 import com.devcli.tool.ToolSideChannel;
 import org.slf4j.Logger;
@@ -9,6 +10,7 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -54,6 +56,8 @@ public class SessionMemory {
     public static final int DEFAULT_EVIDENCE_TOKEN_BUDGET = 6_000;
     /** 默认保留多少个 volatile facts。 */
     public static final int DEFAULT_MAX_VOLATILE_FACTS = 16;
+    private static final int MAX_PROTECTED_CONSTRAINTS = 64;
+    private static final int PROTECTED_CONSTRAINT_CHARS = 600;
     /** 单条 tool 结果在注入时截断到此字符数。完整原文仍保留在 recentToolResults，仅渲染时截断。 */
     public static final int TOOL_RESULT_RENDER_CHARS = 1_500;
     public static final int DEFAULT_MAX_RAG_EVIDENCE = 8;
@@ -79,6 +83,7 @@ public class SessionMemory {
     private final LinkedList<RagEvidence> ragEvidenceMemory = new LinkedList<>();
     private final LinkedList<KeyFact> volatileFacts = new LinkedList<>();
     private final LinkedHashMap<String, String> taskState = new LinkedHashMap<>();
+    private final LinkedHashMap<String, String> protectedConstraints = new LinkedHashMap<>();
     private final LinkedHashMap<String, Long> stateSequences = new LinkedHashMap<>();
     private final LinkedHashSet<String> modifiedFiles = new LinkedHashSet<>();
     private final LinkedHashMap<String, AttemptDigestSnapshot> attemptDigests = new LinkedHashMap<>();
@@ -217,7 +222,8 @@ public class SessionMemory {
         return new SessionSnapshot(Map.copyOf(taskState), List.copyOf(evidence),
                 List.copyOf(modifiedFiles), List.copyOf(attemptDigests.values()),
                 taskLedger.render(), localSequence, taskId, taskEnded,
-                volatileFacts.stream().map(KeyFact::snapshot).toList());
+                volatileFacts.stream().map(KeyFact::snapshot).toList(),
+                List.copyOf(protectedConstraints.values()));
     }
 
     // ─────────────────────────────────────────────────────────
@@ -278,7 +284,8 @@ public class SessionMemory {
                 attemptDigests.remove(attemptDigests.keySet().iterator().next());
             }
         }
-        if (kind == EvidenceKind.CRITICAL && "write_file".equals(toolName)) {
+        if (kind == EvidenceKind.CRITICAL
+                && ("write_file".equals(toolName) || "edit_file".equals(toolName))) {
             String path = extractPath(safeArgs);
             if (!path.isBlank()) modifiedFiles.add(path);
         }
@@ -384,6 +391,7 @@ public class SessionMemory {
     private static EvidenceKind classifyEvidence(String toolName, String result) {
         String normalized = result == null ? "" : result.toLowerCase(Locale.ROOT);
         if (normalized.contains("negativefact") || "write_file".equals(toolName)
+                || "edit_file".equals(toolName)
                 || "create_project".equals(toolName) || isPassingTestResult(toolName, normalized)) {
             return EvidenceKind.CRITICAL;
         }
@@ -497,6 +505,33 @@ public class SessionMemory {
         taskState.clear();
     }
 
+    /** 保存从用户消息中提取的硬约束；它不依赖摘要生命周期，也不与普通事件混存。 */
+    public synchronized void addProtectedConstraint(String constraint) {
+        if (constraint == null || constraint.isBlank()) return;
+        String normalized = constraint.replace("\r\n", "\n")
+                .replace('\r', '\n').trim();
+        if (normalized.isBlank()) return;
+        if (normalized.length() > PROTECTED_CONSTRAINT_CHARS) {
+            normalized = normalized.substring(0, PROTECTED_CONSTRAINT_CHARS) + "...";
+        }
+        normalized = SensitiveDataRedactor.redact(normalized);
+        if (normalized == null || normalized.isBlank()) return;
+        protectedConstraints.remove(normalized);
+        protectedConstraints.put(normalized, normalized);
+        while (protectedConstraints.size() > MAX_PROTECTED_CONSTRAINTS) {
+            protectedConstraints.remove(protectedConstraints.keySet().iterator().next());
+        }
+    }
+
+    public synchronized void addProtectedConstraints(Collection<String> constraints) {
+        if (constraints == null) return;
+        constraints.forEach(this::addProtectedConstraint);
+    }
+
+    public synchronized List<String> getProtectedConstraints() {
+        return List.copyOf(protectedConstraints.values());
+    }
+
     // ─────────────────────────────────────────────────────────
     // taskLedger（计划执行进度投影）
     // ─────────────────────────────────────────────────────────
@@ -568,6 +603,11 @@ public class SessionMemory {
             for (Map.Entry<String, String> e : taskState.entrySet()) {
                 section.append("- ").append(e.getKey()).append(": ").append(e.getValue()).append('\n');
             }
+            appendBudgeted(sb, section.toString(), effectiveBudget);
+        }
+        if (!protectedConstraints.isEmpty()) {
+            StringBuilder section = new StringBuilder("### 用户硬约束（压缩保护）\n\n");
+            protectedConstraints.values().forEach(value -> section.append("- ").append(value).append('\n'));
             appendBudgeted(sb, section.toString(), effectiveBudget);
         }
         if (!modifiedFiles.isEmpty()) {
@@ -717,6 +757,7 @@ public class SessionMemory {
         if (shouldRenderToolEvidence(effectiveView)) {
             appendRecentFileSection(sb);
         }
+        appendProtectedConstraintSection(sb);
         appendOpenTaskSection(sb);
         if (shouldRenderToolEvidence(effectiveView)) {
             appendKeyToolReferenceSection(sb);
@@ -728,7 +769,8 @@ public class SessionMemory {
     private void appendRecentFileSection(StringBuilder sb) {
         LinkedHashMap<String, String> files = new LinkedHashMap<>();
         for (ToolEvidence ev : recentToolResults) {
-            if (!"read_file".equals(ev.toolName) && !"write_file".equals(ev.toolName)) {
+            if (!"read_file".equals(ev.toolName) && !"write_file".equals(ev.toolName)
+                    && !"edit_file".equals(ev.toolName)) {
                 continue;
             }
             String path = extractPath(ev.argsJson);
@@ -867,6 +909,15 @@ public class SessionMemory {
         return view == SessionView.FULL || view == SessionView.PLANNER || view == SessionView.WORKER;
     }
 
+    private void appendProtectedConstraintSection(StringBuilder sb) {
+        if (protectedConstraints.isEmpty()) return;
+        appendSectionBreak(sb);
+        sb.append("### 用户硬约束\n\n");
+        for (String constraint : protectedConstraints.values()) {
+            sb.append("- ").append(constraint).append('\n');
+        }
+    }
+
     private static boolean shouldRenderToolEvidence(SessionView view) {
         return view == SessionView.FULL || view == SessionView.WORKER || view == SessionView.REVIEWER;
     }
@@ -939,6 +990,7 @@ public class SessionMemory {
         processedEventIds.clear();
         modifiedFiles.clear();
         attemptDigests.clear();
+        protectedConstraints.clear();
         localSequence = 0;
         planSequence = Long.MIN_VALUE;
         taskLedger.clear();
@@ -1295,7 +1347,26 @@ public class SessionMemory {
                                   long sequence,
                                   String taskId,
                                   boolean taskEnded,
-                                  List<KeyEventSnapshot> keyEvents) {}
+                                  List<KeyEventSnapshot> keyEvents,
+                                  List<String> protectedConstraints) {
+        public SessionSnapshot(Map<String, String> workState,
+                               List<EvidenceSnapshot> evidenceJournal,
+                               List<String> modifiedFiles,
+                               List<AttemptDigestSnapshot> attemptDigests,
+                               String taskLedger,
+                               long sequence,
+                               String taskId,
+                               boolean taskEnded,
+                               List<KeyEventSnapshot> keyEvents) {
+            this(workState, evidenceJournal, modifiedFiles, attemptDigests, taskLedger,
+                    sequence, taskId, taskEnded, keyEvents, List.of());
+        }
+
+        public SessionSnapshot {
+            protectedConstraints = protectedConstraints == null
+                    ? List.of() : List.copyOf(protectedConstraints);
+        }
+    }
 
     public record RagEvidence(String filePath,
                               String symbolName,

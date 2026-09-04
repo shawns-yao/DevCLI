@@ -523,6 +523,7 @@ public class SubAgent {
         SubAgentStreamRenderer streamRenderer = new SubAgentStreamRenderer(name, role, out);
 
         AgentBudget budget = createExecutionBudget();
+        AgentRuntimeSupport.bindCompactionBudget(historyCompactor, budget, null);
         return new AgentExecutionEngine<AgentMessage>(
                 llmClient, budget, HookLifecycle.load(toolRegistry)).run(
                 new AgentExecutionEngine.Delegate<>() {
@@ -992,7 +993,7 @@ public class SubAgent {
         if (role != AgentRole.REVIEWER) {
             return null;
         }
-        return List.of("read_file", "list_dir", "grep_code", "execute_command");
+        return List.of("read_file", "read_tool_result", "list_dir", "grep_code", "execute_command");
     }
 
     private void appendImageToolMessages(List<ToolExecutionResult> toolResults) {

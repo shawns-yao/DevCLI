@@ -578,6 +578,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     @Override
     public void recordFileWrite(String displayPath, Path safePath, String before, String content, String stepId) {
+        // 文件内容发生变化后，当前 Registry 中的内容型只读缓存不再可信。
+        toolResultCache.clear();
         if (stepId != null && !stepId.isBlank()) {
             stepModifiedFiles
                     .computeIfAbsent(stepId, k -> java.util.concurrent.ConcurrentHashMap.newKeySet())
@@ -617,6 +619,11 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         } catch (Exception e) {
             log.warn("发布代码索引失效标记失败，检索时将回退实时候选校验: {}", e.getMessage());
         }
+    }
+
+    /** 隔离工作区补丁归并到主项目后清理主 Registry 的只读结果缓存。 */
+    public void invalidateToolResultCache() {
+        toolResultCache.clear();
     }
 
     public String contextResourceKey(Path path) {
@@ -1037,10 +1044,12 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
      * - 其他情况 → allow（仅表示工具调用真的发生过，工具内部的业务错误仍以返回字符串呈现给 LLM）
      */
     public String executeTool(String name, String argumentsJson) {
+        ToolResultSizeManager.resetTurnBudget();
         return executionPipeline.execute(name, argumentsJson, null).text();
     }
 
     public ToolOutput executeToolOutput(String name, String argumentsJson) {
+        ToolResultSizeManager.resetTurnBudget();
         if (isLegacyExecuteToolOverride()) {
             return ToolOutput.text(executeTool(name, argumentsJson));
         }
@@ -1049,6 +1058,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     /** 兼容扩展类的原有受保护入口，实际执行统一进入中间件管线。 */
     protected ToolOutput doExecuteTool(String name, String argumentsJson) {
+        ToolResultSizeManager.resetTurnBudget();
         return executionPipeline.execute(name, argumentsJson, null);
     }
 
@@ -1112,7 +1122,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         executionPipeline.register(ToolExecutionPipeline.Stage.RESULT_CACHE, (context, chain) -> {
             Tool tool = tools.get(context.name());
             if (tool == null) return chain.proceed(context);
-            if (tool.effect() != ToolEffect.READ_ONLY) {
+            if (tool.effect() != ToolEffect.READ_ONLY || !isCacheableReadTool(context.name())) {
                 toolResultCache.clear();
                 return chain.proceed(context);
             }
@@ -1128,11 +1138,15 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                 governToolOutput(context.name(), context.invocationId(), chain.proceed(context)));
     }
 
+    /** 文件、网络和记忆查询依赖外部可变状态，不使用短期结果缓存。 */
+    private static boolean isCacheableReadTool(String name) {
+        return !Set.of("read_file", "list_dir", "grep_code", "search_code",
+                "web_search", "web_fetch", "list_memory", "browser_status")
+                .contains(name);
+    }
+
     private ToolOutput governToolOutput(String name, String invocationId, ToolOutput output) {
         ToolOutput normalized = output == null ? ToolOutput.success("") : output;
-        if (invocationId == null || invocationId.isBlank()) {
-            return normalized;
-        }
         return ToolResultSizeManager.processOutput(name, invocationId, normalized);
     }
 

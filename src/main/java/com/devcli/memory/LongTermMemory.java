@@ -225,6 +225,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
             tokenCounter.addAndGet(persistedEntry.getTokenCount()
                     - (previous == null ? 0 : previous.getTokenCount()));
         }
+        supersededTargets.forEach(old -> notifyDeleted(old.getId()));
         try {
             onStoreHook.accept(managedEntry);
         } catch (Exception e) {
@@ -257,6 +258,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
         putLoaded(candidate);
         tokenCounter.addAndGet(candidate.getTokenCount()
                 - (previous == null ? 0 : previous.getTokenCount()));
+        notifyDeleted(candidate.getId());
     }
 
     /**
@@ -392,6 +394,9 @@ public class LongTermMemory implements Memory, AutoCloseable {
             return false;
         }
         putLoaded(updated);
+        if (reviewState == MemoryEvidence.ReviewState.REJECTED) {
+            notifyDeleted(id);
+        }
         return true;
     }
 
@@ -441,6 +446,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
                     entry.getRevision(), entry.getExpiresAt(), Map.copyOf(metadata));
             if (store.upsert(archived) || !persistentStore) {
                 putLoaded(archived);
+                notifyDeleted(entry.getId());
             } else {
                 log.warn("Failed to archive expired memory {}", entry.getId());
             }
@@ -684,6 +690,15 @@ public class LongTermMemory implements Memory, AutoCloseable {
         String removed = contentDigests.remove(id);
         if (removed != null && !contentDigests.containsValue(removed)) {
             contentDigestValues.remove(removed);
+        }
+    }
+
+    private void notifyDeleted(String id) {
+        if (id == null || id.isBlank()) return;
+        try {
+            onDeleteHook.accept(id);
+        } catch (Exception e) {
+            log.warn("LongTermMemory onDeleteHook failed for {}: {}", id, e.getMessage());
         }
     }
 

@@ -22,7 +22,8 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
         RunEvent.ContextRefresh,
         RunEvent.ToolResults, RunEvent.HookInvocationStarted, RunEvent.HookInvocationCompleted,
         RunEvent.TurnCompleted, RunEvent.TurnFailed,
-        RunEvent.TurnRejected, RunEvent.CheckpointCreated, RunEvent.CheckpointFailed {
+        RunEvent.TurnRejected, RunEvent.CheckpointCreated, RunEvent.CheckpointFailed,
+        RunEvent.ContextCompacted {
 
     String type();
 
@@ -412,6 +413,26 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
         @Override
         public String type() {
             return "thread.checkpoint.failed";
+        }
+    }
+
+    /** 持久化上下文压缩边界，供恢复时校验摘要来源链。 */
+    record ContextCompacted(long sourceEventStart,
+                            long sourceEventEnd,
+                            String sourceHash,
+                            String projectionHash,
+                            String mode) implements RunEvent {
+        public ContextCompacted {
+            sourceEventStart = Math.max(0L, sourceEventStart);
+            sourceEventEnd = Math.max(sourceEventStart, sourceEventEnd);
+            sourceHash = text(sourceHash);
+            projectionHash = text(projectionHash);
+            mode = text(mode);
+        }
+
+        @Override
+        public String type() {
+            return "context.compacted";
         }
     }
 

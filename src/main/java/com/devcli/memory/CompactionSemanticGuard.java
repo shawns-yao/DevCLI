@@ -77,11 +77,21 @@ final class CompactionSemanticGuard {
         for (LlmClient.Message message : source) {
             if (message == null || message.content() == null || message.content().isBlank()) continue;
             for (String segment : segments(message.content())) {
+                // 大段普通文本（例如日志/代码正文）无需进入多组有界正则解析。
+                // 仅对可能承载约束的片段做结构化识别，避免长消息上的重复扫描。
+                boolean marked = PROTECTED_MARKER.matcher(segment).find()
+                        || COMMAND.matcher(segment).find();
+                if (!marked && segment.length() > 2_000) {
+                    continue;
+                }
+                if (!marked && segment.indexOf(':') < 0 && segment.indexOf('=') < 0) {
+                    continue;
+                }
                 StructuredClaim.parse(segment).ifPresentOrElse(claim -> {
                     latestClaims.remove(claim.subject());
                     latestClaims.put(claim.subject(), limit(claim.display(), MAX_CONSTRAINT_CHARS));
                 }, () -> {
-                    if (PROTECTED_MARKER.matcher(segment).find() || COMMAND.matcher(segment).find()) {
+                    if (marked) {
                         ordinary.add(limit(segment, MAX_CONSTRAINT_CHARS));
                     }
                 });

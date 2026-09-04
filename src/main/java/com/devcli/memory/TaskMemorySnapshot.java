@@ -43,6 +43,18 @@ public record TaskMemorySnapshot(String taskId, String scopeKey, String userRequ
                         entry -> SensitiveDataRedactor.redact(entry.getValue())));
         List<String> evidence = new ArrayList<>();
         if (session != null) {
+            for (String constraint : session.protectedConstraints()) {
+                evidence.add(SensitiveDataRedactor.redact(
+                        "USER_CONSTRAINT:" + constraint));
+            }
+            if (!session.taskLedger().isBlank()) {
+                evidence.add(SensitiveDataRedactor.redact(
+                        "TASK_LEDGER:" + session.taskLedger()));
+            }
+            for (String modifiedFile : session.modifiedFiles()) {
+                evidence.add(SensitiveDataRedactor.redact(
+                        "MODIFIED_FILE:" + modifiedFile));
+            }
             for (SessionMemory.EvidenceSnapshot item : session.evidenceJournal()) {
                 evidence.add(SensitiveDataRedactor.redact(
                         item.kind() + ":" + item.toolName() + ":" + item.reference()));

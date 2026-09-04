@@ -143,6 +143,27 @@ class RuntimeThreadStoreTest {
     }
 
     @Test
+    void checkpointSourceEventHashIsValidated(@TempDir Path tempDir) throws Exception {
+        Path db = tempDir.resolve("runtime.db");
+        try (RuntimeThreadStore store = new RuntimeThreadStore(db)) {
+            String threadId = store.createThread();
+            long coverage = appendTurn(store, threadId, "t1", "input", "output");
+            var cursor = store.compactionSourceCursor(threadId);
+            store.appendEvent(threadId, "context.compacted", RunEventJsonCodec.encode(
+                    new RunEvent.ContextCompacted(cursor.eventStart(), cursor.eventEnd(),
+                            cursor.sourceHash(), "none", "full"), "t1"));
+            CompactBoundaryMetadata metadata = new CompactBoundaryMetadata(
+                    "history", "token_threshold", "full", 100, 20, 4, 2, 1, 10,
+                    List.of(), "none", "none", false, 0, 0, "pass", cursor.sourceHash(),
+                    0, 0, "none", cursor.eventStart(), cursor.eventEnd());
+            store.saveCheckpoint(threadId, coverage,
+                    new TurnRunner.CheckpointCandidate(List.of(LlmClient.Message.user("summary")),
+                            "summary", metadata));
+            assertTrue(store.latestCheckpoint(threadId).isPresent());
+        }
+    }
+
+    @Test
     void branchesPreserveForkHistoryAndDivergeAfterActivation(@TempDir Path tempDir) throws Exception {
         try (RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"))) {
             String threadId = store.createThread();

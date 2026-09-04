@@ -324,6 +324,10 @@ class ConversationHistoryCompactorTest {
         assertEquals("MOCK SUMMARY OF OLD CONTENT",
                 CompactBoundaryMetadata.stripBoundaryBlock(
                         summaryMessage.substring(ConversationHistoryCompactor.SUMMARY_MARKER.length()).trim()));
+        assertTrue(metadata.sourceHash().matches("[0-9a-f]{64}"));
+        assertEquals(1, metadata.sourceStart());
+        assertTrue(metadata.sourceEnd() > metadata.sourceStart());
+        assertTrue(metadata.projectionHash().matches("[0-9a-f]{64}"));
     }
 
     @Test
@@ -912,6 +916,39 @@ class ConversationHistoryCompactorTest {
         List<LlmClient.Message> original = List.copyOf(history);
         assertFalse(compactor.compactIfNeeded(history, 100));
         assertEquals(original, history);
+    }
+
+    @Test
+    void semanticSummaryReadsToolResultBeforeMicrocompact(@TempDir Path tempDir) {
+        AtomicInteger seen = new AtomicInteger();
+        ConversationHistoryCompactor compactor = new ConversationHistoryCompactor(null, 2_000, true) {
+            @Override
+            protected String summarize(List<LlmClient.Message> messages) {
+                assertTrue(messages.stream().anyMatch(message ->
+                                message.content() != null && message.content().contains("ORIGINAL_TOOL_PAYLOAD")),
+                        "语义摘要应读取 MicroCompact 前的原始工具结果");
+                seen.incrementAndGet();
+                return "SUMMARY";
+            }
+        };
+        compactor.setMicrocompactOutputRoot(tempDir);
+        List<LlmClient.Message> history = new ArrayList<>(List.of(
+                LlmClient.Message.system("system"),
+                LlmClient.Message.user("inspect"),
+                LlmClient.Message.assistant(null, null, List.of(
+                        new LlmClient.ToolCall("read-1", new LlmClient.ToolCall.Function(
+                                "read_file", "{\"path\":\"src/A.java\"}")))),
+                LlmClient.Message.tool("read-1", "ORIGINAL_TOOL_PAYLOAD ".repeat(4_000)),
+                LlmClient.Message.user("modify " + "m".repeat(9_000)),
+                LlmClient.Message.assistant(null, null, List.of(
+                        new LlmClient.ToolCall("write-1", new LlmClient.ToolCall.Function(
+                                "write_file", "{\"path\":\"src/A.java\"}")))),
+                LlmClient.Message.tool("write-1", "written"),
+                LlmClient.Message.assistant("done"),
+                LlmClient.Message.user("latest")));
+
+        assertTrue(compactor.compactIfNeeded(history, 1_000));
+        assertEquals(1, seen.get());
     }
 
     @Test

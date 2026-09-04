@@ -1,6 +1,7 @@
 package com.devcli.memory;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.devcli.policy.SensitiveDataRedactor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -45,18 +46,22 @@ public final class MemoryPromotionPipeline {
         MemoryPromotionQueue.Job job = queue.claimNext().orElse(null);
         if (job == null) return false;
         try {
-            IsolatedMemoryCurator.Decision decision = curator.curate(job.snapshot());
+            IsolatedMemoryCurator.Decision original = curator.curate(job.snapshot());
+            IsolatedMemoryCurator.Decision decision = sanitizeDecision(original);
+            boolean redacted = decisionContentChanged(original, decision);
             switch (decision.action()) {
                 case SKIP -> queue.markSkipped(job.id(), decision.reason());
                 case CONFIRM -> queue.markAwaitingConfirmation(job.id(), JSON.writeValueAsString(decision));
                 case SAVE -> {
-                    if (autoSaveEligible(job.snapshot(), decision)) {
+                    if (!redacted && autoSaveEligible(job.snapshot(), decision)) {
                         save(job, decision, MemoryEvidence.ReviewState.CURATED, false);
                     } else {
                         IsolatedMemoryCurator.Decision pending = new IsolatedMemoryCurator.Decision(
                                 IsolatedMemoryCurator.Action.CONFIRM, decision.kind(), decision.content(),
                                 decision.scopeType(), decision.scopeKey(), decision.confidence(),
-                                decision.sourceRefs(), "auto_save_requires_high_confidence_and_evidence");
+                                decision.sourceRefs(), redacted
+                                        ? "curator_output_redacted_requires_confirmation"
+                                        : "auto_save_requires_high_confidence_and_evidence");
                         queue.markAwaitingConfirmation(job.id(), JSON.writeValueAsString(pending));
                     }
                 }
@@ -102,17 +107,21 @@ public final class MemoryPromotionPipeline {
 
     private String persist(MemoryPromotionQueue.Job job, IsolatedMemoryCurator.Decision decision,
                            MemoryEvidence.ReviewState reviewState, boolean validated) {
+        IsolatedMemoryCurator.Decision safeDecision = sanitizeDecision(decision);
+        if (safeDecision.content().isBlank()) {
+            throw new IllegalStateException("curated memory content is empty after redaction");
+        }
         String memoryId = "memory-" + job.id().replace("promotion-", "");
-        String scopeType = normalizedScopeType(decision.scopeType());
-        String scopeKey = trustedScopeKey(job.snapshot(), decision, scopeType);
-        String sourceRef = decision.sourceRefs().stream()
+        String scopeType = normalizedScopeType(safeDecision.scopeType());
+        String scopeKey = trustedScopeKey(job.snapshot(), safeDecision, scopeType);
+        String sourceRef = safeDecision.sourceRefs().stream()
                 .filter(ref -> job.snapshot().sourceExcerpt(ref).isPresent())
                 .findFirst().orElse("");
         String sourceQuote = sourceRef.isBlank() ? ""
                 : job.snapshot().sourceExcerpt(sourceRef).orElse("");
         MemoryEntry equivalent = longTermMemory.getAll().stream()
                 .filter(MemoryEntry::isRecallable)
-                .filter(entry -> entry.getContent().equals(decision.content()))
+                .filter(entry -> entry.getContent().equals(safeDecision.content()))
                 .filter(entry -> sameScope(entry, scopeType, scopeKey))
                 .findFirst().orElse(null);
         if (equivalent != null) {
@@ -121,23 +130,29 @@ public final class MemoryPromotionPipeline {
         }
         Map<String, String> metadata = new HashMap<>();
         metadata.put("source", "task_curator");
-        metadata.put("memory_kind", normalizedKind(decision.kind()));
+        metadata.put("memory_kind", normalizedKind(safeDecision.kind()));
         metadata.put("scope_type", scopeType);
         metadata.put("scope_key", scopeKey);
         metadata.put(MemoryWriteProtocol.META_SCOPE,
                 "GLOBAL".equals(metadata.get("scope_type")) ? "global" : scopeKey);
-        metadata.put("source_refs", String.join(",", decision.sourceRefs()));
+        metadata.put("source_refs", String.join(",", safeDecision.sourceRefs()));
         metadata.put("source_ref", sourceRef);
         metadata.put("source_task_id", job.snapshot().taskId());
         metadata.put("source_captured_at", job.snapshot().capturedAt().toString());
         metadata.put("source_availability", "SNAPSHOT");
         metadata.put("source_quote_sha256", sha256(sourceQuote));
-        metadata.put("curator_confidence", decision.confidence());
-        MemoryEvidence evidence = new MemoryEvidence(confidence(decision.confidence()),
-                sourceQuote, decision.reason(), reviewState, List.of());
-        MemoryEntry entry = new MemoryEntry(memoryId, decision.content(), MemoryEntry.MemoryType.FACT,
-                Instant.now(), Map.copyOf(metadata), MemoryEntry.estimateTokens(decision.content()),
-                MemorySubjectExtractor.extract(decision.content(), metadata), true, "",
+        metadata.put("curator_confidence", safeDecision.confidence());
+        SensitiveDataRedactor.RedactionResult redaction =
+                SensitiveDataRedactor.inspect(safeDecision.content());
+        if (redaction.changed()) {
+            metadata.put("redacted", "true");
+            metadata.put("redacted_types", redaction.removedTypesCsv());
+        }
+        MemoryEvidence evidence = new MemoryEvidence(confidence(safeDecision.confidence()),
+                sourceQuote, safeDecision.reason(), reviewState, List.of());
+        MemoryEntry entry = new MemoryEntry(memoryId, safeDecision.content(), MemoryEntry.MemoryType.FACT,
+                Instant.now(), Map.copyOf(metadata), MemoryEntry.estimateTokens(safeDecision.content()),
+                MemorySubjectExtractor.extract(safeDecision.content(), metadata), true, "",
                 MemoryEntry.CURRENT_SCHEMA_VERSION, 1, null, evidence);
         longTermMemory.storeManaged(entry);
         if (longTermMemory.retrieve(memoryId).isEmpty()) {
@@ -150,6 +165,28 @@ public final class MemoryPromotionPipeline {
                 .orElseThrow(() -> new IllegalStateException("curated memory disappeared after persistence"));
         committedListener.accept(committed);
         return memoryId;
+    }
+
+    private static IsolatedMemoryCurator.Decision sanitizeDecision(
+            IsolatedMemoryCurator.Decision decision) {
+        if (decision == null) {
+            throw new IllegalArgumentException("curator returned null decision");
+        }
+        SensitiveDataRedactor.RedactionResult content =
+                SensitiveDataRedactor.inspect(decision.content());
+        SensitiveDataRedactor.RedactionResult reason =
+                SensitiveDataRedactor.inspect(decision.reason());
+        return new IsolatedMemoryCurator.Decision(
+                decision.action(), decision.kind(), content.sanitizedText(),
+                decision.scopeType(), decision.scopeKey(), decision.confidence(),
+                decision.sourceRefs(), reason.sanitizedText());
+    }
+
+    private static boolean decisionContentChanged(
+            IsolatedMemoryCurator.Decision original,
+            IsolatedMemoryCurator.Decision sanitized) {
+        return !Objects.equals(original.content(), sanitized.content())
+                || !Objects.equals(original.reason(), sanitized.reason());
     }
 
     private static boolean autoSaveEligible(TaskMemorySnapshot snapshot,

@@ -19,6 +19,11 @@ public final class FileToolProvider implements ToolProvider {
     static final int DEFAULT_MAX_RETURN_TOKENS = 4_000;
     static final int MAX_RETURN_CHARS = DEFAULT_MAX_RETURN_TOKENS;
     static final int MAX_LINE_WINDOW = 400;
+    private static final int MAX_DIRECTORY_ENTRIES = 500;
+    private static final int MAX_DIRECTORY_RESULT_CHARS = 4_000;
+    private static final String DIRECTORY_TRUNCATION_HEADER =
+            "目录内容已截断（最多 " + MAX_DIRECTORY_ENTRIES + " 项 / "
+                    + MAX_DIRECTORY_RESULT_CHARS + " 字符）:\n";
 
     @Override
     public void register(ToolContext context) {
@@ -211,11 +216,25 @@ public final class FileToolProvider implements ToolProvider {
                             return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
                                     "目录为空或不存在", false);
                         }
+                        java.util.Arrays.sort(files, java.util.Comparator.comparing(File::getName));
                         StringBuilder sb = new StringBuilder("目录内容:\n");
+                        boolean truncated = false;
+                        int emitted = 0;
                         for (File f : files) {
-                            sb.append(f.isDirectory() ? "[D] " : "[F] ")
-                                    .append(f.getName())
-                                    .append("\n");
+                            String line = (f.isDirectory() ? "[D] " : "[F] ")
+                                    + f.getName() + "\n";
+                            if (emitted >= MAX_DIRECTORY_ENTRIES
+                                    || sb.length() + line.length() > MAX_DIRECTORY_RESULT_CHARS
+                                    - DIRECTORY_TRUNCATION_HEADER.length()
+                                    + "目录内容:\n".length()) {
+                                truncated = true;
+                                break;
+                            }
+                            sb.append(line);
+                            emitted++;
+                        }
+                        if (truncated) {
+                            sb.replace(0, "目录内容:\n".length(), DIRECTORY_TRUNCATION_HEADER);
                         }
                         return ToolOutput.success(sb.toString());
                     } catch (Exception e) {

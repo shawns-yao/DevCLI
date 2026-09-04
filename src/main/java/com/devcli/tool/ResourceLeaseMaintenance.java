@@ -10,6 +10,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -24,9 +25,14 @@ public final class ResourceLeaseMaintenance implements AutoCloseable {
             "DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS";
     private static final Duration DEFAULT_INTERVAL = Duration.ofSeconds(60);
     private static final Logger log = LoggerFactory.getLogger(ResourceLeaseMaintenance.class);
+    /** 所有维护实例共享一个可重建的守护执行器。 */
+    private static final Object SHARED_SCHEDULER_LOCK = new Object();
+    private static ScheduledExecutorService sharedScheduler;
+    private static int sharedSchedulerUsers;
 
     private final Set<ResourceLeaseManager> managers = ConcurrentHashMap.newKeySet();
     private final ScheduledExecutorService scheduler;
+    private final ScheduledFuture<?> scheduledTask;
     private final AtomicInteger registrations = new AtomicInteger();
     private final AtomicBoolean closed = new AtomicBoolean();
 
@@ -37,14 +43,15 @@ public final class ResourceLeaseMaintenance implements AutoCloseable {
     ResourceLeaseMaintenance(Duration interval) {
         Duration normalized = interval == null || interval.isZero() || interval.isNegative()
                 ? DEFAULT_INTERVAL : interval;
-        scheduler = Executors.newSingleThreadScheduledExecutor(task -> {
-            Thread thread = new Thread(task, "devcli-resource-lease-cleaner");
-            thread.setDaemon(true);
-            return thread;
-        });
         long delayMillis = Math.max(1, normalized.toMillis());
-        scheduler.scheduleWithFixedDelay(this::pruneAll,
-                delayMillis, delayMillis, TimeUnit.MILLISECONDS);
+        scheduler = acquireSharedScheduler();
+        try {
+            scheduledTask = scheduler.scheduleWithFixedDelay(this::pruneAll,
+                    delayMillis, delayMillis, TimeUnit.MILLISECONDS);
+        } catch (RuntimeException error) {
+            releaseSharedScheduler(scheduler);
+            throw error;
+        }
     }
 
     synchronized Registration attach(ResourceLeaseManager manager) {
@@ -93,7 +100,7 @@ public final class ResourceLeaseMaintenance implements AutoCloseable {
     }
 
     boolean isTerminated() {
-        return scheduler.isTerminated();
+        return scheduledTask.isCancelled() || scheduledTask.isDone() || scheduler.isTerminated();
     }
 
     static Duration resolveInterval(Properties properties, Map<String, String> environment) {
@@ -119,13 +126,39 @@ public final class ResourceLeaseMaintenance implements AutoCloseable {
         }
         managers.clear();
         registrations.set(0);
-        scheduler.shutdownNow();
-        try {
-            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                log.warn("资源租约后台清理线程未在超时内终止");
+        scheduledTask.cancel(false);
+        releaseSharedScheduler(scheduler);
+    }
+
+    private static ScheduledExecutorService acquireSharedScheduler() {
+        synchronized (SHARED_SCHEDULER_LOCK) {
+            if (sharedScheduler == null || sharedScheduler.isShutdown()) {
+                sharedScheduler = Executors.newSingleThreadScheduledExecutor(task -> {
+                    Thread thread = new Thread(task, "devcli-resource-lease-cleaner");
+                    thread.setDaemon(true);
+                    return thread;
+                });
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            sharedSchedulerUsers++;
+            return sharedScheduler;
+        }
+    }
+
+    private static void releaseSharedScheduler(ScheduledExecutorService scheduler) {
+        synchronized (SHARED_SCHEDULER_LOCK) {
+            if (sharedScheduler != scheduler) return;
+            sharedSchedulerUsers = Math.max(0, sharedSchedulerUsers - 1);
+            if (sharedSchedulerUsers != 0) return;
+            ScheduledExecutorService closing = sharedScheduler;
+            sharedScheduler = null;
+            closing.shutdownNow();
+            try {
+                if (!closing.awaitTermination(5, TimeUnit.SECONDS)) {
+                    log.warn("资源租约共享清理线程未在超时内终止");
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 

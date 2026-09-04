@@ -528,6 +528,7 @@ public class PlanExecuteAgent {
         ));
 
         AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
+        AgentRuntimeSupport.bindCompactionBudget(historyCompactor, budget, memoryManager);
         return new AgentExecutionEngine<TaskRunResult>(
                 llmClient, budget, HookLifecycle.load(activeTaskToolRegistry())).run(
                 new AgentExecutionEngine.Delegate<>() {

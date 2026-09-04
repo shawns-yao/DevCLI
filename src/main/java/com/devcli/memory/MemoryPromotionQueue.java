@@ -122,6 +122,20 @@ public final class MemoryPromotionQueue implements AutoCloseable {
         }
     }
 
+    /** 是否仍有可处理的候选；供后台失败重试调度判断是否需要继续工作。 */
+    public synchronized boolean hasRunnableJobs() {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT 1 FROM memory_promotion_jobs "
+                        + "WHERE state IN ('PENDING', 'FAILED_RETRYABLE') LIMIT 1")) {
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next();
+            }
+        } catch (Exception error) {
+            log.warn("memory promotion runnable-job check failed: {}", error.getMessage());
+            return false;
+        }
+    }
+
     public synchronized Optional<Job> find(String id) {
         try (PreparedStatement statement = connection.prepareStatement("""
                 SELECT id, snapshot_json, state, result_ref, detail, created_at_ms, updated_at_ms
@@ -155,19 +169,19 @@ public final class MemoryPromotionQueue implements AutoCloseable {
     }
 
     public void markCommitted(String id, String memoryId) {
-        transition(id, State.COMMITTED, memoryId, "");
+        transition(id, State.COMMITTED, memoryId, "", Set.of(State.CURATING, State.AWAITING_CONFIRMATION));
     }
 
     public void markSkipped(String id, String reason) {
-        transition(id, State.SKIPPED, "", reason);
+        transition(id, State.SKIPPED, "", reason, Set.of(State.CURATING, State.AWAITING_CONFIRMATION));
     }
 
     public void markAwaitingConfirmation(String id, String detail) {
-        transition(id, State.AWAITING_CONFIRMATION, "", detail);
+        transition(id, State.AWAITING_CONFIRMATION, "", detail, Set.of(State.CURATING));
     }
 
     public void markFailedRetryable(String id, String detail) {
-        transition(id, State.FAILED_RETRYABLE, "", detail);
+        transition(id, State.FAILED_RETRYABLE, "", detail, Set.of(State.CURATING));
     }
 
     /** 在同一进程内把状态校验、事实写入和队列终态串成一个清空闸门。 */
@@ -181,8 +195,7 @@ public final class MemoryPromotionQueue implements AutoCloseable {
         if (resultRef == null || resultRef.isBlank()) {
             throw new IllegalStateException("memory promotion persister returned no reference");
         }
-        transition(id, State.COMMITTED, resultRef, "");
-        return true;
+        return transition(id, State.COMMITTED, resultRef, "", allowedStates);
     }
 
     public synchronized void deleteAllJobs() {
@@ -193,17 +206,25 @@ public final class MemoryPromotionQueue implements AutoCloseable {
         }
     }
 
-    private synchronized void transition(String id, State state, String resultRef, String detail) {
+    private synchronized boolean transition(String id, State state, String resultRef, String detail,
+                                             Set<State> allowedStates) {
+        if (id == null || state == null || allowedStates == null || allowedStates.isEmpty()) return false;
+        String placeholders = String.join(",", java.util.Collections.nCopies(allowedStates.size(), "?"));
+        String ownerFence = allowedStates.contains(State.CURATING)
+                ? " AND (state <> 'CURATING' OR owner_id=?)" : "";
         try (PreparedStatement statement = connection.prepareStatement("""
                 UPDATE memory_promotion_jobs
-                SET state=?, owner_id='', result_ref=?, detail=?, updated_at_ms=? WHERE id=?
-                """)) {
+                SET state=?, owner_id='', result_ref=?, detail=?, updated_at_ms=?
+                WHERE id=? AND state IN (""" + placeholders + ")" + ownerFence)) {
             statement.setString(1, state.name());
             statement.setString(2, resultRef == null ? "" : resultRef);
             statement.setString(3, detail == null ? "" : detail);
             statement.setLong(4, Instant.now().toEpochMilli());
             statement.setString(5, id);
-            statement.executeUpdate();
+            int parameter = 6;
+            for (State allowed : allowedStates) statement.setString(parameter++, allowed.name());
+            if (!ownerFence.isBlank()) statement.setString(parameter, ownerId);
+            return statement.executeUpdate() == 1;
         } catch (Exception error) {
             throw new IllegalStateException("memory promotion transition failed", error);
         }

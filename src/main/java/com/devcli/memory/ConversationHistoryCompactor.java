@@ -12,6 +12,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
@@ -24,8 +26,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 压缩 ReAct 主循环里的 {@code conversationHistory}（即 {@code List<LlmClient.Message>}）。
@@ -44,7 +50,7 @@ import java.util.function.Supplier;
  *    最近的 user 消息边界，作为 splitIdx
  * 4. <b>增量摘要</b>：识别 history 头部是否已有"上一轮摘要"标记
  *    （首条 user 内容以 {@link #SUMMARY_MARKER} 开头），如有则只把"上次摘要之后到 splitIdx 之间"
- *    的新消息送 LLM，老摘要作为 base 并入；如无则走 Map-Reduce 全量摘要
+ *    的新消息送 LLM；旧摘要只在程序内作为 Reducer 的状态，不作为 LLM 的事实正文
  * 5. 重建：[system] + [user("[已压缩的历史对话摘要]\n" + summary)] +
  *         [assistant("好的，已了解上下文。请继续。")] + [尾部保留消息]
  *
@@ -52,7 +58,7 @@ import java.util.function.Supplier;
  *
  * 摘要算法选型：
  * - 历史首次压缩时使用 Map-Reduce（整段历史进 LLM 视野，不 first-N 截断）
- * - 后续压缩使用增量更新（基于上轮摘要 + 仅新增消息），避免摘要套娃稀释老事实
+ * - 后续压缩使用增量更新（旧摘要结构化索引 + 仅新增消息），避免摘要套娃稀释老事实
  * - first-N 字符截断在多轮压缩下信息保留率会塌到 16% 量级（实测）
  * - 摘要输出为固定六段结构化（{@link RollingSummary}）；任务状态不进入摘要；
  *   超长时先由 {@link SummaryGarbageCollector} 程序化按段裁剪（不调 LLM），不够再 LLM recompress 兜底
@@ -110,6 +116,9 @@ public class ConversationHistoryCompactor {
                     .withZone(ZoneId.systemDefault());
     private static final String MICROCOMPACT_SESSION_ID =
             MICROCOMPACT_SESSION_ID_FMT.format(Instant.now());
+    private static final Object MICROCOMPACT_WRITE_LOCK = new Object();
+    private static final Pattern TOOL_RESULT_SHA256 = Pattern.compile(
+            "\\[tool_result metadata:[^\\]]*\\bsha256=([0-9a-fA-F]{64})\\b");
 
     /**
      * 滚动摘要的字符上限。增量摘要"只追加不删除"会让摘要单调膨胀，
@@ -225,19 +234,21 @@ public class ConversationHistoryCompactor {
             你在维护一份固定六段式滚动摘要。不要重写完整摘要，只输出 JSON 变更操作：
             {"operations":[{"action":"ADD|UPDATE|RESOLVE|SUPERSEDE|EXPIRE|DELETE",
             "section":"六段标题之一","target_section":"可选六段标题","subject":"稳定主题键",
+            "target_id":"UPDATE/RESOLVE/SUPERSEDE/EXPIRE/DELETE 时必须填写已有条目 id",
             "content":"新增或最终事实","lifecycle":"STABLE|ACTIVE|UNRESOLVED|RESOLVED",
             "importance":0-100,"evidence_refs":["工具或消息引用"]}]}
 
             规则：
             1. 六段标题保持不变，生命周期只是事实元数据，不新增段落；任务状态不进入摘要。
-            2. 新事实用 ADD；同主题最终值变化用 UPDATE，且必须原样复用已有元数据中的 subject；任务完成用 RESOLVE 并写入最终结果。
+            2. 新事实用 ADD；同主题最终值变化用 UPDATE，且必须填写并原样复用已有元数据中的 target_id 与 subject；任务完成用 RESOLVE 并填写 target_id。
             3. 已被覆盖用 SUPERSEDE，暂时失效用 EXPIRE，确定无审计价值才用 DELETE。
             4. 保留仍有效的决策、未完成事项、当前阻塞、精确实体和证据引用。
-            5. 只输出一个 JSON 对象，不输出 Markdown、解释或代码围栏。
+            5. 未被新增对话提及的已有条目不要操作，程序会保留它们；不要根据索引臆造旧条目内容。
+            6. 只输出一个 JSON 对象，不输出 Markdown、解释或代码围栏。
 
-            === 已有摘要（六段） ===
+            === 已有摘要索引 ===
             %s
-            === 已有摘要（结束） ===
+            === 已有摘要索引结束 ===
 
             === 新增对话 ===
             %s
@@ -260,11 +271,16 @@ public class ConversationHistoryCompactor {
     private int learnedSummaryInputBudget;
     private final int retainRecentTokens;
     private boolean adaptiveRetainBudget;
+    private final ContextProjectionBuilder projectionBuilder = new ContextProjectionBuilder();
     /** 六段摘要的程序化垃圾回收（capSummarySize 优先用它裁剪，不调 LLM）。 */
     private final SummaryGarbageCollector summaryGc = new SummaryGarbageCollector();
     private CompactionSummaryCache compactionSummaryCache;
     private Supplier<String> postCompactContextSupplier;
     private Supplier<CompactBoundaryRuntimeState> compactBoundaryRuntimeStateSupplier;
+    private Supplier<CompactionSourceCursor> compactionSourceCursorSupplier;
+    private Supplier<List<LlmClient.Message>> originalHistorySupplier;
+    private BooleanSupplier summaryCallGuard = () -> true;
+    private Consumer<LlmClient.ChatResponse> summaryUsageConsumer = response -> { };
     private Path microcompactOutputRoot;
     private MicrocompactStats lastMicrocompactStats = MicrocompactStats.empty();
     private CompactionTriggerStateStore triggerStateStore =
@@ -284,6 +300,19 @@ public class ConversationHistoryCompactor {
 
         static MicrocompactStats empty() {
             return new MicrocompactStats(0, 0, 0, Map.of(), Map.of(), Map.of());
+        }
+    }
+
+    /** Runtime 事件日志中可持久定位的摘要来源范围。 */
+    public record CompactionSourceCursor(long eventStart, long eventEnd, String sourceHash) {
+        public CompactionSourceCursor {
+            eventStart = Math.max(0L, eventStart);
+            eventEnd = Math.max(eventStart, eventEnd);
+            sourceHash = sourceHash == null || sourceHash.isBlank() ? "none" : sourceHash.trim();
+        }
+
+        public static CompactionSourceCursor none() {
+            return new CompactionSourceCursor(0L, 0L, "none");
         }
     }
 
@@ -348,6 +377,26 @@ public class ConversationHistoryCompactor {
         this.compactBoundaryRuntimeStateSupplier = compactBoundaryRuntimeStateSupplier;
     }
 
+    public void setCompactionSourceCursorSupplier(
+            Supplier<CompactionSourceCursor> compactionSourceCursorSupplier) {
+        this.compactionSourceCursorSupplier = compactionSourceCursorSupplier;
+    }
+
+    /** 提供 Runtime 原始事件重放结果，用于周期性纠正滚动摘要。 */
+    public void setOriginalHistorySupplier(Supplier<List<LlmClient.Message>> supplier) {
+        this.originalHistorySupplier = supplier;
+    }
+
+    /** 将摘要调用纳入外层 Agent 的 Token 预算；不设置时保持兼容的无限制行为。 */
+    public void setSummaryCallGuard(BooleanSupplier summaryCallGuard) {
+        this.summaryCallGuard = summaryCallGuard == null ? () -> true : summaryCallGuard;
+    }
+
+    /** 把摘要请求的真实用量回传给外层预算和统计。 */
+    public void setSummaryUsageConsumer(Consumer<LlmClient.ChatResponse> summaryUsageConsumer) {
+        this.summaryUsageConsumer = summaryUsageConsumer == null ? response -> { } : summaryUsageConsumer;
+    }
+
     public void setMicrocompactOutputRoot(Path microcompactOutputRoot) {
         this.microcompactOutputRoot = microcompactOutputRoot == null
                 ? null
@@ -390,14 +439,23 @@ public class ConversationHistoryCompactor {
                     enabled, preCompactionTokens, triggerTokens);
         }
         if (!enabled) return false;
+        String currentHistoryFingerprint = historyFingerprint(history);
         CompactionTriggerStateStore.State pendingTrigger = triggerStateStore.load().orElse(null);
         boolean crossed = preCompactionTokens >= triggerTokens;
+        // 持久化触发状态只属于产生它的那份历史。项目级状态文件可能被多个
+        // compactor 实例复用，不能让旧会话的 pending 标记污染新会话。
+        if (pendingTrigger != null
+                && !pendingTrigger.sourceHash().isBlank()
+                && !currentHistoryFingerprint.equals(pendingTrigger.sourceHash())) {
+            triggerStateStore.clear();
+            pendingTrigger = null;
+        }
         if (!crossed && pendingTrigger == null) {
             return false;
         }
         if (pendingTrigger == null) {
             pendingTrigger = triggerStateStore.begin(
-                    triggerTokens, preCompactionTokens, historyFingerprint(history));
+                    triggerTokens, preCompactionTokens, currentHistoryFingerprint);
             if (!triggerStateStore.isDurable()) {
                 log.warn("compaction trigger state could not be persisted; continuing with in-memory guard");
                 if (metrics) {
@@ -410,6 +468,10 @@ public class ConversationHistoryCompactor {
                     "[context-compaction] kind=trigger beforeTokens=%d triggerTokens=%d%n",
                     preCompactionTokens, triggerTokens);
         }
+
+        // 保留本次压缩开始时的原始消息快照。MicroCompact 只改变模型窗口投影，
+        // 语义摘要仍必须从原始工具结果取证，避免“先裁剪、再摘要”的二次损失。
+        List<LlmClient.Message> summarySourceHistory = List.copyOf(history);
 
         // 历史淘汰只属于一次已经发生的触发事件。不要用淘汰后的 token 再次决定
         // 是否触发语义压缩，否则微压缩会把 crossed 状态悄悄清掉，导致模型摘要永远不执行。
@@ -485,7 +547,7 @@ public class ConversationHistoryCompactor {
 
         // 3) oldMsgs：[systemEnd 之后到 splitIdx 之前] 的所有消息
         //    若有 prev 摘要，oldMsgs 包括 prev 那条 user 消息（增量摘要 prompt 会把它单独识别出来当 base）
-        List<LlmClient.Message> oldMsgs = new ArrayList<>(history.subList(systemEnd, splitIdx));
+        List<LlmClient.Message> oldMsgs = new ArrayList<>(summarySourceHistory.subList(systemEnd, splitIdx));
         if (oldMsgs.isEmpty()) return false;
         int retainedTailTokens = estimateRangeTokens(history, splitIdx, history.size());
 
@@ -514,7 +576,7 @@ public class ConversationHistoryCompactor {
                 && successfulCompactions % fullRecompactInterval == 0;
         if (summary == null) {
             SummaryAttempt attempt = summarizeWithPtlRetry(
-                    summaryBase, history, splitIdx, oldMsgs);
+                    summaryBase, summarySourceHistory, splitIdx, oldMsgs, periodicLifecycleGc);
             if (attempt.terminated()) {
                 // attempt 内部已经 recordFailure
                 triggerStateStore.recordRetry(pendingTrigger);
@@ -544,24 +606,29 @@ public class ConversationHistoryCompactor {
         // 5) 重建：[system] + [user(摘要)] + [assistant("好的")] + 保留尾部
         int originalMessages = history.size();
         int retainedMessages = history.size() - splitIdx;
-        List<LlmClient.Message> rebuilt = new ArrayList<>();
+        List<LlmClient.Message> systemMessages = new ArrayList<>();
         for (int i = 0; i < systemEnd; i++) {
-            rebuilt.add(history.get(i));
+            systemMessages.add(history.get(i));
         }
-        rebuilt.add(LlmClient.Message.internalUser(SUMMARY_MARKER + summary.trim()));
-        // 占位确认消息只为维持 user/assistant 交替协议;用语言无关的最短文本,
-        // 避免模型复述中文散文或在非中文模型下产生歧义。
-        rebuilt.add(LlmClient.Message.assistant("OK."));
         String restoreContext = buildPostCompactRestoreContext();
-        if (!restoreContext.isBlank()) {
-            rebuilt.add(LlmClient.Message.internalUser(POST_COMPACT_RESTORE_MARKER + restoreContext));
-            rebuilt.add(LlmClient.Message.assistant("OK."));
-        }
-        rebuilt.addAll(history.subList(splitIdx, history.size()));
+        ContextProjectionBuilder.Projection projection = projectionBuilder.project(
+                systemMessages, summary, restoreContext,
+                history.subList(splitIdx, history.size()));
+        List<LlmClient.Message> rebuilt = new ArrayList<>(projection.messages());
+        // checkpoint 只保存 system 之后的可恢复窗口；其指纹也按同一范围计算。
+        String checkpointProjectionHash = ContextProjectionBuilder.fingerprintOf(
+                rebuilt.stream()
+                        .filter(message -> !"system".equals(message.role()))
+                        .map(message -> message.withoutImageContent().withoutReasoningContent())
+                        .toList());
 
         int afterTokens = TokenBudget.estimateMessagesTokens(rebuilt);
         CompactBoundaryRuntimeState runtimeState =
                 buildCompactBoundaryRuntimeState(!restoreContext.isBlank());
+        String messageSourceHash = messageRangeFingerprint(summarySourceHistory, systemEnd, splitIdx);
+        CompactionSourceCursor sourceCursor = compactionSourceCursor();
+        String sourceHash = sourceCursor.eventEnd() > 0 && !"none".equalsIgnoreCase(sourceCursor.sourceHash())
+                ? sourceCursor.sourceHash() : messageSourceHash;
         CompactBoundaryMetadata metadata = new CompactBoundaryMetadata(
                 "history",
                 "token_threshold",
@@ -578,7 +645,13 @@ public class ConversationHistoryCompactor {
                 runtimeState.postCompactRestoreEnabled(),
                 semanticValidation.protectedConstraintCount(),
                 semanticValidation.missingConstraints().size(),
-                semanticValidation.validBeforeRepair() ? "pass" : "repaired");
+                semanticValidation.validBeforeRepair() ? "pass" : "repaired",
+                sourceHash,
+                sourceCursor.eventEnd() > 0 ? 0 : systemEnd,
+                sourceCursor.eventEnd() > 0 ? 0 : splitIdx,
+                checkpointProjectionHash,
+                sourceCursor.eventStart(),
+                sourceCursor.eventEnd());
         rebuilt.set(systemEnd, LlmClient.Message.internalUser(
                 SUMMARY_MARKER + metadata.renderBoundaryBlock() + "\n" + summary.trim()));
         history.clear();
@@ -607,6 +680,19 @@ public class ConversationHistoryCompactor {
                     postCompactionHistoryTokens, summary.length());
         }
         return true;
+    }
+
+    private CompactionSourceCursor compactionSourceCursor() {
+        if (compactionSourceCursorSupplier == null) {
+            return CompactionSourceCursor.none();
+        }
+        try {
+            CompactionSourceCursor value = compactionSourceCursorSupplier.get();
+            return value == null ? CompactionSourceCursor.none() : value;
+        } catch (Exception e) {
+            log.warn("compaction source cursor supplier failed; use legacy message range", e);
+            return CompactionSourceCursor.none();
+        }
     }
 
     private static void ageLifecycleItems(RollingSummary summary) {
@@ -687,7 +773,7 @@ public class ConversationHistoryCompactor {
                         || content.contains("<microcompact_boundary>")) {
                     continue;
                 }
-                String fingerprint = sha256(content);
+                String fingerprint = contentFingerprint(content);
                 Integer firstIndex = firstByContent.putIfAbsent(fingerprint, index);
                 boolean duplicate = firstIndex != null && firstIndex != index;
                 boolean dead = invocation != null && isProvablyDead(invocation, index, invocations);
@@ -771,19 +857,35 @@ public class ConversationHistoryCompactor {
         }
     }
 
+    /** ToolResultSizeManager 的 result_ref 每次调用都不同，重复判断应使用原文哈希。 */
+    private static String contentFingerprint(String content) {
+        if (content == null) return sha256("");
+        Matcher matcher = TOOL_RESULT_SHA256.matcher(content);
+        return matcher.find() ? matcher.group(1).toLowerCase(Locale.ROOT) : sha256(content);
+    }
+
     private String collapseOldToolResultContent(String toolCallId, String toolName, String content,
                                                 String sourceToolCallId, String reason) {
-        Path outputFile = microcompactOutputRoot.resolve(MICROCOMPACT_OUTPUTS_DIR)
-                .resolve(MICROCOMPACT_SESSION_ID).resolve(sanitizeFileName(toolCallId) + ".txt")
-                .toAbsolutePath().normalize();
-        String compacted = renderMicrocompactBoundary(toolCallId, toolName, content.length(), outputFile,
+        Path candidate = microcompactOutputPath(toolCallId);
+        String compacted = renderMicrocompactBoundary(toolCallId, toolName, content.length(), candidate,
                 sourceToolCallId, reason)
-                + "[旧工具结果已回收；可用 read_file 读取 storedPath。]";
+                + "[旧工具结果已回收；请在当前工作区调用 read_file 读取 storedPath。]";
         // 短结果原地保留，避免恢复引用更长，也避免创建没有节省收益的落盘文件。
         if (MemoryEntry.estimateTokens(compacted) >= MemoryEntry.estimateTokens(content)) {
             return content;
         }
-        return persistMicrocompactToolOutput(toolCallId, content) == null ? content : compacted;
+        Path stored = persistMicrocompactToolOutput(toolCallId, content);
+        if (stored == null) return content;
+        return renderMicrocompactBoundary(toolCallId, toolName, content.length(), stored,
+                sourceToolCallId, reason)
+                + "[旧工具结果已回收；请在当前工作区调用 read_file 读取 storedPath。]";
+    }
+
+    private Path microcompactOutputPath(String toolCallId) {
+        return microcompactOutputRoot.resolve(MICROCOMPACT_OUTPUTS_DIR)
+                .resolve(MICROCOMPACT_SESSION_ID)
+                .resolve(sanitizeFileName(toolCallId) + ".txt")
+                .toAbsolutePath().normalize();
     }
 
     private Path persistMicrocompactToolOutput(String toolCallId, String content) {
@@ -795,18 +897,55 @@ public class ConversationHistoryCompactor {
                     .resolve(MICROCOMPACT_OUTPUTS_DIR)
                     .resolve(MICROCOMPACT_SESSION_ID);
             Files.createDirectories(outputDir);
-            Path outputFile = outputDir.resolve(sanitizeFileName(toolCallId) + ".txt")
-                    .toAbsolutePath()
-                    .normalize();
-            if (!outputFile.startsWith(microcompactOutputRoot)) {
-                return null;
+            Path root = microcompactOutputRoot.toAbsolutePath().normalize();
+            Path realRoot = root.toRealPath();
+            Path realOutputDir = outputDir.toRealPath();
+            if (!realOutputDir.startsWith(realRoot)) return null;
+            synchronized (MICROCOMPACT_WRITE_LOCK) {
+                String safeName = sanitizeFileName(toolCallId);
+                Path outputFile = outputDir.resolve(safeName + ".txt")
+                        .toAbsolutePath().normalize();
+                if (!outputFile.startsWith(root)) return null;
+                if (Files.isRegularFile(outputFile)
+                        && content.equals(Files.readString(outputFile, StandardCharsets.UTF_8))) {
+                    ensureMicrocompactHash(outputFile, content);
+                    return outputFile;
+                }
+                if (Files.exists(outputFile)) {
+                    outputFile = outputDir.resolve(safeName + "-"
+                            + UUID.randomUUID().toString().replace("-", "") + ".txt")
+                            .toAbsolutePath().normalize();
+                }
+                atomicWrite(outputFile, content.getBytes(StandardCharsets.UTF_8));
+                ensureMicrocompactHash(outputFile, content);
+                return outputFile;
             }
-            Files.writeString(outputFile, content, StandardCharsets.UTF_8);
-            return outputFile;
         } catch (IOException | RuntimeException e) {
             log.warn("failed to persist microcompact tool output for {}; fallback to inline content",
                     toolCallId, e);
             return null;
+        }
+    }
+
+    private static void ensureMicrocompactHash(Path outputFile, String content) throws IOException {
+        Path sidecar = outputFile.resolveSibling(outputFile.getFileName() + ".sha256");
+        atomicWrite(sidecar, sha256(content).getBytes(StandardCharsets.US_ASCII));
+    }
+
+    private static void atomicWrite(Path target, byte[] bytes) throws IOException {
+        Path parent = target.getParent();
+        if (parent == null) throw new IOException("microcompact output parent is missing");
+        Path temporary = Files.createTempFile(parent, ".microcompact-", ".tmp");
+        try {
+            Files.write(temporary, bytes);
+            try {
+                Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException ignored) {
+                Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(temporary);
         }
     }
 
@@ -837,7 +976,8 @@ public class ConversationHistoryCompactor {
             return "tool-result";
         }
         String sanitized = value.replaceAll("[^A-Za-z0-9._-]", "_");
-        return sanitized.isBlank() ? "tool-result" : sanitized;
+        if (sanitized.isBlank()) return "tool-result";
+        return sanitized.length() <= 96 ? sanitized : sanitized.substring(0, 96);
     }
 
     /**
@@ -856,14 +996,18 @@ public class ConversationHistoryCompactor {
      * <p>完整历史、已有摘要和新增消息在重试之间保持不变。
      */
     private SummaryAttempt summarizeWithPtlRetry(PreviousSummary prev,
-                                                  List<LlmClient.Message> history,
+                                                  List<LlmClient.Message> summarySourceHistory,
                                                   int splitIdx,
-                                                  List<LlmClient.Message> oldMsgs) {
+                                                  List<LlmClient.Message> oldMsgs,
+                                                  boolean periodicRebuild) {
         // 决定增量 vs 全量路径
-        boolean incremental = prev != null;
+        List<LlmClient.Message> rebuiltSource = periodicRebuild ? originalHistory() : List.of();
+        boolean incremental = prev != null && rebuiltSource.isEmpty();
         List<LlmClient.Message> currentMsgs;
-        if (incremental) {
-            currentMsgs = new ArrayList<>(history.subList(prev.endIdx, splitIdx));
+        if (periodicRebuild && !rebuiltSource.isEmpty()) {
+            currentMsgs = rebuiltSource;
+        } else if (incremental) {
+            currentMsgs = new ArrayList<>(summarySourceHistory.subList(prev.endIdx, splitIdx));
             if (currentMsgs.isEmpty()) {
                 log.info("compactIfNeeded skip: previous summary present but no new messages between summary and splitIdx");
                 // 这是结构性 noop，不计入失败
@@ -913,6 +1057,17 @@ public class ConversationHistoryCompactor {
                 log.info("conversation summary PTL on attempt {}/{}: request budget reduced to {}, retaining all {} messages",
                         ptlAttempts, MAX_PTL_RETRIES, reducedBudget, currentMsgs.size());
             }
+        }
+    }
+
+    private List<LlmClient.Message> originalHistory() {
+        if (originalHistorySupplier == null) return List.of();
+        try {
+            List<LlmClient.Message> value = originalHistorySupplier.get();
+            return value == null ? List.of() : value.stream().filter(java.util.Objects::nonNull).toList();
+        } catch (Exception e) {
+            log.warn("original event history supplier failed; keep rolling summary", e);
+            return List.of();
         }
     }
 
@@ -1138,8 +1293,8 @@ public class ConversationHistoryCompactor {
     }
 
     /**
-     * 增量摘要：基于上一轮已有摘要 + 仅新增的若干消息，更新摘要。
-     * <p>不再把已有摘要作为 oldMsgs 重新压一遍，避免摘要套娃稀释老事实。
+     * 增量摘要：基于上一轮摘要的结构化索引 + 仅新增的若干消息，提出变更操作。
+     * <p>旧摘要正文只在本地 Reducer 中保留和更新，不再作为 LLM 的事实输入，避免摘要套娃稀释老事实。
      * 包可见以便测试通过子类替换。
      */
     protected String summarizeIncremental(String previousSummary,
@@ -1165,14 +1320,37 @@ public class ConversationHistoryCompactor {
         String text = newContent.toString();
         String system = "你是一个滚动摘要变更提取器，只提出受限 JSON 操作，不直接重写摘要。";
         for (int start = 0; start < text.length();) {
-            String base = rolling;
-            Function<String, String> prompt = chunk -> String.format(INCREMENTAL_PROMPT, base, chunk);
+            String baseSummary = rolling;
+            String summaryIndex = renderSummaryIndex(baseSummary);
+            Function<String, String> prompt = chunk -> String.format(INCREMENTAL_PROMPT, summaryIndex, chunk);
             int end = nextChunkEnd(text, start, system, prompt);
             String proposedOperations = requireSummary(chatOnce(system, prompt.apply(text.substring(start, end))));
-            rolling = applyIncrementalOperations(base, proposedOperations);
+            rolling = applyIncrementalOperations(baseSummary, proposedOperations);
             start = end;
         }
         return rolling;
+    }
+
+    /**
+     * 为增量摘要提供旧条目的结构化索引，而不是把旧摘要正文再次交给 LLM。
+     * 旧摘要正文仍由 Reducer 在本地保留，未被新消息触及的条目不会丢失。
+     */
+    private static String renderSummaryIndex(String summary) throws IOException {
+        RollingSummary parsed = RollingSummary.parse(summary);
+        var entries = JSON.createArrayNode();
+        for (SummaryItem item : parsed.allItems()) {
+            if (!item.isVisible()) continue;
+            var entry = JSON.createObjectNode();
+            entry.put("id", item.id());
+            entry.put("section", item.section());
+            entry.put("subject", item.subject());
+            entry.put("lifecycle", item.lifecycle().name());
+            entry.put("revision", item.revision());
+            var refs = entry.putArray("evidence_refs");
+            item.evidenceRefs().forEach(refs::add);
+            entries.add(entry);
+        }
+        return JSON.writeValueAsString(entries);
     }
 
     private String applyIncrementalOperations(String previousSummary, String proposedOperations) throws IOException {
@@ -1337,6 +1515,13 @@ public class ConversationHistoryCompactor {
         if (TokenBudget.estimateMessagesTokens(req) > summaryInputBudgetTokens()) {
             throw new IOException("Summary request exceeds local input budget; original history retained");
         }
+        try {
+            if (!summaryCallGuard.getAsBoolean()) {
+                throw new IOException("Summary call budget exhausted; original history retained");
+            }
+        } catch (RuntimeException e) {
+            throw new IOException("Summary call guard failed; original history retained", e);
+        }
         LlmClient.ChatResponse response;
         try {
             response = llmClient.chat(req, null);
@@ -1353,6 +1538,13 @@ public class ConversationHistoryCompactor {
             System.err.printf(Locale.ROOT,
                     "[context-compaction] kind=summary-call inputTokens=%d outputTokens=%d cachedInputTokens=%d%n",
                     response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
+        }
+        if (response != null) {
+            try {
+                summaryUsageConsumer.accept(response);
+            } catch (RuntimeException e) {
+                log.warn("summary usage consumer failed; keeping compaction result", e);
+            }
         }
         return response == null ? null : response.content();
     }
@@ -1482,12 +1674,26 @@ public class ConversationHistoryCompactor {
         StringBuilder value = new StringBuilder();
         for (LlmClient.Message message : history) {
             value.append(message.role()).append('\n')
+                    .append(message.source()).append('\n')
                     .append(message.content()).append('\n')
                     .append(message.reasoningContent()).append('\n')
                     .append(message.toolCallId()).append('\n')
+                    .append(message.imagePartCount()).append('\n')
                     .append(message.toolCalls()).append('\n');
         }
         return sha256(value.toString());
+    }
+
+    /** 压缩边界只记录被摘要覆盖的原文范围，便于持久检查点和诊断校验。 */
+    private static String messageRangeFingerprint(List<LlmClient.Message> history,
+                                                  int start,
+                                                  int end) {
+        if (history == null || history.isEmpty()) {
+            return sha256("");
+        }
+        int safeStart = Math.max(0, Math.min(start, history.size()));
+        int safeEnd = Math.max(safeStart, Math.min(end, history.size()));
+        return historyFingerprint(history.subList(safeStart, safeEnd));
     }
 
     private static String sha256(String value) {

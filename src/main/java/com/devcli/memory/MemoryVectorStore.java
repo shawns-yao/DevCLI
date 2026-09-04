@@ -129,11 +129,11 @@ public class MemoryVectorStore implements AutoCloseable {
     }
 
     /** 写入 / 更新一条语义卡向量。fact_id 已存在时覆盖。 */
-    public void upsert(String factId, String content, float[] embedding) {
+    public synchronized void upsert(String factId, String content, float[] embedding) {
         upsert(factId, content, embedding, "");
     }
 
-    public void upsert(String factId, String semanticText, float[] embedding, String embeddingModel) {
+    public synchronized void upsert(String factId, String semanticText, float[] embedding, String embeddingModel) {
         if (!usable) { notifyDegradeOnce(); return; }
         if (factId == null || embedding == null) return;
         if (embedding.length == 0) {
@@ -178,7 +178,7 @@ public class MemoryVectorStore implements AutoCloseable {
     }
 
     /** 删除一条 fact 的向量。 */
-    public void delete(String factId) {
+    public synchronized void delete(String factId) {
         if (!usable) { notifyDegradeOnce(); return; }
         if (factId == null) return;
         try (PreparedStatement ps = connection.prepareStatement(
@@ -191,7 +191,7 @@ public class MemoryVectorStore implements AutoCloseable {
     }
 
     /** 清空所有向量（配合 {@code /memory clear}）。 */
-    public void clear() {
+    public synchronized void clear() {
         if (!usable) { notifyDegradeOnce(); return; }
         try (Statement stmt = connection.createStatement()) {
             stmt.execute("DELETE FROM memory_vectors");
@@ -208,7 +208,7 @@ public class MemoryVectorStore implements AutoCloseable {
      * @param threshold   相似度阈值（< 此值不返回）；建议用 {@link #DEFAULT_SIMILARITY_THRESHOLD}
      * @return 按相似度倒序的搜索结果，可能为空
      */
-    public List<SearchResult> search(float[] queryVector, int topK, double threshold) {
+    public synchronized List<SearchResult> search(float[] queryVector, int topK, double threshold) {
         if (!usable) { notifyDegradeOnce(); return List.of(); }
         if (queryVector == null || queryVector.length == 0) return List.of();
         List<SearchResult> results = new ArrayList<>();
@@ -238,7 +238,7 @@ public class MemoryVectorStore implements AutoCloseable {
         return results;
     }
 
-    public int count() {
+    public synchronized int count() {
         if (!usable) return 0;
         try (Statement stmt = connection.createStatement();
              ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM memory_vectors")) {
@@ -250,7 +250,7 @@ public class MemoryVectorStore implements AutoCloseable {
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
         if (connection != null) {
             try {
                 connection.close();

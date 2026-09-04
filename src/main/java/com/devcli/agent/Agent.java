@@ -48,6 +48,7 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public class Agent implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(Agent.class);
+    private static final long PRE_SUMMARY_FAST_PATH_WAIT_MILLIS = 250L;
     private LlmClient llmClient;
     private final ToolRegistry toolRegistry;
     private final boolean ownsToolRegistry;
@@ -69,6 +70,9 @@ public class Agent implements AutoCloseable {
     private final AtomicReference<com.devcli.runtime.CancellationToken> activeCancellationToken =
             new AtomicReference<>();
     private String currentSkillActivationText = "";
+    /** ReAct 的工作记忆跨用户轮次保留；显式清理后再复用同一会话标识重新开启。 */
+    private final String sessionTaskId = "react-run-"
+            + java.util.UUID.randomUUID().toString().substring(0, 8);
 
     public Agent(LlmClient llmClient) {
         this(llmClient, new ToolRegistry(), true);
@@ -168,6 +172,17 @@ public class Agent implements AutoCloseable {
         this.runEventSink = runEventSink == null ? RunEventSink.NO_OP : runEventSink;
     }
 
+    /** 绑定 Runtime 事件游标，使压缩边界可在重启后定位并校验。 */
+    public void setCompactionSourceCursorSupplier(
+            java.util.function.Supplier<ConversationHistoryCompactor.CompactionSourceCursor> supplier) {
+        historyCompactor.setCompactionSourceCursorSupplier(supplier);
+    }
+
+    public void setOriginalHistorySupplier(
+            java.util.function.Supplier<List<LlmClient.Message>> supplier) {
+        historyCompactor.setOriginalHistorySupplier(supplier);
+    }
+
     public void setTurnInbox(AgentTurnInbox turnInbox) {
         this.turnInbox = turnInbox == null ? new AgentTurnInbox() : turnInbox;
     }
@@ -219,7 +234,7 @@ public class Agent implements AutoCloseable {
     public String run(String userInput, LlmClient.ToolChoice initialToolChoice) {
         com.devcli.runtime.CancellationToken inheritedToken = CancellationContext.current();
         activeCancellationToken.set(inheritedToken);
-        String sessionTaskId = "react-run-" + java.util.UUID.randomUUID().toString().substring(0, 8);
+        memoryManager.beginTask(sessionTaskId);
         memoryManager.setActiveProjectScope(toolRegistry.getProjectPath());
         String result = "";
         try {
@@ -227,6 +242,9 @@ public class Agent implements AutoCloseable {
             return result;
         } finally {
             memoryManager.completeTask(sessionTaskId, userInput, result, toolRegistry.getProjectPath());
+            memoryManager.endTask(sessionTaskId);
+            historyCompactor.setSummaryCallGuard(null);
+            historyCompactor.setSummaryUsageConsumer(null);
             activeCancellationToken.compareAndSet(inheritedToken, null);
         }
     }
@@ -262,6 +280,7 @@ public class Agent implements AutoCloseable {
 
         long startNanos = System.nanoTime();
         AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
+        AgentRuntimeSupport.bindCompactionBudget(historyCompactor, budget, memoryManager);
         TraceContext traceContext = TraceContext.root("react");
         TurnExecutionMetrics metrics = new TurnExecutionMetrics();
         traceRecorder.record(traceContext, "run.start", java.util.Map.of(
@@ -446,9 +465,9 @@ public class Agent implements AutoCloseable {
                         appendReasoning(reasoningTranscript, response.reasoningContent());
                         memoryManager.addAssistantMessage(response.content());
                         memoryManager.recordTokenUsage(
-                                currentBudget.totalInputTokens(),
-                                currentBudget.totalOutputTokens(),
-                                currentBudget.totalCachedInputTokens());
+                                response.inputTokens(),
+                                response.outputTokens(),
+                                response.cachedInputTokens());
                         pushStatus(currentBudget, startNanos, "idle");
                         log.info("ReAct run finished: inputTokens={}, outputTokens={}, reasoningChars={}, answerChars={}",
                                 currentBudget.totalInputTokens(),
@@ -671,10 +690,12 @@ public class Agent implements AutoCloseable {
         // 预摘要只用于为未来的语义压缩准备可复用缓存，不能阻塞主 Agent turn。
         // Provider 连接可能因半关闭的 SSE 响应等待到 callTimeout；主链路应继续执行，
         // 真正达到阈值时由 ConversationHistoryCompactor 自己负责有界重试/降级。
-        memoryManager.maintainSessionPreSummaryAfterTurnAsync(
+        java.util.concurrent.CompletableFuture<MemoryManager.SessionPreSummaryMaintenanceResult> future =
+                memoryManager.maintainSessionPreSummaryAfterTurnAsync(
                         conversationHistory,
                         turnToolCalls,
-                        largestToolResultChars)
+                        largestToolResultChars);
+        future
                 .whenComplete((result, error) -> {
                     if (error != null) {
                         log.debug("session pre-summary maintenance finished asynchronously with error", error);
@@ -682,6 +703,16 @@ public class Agent implements AutoCloseable {
                         log.debug("session pre-summary refreshed after ReAct turn");
                     }
                 });
+        try {
+            // 让快速的本地/缓存维护在下一轮可见；远程慢调用不延长主 turn。
+            future.get(PRE_SUMMARY_FAST_PATH_WAIT_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.TimeoutException ignored) {
+            // 后台任务继续运行。
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } catch (java.util.concurrent.ExecutionException error) {
+            log.debug("session pre-summary maintenance failed", error.getCause());
+        }
     }
 
     private String buildExternalContext() {
@@ -734,6 +765,9 @@ public class Agent implements AutoCloseable {
     }
 
     private void storeExplicitBrowserMemoryHint(String userInput) {
+        if (memoryManager.isMemoryIgnored()) {
+            return;
+        }
         List<String> recentTexts = conversationHistory.stream()
                 .map(LlmClient.Message::content)
                 .filter(content -> content != null && !content.isBlank())

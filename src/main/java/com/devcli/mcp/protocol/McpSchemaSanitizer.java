@@ -23,7 +23,7 @@ public final class McpSchemaSanitizer {
             return fallback;
         }
         JsonNode copy = schema.deepCopy();
-        JsonNode cleaned = clean(copy);
+        JsonNode cleaned = clean(copy, true);
         if (!cleaned.isObject()) {
             ObjectNode fallback = MAPPER.createObjectNode();
             fallback.put("type", "object");
@@ -40,7 +40,7 @@ public final class McpSchemaSanitizer {
         return obj;
     }
 
-    private static JsonNode clean(JsonNode node) {
+    private static JsonNode clean(JsonNode node, boolean root) {
         if (node == null || node.isNull()) {
             return node;
         }
@@ -50,7 +50,29 @@ public final class McpSchemaSanitizer {
             object.remove("$id");
             object.remove("$ref");
 
-            // Preserve unions: nullable scalar fields must not become object-only parameters.
+            // 工具输入根必须是 object；根级联合无法直接映射到工具参数时降级为描述。
+            // 嵌套属性保留 anyOf/oneOf，避免把可空标量误改成 object。
+            if (root) {
+                StringBuilder alternatives = new StringBuilder();
+                for (String keyword : new String[]{"anyOf", "oneOf"}) {
+                    JsonNode union = object.remove(keyword);
+                    if (union != null && union.isArray()) {
+                        if (!alternatives.isEmpty()) alternatives.append("; ");
+                        alternatives.append(keyword).append(" options: ");
+                        for (int i = 0; i < union.size(); i++) {
+                            if (i > 0) alternatives.append(", ");
+                            JsonNode option = union.get(i);
+                            alternatives.append(option.path("type").asText(option.toString()));
+                        }
+                    }
+                }
+                if (!alternatives.isEmpty()) {
+                    String existing = object.path("description").asText("");
+                    object.put("description", truncateDescription(
+                            existing.isBlank() ? alternatives.toString()
+                                    : existing + " (" + alternatives + ")"));
+                }
+            }
 
             Iterator<Map.Entry<String, JsonNode>> fields = object.fields();
             while (fields.hasNext()) {
@@ -59,7 +81,7 @@ public final class McpSchemaSanitizer {
                 if ("description".equals(field.getKey()) && child.isTextual()) {
                     object.put("description", truncateDescription(child.asText()));
                 } else {
-                    clean(child);
+                    clean(child, false);
                 }
             }
             return object;
@@ -67,7 +89,7 @@ public final class McpSchemaSanitizer {
         if (node.isArray()) {
             ArrayNode array = (ArrayNode) node;
             for (JsonNode child : array) {
-                clean(child);
+                clean(child, false);
             }
         }
         return node;

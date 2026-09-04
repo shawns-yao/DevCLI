@@ -200,7 +200,7 @@ public class SqliteLongTermMemoryStore implements LongTermMemoryStore {
         String predicates = String.join(" OR ", java.util.Collections.nCopies(
                 effectiveTokens.size(), "LOWER(search_text) LIKE ? ESCAPE '\\'"));
         String sql = "SELECT id FROM memory_facts WHERE active = 1 AND (" + predicates
-                + ") ORDER BY recall_count DESC, last_recalled_at_ms DESC LIMIT ?";
+                + ") ORDER BY timestamp_ms DESC, id ASC LIMIT ?";
         List<String> ids = new ArrayList<>();
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             int parameter = 1;

@@ -6,6 +6,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -52,7 +53,9 @@ public final class ToolExecutionPipeline {
                         ToolExecutionContext executionContext) {
             this.name = name;
             this.argumentsJson = argumentsJson == null || argumentsJson.isBlank() ? "{}" : argumentsJson;
-            this.invocationId = invocationId;
+            this.invocationId = invocationId == null || invocationId.isBlank()
+                    ? "direct-" + UUID.randomUUID().toString().replace("-", "")
+                    : invocationId;
             this.executionContext = Objects.requireNonNull(executionContext, "executionContext");
         }
 
@@ -116,18 +119,35 @@ public final class ToolExecutionPipeline {
     }
 
     public ToolOutput execute(String name, String argumentsJson, String invocationId) {
-        return execute(name, argumentsJson, invocationId,
-                ToolExecutionContext.current(invocationId));
+        String effectiveInvocationId = normalizeInvocationId(invocationId, null);
+        return execute(name, argumentsJson, effectiveInvocationId,
+                ToolExecutionContext.current(effectiveInvocationId));
     }
 
     public ToolOutput execute(String name, String argumentsJson, String invocationId,
                               ToolExecutionContext executionContext) {
+        String effectiveInvocationId = normalizeInvocationId(invocationId, executionContext);
+        ToolExecutionContext effectiveContext = executionContext == null
+                ? ToolExecutionContext.current(effectiveInvocationId) : executionContext;
         List<RegisteredMiddleware> snapshot;
         synchronized (this) {
             snapshot = List.copyOf(middleware);
         }
         return proceed(snapshot, 0, new Context(
-                name, argumentsJson, invocationId, executionContext));
+                name, argumentsJson, effectiveInvocationId, effectiveContext));
+    }
+
+    private static String normalizeInvocationId(String invocationId,
+                                                ToolExecutionContext executionContext) {
+        if (invocationId == null || invocationId.isBlank()) {
+            if (executionContext != null
+                    && executionContext.invocationId() != null
+                    && !executionContext.invocationId().isBlank()) {
+                return executionContext.invocationId();
+            }
+            return "direct-" + UUID.randomUUID().toString().replace("-", "");
+        }
+        return invocationId;
     }
 
     private ToolOutput proceed(List<RegisteredMiddleware> snapshot, int index, Context context) {

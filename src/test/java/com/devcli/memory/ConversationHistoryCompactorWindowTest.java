@@ -40,22 +40,22 @@ class ConversationHistoryCompactorWindowTest {
     }
 
     @Test
-    void incrementalChunksIncludePreviousSummaryAndRollForward() throws IOException {
-        String previous = SUMMARY + "中".repeat(3_800);
+    void incrementalChunksUsePreviousSummaryIndexWithoutRefeedingItsBody() throws IOException {
+        String previous = SUMMARY + "OLD_FACT_SECRET_9f3c" + "中".repeat(3_800);
         String added = "新增历史\n" + "a\uD83D\uDE00中".repeat(4_000);
         BudgetClient client = new BudgetClient(8_000, request -> OPERATION);
         String result = new ConversationHistoryCompactor(client)
                 .summarizeIncremental(previous, List.of(LlmClient.Message.user(added)));
         assertTrue(client.requests.size() > 1);
-        StringBuilder consumed = new StringBuilder();
         for (var request : client.requests) {
             String prompt = request.get(1).content();
-            assertTrue(prompt.contains("=== 已有摘要（六段） ==="));
-            consumed.append(between(prompt, "=== 新增对话 ===\n", "\n=== 新增对话（结束） ==="));
+            assertTrue(prompt.contains("=== 已有摘要索引 ==="));
+            assertFalse(prompt.contains("OLD_FACT_SECRET_9f3c"),
+                    "增量摘要不应把旧摘要正文再次作为事实来源");
         }
-        assertEquals("USER: " + added + "\n\n", consumed.toString());
-        assertTrue(client.requests.get(1).get(1).content().contains("Java 17"));
         assertTrue(result.contains("Java 17"));
+        assertTrue(result.contains("OLD_FACT_SECRET_9f3c"),
+                "模型未触及的旧条目应由本地 Reducer 保留");
         assertRequestsFit(client);
     }
 
@@ -92,11 +92,12 @@ class ConversationHistoryCompactorWindowTest {
     }
 
     @Test
-    void oversizedPreviousSummaryFailsBeforeCallingModel() {
+    void oversizedPreviousSummaryBodyDoesNotBlockIncrementalExtraction() throws IOException {
         BudgetClient client = new BudgetClient(8_000, request -> OPERATION);
-        assertThrows(IOException.class, () -> new ConversationHistoryCompactor(client)
-                .summarizeIncremental(SUMMARY + "中".repeat(7_000), List.of(LlmClient.Message.user("new"))));
-        assertTrue(client.requests.isEmpty());
+        String result = new ConversationHistoryCompactor(client)
+                .summarizeIncremental(SUMMARY + "中".repeat(7_000), List.of(LlmClient.Message.user("new")));
+        assertFalse(client.requests.isEmpty());
+        assertTrue(result.contains("Java 17"));
     }
 
     private static String between(String value, String start, String end) {

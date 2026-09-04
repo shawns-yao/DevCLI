@@ -113,12 +113,17 @@ class ToolResultSizeManagerTest {
     }
 
     @Test
-    void listDirToolBypassesSizeManagement() {
-        // list_dir 也在白名单：目录树短结构化输出不应被截断
-        String dirTree = "drwx ".repeat(1_500); // ~7.5K，正常情况会被截断
+    void listDirToolUsesSizeManagementWhenLarge() {
+        String dirTree = "drwx ".repeat(200);
         String out = ToolResultSizeManager.process(
                 "list_dir", "call_4", tempDir.toString(), false, dirTree);
-        assertEquals(dirTree, out, "list_dir 结果不应被治理");
+        assertEquals(dirTree, out, "短目录结果仍应原样返回");
+
+        String largeTree = "drwx ".repeat(1_500);
+        String managed = ToolResultSizeManager.process(
+                "list_dir", "call_4-large", tempDir.toString(), false, largeTree);
+        assertNotEquals(largeTree, managed, "大目录结果不得绕过尺寸治理");
+        assertTrue(managed.contains("result_ref"), managed);
     }
 
     @Test

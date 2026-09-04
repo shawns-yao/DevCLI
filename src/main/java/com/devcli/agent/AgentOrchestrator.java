@@ -560,11 +560,12 @@ public class AgentOrchestrator {
         toolRegistry.pruneExpiredLeases();
         memoryManager.setTaskState("context_epoch",
                 Long.toString(toolRegistry.contextVersionLedger().currentGeneration()));
-        if (CancellationContext.isCancelled()) {
-            return "⏹️ 已取消当前 Plan 任务。";
-        }
         String finalResultForSummary = "";
         try {
+            if (CancellationContext.isCancelled()) {
+                finalResultForSummary = "⏹️ 已取消当前 Plan 任务。";
+                return finalResultForSummary;
+            }
             // 1. 规划阶段：让规划者拆解任务
             out.println(AnsiStyle.heading("📋 第一阶段：规划"));
             out.println("🧑‍💼 规划者正在分析任务...\n");

@@ -153,6 +153,18 @@ class SubAgentTest {
     }
 
     @Test
+    void reviewerAllowlistIncludesRecoverableToolResults() throws Exception {
+        SubAgent reviewer = new SubAgent("reviewer", AgentRole.REVIEWER,
+                new GLMClient("test-key"), new ToolRegistry());
+        Method method = SubAgent.class.getDeclaredMethod("allowedToolNamesForRole");
+        method.setAccessible(true);
+
+        @SuppressWarnings("unchecked")
+        List<String> allowed = (List<String>) method.invoke(reviewer);
+        assertTrue(allowed.contains("read_tool_result"), allowed.toString());
+    }
+
+    @Test
     void plannerPromptShouldTreatEmptyWorkspaceAsValidAndAvoidBlockingDiscoverySteps() {
         SubAgent planner = new SubAgent("planner", AgentRole.PLANNER,
                 new GLMClient("test-key"), new ToolRegistry());

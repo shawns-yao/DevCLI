@@ -24,7 +24,13 @@ public record CompactBoundaryMetadata(
         boolean postCompactRestoreEnabled,
         int protectedConstraints,
         int restoredConstraints,
-        String semanticGuardStatus
+        String semanticGuardStatus,
+        String sourceHash,
+        int sourceStart,
+        int sourceEnd,
+        String projectionHash,
+        long sourceEventStart,
+        long sourceEventEnd
 ) {
     private static final String START = "<compact_boundary>";
     private static final String END = "</compact_boundary>";
@@ -36,6 +42,12 @@ public record CompactBoundaryMetadata(
         protectedConstraints = Math.max(0, protectedConstraints);
         restoredConstraints = Math.max(0, restoredConstraints);
         semanticGuardStatus = blankToNone(semanticGuardStatus);
+        sourceHash = blankToNone(sourceHash);
+        sourceStart = Math.max(0, sourceStart);
+        sourceEnd = Math.max(sourceStart, sourceEnd);
+        projectionHash = blankToNone(projectionHash);
+        sourceEventStart = Math.max(0L, sourceEventStart);
+        sourceEventEnd = Math.max(sourceEventStart, sourceEventEnd);
     }
 
     public CompactBoundaryMetadata(
@@ -50,7 +62,7 @@ public record CompactBoundaryMetadata(
             int summaryChars) {
         this(compactType, trigger, mode, preTokens, postTokens, originalMessages, rebuiltMessages,
                 retainedMessages, summaryChars, List.of(), "none", "none", false,
-                0, 0, "none");
+                0, 0, "none", "none", 0, 0, "none", 0, 0);
     }
 
     public CompactBoundaryMetadata(
@@ -69,7 +81,16 @@ public record CompactBoundaryMetadata(
             boolean postCompactRestoreEnabled) {
         this(compactType, trigger, mode, preTokens, postTokens, originalMessages, rebuiltMessages,
                 retainedMessages, summaryChars, loadedSkills, ragEpoch, mcpToolSnapshot,
-                postCompactRestoreEnabled, 0, 0, "none");
+                postCompactRestoreEnabled, 0, 0, "none", "none", 0, 0, "none", 0, 0);
+    }
+
+    /** 兼容旧内存下标字段；新代码应使用 sourceEventStart/sourceEventEnd。 */
+    public int sourceStart() {
+        return sourceStart;
+    }
+
+    public int sourceEnd() {
+        return sourceEnd;
     }
 
     public String renderBoundaryBlock() {
@@ -90,6 +111,13 @@ public record CompactBoundaryMetadata(
                 + "protectedConstraints=" + protectedConstraints + "\n"
                 + "restoredConstraints=" + restoredConstraints + "\n"
                 + "semanticGuard=" + semanticGuardStatus + "\n"
+                + "sourceHash=" + sourceHash + "\n"
+                + "sourceRange=" + (sourceEventEnd > 0
+                ? sourceEventStart + ":" + sourceEventEnd
+                : sourceStart + ":" + sourceEnd) + "\n"
+                + "messageRange=" + sourceStart + ":" + sourceEnd + "\n"
+                + "sourceEventRange=" + sourceEventStart + ":" + sourceEventEnd + "\n"
+                + "projectionHash=" + projectionHash + "\n"
                 + END;
     }
 
@@ -139,7 +167,13 @@ public record CompactBoundaryMetadata(
                     "enabled".equalsIgnoreCase(values.getOrDefault("postCompactRestore", "disabled")),
                     parseIntOrDefault(values.get("protectedConstraints"), 0),
                     parseIntOrDefault(values.get("restoredConstraints"), 0),
-                    blankToNone(values.get("semanticGuard"))
+                    blankToNone(values.get("semanticGuard")),
+                    blankToNone(values.get("sourceHash")),
+                    parseRangeStart(values.getOrDefault("messageRange", values.get("sourceRange"))),
+                    parseRangeEnd(values.getOrDefault("messageRange", values.get("sourceRange"))),
+                    blankToNone(values.get("projectionHash")),
+                    parseLongRangeStart(values.getOrDefault("sourceEventRange", "0:0")),
+                    parseLongRangeEnd(values.getOrDefault("sourceEventRange", "0:0"))
             ));
         } catch (RuntimeException e) {
             return Optional.empty();
@@ -196,5 +230,40 @@ public record CompactBoundaryMetadata(
 
     private static String blankToNone(String value) {
         return value == null || value.isBlank() ? "none" : value.trim();
+    }
+
+    private static int parseRangeStart(String value) {
+        int separator = value == null ? -1 : value.indexOf(':');
+        if (separator < 0) return 0;
+        return parseIntOrDefault(value.substring(0, separator), 0);
+    }
+
+    private static int parseRangeEnd(String value) {
+        int separator = value == null ? -1 : value.indexOf(':');
+        if (separator < 0) return 0;
+        return Math.max(parseRangeStart(value),
+                parseIntOrDefault(value.substring(separator + 1), 0));
+    }
+
+    private static long parseLongRangeStart(String value) {
+        int separator = value == null ? -1 : value.indexOf(':');
+        if (separator < 0) return 0L;
+        return parseLongOrDefault(value.substring(0, separator), 0L);
+    }
+
+    private static long parseLongRangeEnd(String value) {
+        int separator = value == null ? -1 : value.indexOf(':');
+        if (separator < 0) return 0L;
+        return Math.max(parseLongRangeStart(value),
+                parseLongOrDefault(value.substring(separator + 1), 0L));
+    }
+
+    private static long parseLongOrDefault(String value, long fallback) {
+        if (value == null || value.isBlank()) return fallback;
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
     }
 }
