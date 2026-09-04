@@ -79,4 +79,19 @@ class DelegationToolTest {
             assertEquals(ToolErrorCode.CAPABILITY_DENIED, result.errorCode());
         }
     }
+
+    @Test
+    void structuredDelegationArgumentsKeepArraysAndObjects() {
+        try (ToolRegistry registry = new ToolRegistry()) {
+            var results = registry.runWithDelegation((args, context) -> ToolOutput.success(
+                            args.get("constraints") + "|" + args.get("budget")),
+                    () -> registry.executeTools(java.util.List.of(new ToolRegistry.ToolInvocation(
+                            "structured", "delegate_task",
+                            "{\"role\":\"explorer\",\"task\":\"inspect\","
+                                    + "\"constraints\":[\"read only\",\"no network\"],"
+                                    + "\"budget\":{\"max_iterations\":3}}"))));
+            assertEquals("[\"read only\",\"no network\"]|{\"max_iterations\":3}",
+                    results.getFirst().result());
+        }
+    }
 }

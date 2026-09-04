@@ -20,6 +20,11 @@ public interface ToolProvider {
 
         Path resolveSafePath(String path);
 
+        /** 委派 Worker 的写路径白名单；默认不额外限制。 */
+        default boolean isWritePathAllowed(String path) {
+            return true;
+        }
+
         int maxWriteFileBytes();
 
         String currentResourceLeaseStep();

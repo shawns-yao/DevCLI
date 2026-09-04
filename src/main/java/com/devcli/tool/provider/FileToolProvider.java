@@ -68,6 +68,10 @@ public final class FileToolProvider implements ToolProvider {
                         throw new PolicyException("写入内容 " + contentBytes + " 字节超过 "
                                 + (context.maxWriteFileBytes() / 1024 / 1024) + "MB 上限");
                     }
+                    if (!context.isWritePathAllowed(path)) {
+                        return ToolOutput.rejected(ToolErrorCode.CAPABILITY_DENIED,
+                                "委派 Worker 写路径不在允许范围内: " + path, false);
+                    }
                     Path safe = context.resolveSafePath(path);
                     String activeStep = context.currentResourceLeaseStep();
                     if (activeStep != null && !activeStep.isBlank()) {
@@ -128,6 +132,10 @@ public final class FileToolProvider implements ToolProvider {
                     String newString = args.get("new_string") == null ? "" : args.get("new_string");
                     if (oldString == null || oldString.isEmpty()) {
                         return invalid("old_string 不能为空");
+                    }
+                    if (!context.isWritePathAllowed(path)) {
+                        return ToolOutput.rejected(ToolErrorCode.CAPABILITY_DENIED,
+                                "委派 Worker 写路径不在允许范围内: " + path, false);
                     }
                     Path safe = context.resolveSafePath(path);
                     if (!Files.exists(safe) || !Files.isRegularFile(safe)) {

@@ -259,6 +259,71 @@ class AgentDelegationTest {
         assertEquals(1, parent.iteration());
     }
 
+    @Test
+    void failedDelegationStillReturnsReconciliableReport() throws Exception {
+        try (ToolRegistry registry = registry()) {
+            ToolOutput output = session(registry, new ScriptedClient(), new AgentBudget(1000, 3, 20))
+                    .execute(Map.of("role", "explorer", "task", "inspect"),
+                            ToolExecutionContext.current("child"));
+            assertFalse(output.isSuccess());
+            var report = new com.fasterxml.jackson.databind.ObjectMapper().readTree(output.text());
+            assertTrue(report.hasNonNull("report_id"));
+            assertTrue(report.hasNonNull("status"));
+            assertTrue(report.has("evidence"));
+            assertTrue(report.has("dead_ends"));
+            assertTrue(report.has("open_questions"));
+        }
+    }
+
+    @Test
+    void structuredBriefIsInjectedWithoutCopyingParentHistory() throws Exception {
+        ScriptedClient child = new ScriptedClient(answer("done"));
+        try (ToolRegistry registry = registry()) {
+            ToolOutput output = session(registry, child, new AgentBudget(1000, 3, 20)).execute(
+                    Map.of("role", "explorer", "task", "inspect",
+                            "deliverable", "列出入口文件",
+                            "constraints", "[\"只读\",\"不联网\"]",
+                            "entry_points", "[\"src/main/java\"]",
+                            "budget", "{\"max_iterations\":2}"),
+                    ToolExecutionContext.current("child"));
+            assertTrue(output.isSuccess(), output.text());
+            assertTrue(child.requests.getFirst().get(1).content().contains("交付物：列出入口文件"));
+            assertTrue(child.requests.getFirst().get(1).content().contains("[\"只读\",\"不联网\"]"));
+            var report = new com.fasterxml.jackson.databind.ObjectMapper().readTree(output.text());
+            assertEquals(2, report.path("request").path("budget").path("max_iterations").asInt());
+        }
+    }
+
+    @Test
+    void workerWritePathAllowlistIsEnforcedBeforeWorkspaceMutation() throws Exception {
+        ScriptedClient child = new ScriptedClient(
+                call("write_file", "{\"path\":\"blocked.txt\",\"content\":\"no\"}"), answer("done"));
+        try (ToolRegistry registry = registry()) {
+            ToolOutput output = session(registry, child, new AgentBudget(1000, 3, 20)).execute(
+                    Map.of("role", "worker", "task", "write",
+                            "allowed_write_paths", "[\"allowed.txt\"]"),
+                    ToolExecutionContext.current("child"));
+            assertFalse(output.isSuccess(), output.text());
+            assertFalse(Files.exists(project.resolve("blocked.txt")));
+            assertTrue(output.text().contains("report_id"));
+        }
+    }
+
+    @Test
+    void explicitToolAllowlistRejectsCallsOutsideTheBrief() throws Exception {
+        ScriptedClient child = new ScriptedClient(
+                call("grep_code", "{\"query\":\"secret\"}"), answer("done"));
+        try (ToolRegistry registry = registry()) {
+            ToolOutput output = session(registry, child, new AgentBudget(1000, 3, 20)).execute(
+                    Map.of("role", "explorer", "task", "inspect",
+                            "allowed_tools", "[\"read_file\"]"),
+                    ToolExecutionContext.current("child"));
+            assertTrue(output.isSuccess(), output.text());
+            assertTrue(output.text().contains("CAPABILITY_DENIED"));
+            assertTrue(child.tools.getFirst().stream().noneMatch(t -> t.name().equals("grep_code")));
+        }
+    }
+
     private DelegationSession session(ToolRegistry registry, LlmClient client, AgentBudget budget) {
         return new DelegationSession(registry, role -> client, budget, "project rules", RunEventSink.NO_OP);
     }
