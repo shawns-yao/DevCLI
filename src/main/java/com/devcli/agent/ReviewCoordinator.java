@@ -104,8 +104,7 @@ final class ReviewCoordinator {
         String reviewTask = buildReviewTask(step);
         List<String> reviewToolCalls = Collections.synchronizedList(new ArrayList<>());
         reviewer.setStructuredToolResultConsumer(result -> {
-            memoryManager.addToolResult(result.name(), result.argumentsJson(), result.result(),
-                    result.sideChannels());
+            memoryManager.addToolResult(result);
             if (result.status() == ToolStatus.SUCCESS) {
                 reviewToolCalls.add(result.name());
             }

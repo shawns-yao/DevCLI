@@ -615,9 +615,7 @@ public class PlanExecuteAgent {
                                     "timedOut", toolResult.timedOut(),
                                     "resultPreview", preview(toolResult.result(), 300)
                             ));
-                            memoryManager.addToolResult(
-                                    toolResult.name(), toolResult.argumentsJson(), toolResult.result(),
-                                    toolResult.sideChannels());
+                            memoryManager.addToolResult(toolResult);
                             allResults.append(toolResult.result()).append("\n");
                         }
                         appendImageToolMessages(messages, toolResults);

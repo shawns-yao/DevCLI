@@ -5,6 +5,8 @@ import com.devcli.rag.RagEvidenceSideChannel;
 import com.devcli.policy.SensitiveDataRedactor;
 import com.devcli.tool.ToolResultArtifact;
 import com.devcli.tool.ToolSideChannel;
+import com.devcli.tool.ToolStatus;
+import com.devcli.tool.ToolErrorCode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -145,7 +147,8 @@ public class SessionMemory {
             if (!acceptEvidenceOrigin(observed)) return;
             recordToolResultInternal(observed.toolName(), observed.argsJson(), observed.result(),
                     observed.sideChannels(), observed.agentId(), observed.stepId(),
-                    observed.originSequence(), observed.contextEpoch(), sequence);
+                    observed.originSequence(), observed.contextEpoch(), sequence,
+                    observed.status(), observed.errorCode(), observed.modifiedResources());
         } else if (event instanceof KeyEvent keyEvent) {
             int importance = keyEvent.importance() > 0
                     ? keyEvent.importance() : inferEventImportance(keyEvent.description());
@@ -262,10 +265,12 @@ public class SessionMemory {
 
     private void recordToolResultInternal(String toolName, String argsJson, String result,
                                           List<ToolSideChannel> sideChannels, String agentId, String stepId,
-                                          long originSequence, long contextEpoch, long sequence) {
+                                          long originSequence, long contextEpoch, long sequence,
+                                          ToolStatus status, ToolErrorCode errorCode,
+                                          List<String> modifiedResources) {
         if (toolName == null || result == null) return;
         String safeArgs = argsJson == null ? "" : argsJson;
-        EvidenceKind kind = classifyEvidence(toolName, result);
+        EvidenceKind kind = classifyEvidence(toolName, result, status);
         int importance = baselineImportance(kind, toolName, result);
         String reference = evidenceReference(toolName, safeArgs, result);
         String normalizedResult = normalizeEvidenceResult(kind, toolName, safeArgs, result, reference);
@@ -284,10 +289,18 @@ public class SessionMemory {
                 attemptDigests.remove(attemptDigests.keySet().iterator().next());
             }
         }
-        if (kind == EvidenceKind.CRITICAL
-                && ("write_file".equals(toolName) || "edit_file".equals(toolName))) {
-            String path = extractPath(safeArgs);
-            if (!path.isBlank()) modifiedFiles.add(path);
+        if (status == ToolStatus.SUCCESS || (status == null
+                && ("write_file".equals(toolName) || "edit_file".equals(toolName)))) {
+            List<String> resources = modifiedResources == null ? List.of() : modifiedResources;
+            if (resources.isEmpty() && (status == null || status == ToolStatus.SUCCESS)
+                    && ("write_file".equals(toolName) || "edit_file".equals(toolName))
+                    && !result.contains("无需写入") && !result.contains("内容未变化")) {
+                String path = extractPath(safeArgs);
+                if (!path.isBlank()) resources = List.of(path);
+            }
+            resources.stream()
+                    .filter(path -> path != null && !path.isBlank())
+                    .forEach(modifiedFiles::add);
         }
         evictToolResultsIfNeeded();
         recordRagEvidenceIfPresent(toolName, safeArgs, result, sideChannels);
@@ -388,7 +401,10 @@ public class SessionMemory {
                 evidence.importance, evidence.agentId, evidence.stepId, evidence.sequence);
     }
 
-    private static EvidenceKind classifyEvidence(String toolName, String result) {
+    private static EvidenceKind classifyEvidence(String toolName, String result, ToolStatus status) {
+        if (status != null && status != ToolStatus.SUCCESS) {
+            return EvidenceKind.FAILURE;
+        }
         String normalized = result == null ? "" : result.toLowerCase(Locale.ROOT);
         if (normalized.contains("negativefact") || "write_file".equals(toolName)
                 || "edit_file".equals(toolName)
@@ -1268,17 +1284,33 @@ public class SessionMemory {
     public record ToolResultObserved(String toolName, String argsJson, String result,
                                      List<ToolSideChannel> sideChannels, String agentId,
                                      String stepId, long originSequence, long contextEpoch,
-                                     long sequence) implements SessionEvent {
+                                     long sequence, ToolStatus status, ToolErrorCode errorCode,
+                                     List<String> modifiedResources) implements SessionEvent {
         public ToolResultObserved {
             sideChannels = sideChannels == null ? List.of() : List.copyOf(sideChannels);
+            modifiedResources = modifiedResources == null ? List.of() : List.copyOf(modifiedResources);
             originSequence = Math.max(0, originSequence);
             contextEpoch = Math.max(0, contextEpoch);
         }
 
         public ToolResultObserved(String toolName, String argsJson, String result,
-                                  List<ToolSideChannel> sideChannels, String agentId,
-                                  String stepId, long sequence) {
-            this(toolName, argsJson, result, sideChannels, agentId, stepId, 0, 0, sequence);
+                                   List<ToolSideChannel> sideChannels, String agentId,
+                                   String stepId, long sequence) {
+            this(toolName, argsJson, result, sideChannels, agentId, stepId, 0, 0, sequence,
+                    null, null, List.of());
+        }
+
+        /** 兼容旧测试和事件构造器的九参数入口。 */
+        public ToolResultObserved(String toolName, String argsJson, String result,
+                                  List<?> sideChannels, String agentId, String stepId,
+                                  long originSequence, long contextEpoch, long sequence) {
+            this(toolName, argsJson, result,
+                    sideChannels == null ? List.of() : sideChannels.stream()
+                            .filter(ToolSideChannel.class::isInstance)
+                            .map(ToolSideChannel.class::cast)
+                            .toList(),
+                    agentId, stepId, originSequence, contextEpoch, sequence,
+                    null, null, List.of());
         }
     }
 

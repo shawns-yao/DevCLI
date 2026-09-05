@@ -531,6 +531,9 @@ public class ConversationHistoryCompactor {
         int splitIdx = findSplitIdxByTokenBudget(history, systemEnd, tailBudget);
         splitIdx = fitRecentTailWithinTokenBudget(history, systemEnd, splitIdx, tailBudget);
         if (splitIdx <= systemEnd) {
+            splitIdx = findSplitIdxByCompletedToolBatch(history, systemEnd, tailBudget);
+        }
+        if (splitIdx <= systemEnd) {
             log.info("compactIfNeeded skip: cannot find safe splitIdx > systemEnd={}", systemEnd);
             // 这不是 LLM 调用失败，是结构性无法压缩（如全是 system 或 retainTokens 过大）。
             // 不计入 consecutiveFailures，避免被锁死在尾部消息超大但摘要其实可用的场景。
@@ -1156,6 +1159,30 @@ public class ConversationHistoryCompactor {
         }
         // 累计不够 retain，且没找到任何 user：返回 systemEnd 让调用方跳过
         return systemEnd;
+    }
+
+    /**
+     * A single user turn can contain an unbounded sequence of assistant/tool batches.
+     * When there is no later user boundary, compact only after a complete tool result
+     * batch so the projection can replace the removed request with the summary user turn.
+     */
+    private static int findSplitIdxByCompletedToolBatch(List<LlmClient.Message> history,
+                                                        int systemEnd, int retainTokens) {
+        int lastCompletedBatch = systemEnd;
+        for (int i = systemEnd + 1; i < history.size(); i++) {
+            LlmClient.Message previous = history.get(i - 1);
+            if (!"tool".equals(previous.role()) || previous.toolCallId() == null) {
+                continue;
+            }
+            if (i < history.size() && "tool".equals(history.get(i).role())) {
+                continue;
+            }
+            lastCompletedBatch = i;
+            if (estimateRangeTokens(history, i, history.size()) <= retainTokens) {
+                return i;
+            }
+        }
+        return lastCompletedBatch;
     }
 
     /**

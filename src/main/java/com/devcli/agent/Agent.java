@@ -432,9 +432,7 @@ public class Agent implements AutoCloseable {
                                     "timedOut", toolResult.timedOut(),
                                     "resultPreview", preview(toolResult.result(), 300)
                             ));
-                            memoryManager.addToolResult(
-                                    toolResult.name(), toolResult.argumentsJson(), toolResult.result(),
-                                    toolResult.sideChannels());
+                            memoryManager.addToolResult(toolResult);
                         }
                         appendImageToolMessages(toolResults);
                     }

@@ -94,41 +94,48 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             LlmClient client = models.computeIfAbsent(role, modelResolver);
             if (client == null) throw new IllegalArgumentException("子 Agent 模型不可用: " + role);
             if (role.equals("worker")) {
-                try (WorkspaceExecutionSession workspace = WorkspaceExecutionSession.open(parent, id)) {
+                try (WorkspaceExecutionSession workspace = WorkspaceExecutionSession.open(
+                        parent, id, parseStringList(arguments.get("allowed_write_paths")))) {
                     result = executeChild(workspace.toolRegistry(), client, budget, id, role, rolePrompt,
                             arguments, context, ToolRegistry.ToolAccessScope.ISOLATED_PROJECT);
                     if (result.isSuccess()) {
                         context.throwIfCancelled();
                         PatchSet patch = workspace.patchSet();
+                        ObjectNode report = (ObjectNode) JSON.readTree(result.text());
+                        List<String> patchResources = patch.changes().stream()
+                                .map(PatchSet.FileChange::relativePath).distinct().toList();
+                        appendPatchEvidence(report, patch);
+                        boolean reviewRequired = DelegationReviewGate.requiresIndependentReview(
+                                new DelegationReviewGate.Signals(
+                                        patchResources, childEverHadMutationFailure(result)));
+                        report.put("independent_review_required", reviewRequired);
+                        if (reviewRequired) {
+                            ToolOutput review = runIndependentReview(
+                                    report.toString(), arguments, context, workspace.toolRegistry());
+                            DelegationReviewProtocol.Decision decision =
+                                    DelegationReviewProtocol.evaluate(review.text());
+                            if (!review.isSuccess() || !decision.protocolValid() || !decision.approved()) {
+                                throw new IOException("独立 Reviewer 未通过，未应用工作区修改: "
+                                        + decision.summary() + " "
+                                        + String.join("; ", decision.blockingIssues()));
+                            }
+                            report.put("independent_review", "APPROVED");
+                            if (decision.advisories() > 0) {
+                                var advisories = report.putArray("advisories");
+                                decision.advisoryIssues().forEach(advisories::add);
+                            }
+                        } else {
+                            report.put("independent_review", "NOT_REQUIRED");
+                        }
                         PatchSet.ApplyResult applied = workspace.commit(patch,
                                 ignored -> context.throwIfCancelled(), ignored -> { });
                         if (applied.applied()) {
-                            ObjectNode report = (ObjectNode) JSON.readTree(result.text());
                             var files = report.putArray("modified_resources");
                             applied.modifiedResources().forEach(files::add);
-                            appendPatchEvidence(report, patch);
-                            boolean reviewRequired = DelegationReviewGate.requiresIndependentReview(
-                                    new DelegationReviewGate.Signals(
-                                            applied.modifiedResources(), childEverHadMutationFailure(result)));
-                            report.put("independent_review_required", reviewRequired);
-                            if (reviewRequired) {
-                                ToolOutput review = runIndependentReview(report.toString(), arguments, context);
-                                DelegationReviewProtocol.Decision decision = DelegationReviewProtocol.evaluate(review.text());
-                                if (!review.isSuccess() || !decision.protocolValid() || !decision.approved()) {
-                                    return reportFailure(id, ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
-                                            "独立 Reviewer 未通过: " + decision.summary(), false), "failed");
-                                }
-                                report.put("independent_review", "APPROVED");
-                                if (decision.advisories() > 0) {
-                                    var advisories = report.putArray("advisories");
-                                    decision.advisoryIssues().forEach(advisories::add);
-                                }
-                            } else {
-                                report.put("independent_review", "NOT_REQUIRED");
-                            }
                             report.put("report_id", id).put("status", "done");
                             storeReport(id, report.toString());
-                            result = ToolOutput.success(report.toString()).withModifiedResources(applied.modifiedResources());
+                            result = ToolOutput.success(report.toString())
+                                    .withModifiedResources(applied.modifiedResources());
                         } else {
                             result = ToolOutput.error(ToolErrorCode.RESOURCE_CONFLICT,
                                     applied.failureDescription(), false);
@@ -295,7 +302,8 @@ final class DelegationSession implements DelegateTaskTool.Handler {
 
     private ToolOutput runIndependentReview(String workerReport,
                                             Map<String, String> arguments,
-                                            ToolExecutionContext context) {
+                                            ToolExecutionContext context,
+                                            ToolRegistry reviewBase) {
         try {
             LlmClient reviewer = models.computeIfAbsent("reviewer", modelResolver);
             if (reviewer == null) {
@@ -306,7 +314,8 @@ final class DelegationSession implements DelegateTaskTool.Handler {
                     "task", "独立复核委派 Worker 的实际修改，只判断是否违反任务要求",
                     "context", "原始任务：" + arguments.getOrDefault("task", "")
                             + "\nWorker 结构化报告（仅作线索，必须自行读取文件核对）：\n" + workerReport);
-            try (ToolRegistry reviewerRegistry = parent.forkForProject(Path.of(parent.getProjectPath()))) {
+            try (ToolRegistry reviewerRegistry = reviewBase.forkForProject(
+                    Path.of(reviewBase.getProjectPath()))) {
                 return executeChild(reviewerRegistry, reviewer, parentBudget.fork(),
                         "delegate-reviewer-" + UUID.randomUUID().toString().substring(0, 8),
                         "reviewer",

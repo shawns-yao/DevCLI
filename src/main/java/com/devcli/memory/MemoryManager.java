@@ -5,6 +5,7 @@ import com.devcli.context.ContextProfile;
 import com.devcli.config.ConfigResolver;
 import com.devcli.policy.SensitiveDataRedactor;
 import com.devcli.tool.ToolSideChannel;
+import com.devcli.tool.ToolRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -187,11 +188,25 @@ public class MemoryManager implements AutoCloseable {
 
     public void addToolResult(String toolName, String argsJson, String result,
                               List<ToolSideChannel> sideChannels) {
+        addToolResult(toolName, argsJson, result, sideChannels, null, null, List.of());
+    }
+
+    public void addToolResult(ToolRegistry.ToolExecutionResult toolResult) {
+        if (toolResult == null) return;
+        addToolResult(toolResult.name(), toolResult.argumentsJson(), toolResult.result(),
+                toolResult.sideChannels(), toolResult.status(), toolResult.errorCode(), List.of());
+    }
+
+    private void addToolResult(String toolName, String argsJson, String result,
+                               List<ToolSideChannel> sideChannels,
+                               com.devcli.tool.ToolStatus status,
+                               com.devcli.tool.ToolErrorCode errorCode,
+                               List<String> modifiedResources) {
         if (memoryIgnored || toolName == null || result == null) return;
         sessionMemory.accept(new SessionMemory.ToolResultObserved(
                 toolName, argsJson, result, sideChannels, currentAgentId(), currentEvidenceScope(),
                 currentEvidenceOrigin(), currentContextEpoch(),
-                sessionEventSequence.incrementAndGet()));
+                sessionEventSequence.incrementAndGet(), status, errorCode, modifiedResources));
         recordCurrentStateInvalidations(toolName, argsJson, result, sideChannels);
     }
 
@@ -219,7 +234,9 @@ public class MemoryManager implements AutoCloseable {
         RuleCurrentStateConflictDetector.detect(ruleContextSupplier.get(), observation)
                 .ifPresent(notice -> recordCurrentStateNotice(notice));
         List<MemoryEntry> conflicts = MemoryObservationConflictDetector.conflictingEntries(
-                observation, longTermMemory.getAll());
+                observation, longTermMemory.getAll().stream()
+                        .filter(entry -> MemoryRetriever.isVisibleInScope(entry, activeScopeKeys))
+                        .toList());
         if (conflicts.isEmpty()) {
             return;
         }
@@ -242,6 +259,12 @@ public class MemoryManager implements AutoCloseable {
                     + "。本次及后续检索不得继续依赖被推翻记忆。";
             Map<String, String> metadata = new HashMap<>();
             metadata.put("source", "tool_observation");
+            if (!activeScopeKeys.isEmpty()) {
+                String scope = activeScopeKeys.iterator().next();
+                metadata.put("scope_type", "PROJECT");
+                metadata.put("scope_key", scope);
+                metadata.put(MemoryWriteProtocol.META_SCOPE, scope);
+            }
             metadata.put("memory_type", "fact");
             metadata.put("subject", group.getKey());
             metadata.put("negative_fact", "true");
