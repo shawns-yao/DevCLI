@@ -424,6 +424,9 @@ final class DelegationSession implements DelegateTaskTool.Handler {
         }
         @Override public List<LlmClient.Message> history() { return history; }
         @Override public List<LlmClient.Tool> toolDefinitions(int iteration) { return tools; }
+        @Override public ToolRegistry.ToolSnapshot toolSnapshot(int iteration) {
+            return registry.snapshotForCurrentAccess().withDefinitions(tools);
+        }
         @Override public LlmClient.StreamListener streamListener() { return LlmClient.StreamListener.NO_OP; }
         @Override public int maxIterations() { return childMaxIterations; }
         @Override public boolean isCancelled() { return context.isCancelled() || CancellationContext.isCancelled(); }
@@ -447,8 +450,12 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             }
         }
         @Override public List<ToolRegistry.ToolExecutionResult> executeTools(List<LlmClient.ToolCall> calls, int iteration) {
+            return executeTools(calls, iteration, null);
+        }
+        @Override public List<ToolRegistry.ToolExecutionResult> executeTools(
+                List<LlmClient.ToolCall> calls, int iteration, ToolRegistry.ToolSnapshot snapshot) {
             return registry.executeTools(calls.stream().map(call -> new ToolRegistry.ToolInvocation(
-                    call.id(), call.function().name(), call.function().arguments())).toList());
+                    call.id(), call.function().name(), call.function().arguments())).toList(), snapshot);
         }
         @Override public void afterToolResults(LlmClient.ChatResponse response,
                 List<ToolRegistry.ToolExecutionResult> results, int iteration, AgentBudget currentBudget) {

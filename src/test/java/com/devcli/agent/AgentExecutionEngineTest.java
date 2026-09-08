@@ -19,9 +19,11 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AgentExecutionEngineTest {
@@ -85,6 +87,37 @@ class AgentExecutionEngineTest {
                         .map(RunEvent.ExecutionStateChanged.class::cast)
                         .map(RunEvent.ExecutionStateChanged::state)
                         .toList());
+    }
+
+    @Test
+    void passesTheSameToolSnapshotToModelAndExecution() {
+        LlmClient.ToolCall call = new LlmClient.ToolCall(
+                "call_1", new LlmClient.ToolCall.Function("read_file", "{}"));
+        ScriptedClient llm = new ScriptedClient(List.of(
+                new LlmClient.ChatResponse("assistant", "", null, List.of(call), 1, 1)));
+        try (ToolRegistry registry = new ToolRegistry()) {
+            ToolRegistry.ToolSnapshot snapshot = registry.snapshotForCurrentAccess();
+            AtomicReference<ToolRegistry.ToolSnapshot> executedSnapshot = new AtomicReference<>();
+            RecordingDelegate delegate = new RecordingDelegate(true) {
+                @Override
+                public ToolRegistry.ToolSnapshot toolSnapshot(int iteration) {
+                    return snapshot;
+                }
+
+                @Override
+                public List<ToolRegistry.ToolExecutionResult> executeTools(
+                        List<LlmClient.ToolCall> toolCalls,
+                        int iteration,
+                        ToolRegistry.ToolSnapshot currentSnapshot) {
+                    executedSnapshot.set(currentSnapshot);
+                    return super.executeTools(toolCalls, iteration);
+                }
+            };
+
+            assertEquals("tool-complete", new AgentExecutionEngine<String>(
+                    llm, new AgentBudget(100, 3, 10)).run(delegate));
+            assertSame(snapshot, executedSnapshot.get());
+        }
     }
 
     @Test

@@ -146,6 +146,62 @@ class ToolRegistryTest {
     }
 
     @Test
+    void toolSnapshotRejectsReplacementBeforeExecution() {
+        AtomicInteger oldCalls = new AtomicInteger();
+        AtomicInteger newCalls = new AtomicInteger();
+        try (ToolRegistry registry = new ToolRegistry()) {
+            var parameters = JsonNodeFactory.instance.objectNode();
+            registry.registerTool(new ToolRegistry.Tool(
+                    "snapshot_tool", "old", parameters,
+                    args -> {
+                        oldCalls.incrementAndGet();
+                        return "old";
+                    }, ToolRegistry.ToolEffect.READ_ONLY));
+
+            ToolRegistry.ToolSnapshot snapshot = registry.snapshotForCurrentAccess();
+
+            registry.registerTool(new ToolRegistry.Tool(
+                    "snapshot_tool", "new", parameters,
+                    args -> {
+                        newCalls.incrementAndGet();
+                        return "new";
+                    }, ToolRegistry.ToolEffect.READ_ONLY));
+
+            ToolRegistry.ToolExecutionResult result = registry.executeTools(List.of(
+                    new ToolRegistry.ToolInvocation("call_snapshot", "snapshot_tool", "{}")),
+                    snapshot).getFirst();
+
+            assertEquals(ToolStatus.REJECTED, result.status());
+            assertEquals(ToolErrorCode.STALE_TOOL_SNAPSHOT, result.errorCode());
+            assertTrue(result.retryable());
+            assertEquals(0, oldCalls.get());
+            assertEquals(0, newCalls.get());
+        }
+    }
+
+    @Test
+    void toolSnapshotExecutesCapturedBindingWhenCatalogIsUnchanged() {
+        AtomicInteger calls = new AtomicInteger();
+        try (ToolRegistry registry = new ToolRegistry()) {
+            registry.registerTool(new ToolRegistry.Tool(
+                    "snapshot_tool", "captured", JsonNodeFactory.instance.objectNode(),
+                    args -> {
+                        calls.incrementAndGet();
+                        return "captured";
+                    }, ToolRegistry.ToolEffect.READ_ONLY));
+
+            ToolRegistry.ToolSnapshot snapshot = registry.snapshotForCurrentAccess();
+            ToolRegistry.ToolExecutionResult result = registry.executeTools(List.of(
+                    new ToolRegistry.ToolInvocation("call_snapshot", "snapshot_tool", "{}")),
+                    snapshot).getFirst();
+
+            assertEquals(ToolStatus.SUCCESS, result.status());
+            assertEquals("captured", result.result());
+            assertEquals(1, calls.get());
+        }
+    }
+
+    @Test
     void prefetchIgnoresSingleLetterPromptNoiseWhenSelectingMcpTools() {
         ToolRegistry registry = new ToolRegistry();
         for (String toolName : List.of(

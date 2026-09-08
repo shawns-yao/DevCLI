@@ -55,6 +55,8 @@ public class SubAgent {
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
     static final int DEFAULT_REVIEWER_MAX_ITERATIONS = 5;
     static final int MAX_REVIEWER_MAX_ITERATIONS = 8;
+    private static final java.util.Set<String> REVIEWER_TOOL_NAMES = java.util.Set.of(
+            "read_file", "read_tool_result", "list_dir", "grep_code", "execute_command");
     private static final String REVIEWER_FINAL_DECISION_PROMPT = """
             Reviewer 取证阶段已经结束。现在是最终裁决轮，禁止继续调用工具。
             必须只输出一个完整、可解析的裁决 JSON，并严格覆盖 system prompt 要求的
@@ -540,6 +542,20 @@ public class SubAgent {
                     }
 
                     @Override
+                    public ToolRegistry.ToolSnapshot toolSnapshot(int iteration) {
+                        if (!toolsEnabled || !shouldUseTools() || isReviewerFinalIteration(iteration)) {
+                            return null;
+                        }
+                        ToolRegistry.ToolSnapshot snapshot = toolRegistry.snapshotForCurrentAccess();
+                        if (forkContext != null) {
+                            return snapshot.withDefinitions(forkContext.toolDefinitions());
+                        }
+                        return role == AgentRole.REVIEWER
+                                ? snapshot.filter(REVIEWER_TOOL_NAMES)
+                                : snapshot;
+                    }
+
+                    @Override
                     public com.devcli.tool.ToolPresentation toolPresentation(String toolName) {
                         return toolRegistry.toolPresentation(toolName);
                     }
@@ -617,6 +633,13 @@ public class SubAgent {
                     public List<ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
                                                                   int iteration) {
                         return executeToolCalls(toolCalls);
+                    }
+
+                    @Override
+                    public List<ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
+                                                                  int iteration,
+                                                                  ToolRegistry.ToolSnapshot snapshot) {
+                        return executeToolCalls(toolCalls, snapshot);
                     }
 
                     @Override
@@ -960,6 +983,12 @@ public class SubAgent {
     }
 
     private List<ToolExecutionResult> executeToolCalls(List<LlmClient.ToolCall> toolCalls) {
+        return executeToolCalls(toolCalls, null);
+    }
+
+    private List<ToolExecutionResult> executeToolCalls(
+            List<LlmClient.ToolCall> toolCalls,
+            ToolRegistry.ToolSnapshot snapshot) {
         List<ToolExecutionResult> results = new ArrayList<>();
         List<ToolInvocation> invocations = new ArrayList<>();
         List<String> allowedToolNames = allowedToolNamesForRole();
@@ -983,7 +1012,7 @@ public class SubAgent {
         if (!invocations.isEmpty()) {
             AtomicReference<List<ToolExecutionResult>> executed = new AtomicReference<>(List.of());
             toolRegistry.runWithSkillContextBuffer(skillContextBuffer,
-                    () -> executed.set(toolRegistry.executeTools(invocations)));
+                    () -> executed.set(toolRegistry.executeTools(invocations, snapshot)));
             results.addAll(executed.get());
         }
         return results;

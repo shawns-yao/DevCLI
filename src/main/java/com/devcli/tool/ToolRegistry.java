@@ -12,6 +12,7 @@ import com.devcli.browser.BrowserCheckResult;
 import com.devcli.browser.BrowserConnector;
 import com.devcli.browser.BrowserGuard;
 import com.devcli.context.ContextProfile;
+import com.devcli.llm.LlmClient;
 import com.devcli.lsp.LspDiagnosticReport;
 import com.devcli.lsp.LspManager;
 import com.devcli.mcp.config.McpToolTrustPolicy;
@@ -51,6 +52,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * 工具注册表 - 管理所有可用工具
@@ -95,6 +97,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private final ThreadLocal<Set<String>> allowedToolNames = new ThreadLocal<>();
     private final ThreadLocal<List<String>> allowedWriteGlobs = new ThreadLocal<>();
     private final ThreadLocal<DelegateTaskTool.Handler> delegationHandler = new ThreadLocal<>();
+    /** 当前工具调用绑定的不可变工具快照；并行调用在线程内显式继承。 */
+    private final ThreadLocal<ToolSnapshot> activeToolSnapshot = new ThreadLocal<>();
     private boolean delegatedChild;
     private final ResourceLeaseManager resourceLeaseManager = new ResourceLeaseManager();
     /**
@@ -241,13 +245,55 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     /** 返回工具声明的副作用等级；未知工具按外部副作用保守处理。 */
     public ToolEffect toolEffect(String name) {
-        Tool tool = tools.get(name);
+        Tool tool = activeTool(name);
         return tool == null ? ToolEffect.EXTERNAL_MUTATION : tool.effect();
     }
 
     public ToolPresentation toolPresentation(String name) {
-        Tool tool = tools.get(name);
+        Tool tool = activeTool(name);
         return tool == null ? ToolPresentation.generic(name) : tool.presentation();
+    }
+
+    private Tool activeTool(String name) {
+        ToolSnapshot snapshot = activeToolSnapshot.get();
+        if (snapshot != null) {
+            ToolBinding binding = snapshot.binding(name);
+            return binding == null ? null : binding.tool();
+        }
+        return tools.get(name);
+    }
+
+    private McpRegisteredTool activeMcpTool(String name) {
+        ToolSnapshot snapshot = activeToolSnapshot.get();
+        if (snapshot != null) {
+            ToolBinding binding = snapshot.binding(name);
+            return binding == null ? null : binding.mcpTool();
+        }
+        return mcpTools.get(name);
+    }
+
+    private boolean isSnapshotCurrent(ToolSnapshot snapshot) {
+        return snapshot != null
+                && snapshot.owner == this
+                && snapshot.catalogVersion == toolCatalogVersion.get();
+    }
+
+    private <T> T runWithToolSnapshot(ToolSnapshot snapshot, Supplier<T> action) {
+        ToolSnapshot previous = activeToolSnapshot.get();
+        if (snapshot == null) {
+            activeToolSnapshot.remove();
+        } else {
+            activeToolSnapshot.set(snapshot);
+        }
+        try {
+            return action.get();
+        } finally {
+            if (previous == null) {
+                activeToolSnapshot.remove();
+            } else {
+                activeToolSnapshot.set(previous);
+            }
+        }
     }
 
     /**
@@ -492,7 +538,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     @Override
-    public void registerTool(Tool tool) {
+    public synchronized void registerTool(Tool tool) {
         if (tool == null || tool.name() == null || tool.name().isBlank()) {
             return;
         }
@@ -831,16 +877,33 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     /**
-     * 获取所有工具定义（用于LLM）
+     * 捕获当前权限范围内的工具定义与可执行绑定。
+     *
+     * <p>模型请求和随后的一批工具调用应使用同一份快照；注册表在两者之间发生变更时，
+     * 执行入口会拒绝该批调用，避免模型看到的 schema 与实际执行器错位。</p>
      */
-    public List<com.devcli.llm.LlmClient.Tool> getToolDefinitions() {
+    public synchronized ToolSnapshot snapshotForCurrentAccess() {
         ToolAccessScope scope = currentToolAccessScope();
-        return tools.values().stream()
-                .filter(tool -> isToolDefinitionVisible(tool.name()))
-                .filter(tool -> scope.permits(tool.effect()))
-                .filter(tool -> allowedToolNames.get() == null || allowedToolNames.get().contains(tool.name()))
-                .map(t -> new com.devcli.llm.LlmClient.Tool(t.name(), t.description(), t.parameters()))
-                .toList();
+        Set<String> allowlist = allowedToolNames.get();
+        Map<String, ToolBinding> bindings = new LinkedHashMap<>();
+        List<LlmClient.Tool> definitions = new ArrayList<>();
+        for (Tool tool : tools.values()) {
+            bindings.put(tool.name(), new ToolBinding(tool, mcpTools.get(tool.name())));
+            if (isToolDefinitionVisible(tool.name())
+                    && scope.permits(tool.effect())
+                    && (allowlist == null || allowlist.contains(tool.name()))) {
+                definitions.add(new LlmClient.Tool(tool.name(), tool.description(), tool.parameters()));
+            }
+        }
+        return new ToolSnapshot(this, toolCatalogVersion.get(), definitions, bindings);
+    }
+
+    /**
+     * 获取所有工具定义（用于 LLM）。调用方若还要执行本轮工具，应优先使用
+     * {@link #snapshotForCurrentAccess()}，以便复用同一份执行绑定。
+     */
+    public List<LlmClient.Tool> getToolDefinitions() {
+        return snapshotForCurrentAccess().definitions();
     }
 
     private boolean isToolDefinitionVisible(String toolName) {
@@ -922,7 +985,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     protected synchronized boolean mcpToolRequiresPerCallApproval(String toolName) {
-        McpRegisteredTool registered = mcpTools.get(toolName);
+        McpRegisteredTool registered = activeMcpTool(toolName);
         if (registered == null || registered.descriptor().annotations() == null) {
             return false;
         }
@@ -931,7 +994,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     protected synchronized String mcpToolApprovalNotice(String toolName) {
-        McpRegisteredTool registered = mcpTools.get(toolName);
+        McpRegisteredTool registered = activeMcpTool(toolName);
         if (registered == null || registered.descriptor().annotations() == null) {
             return null;
         }
@@ -1123,12 +1186,12 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                         ? ToolOutput.cancelled("用户取消了此次工具调用")
                         : chain.proceed(context));
         executionPipeline.register(ToolExecutionPipeline.Stage.EXISTENCE, (context, chain) ->
-                tools.containsKey(context.name())
+                activeTool(context.name()) != null
                         ? chain.proceed(context)
                         : ToolOutput.error(ToolErrorCode.UNKNOWN_TOOL,
                         unknownToolGuidance(context.name()), true));
         executionPipeline.register(ToolExecutionPipeline.Stage.CAPABILITY, (context, chain) -> {
-            Tool tool = tools.get(context.name());
+            Tool tool = activeTool(context.name());
             ToolAccessScope scope = currentToolAccessScope();
             Set<String> allowlist = allowedToolNames.get();
             if (tool != null && (allowlist != null && !allowlist.contains(context.name())
@@ -1161,7 +1224,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                             "子 Agent 只能读取本次子任务生成的工具结果；其他证据必须由父 Agent 显式提供");
                 }
             }
-            if (mcpTools.containsKey(context.name())) {
+            if (activeMcpTool(context.name()) != null) {
                 BrowserCheckResult browserCheck = checkBrowserTool(
                         context.name(), context.argumentsJson(), false);
                 context.putAttribute(PIPELINE_BROWSER_AUDIT, browserCheck.metadata());
@@ -1172,7 +1235,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
             return chain.proceed(context);
         });
         executionPipeline.register(ToolExecutionPipeline.Stage.RESULT_CACHE, (context, chain) -> {
-            Tool tool = tools.get(context.name());
+            Tool tool = activeTool(context.name());
             if (tool == null) return chain.proceed(context);
             if (tool.effect() != ToolEffect.READ_ONLY || !isCacheableReadTool(context.name())) {
                 toolResultCache.clear();
@@ -1242,7 +1305,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     private ToolOutput executeResolvedTool(ToolExecutionPipeline.Context context) {
-        McpRegisteredTool mcpTool = mcpTools.get(context.name());
+        McpRegisteredTool mcpTool = activeMcpTool(context.name());
         if (mcpTool != null) {
             ToolOutput output = mcpTool.invoker().invoke(
                     context.argumentsJson(), context.executionContext());
@@ -1252,7 +1315,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
             return output;
         }
 
-        Tool tool = tools.get(context.name());
+        Tool tool = activeTool(context.name());
         JsonNode parsedArgs = context.attribute(PIPELINE_PARSED_ARGUMENTS, JsonNode.class);
         if (parsedArgs == null) {
             parsedArgs = parseValidatedArguments(context.argumentsJson());
@@ -1299,7 +1362,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     protected ToolOutput validateToolArguments(String name, String argumentsJson) {
-        Tool tool = tools.get(name);
+        Tool tool = activeTool(name);
         if (tool == null) {
             return null;
         }
@@ -1310,7 +1373,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
             return validationFailed("不是合法 JSON: " + e.getOriginalMessage());
         }
         JsonNode schema = tool.parameters();
-        McpRegisteredTool mcpTool = mcpTools.get(name);
+        McpRegisteredTool mcpTool = activeMcpTool(name);
         if (mcpTool != null) {
             schema = mcpTool.descriptor().inputSchema();
         }
@@ -1345,13 +1408,14 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     private ToolOutput executeToolOutput(ToolInvocation invocation,
-                                         ToolExecutionContext executionContext) {
+                                         ToolExecutionContext executionContext,
+                                         ToolSnapshot snapshot) {
         if (isLegacyExecuteToolOverride() || isExecuteToolOutputOverride()) {
             return governToolOutput(invocation.name(), invocation.id(),
                     executeToolOutput(invocation.name(), invocation.argumentsJson()));
         }
-        return executionPipeline.execute(
-                invocation.name(), invocation.argumentsJson(), invocation.id(), executionContext);
+        return runWithToolSnapshot(snapshot, () -> executionPipeline.execute(
+                invocation.name(), invocation.argumentsJson(), invocation.id(), executionContext));
     }
 
     private boolean isLegacyExecuteToolOverride() {
@@ -1385,14 +1449,14 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     public boolean requiresApproval(String name) {
         if (name != null && name.startsWith("mcp__")) {
-            Tool tool = tools.get(name);
+            Tool tool = activeTool(name);
             return tool == null || isMaterialSideEffect(tool.effect());
         }
         Optional<BuiltInToolPolicy.Policy> policy = BuiltInToolPolicy.find(name);
         if (policy.isPresent()) {
             return policy.get().requiresApproval();
         }
-        Tool tool = tools.get(name);
+        Tool tool = activeTool(name);
         return tool != null && isMaterialSideEffect(tool.effect());
     }
 
@@ -1404,7 +1468,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         if (policy.isPresent()) {
             return policy.get().audited();
         }
-        Tool tool = tools.get(name);
+        Tool tool = activeTool(name);
         return tool != null && isMaterialSideEffect(tool.effect());
     }
 
@@ -1424,10 +1488,17 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     /** 叶子副作用工具需要工作区级串行；delegate_task 是编排工具，其子操作各自加锁，这里不持锁以防跨线程自锁。 */
     boolean isSerializedSideEffect(String toolName) {
+        return isSerializedSideEffect(toolName, null);
+    }
+
+    private boolean isSerializedSideEffect(String toolName, ToolSnapshot snapshot) {
         if (DelegateTaskTool.NAME.equals(toolName)) {
             return false;
         }
-        ToolEffect effect = toolEffect(toolName);
+        ToolBinding binding = snapshot == null ? null : snapshot.binding(toolName);
+        ToolEffect effect = binding == null
+                ? toolEffect(toolName)
+                : binding.tool().effect();
         return effect != ToolEffect.READ_ONLY && effect != ToolEffect.LOCAL_CONTEXT;
     }
 
@@ -1437,15 +1508,38 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
      */
 
     public List<ToolExecutionResult> executeTools(List<ToolInvocation> invocations) {
+        return executeToolsInternal(invocations, null);
+    }
+
+    /** 使用指定的模型工具快照执行一批调用；快照失效时失败关闭。 */
+    public List<ToolExecutionResult> executeTools(List<ToolInvocation> invocations,
+                                                   ToolSnapshot snapshot) {
+        // 保留旧版扩展点：测试或外部注册表若覆写单参数批量入口，继续由其负责结果编排。
+        // 内置路径均使用本方法，因此不会丢失快照绑定。
+        if (snapshot != null && hasLegacyExecuteToolsOverride()) {
+            return executeTools(invocations);
+        }
+        return executeToolsInternal(invocations, snapshot);
+    }
+
+    private List<ToolExecutionResult> executeToolsInternal(List<ToolInvocation> invocations,
+                                                           ToolSnapshot snapshot) {
         ToolResultSizeManager.resetTurnBudget();
         if (invocations == null || invocations.isEmpty()) {
             return List.of();
         }
+        if (snapshot != null && !isSnapshotCurrent(snapshot)) {
+            return invocations.stream()
+                    .map(invocation -> staleToolSnapshotResult(invocation, snapshot))
+                    .toList();
+        }
         if (CancellationContext.isCancelled()) {
             return invocations.stream()
                     .map(invocation -> ToolExecutionResult.cancelled(
-                            invocation, "用户取消了此次工具调用", 0,
-                            toolPresentation(invocation.name())))
+                                invocation, "用户取消了此次工具调用", 0,
+                                snapshot == null
+                                        ? toolPresentation(invocation.name())
+                                        : snapshot.presentation(invocation.name())))
                     .toList();
         }
         int parallelism = Math.min(invocations.size(), MAX_PARALLEL_TOOLS);
@@ -1482,7 +1576,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                 CancellationToken callToken = callTokens.get(i);
                 long invocationDeadline = activeDelegation != null && DelegateTaskTool.NAME.equals(invocation.name())
                         ? deadlineAfterSeconds(batchStartedAt,
-                                Math.max(toolBatchTimeoutSeconds, toolTimeoutSeconds(invocation.name())))
+                                Math.max(toolBatchTimeoutSeconds,
+                                        toolTimeoutSeconds(invocation.name(), snapshot)))
                         : batchDeadlineNanos;
                 futures.add(executor.submit(() -> runWithDelegation(activeDelegation, () ->
                         runWithAllowedTools(activeAllowedTools, () ->
@@ -1493,7 +1588,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                                         deadlineExecutor,
                                         activeSkillBuffer,
                                         activeAccessScope,
-                                        activeResourceLeaseStep))))));
+                                        activeResourceLeaseStep,
+                                        snapshot))))));
             }
 
             List<ToolExecutionResult> results = new ArrayList<>();
@@ -1506,7 +1602,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                         break;
                     } catch (CancellationException e) {
                         results.add(resultForCancellation(
-                                invocation, callTokens.get(i), 0));
+                                invocation, callTokens.get(i), 0, snapshot));
                         break;
                     } catch (InterruptedException e) {
                         restoreInterrupt = true;
@@ -1515,10 +1611,12 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                     } catch (ExecutionException e) {
                         CancellationToken token = callTokens.get(i);
                         results.add(token.cancellation().isPresent()
-                                ? resultForCancellation(invocation, token, 0)
+                                ? resultForCancellation(invocation, token, 0, snapshot)
                                 : ToolExecutionResult.failed(
                                         invocation, causeMessage(e), 0,
-                                        toolPresentation(invocation.name())));
+                                        snapshot == null
+                                                ? toolPresentation(invocation.name())
+                                                : snapshot.presentation(invocation.name())));
                         break;
                     }
                 }
@@ -1534,6 +1632,25 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         }
     }
 
+    private boolean hasLegacyExecuteToolsOverride() {
+        try {
+            return getClass().getMethod("executeTools", List.class).getDeclaringClass()
+                    != ToolRegistry.class;
+        } catch (NoSuchMethodException e) {
+            return false;
+        }
+    }
+
+    private ToolExecutionResult staleToolSnapshotResult(
+            ToolInvocation invocation, ToolSnapshot snapshot) {
+        String message = "工具定义快照已失效，已拒绝执行 " + invocation.name()
+                + "；请重新获取工具定义后重试";
+        ToolPresentation presentation = snapshot == null
+                ? toolPresentation(invocation.name())
+                : snapshot.presentation(invocation.name());
+        return ToolExecutionResult.staleToolSnapshot(invocation, message, presentation);
+    }
+
     private ToolExecutionResult executeInvocation(
             ToolInvocation invocation,
             CancellationToken callToken,
@@ -1541,9 +1658,14 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
             ScheduledExecutorService deadlineExecutor,
             SkillContextBuffer activeSkillBuffer,
             ToolAccessScope activeAccessScope,
-            String activeResourceLeaseStep) {
+            String activeResourceLeaseStep,
+            ToolSnapshot snapshot) {
         long startedAt = System.nanoTime();
-        long timeoutSeconds = toolTimeoutSeconds(invocation.name());
+        if (snapshot != null && (!isSnapshotCurrent(snapshot)
+                || snapshot.binding(invocation.name()) == null)) {
+            return staleToolSnapshotResult(invocation, snapshot);
+        }
+        long timeoutSeconds = toolTimeoutSeconds(invocation.name(), snapshot);
         long invocationDeadline = Math.min(
                 batchDeadlineNanos, deadlineAfterSeconds(startedAt, timeoutSeconds));
         ToolExecutionContext executionContext = new ToolExecutionContext(
@@ -1567,16 +1689,17 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                 cancellation -> worker.interrupt())) {
             if (callToken.cancellation().isPresent()) {
                 return resultForCancellation(
-                        invocation, callToken, executionContext.elapsedMillis());
+                        invocation, callToken, executionContext.elapsedMillis(), snapshot);
             }
             java.util.concurrent.atomic.AtomicReference<ToolOutput> output =
                     new java.util.concurrent.atomic.AtomicReference<>(ToolOutput.text(""));
-            boolean serializeSideEffect = isSerializedSideEffect(invocation.name());
+            boolean serializeSideEffect = isSerializedSideEffect(invocation.name(), snapshot);
             runWithToolAccess(activeAccessScope, () ->
                     runWithResourceLease(activeResourceLeaseStep, () -> {
                         if (!serializeSideEffect) {
                             runWithSkillContextBuffer(activeSkillBuffer,
-                                    () -> output.set(executeToolOutput(invocation, executionContext)));
+                                    () -> output.set(executeToolOutput(
+                                            invocation, executionContext, snapshot)));
                             return null;
                         }
                         // 叶子副作用：工作区级公平锁串行，避免同一并行批次竞态同一资源
@@ -1598,7 +1721,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                         }
                         try {
                             runWithSkillContextBuffer(activeSkillBuffer,
-                                    () -> output.set(executeToolOutput(invocation, executionContext)));
+                                    () -> output.set(executeToolOutput(
+                                            invocation, executionContext, snapshot)));
                         } finally {
                             if (sideEffectSerializeLock.isHeldByCurrentThread()) {
                                 sideEffectSerializeLock.unlock();
@@ -1608,23 +1732,27 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                     }));
             if (callToken.cancellation().isPresent()) {
                 return resultForCancellation(
-                        invocation, callToken, executionContext.elapsedMillis());
+                        invocation, callToken, executionContext.elapsedMillis(), snapshot);
             }
             return ToolExecutionResult.completed(
                     invocation,
                     output.get(),
                     executionContext.elapsedMillis(),
-                    toolPresentation(invocation.name()));
+                    snapshot == null
+                            ? toolPresentation(invocation.name())
+                            : snapshot.presentation(invocation.name()));
         } catch (RuntimeException e) {
             if (callToken.cancellation().isPresent()) {
                 return resultForCancellation(
-                        invocation, callToken, executionContext.elapsedMillis());
+                        invocation, callToken, executionContext.elapsedMillis(), snapshot);
             }
             return ToolExecutionResult.failed(
                     invocation,
                     e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage(),
                     executionContext.elapsedMillis(),
-                    toolPresentation(invocation.name()));
+                    snapshot == null
+                            ? toolPresentation(invocation.name())
+                            : snapshot.presentation(invocation.name()));
         } finally {
             if (timeoutTask != null) {
                 timeoutTask.cancel(false);
@@ -1636,15 +1764,18 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     private ToolExecutionResult resultForCancellation(
-            ToolInvocation invocation, CancellationToken token, long elapsedMillis) {
+            ToolInvocation invocation, CancellationToken token, long elapsedMillis,
+            ToolSnapshot snapshot) {
         CancellationToken.Cancellation cancellation = token.cancellation()
                 .orElse(new CancellationToken.Cancellation(
                         CancellationToken.Reason.INTERRUPTED, "工具执行被中断"));
-        ToolPresentation presentation = toolPresentation(invocation.name());
+        ToolPresentation presentation = snapshot == null
+                ? toolPresentation(invocation.name())
+                : snapshot.presentation(invocation.name());
         if (cancellation.reason() == CancellationToken.Reason.TIMEOUT) {
             return ToolExecutionResult.timedOut(
                     invocation,
-                    toolTimeoutSeconds(invocation.name()),
+                    toolTimeoutSeconds(invocation.name(), snapshot),
                     elapsedMillis,
                     presentation);
         }
@@ -1682,7 +1813,19 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     /** 单个工具的执行上限：声明过独立超时用声明值，否则继承批次超时。 */
     private long toolTimeoutSeconds(String toolName) {
-        Tool tool = toolName == null ? null : tools.get(toolName);
+        return toolTimeoutSeconds(toolName, null);
+    }
+
+    private long toolTimeoutSeconds(String toolName, ToolSnapshot snapshot) {
+        Tool tool;
+        if (toolName == null) {
+            tool = null;
+        } else if (snapshot == null) {
+            tool = activeTool(toolName);
+        } else {
+            ToolBinding binding = snapshot.binding(toolName);
+            tool = binding == null ? null : binding.tool();
+        }
         if (tool != null && tool.hasOwnTimeout()) {
             return tool.timeoutSeconds();
         }
@@ -1690,14 +1833,14 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     public ToolCancellationCapability toolCancellationCapability(String toolName) {
-        Tool tool = toolName == null ? null : tools.get(toolName);
+        Tool tool = toolName == null ? null : activeTool(toolName);
         return tool == null
                 ? ToolCancellationCapability.INTERRUPT_ONLY
                 : tool.cancellationCapability();
     }
 
     public boolean hasTool(String name) {
-        return tools.containsKey(name);
+        return activeTool(name) != null;
     }
 
     private static String mcpDescription(McpToolDescriptor descriptor) {
@@ -1784,6 +1927,66 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public enum ToolCancellationCapability {
         COOPERATIVE,
         INTERRUPT_ONLY
+    }
+
+    /** 一次模型回复所对应的不可变工具定义与执行器绑定。 */
+    public static final class ToolSnapshot {
+        private final ToolRegistry owner;
+        private final long catalogVersion;
+        private final List<LlmClient.Tool> definitions;
+        private final Map<String, ToolBinding> bindings;
+
+        private ToolSnapshot(ToolRegistry owner, long catalogVersion,
+                             List<LlmClient.Tool> definitions,
+                             Map<String, ToolBinding> bindings) {
+            this.owner = Objects.requireNonNull(owner, "owner");
+            this.catalogVersion = catalogVersion;
+            this.definitions = List.copyOf(definitions == null ? List.of() : definitions);
+            this.bindings = Map.copyOf(bindings == null ? Map.of() : bindings);
+        }
+
+        public List<LlmClient.Tool> definitions() {
+            return definitions;
+        }
+
+        public long catalogVersion() {
+            return catalogVersion;
+        }
+
+        /** 按模型可见定义收窄快照，执行绑定仍来自同一次捕获。 */
+        public ToolSnapshot filter(Set<String> names) {
+            if (names == null) {
+                return this;
+            }
+            List<LlmClient.Tool> filtered = definitions.stream()
+                    .filter(definition -> names.contains(definition.name()))
+                    .toList();
+            return withDefinitions(filtered);
+        }
+
+        /** 使用已冻结的模型定义替换展示列表，保留快照捕获的全部执行绑定。 */
+        public ToolSnapshot withDefinitions(List<LlmClient.Tool> expectedDefinitions) {
+            List<LlmClient.Tool> frozen = List.copyOf(
+                    expectedDefinitions == null ? List.of() : expectedDefinitions);
+            // 展示列表可以按角色、allowlist 或能力范围收窄，但隐藏工具仍需保留
+            // 原始绑定，以便模型越权调用时进入统一的 CAPABILITY_DENIED 管线，
+            // 而不是被误报为快照缺少工具。
+            return new ToolSnapshot(owner, catalogVersion, frozen, bindings);
+        }
+
+        private ToolBinding binding(String name) {
+            return bindings.get(name);
+        }
+
+        private ToolPresentation presentation(String name) {
+            ToolBinding binding = binding(name);
+            return binding == null
+                    ? ToolPresentation.generic(name)
+                    : binding.tool().presentation();
+        }
+    }
+
+    private record ToolBinding(Tool tool, McpRegisteredTool mcpTool) {
     }
 
     public record Tool(String name, String description, JsonNode parameters,
@@ -1975,6 +2178,22 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                     elapsedMillis,
                     ToolStatus.ERROR,
                     ToolErrorCode.EXECUTION_FAILED,
+                    true,
+                    List.of(),
+                    List.of(),
+                    presentation);
+        }
+
+        private static ToolExecutionResult staleToolSnapshot(
+                ToolInvocation invocation, String message, ToolPresentation presentation) {
+            return new ToolExecutionResult(
+                    invocation.id(),
+                    invocation.name(),
+                    invocation.argumentsJson(),
+                    message,
+                    0,
+                    ToolStatus.REJECTED,
+                    ToolErrorCode.STALE_TOOL_SNAPSHOT,
                     true,
                     List.of(),
                     List.of(),

@@ -305,10 +305,16 @@ public class Agent implements AutoCloseable {
 
                     @Override
                     public List<LlmClient.Tool> toolDefinitions(int iteration) {
-                        List<LlmClient.Tool> definitions = toolRegistry.getToolDefinitions();
-                        logRequestContext("react iteration=" + iteration, definitions);
+                        return toolSnapshot(iteration).definitions();
+                    }
+
+                    @Override
+                    public com.devcli.tool.ToolRegistry.ToolSnapshot toolSnapshot(int iteration) {
+                        com.devcli.tool.ToolRegistry.ToolSnapshot snapshot =
+                                toolRegistry.snapshotForCurrentAccess();
+                        logRequestContext("react iteration=" + iteration, snapshot.definitions());
                         streamRenderer.beginThinking();
-                        return definitions;
+                        return snapshot;
                     }
 
                     @Override
@@ -416,6 +422,13 @@ public class Agent implements AutoCloseable {
                     public List<ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
                                                                   int iteration) {
                         return executeToolCalls(toolCalls, iteration);
+                    }
+
+                    @Override
+                    public List<ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
+                                                                  int iteration,
+                                                                  com.devcli.tool.ToolRegistry.ToolSnapshot snapshot) {
+                        return executeToolCalls(toolCalls, iteration, snapshot);
                     }
 
                     @Override
@@ -993,6 +1006,13 @@ public class Agent implements AutoCloseable {
     }
 
     private List<ToolExecutionResult> executeToolCalls(List<LlmClient.ToolCall> toolCalls, int iteration) {
+        return executeToolCalls(toolCalls, iteration, null);
+    }
+
+    private List<ToolExecutionResult> executeToolCalls(
+            List<LlmClient.ToolCall> toolCalls,
+            int iteration,
+            com.devcli.tool.ToolRegistry.ToolSnapshot snapshot) {
         List<ToolInvocation> invocations = new ArrayList<>();
         for (LlmClient.ToolCall toolCall : toolCalls) {
             String toolName = toolCall.function().name();
@@ -1005,7 +1025,7 @@ public class Agent implements AutoCloseable {
         if (invocations.size() > 1) {
             log.info("Executing {} tool calls in parallel (iteration={})", invocations.size(), iteration);
         }
-        List<ToolExecutionResult> results = toolRegistry.executeTools(invocations);
+        List<ToolExecutionResult> results = toolRegistry.executeTools(invocations, snapshot);
         for (ToolExecutionResult result : results) {
             log.debug("Tool result preview [{}]: {}", result.name(), preview(result.result(), 300));
             emitToolResultSummary(result);

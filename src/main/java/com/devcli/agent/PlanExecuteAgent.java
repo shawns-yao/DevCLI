@@ -539,7 +539,12 @@ public class PlanExecuteAgent {
 
                     @Override
                     public List<LlmClient.Tool> toolDefinitions(int iteration) {
-                        return activeTaskToolRegistry().getToolDefinitions();
+                        return toolSnapshot(iteration).definitions();
+                    }
+
+                    @Override
+                    public ToolRegistry.ToolSnapshot toolSnapshot(int iteration) {
+                        return activeTaskToolRegistry().snapshotForCurrentAccess();
                     }
 
                     @Override
@@ -598,6 +603,13 @@ public class PlanExecuteAgent {
                     public List<ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
                                                                   int iteration) {
                         return executeToolCalls(task.getId(), toolCalls);
+                    }
+
+                    @Override
+                    public List<ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
+                                                                  int iteration,
+                                                                  ToolRegistry.ToolSnapshot snapshot) {
+                        return executeToolCalls(task.getId(), toolCalls, snapshot);
                     }
 
                     @Override
@@ -777,6 +789,13 @@ public class PlanExecuteAgent {
     }
 
     private List<ToolExecutionResult> executeToolCalls(String taskId, List<LlmClient.ToolCall> toolCalls) {
+        return executeToolCalls(taskId, toolCalls, null);
+    }
+
+    private List<ToolExecutionResult> executeToolCalls(
+            String taskId,
+            List<LlmClient.ToolCall> toolCalls,
+            ToolRegistry.ToolSnapshot snapshot) {
         List<ToolInvocation> invocations = new ArrayList<>();
         for (LlmClient.ToolCall toolCall : toolCalls) {
             String toolName = toolCall.function().name();
@@ -789,7 +808,7 @@ public class PlanExecuteAgent {
         if (invocations.size() > 1) {
             log.info("Task {} executing {} tool calls in parallel", taskId, invocations.size());
         }
-        List<ToolExecutionResult> results = activeTaskToolRegistry().executeTools(invocations);
+        List<ToolExecutionResult> results = activeTaskToolRegistry().executeTools(invocations, snapshot);
         for (ToolExecutionResult result : results) {
             log.debug("Task {} tool result preview [{}]: {}", taskId, result.name(), preview(result.result(), 300));
         }

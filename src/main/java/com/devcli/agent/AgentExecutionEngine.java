@@ -31,6 +31,11 @@ final class AgentExecutionEngine<R> {
 
         List<LlmClient.Tool> toolDefinitions(int iteration);
 
+        /** 当前轮模型可见定义与执行绑定的不可变快照；旧委托可返回 null 保持兼容。 */
+        default ToolRegistry.ToolSnapshot toolSnapshot(int iteration) {
+            return null;
+        }
+
         LlmClient.StreamListener streamListener();
 
         default RunEventSink eventSink() {
@@ -86,6 +91,14 @@ final class AgentExecutionEngine<R> {
 
         List<ToolRegistry.ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
                                                             int iteration);
+
+        /** 使用与模型请求相同的工具快照执行当前轮调用。 */
+        default List<ToolRegistry.ToolExecutionResult> executeTools(
+                List<LlmClient.ToolCall> toolCalls,
+                int iteration,
+                ToolRegistry.ToolSnapshot snapshot) {
+            return executeTools(toolCalls, iteration);
+        }
 
         default void afterToolResults(LlmClient.ChatResponse response,
                                       List<ToolRegistry.ToolExecutionResult> toolResults,
@@ -255,14 +268,19 @@ final class AgentExecutionEngine<R> {
                 emitState(eventSink, RunEvent.ExecutionState.THINKING,
                         iteration, "正在请求模型生成下一步动作");
                 LlmClient.ChatResponse response;
+                ToolRegistry.ToolSnapshot toolSnapshot;
                 try (SamplingRequestCoordinator.RequestScope ignored =
                              samplingRequests.begin(samplingRequestId(iteration))) {
                     eventSink.emit(RunEvent.ModelContext.from(
                             iteration, List.copyOf(delegate.history())));
                     LlmClient.ToolChoice requestedToolChoice = delegate.toolChoice(iteration);
+                    toolSnapshot = delegate.toolSnapshot(iteration);
+                    List<LlmClient.Tool> toolDefinitions = toolSnapshot == null
+                            ? delegate.toolDefinitions(iteration)
+                            : toolSnapshot.definitions();
                     response = llmClient.chat(
                             delegate.history(),
-                            delegate.toolDefinitions(iteration),
+                            toolDefinitions,
                             new RunEventStreamListener(eventSink),
                             contextReferenceGuard.toolChoice(requestedToolChoice));
                 }
@@ -312,7 +330,7 @@ final class AgentExecutionEngine<R> {
                     emitState(eventSink, RunEvent.ExecutionState.TOOL_EXECUTING,
                             iteration, response.toolCalls().size() + " 个工具调用开始执行");
                     List<ToolRegistry.ToolExecutionResult> returnedResults = delegate.executeTools(
-                            response.toolCalls(), iteration);
+                            response.toolCalls(), iteration, toolSnapshot);
                     ToolResultReconciler.Reconciliation reconciliation =
                             ToolResultReconciler.reconcile(
                                     response.toolCalls(), returnedResults, delegate::toolPresentation);
