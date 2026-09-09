@@ -21,6 +21,15 @@ public class McpResourceCache {
         staleUrisByServer.remove(serverName);
     }
 
+    public void removeServer(String serverName) {
+        if (serverName == null || serverName.isBlank()) {
+            return;
+        }
+        byServer.remove(serverName);
+        staleServers.remove(serverName);
+        staleUrisByServer.remove(serverName);
+    }
+
     public List<McpResourceDescriptor> get(String serverName) {
         if (serverName == null || isServerStale(serverName)) {
             return List.of();

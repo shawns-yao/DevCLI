@@ -2,6 +2,7 @@ package com.devcli.mcp;
 
 import com.devcli.mcp.config.McpConfigLoader;
 import com.devcli.mcp.config.McpServerConfig;
+import com.devcli.mcp.protocol.McpToolDescriptor;
 import com.devcli.tool.ToolRegistry;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -258,6 +259,36 @@ class McpServerManagerTest {
         assertTrue(manager.logs("missing").contains("未找到"));
     }
 
+    @Test
+    void reloadingConfigurationRevokesToolsFromRemovedServers() throws Exception {
+        manager.close();
+        McpServerConfig replacement = httpConfig(webServer);
+        McpConfigLoader loader = new McpConfigLoader(tempConfigPath(), tempConfigPath(), tempConfigPath()) {
+            @Override
+            public Map<String, McpServerConfig> load() {
+                return Map.of("new", replacement);
+            }
+        };
+        manager = new McpServerManager(registry, Path.of("."), loader);
+
+        McpToolDescriptor staleDescriptor = new McpToolDescriptor(
+                "old", "stale", McpToolDescriptor.namespaced("old", "stale"),
+                "stale tool", null);
+        registry.registerMcpTool(staleDescriptor, ignored -> "stale");
+
+        McpServer oldServer = new McpServer("old", new McpServerConfig());
+        oldServer.tools(List.of(staleDescriptor));
+        seedServer(oldServer);
+        assertTrue(registry.hasTool("mcp__old__stale"));
+
+        manager.loadConfiguredServers();
+
+        assertFalse(registry.hasTool("mcp__old__stale"),
+                "配置重载后已移除 server 的工具必须从 ToolRegistry 撤销");
+        assertNull(manager.server("old"));
+        assertNotNull(manager.server("new"));
+    }
+
     // ---- helpers ----
 
     private void enqueueInitialize() {
@@ -329,6 +360,22 @@ class McpServerManagerTest {
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private void seedServer(McpServer server) {
+        try {
+            java.lang.reflect.Field f = McpServerManager.class.getDeclaredField("servers");
+            f.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            Map<String, McpServer> map = (Map<String, McpServer>) f.get(manager);
+            map.put(server.name(), server);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static Path tempConfigPath() {
+        return Path.of(System.getProperty("java.io.tmpdir"), "devcli-mcp-test.json");
     }
 
     private static void restoreProperty(String key, String value) {

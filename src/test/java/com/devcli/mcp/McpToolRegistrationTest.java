@@ -153,6 +153,49 @@ class McpToolRegistrationTest {
         });
     }
 
+    @Test
+    void failedContextualReplacementKeepsPreviousServerToolSet(@TempDir Path tempDir) throws Exception {
+        withAuditDir(tempDir, () -> {
+            ToolRegistry registry = new ToolRegistry();
+            registry.registerMcpTool(sampleDescriptor("demo", "old"), args -> "old");
+            McpToolDescriptor first = sampleDescriptor("demo", "first");
+            McpToolDescriptor second = sampleDescriptor("demo", "second");
+
+            assertThrows(IllegalStateException.class, () ->
+                    registry.replaceContextualMcpToolOutputsForServer(
+                            "demo", List.of(first, second), 2,
+                            descriptor -> {
+                                if ("second".equals(descriptor.name())) {
+                                    throw new IllegalStateException("factory failed");
+                                }
+                                return (args, context) -> ToolOutput.text("new");
+                            }));
+
+            assertTrue(registry.hasTool("mcp__demo__old"));
+            assertFalse(registry.hasTool("mcp__demo__first"));
+            assertFalse(registry.hasTool("mcp__demo__second"));
+            assertEquals("old", registry.executeTool("mcp__demo__old", "{}"));
+        });
+    }
+
+    @Test
+    void failedOutputReplacementKeepsPreviousServerToolSet(@TempDir Path tempDir) throws Exception {
+        withAuditDir(tempDir, () -> {
+            ToolRegistry registry = new ToolRegistry();
+            registry.registerMcpTool(sampleDescriptor("demo", "old"), args -> "old");
+
+            assertThrows(IllegalStateException.class, () ->
+                    registry.replaceMcpToolOutputsForServer(
+                            "demo", List.of(sampleDescriptor("demo", "new")), 2,
+                            descriptor -> {
+                                throw new IllegalStateException("factory failed");
+                            }));
+
+            assertTrue(registry.hasTool("mcp__demo__old"));
+            assertFalse(registry.hasTool("mcp__demo__new"));
+        });
+    }
+
     private static McpToolDescriptor sampleDescriptor() throws Exception {
         return sampleDescriptor("demo", "echo");
     }

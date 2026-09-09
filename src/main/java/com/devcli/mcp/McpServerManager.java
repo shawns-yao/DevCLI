@@ -75,8 +75,17 @@ public class McpServerManager implements AutoCloseable {
         notifyExtensionObserver();
     }
 
-    public void loadConfiguredServers() throws IOException {
+    public synchronized void loadConfiguredServers() throws IOException {
         Map<String, McpServerConfig> configs = configLoader.load();
+        for (McpServer server : servers.values()) {
+            unregisterTools(server);
+            server.close();
+            toolRegistry.removeMcpToolTrustPolicy(server.name());
+            resourceCache.removeServer(server.name());
+            toolDiscoveryCache.remove(server.name());
+            reconnectScheduled.remove(server.name());
+            reconnectAttempts.remove(server.name());
+        }
         servers.clear();
         configs.forEach((name, config) -> servers.put(name, new McpServer(name, config)));
         notifyExtensionObserver();
@@ -449,6 +458,9 @@ public class McpServerManager implements AutoCloseable {
     }
 
     private void start(McpServer server) {
+        if (!isCurrentServer(server)) {
+            return;
+        }
         unregisterTools(server);
         server.close();
         if (server.config().isDisabled()) {
@@ -468,6 +480,10 @@ public class McpServerManager implements AutoCloseable {
             client.initialize();
             registerNotificationHandlers(server, client);
             List<McpToolDescriptor> tools = buildToolList(server, client);
+            if (!isCurrentServer(server)) {
+                client.close();
+                return;
+            }
             server.client(client);
             server.markStarted();
             replaceTools(server, client, tools);
@@ -478,6 +494,9 @@ public class McpServerManager implements AutoCloseable {
             recordConnectionEvent(server, McpConnectionEvent.Type.READY, "ready");
         } catch (Exception e) {
             server.close();
+            if (!isCurrentServer(server)) {
+                return;
+            }
             server.errorMessage(e.getMessage());
             server.status(McpServerStatus.ERROR);
             recordConnectionEvent(server, McpConnectionEvent.Type.ERROR, e.getMessage());
@@ -601,7 +620,13 @@ public class McpServerManager implements AutoCloseable {
         NotificationRouter router = new NotificationRouter();
         router.on("notifications/tools/list_changed", ignored -> {
             try {
+                if (!isCurrentServer(server)) {
+                    return;
+                }
                 List<McpToolDescriptor> tools = buildToolList(server, client);
+                if (!isCurrentServer(server)) {
+                    return;
+                }
                 server.markToolsChanged();
                 replaceTools(server, client, tools);
                 server.tools(tools);
@@ -678,11 +703,15 @@ public class McpServerManager implements AutoCloseable {
         }
     }
 
-    private void unregisterTools(McpServer server) {
+    private synchronized void unregisterTools(McpServer server) {
         for (McpToolDescriptor tool : server.tools()) {
             toolRegistry.unregisterMcpTool(tool.namespacedName());
         }
         server.tools(List.of());
+    }
+
+    private boolean isCurrentServer(McpServer server) {
+        return server != null && servers.get(server.name()) == server;
     }
 
     private static long elapsedMillis(long startedAtNanos) {
