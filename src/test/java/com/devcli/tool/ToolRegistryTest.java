@@ -202,6 +202,17 @@ class ToolRegistryTest {
     }
 
     @Test
+    void toolDefinitionsUseDeterministicNameOrder() {
+        try (ToolRegistry registry = new ToolRegistry()) {
+            List<String> names = registry.snapshotForCurrentAccess().definitions().stream()
+                    .map(com.devcli.llm.LlmClient.Tool::name)
+                    .toList();
+
+            assertEquals(names.stream().sorted().toList(), names);
+        }
+    }
+
+    @Test
     void prefetchIgnoresSingleLetterPromptNoiseWhenSelectingMcpTools() {
         ToolRegistry registry = new ToolRegistry();
         for (String toolName : List.of(
