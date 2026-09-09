@@ -887,7 +887,10 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         Set<String> allowlist = allowedToolNames.get();
         Map<String, ToolBinding> bindings = new LinkedHashMap<>();
         List<LlmClient.Tool> definitions = new ArrayList<>();
-        for (Tool tool : tools.values()) {
+        List<Tool> orderedTools = tools.values().stream()
+                .sorted(Comparator.comparing(Tool::name))
+                .toList();
+        for (Tool tool : orderedTools) {
             bindings.put(tool.name(), new ToolBinding(tool, mcpTools.get(tool.name())));
             if (isToolDefinitionVisible(tool.name())
                     && scope.permits(tool.effect())
@@ -924,6 +927,16 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         mcpTrustPolicies.put(normalized,
                 policy == null ? McpToolTrustPolicy.untrusted() : policy);
         invalidateToolSearchIndex();
+    }
+
+    public void removeMcpToolTrustPolicy(String serverName) {
+        String normalized = normalizeMcpServerName(serverName);
+        if (normalized == null) {
+            return;
+        }
+        if (mcpTrustPolicies.remove(normalized) != null) {
+            invalidateToolSearchIndex();
+        }
     }
 
     /**
@@ -1094,25 +1107,13 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public synchronized void replaceMcpToolOutputsForServer(String serverName, List<McpToolDescriptor> newTools,
                                                             long lifecycleVersion,
                                                             Function<McpToolDescriptor, Function<String, ToolOutput>> invokerFactory) {
-        Objects.requireNonNull(serverName, "serverName");
-        Objects.requireNonNull(newTools, "newTools");
         Objects.requireNonNull(invokerFactory, "invokerFactory");
-        setMcpServerLifecycleVersion(serverName, lifecycleVersion);
-        String prefix = "mcp__" + serverName + "__";
-        List<String> existing = mcpTools.keySet().stream()
-                .filter(name -> name.startsWith(prefix))
-                .toList();
-        for (String toolName : existing) {
-            mcpTools.remove(toolName);
-            tools.remove(toolName);
-            activatedMcpToolDefinitions.remove(toolName);
-        }
-        if (!existing.isEmpty()) {
-            invalidateToolSearchIndex();
-        }
-        for (McpToolDescriptor descriptor : newTools) {
-            registerMcpToolOutput(descriptor, invokerFactory.apply(descriptor));
-        }
+        replaceContextualMcpToolOutputsForServer(serverName, newTools, lifecycleVersion,
+                descriptor -> {
+                    Function<String, ToolOutput> invoker = Objects.requireNonNull(
+                            invokerFactory.apply(descriptor), "MCP invoker");
+                    return (argumentsJson, ignored) -> invoker.apply(argumentsJson);
+                });
     }
 
     public synchronized void replaceContextualMcpToolOutputsForServer(
@@ -1123,21 +1124,60 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         Objects.requireNonNull(serverName, "serverName");
         Objects.requireNonNull(newTools, "newTools");
         Objects.requireNonNull(invokerFactory, "invokerFactory");
-        setMcpServerLifecycleVersion(serverName, lifecycleVersion);
         String prefix = "mcp__" + serverName + "__";
         List<String> existing = mcpTools.keySet().stream()
                 .filter(name -> name.startsWith(prefix))
                 .toList();
+
+        // 先完成整批构造，任何 descriptor / invoker 失败都不能破坏当前已发布集合。
+        Set<String> pendingNames = new HashSet<>();
+        List<PendingMcpTool> pending = new ArrayList<>();
+        for (McpToolDescriptor descriptor : newTools) {
+            Objects.requireNonNull(descriptor, "descriptor");
+            String toolName = descriptor.namespacedName();
+            if (toolName == null || toolName.isBlank() || !pendingNames.add(toolName)) {
+                throw new IllegalArgumentException("MCP 工具批次包含重复或空名称");
+            }
+            if (tools.containsKey(toolName) && !existing.contains(toolName)) {
+                throw new IllegalArgumentException("工具名称已被其他注册项占用: " + toolName);
+            }
+            McpToolTrustPolicy policy = mcpTrustPolicies.getOrDefault(
+                    normalizeMcpServerName(descriptor.serverName()),
+                    McpToolTrustPolicy.untrusted());
+            if (policy.isDenied(descriptor.name())) {
+                continue;
+            }
+            McpToolInvoker invoker = Objects.requireNonNull(
+                    invokerFactory.apply(descriptor), "MCP invoker");
+            McpRegisteredTool registered = new McpRegisteredTool(descriptor, invoker);
+            Tool tool = new Tool(
+                    toolName,
+                    mcpDescription(descriptor),
+                    descriptor.inputSchema(),
+                    args -> "MCP 工具不应通过 Map<String,String> 入口执行",
+                    ToolEffect.fromMcp(descriptor, policy),
+                    -1,
+                    ToolCancellationCapability.COOPERATIVE,
+                    ToolPresentation.generic(toolName)
+            );
+            pending.add(new PendingMcpTool(toolName, registered, tool));
+        }
+
+        setMcpServerLifecycleVersion(serverName, lifecycleVersion);
         for (String toolName : existing) {
             mcpTools.remove(toolName);
             tools.remove(toolName);
             activatedMcpToolDefinitions.remove(toolName);
         }
-        if (!existing.isEmpty()) {
+        if (!existing.isEmpty() || !pending.isEmpty()) {
             invalidateToolSearchIndex();
         }
-        for (McpToolDescriptor descriptor : newTools) {
-            registerContextualMcpToolOutput(descriptor, invokerFactory.apply(descriptor));
+        for (PendingMcpTool item : pending) {
+            mcpTools.put(item.name(), item.registered());
+            tools.put(item.name(), item.tool());
+        }
+        if (!pending.isEmpty()) {
+            invalidateToolSearchIndex();
         }
     }
 
@@ -1249,8 +1289,12 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
             toolResultCache.put(fingerprint, output);
             return output;
         });
-        executionPipeline.register(ToolExecutionPipeline.Stage.RESULT_GOVERNANCE, (context, chain) ->
-                governToolOutput(context.name(), context.invocationId(), chain.proceed(context)));
+        executionPipeline.register(ToolExecutionPipeline.Stage.RESULT_GOVERNANCE, (context, chain) -> {
+            long started = System.nanoTime();
+            ToolOutput output = chain.proceed(context);
+            return governToolOutput(context.name(), context.invocationId(), output,
+                    elapsedMillis(started));
+        });
     }
 
     /** 文件、网络和记忆查询依赖外部可变状态，不使用短期结果缓存。 */
@@ -1261,8 +1305,13 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     private ToolOutput governToolOutput(String name, String invocationId, ToolOutput output) {
+        return governToolOutput(name, invocationId, output, 0L);
+    }
+
+    private ToolOutput governToolOutput(String name, String invocationId, ToolOutput output,
+                                        long elapsedMillis) {
         ToolOutput normalized = output == null ? ToolOutput.success("") : output;
-        return ToolResultSizeManager.processOutput(name, invocationId, normalized);
+        return ToolResultSizeManager.processOutput(name, invocationId, normalized, elapsedMillis);
     }
 
     private ToolOutput executeWithAudit(ToolExecutionPipeline.Context context,
@@ -2075,6 +2124,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     private record McpRegisteredTool(McpToolDescriptor descriptor, McpToolInvoker invoker) {}
+
+    private record PendingMcpTool(String name, McpRegisteredTool registered, Tool tool) {}
 
     @FunctionalInterface
     public interface McpToolInvoker {

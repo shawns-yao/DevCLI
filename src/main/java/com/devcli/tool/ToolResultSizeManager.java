@@ -125,6 +125,11 @@ public final class ToolResultSizeManager {
 
     /** 治理完整 ToolOutput，并把可恢复引用作为强类型 side channel 继续向下游传播。 */
     public static ToolOutput processOutput(String toolName, String toolUseId, ToolOutput output) {
+        return processOutput(toolName, toolUseId, output, 0L);
+    }
+
+    public static ToolOutput processOutput(String toolName, String toolUseId,
+                                           ToolOutput output, long elapsedMillis) {
         ToolOutput normalized = output == null ? ToolOutput.success("") : output;
         ManagedResult managed = manage(
                 toolName, toolUseId, normalized.hasImageParts(), normalized.text());
@@ -132,7 +137,21 @@ public final class ToolResultSizeManager {
                 normalized.status(), normalized.errorCode(), normalized.retryable(),
                 managed.text(), normalized.imageParts(), normalized.modifiedResources(),
                 normalized.sideChannels());
-        return managed.artifact() == null ? result : result.withSideChannel(managed.artifact());
+        if (managed.artifact() == null) return result;
+        ToolResultArtifact base = managed.artifact();
+        ToolResultArtifact enriched = new ToolResultArtifact(
+                base.classification(), base.originalChars(), base.originalBytes(),
+                base.previewChars(), base.artifactRef(), base.nextCursor(), base.sha256(),
+                toolUseId, normalized.status().name(), normalized.errorCode().name(),
+                extractExitCode(normalized.text()), Math.max(0L, elapsedMillis));
+        return result.withSideChannel(enriched);
+    }
+
+    private static int extractExitCode(String text) {
+        if (text == null) return Integer.MIN_VALUE;
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("(?i)\\bexit(?:\\s+code)?\\s*[:=]\\s*(-?\\d+)").matcher(text);
+        return matcher.find() ? Integer.parseInt(matcher.group(1)) : Integer.MIN_VALUE;
     }
 
     private static ManagedResult manage(String toolName, String toolUseId,

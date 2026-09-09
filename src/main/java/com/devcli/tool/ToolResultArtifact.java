@@ -10,7 +10,12 @@ public record ToolResultArtifact(
         int previewChars,
         String artifactRef,
         String nextCursor,
-        String sha256
+        String sha256,
+        String toolCallId,
+        String status,
+        String errorCode,
+        int exitCode,
+        long elapsedMillis
 ) implements ToolSideChannel {
     public ToolResultArtifact {
         classification = classification == null ? "" : classification;
@@ -20,5 +25,17 @@ public record ToolResultArtifact(
         artifactRef = artifactRef == null ? "" : artifactRef;
         nextCursor = nextCursor == null ? "" : nextCursor;
         sha256 = sha256 == null ? "" : sha256;
+        toolCallId = toolCallId == null ? "" : toolCallId;
+        status = status == null ? "" : status;
+        errorCode = errorCode == null ? "" : errorCode;
+        exitCode = Math.max(Integer.MIN_VALUE, exitCode);
+        elapsedMillis = Math.max(0L, elapsedMillis);
+    }
+
+    public ToolResultArtifact(String classification, long originalChars, long originalBytes,
+                              int previewChars, String artifactRef, String nextCursor,
+                              String sha256) {
+        this(classification, originalChars, originalBytes, previewChars, artifactRef,
+                nextCursor, sha256, "", "", "", Integer.MIN_VALUE, 0L);
     }
 }
