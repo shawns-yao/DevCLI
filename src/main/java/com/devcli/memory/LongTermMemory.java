@@ -358,7 +358,8 @@ public class LongTermMemory implements Memory, AutoCloseable {
                             .anyMatch(value -> MemoryQueryTokenizer.matches(value, queryTokens));
                 })
                 .sorted(Comparator.comparingDouble(
-                        (MemoryEntry entry) -> keywordMatchScore(entry, query, queryTokens)).reversed())
+                                (MemoryEntry entry) -> keywordMatchScore(entry, query, queryTokens)).reversed()
+                        .thenComparing(MemoryEntry::getId))
                 .limit(Math.max(0, limit))
                 .collect(Collectors.toList());
     }

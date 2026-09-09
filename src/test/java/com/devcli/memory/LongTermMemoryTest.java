@@ -108,6 +108,50 @@ class LongTermMemoryTest {
     }
 
     @Test
+    void shouldUseStableIdOrderWhenKeywordScoresTie() {
+        Instant timestamp = Instant.parse("2026-01-01T00:00:00Z");
+        MemoryEntry laterId = new MemoryEntry("z-memory", "shared keyword beta",
+                MemoryEntry.MemoryType.FACT, timestamp, null, 5);
+        MemoryEntry earlierId = new MemoryEntry("a-memory", "shared keyword alpha",
+                MemoryEntry.MemoryType.FACT, timestamp, null, 5);
+        LongTermMemoryStore reverseCandidateStore = new LongTermMemoryStore() {
+            private final List<MemoryEntry> entries = List.of(laterId, earlierId);
+
+            @Override
+            public List<MemoryEntry> loadAll() {
+                return entries;
+            }
+
+            @Override
+            public List<String> searchCandidateIds(String query, int limit) {
+                return List.of(laterId.getId(), earlierId.getId());
+            }
+
+            @Override
+            public boolean upsert(MemoryEntry entry) {
+                return true;
+            }
+
+            @Override
+            public void delete(String id) {
+            }
+
+            @Override
+            public void clear() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+
+        try (LongTermMemory deterministic = new LongTermMemory(reverseCandidateStore, tempDir)) {
+            assertEquals(List.of("a-memory", "z-memory"), deterministic.search("shared keyword", 5)
+                    .stream().map(MemoryEntry::getId).toList());
+        }
+    }
+
+    @Test
     void shouldDeleteEntry() {
         memory.store(new MemoryEntry("f1", "测试内容", MemoryEntry.MemoryType.FACT, null, 5));
         assertTrue(memory.delete("f1"));
