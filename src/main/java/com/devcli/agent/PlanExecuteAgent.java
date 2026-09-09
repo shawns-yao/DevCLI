@@ -8,6 +8,8 @@ import com.devcli.llm.LlmClient;
 import com.devcli.llm.LlmTraceLogger;
 import com.devcli.lsp.LspDiagnosticReport;
 import com.devcli.memory.ConversationHistoryCompactor;
+import com.devcli.memory.CompactionContext;
+import com.devcli.memory.CompactionResult;
 import com.devcli.memory.MemoryManager;
 import com.devcli.memory.TokenBudget;
 import com.devcli.context.ContextProfile;
@@ -198,7 +200,9 @@ public class PlanExecuteAgent {
         int trigger = profile.historyTriggerTokens(toolDefinitionTokens);
         try {
             historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(toolRegistry.getProjectPath()));
-            boolean compacted = historyCompactor.compactIfNeeded(messages, trigger);
+            CompactionResult compaction = historyCompactor.compactIfNeeded(
+                    messages, CompactionContext.forTrigger(trigger));
+            boolean compacted = compaction.compacted();
             if (compacted && out != null) {
                 out.println("📦 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
             }

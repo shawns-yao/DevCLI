@@ -47,6 +47,7 @@ final class AgentRuntimeSupport {
                                    java.util.function.Supplier<String> restoreSectionSupplier,
                                    java.util.function.Supplier<CompactBoundaryRuntimeState> runtimeStateSupplier) {
         compactor.setCompactionSummaryCache(memoryManager.getCompactionSummaryCache());
+        compactor.setSessionSnapshotSupplier(memoryManager.getSessionMemory()::snapshot);
         compactor.setPostCompactContextSupplier(restoreSectionSupplier);
         compactor.setCompactBoundaryRuntimeStateSupplier(runtimeStateSupplier);
         compactor.setMicrocompactOutputRoot(Path.of(toolRegistry.getProjectPath()));

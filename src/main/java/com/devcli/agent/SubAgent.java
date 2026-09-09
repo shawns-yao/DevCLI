@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.hook.HookLifecycle;
 import com.devcli.llm.LlmClient;
+import com.devcli.memory.CompactionContext;
+import com.devcli.memory.CompactionResult;
 import com.devcli.llm.LlmException;
 import com.devcli.llm.LlmTraceLogger;
 import com.devcli.lsp.LspDiagnosticReport;
@@ -377,8 +379,10 @@ public class SubAgent {
             historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(toolRegistry.getProjectPath()));
             int toolDefinitionTokens = TokenBudget.estimateToolDefinitionsTokens(
                     toolRegistry.getToolDefinitions());
-            boolean compacted = historyCompactor.compactIfNeeded(
-                    history, profile.historyTriggerTokens(toolDefinitionTokens));
+            CompactionResult compaction = historyCompactor.compactIfNeeded(
+                    history, CompactionContext.forTrigger(
+                            profile.historyTriggerTokens(toolDefinitionTokens)));
+            boolean compacted = compaction.compacted();
             if (compacted && out != null) {
                 out.println("📦 [" + name + "] 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
             }

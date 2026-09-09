@@ -5,6 +5,7 @@ import com.devcli.config.ConfigResolver;
 import com.devcli.hook.HookLifecycle;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.ConversationHistoryCompactor;
+import com.devcli.memory.CompactionContext;
 import com.devcli.memory.TokenBudget;
 import com.devcli.prompt.PromptRepository;
 import com.devcli.runtime.CancellationContext;
@@ -442,8 +443,9 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             };
         }
         @Override public void beforeIteration(int iteration, AgentBudget currentBudget) {
-            compactor.compactIfNeeded(history, ContextProfile.from(client).historyTriggerTokens(
-                    TokenBudget.estimateToolDefinitionsTokens(tools)));
+            compactor.compactIfNeeded(history, CompactionContext.forTrigger(
+                    ContextProfile.from(client).historyTriggerTokens(
+                            TokenBudget.estimateToolDefinitionsTokens(tools))));
             if (registry.getSkillContextBuffer() != null) {
                 String pending = registry.getSkillContextBuffer().drain();
                 if (!pending.isBlank()) history.add(LlmClient.Message.internalUser(pending));

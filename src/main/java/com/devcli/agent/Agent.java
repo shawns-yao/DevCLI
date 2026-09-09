@@ -7,6 +7,8 @@ import com.devcli.context.ContextProfile;
 import com.devcli.context.TokenUsageFormatter;
 import com.devcli.lsp.LspDiagnosticReport;
 import com.devcli.memory.ConversationHistoryCompactor;
+import com.devcli.memory.CompactionContext;
+import com.devcli.memory.CompactionResult;
 import com.devcli.memory.ExplicitMemoryHints;
 import com.devcli.memory.MemoryManager;
 import com.devcli.memory.TokenBudget;
@@ -636,7 +638,9 @@ public class Agent implements AutoCloseable {
             if (projectPath != null) {
                 historyCompactor.setMicrocompactOutputRoot(Path.of(projectPath));
             }
-            boolean compacted = historyCompactor.compactIfNeeded(conversationHistory, trigger);
+            CompactionResult compaction = historyCompactor.compactIfNeeded(
+                    conversationHistory, CompactionContext.forTrigger(trigger));
+            boolean compacted = compaction.compacted();
             if (compacted) {
                 renderer().stream().println("📦 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
             }
@@ -748,7 +752,8 @@ public class Agent implements AutoCloseable {
 
     public boolean compactHistoryForPersistence(int triggerTokens) {
         if (triggerTokens <= 0) return false;
-        return historyCompactor.compactIfNeeded(conversationHistory, triggerTokens);
+        return historyCompactor.compactIfNeeded(
+                conversationHistory, CompactionContext.forTrigger(triggerTokens)).compacted();
     }
 
     /**
