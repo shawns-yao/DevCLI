@@ -3,6 +3,7 @@ package com.devcli.tool.command;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolExecutionContext;
 import com.devcli.tool.ToolOutput;
+import com.devcli.tool.CommandResultMetadata;
 
 import java.nio.file.Path;
 
@@ -33,15 +34,18 @@ public interface CommandExecutionService {
 
         public ToolOutput toToolOutput() {
             if (timedOut) {
-                return ToolOutput.timedOut(output);
+                return ToolOutput.timedOut(output)
+                        .withSideChannel(new CommandResultMetadata(exitCode, true, cancelled));
             }
             if (cancelled) {
-                return ToolOutput.cancelled(output);
+                return ToolOutput.cancelled(output)
+                        .withSideChannel(new CommandResultMetadata(exitCode, false, true));
             }
             String text = "命令执行完成 (exit code: " + exitCode + ")\n" + output;
-            return exitCode == 0
+            ToolOutput result = exitCode == 0
                     ? ToolOutput.success(text)
                     : ToolOutput.error(ToolErrorCode.EXECUTION_FAILED, text, false);
+            return result.withSideChannel(new CommandResultMetadata(exitCode, false, false));
         }
 
         public String toToolText() {

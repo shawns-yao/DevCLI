@@ -100,7 +100,7 @@ public final class CompactionFactLedger {
 
     public synchronized List<Fact> activeFacts() {
         return facts.values().stream()
-                .filter(f -> f.status() != FactStatus.SUPERSEDED && f.status() != FactStatus.EXPIRED)
+                .filter(f -> f.status() == FactStatus.ACTIVE || f.status() == FactStatus.UNRESOLVED)
                 .toList();
     }
 
@@ -110,6 +110,25 @@ public final class CompactionFactLedger {
 
     public synchronized List<Fact> missingFrom(String text) {
         String value = text == null ? "" : text;
-        return activeFacts().stream().filter(f -> !value.contains(f.value())).toList();
+        return activeFacts().stream().filter(f -> !containsFact(value, f.value())).toList();
+    }
+
+    private static boolean containsFact(String text, String fact) {
+        if (text == null || fact == null || fact.isBlank()) return false;
+        int from = 0;
+        while (from <= text.length() - fact.length()) {
+            int index = text.indexOf(fact, from);
+            if (index < 0) return false;
+            int end = index + fact.length();
+            boolean leftWord = index > 0 && isWordCharacter(text.charAt(index - 1));
+            boolean rightWord = end < text.length() && isWordCharacter(text.charAt(end));
+            if (!leftWord && !rightWord) return true;
+            from = index + 1;
+        }
+        return false;
+    }
+
+    private static boolean isWordCharacter(char value) {
+        return Character.isLetterOrDigit(value) || value == '_' || value == '$';
     }
 }

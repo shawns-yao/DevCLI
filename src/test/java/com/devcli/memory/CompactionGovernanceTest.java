@@ -1,9 +1,12 @@
 package com.devcli.memory;
 
+import com.devcli.llm.LlmClient;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 import java.nio.file.Files;
+import java.util.List;
+import java.util.Map;
 
 class CompactionGovernanceTest {
     @Test
@@ -31,6 +34,26 @@ class CompactionGovernanceTest {
                 .validate("compile failure is completed", ledger);
         assertFalse(result.valid());
         assertEquals(1, result.stateConflicts().size());
+    }
+
+    @Test
+    void factsUseProvidedRuntimeEventIdsAndSessionEpoch() {
+        var ledger = new CompactionFactLedger();
+        var context = CompactionContext.forTrigger(
+                100, "project", "session-1", 9, 2,
+                40, 50, "hash", null, List.of(), Map.of(), List.of(41L, 49L));
+
+        new CompactionFactExtractor().extract(
+                List.of(LlmClient.Message.user("modified: src/App.java"),
+                        LlmClient.Message.assistant("收到")), ledger, context);
+
+        var fact = ledger.snapshot().stream()
+                .filter(value -> value.type() == CompactionFactLedger.Type.MODIFIED_FILE)
+                .findFirst().orElseThrow();
+        assertEquals(41L, fact.sequence());
+        assertEquals(9L, fact.contextEpoch());
+        assertTrue(fact.sourceMessageId().contains("session-1"));
+        assertTrue(fact.sourceMessageId().contains("event:41"));
     }
 
     @Test

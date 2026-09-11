@@ -4,6 +4,7 @@ import com.devcli.rag.RagEvidencePayload;
 import com.devcli.rag.RagEvidenceSideChannel;
 import com.devcli.policy.SensitiveDataRedactor;
 import com.devcli.tool.ToolResultArtifact;
+import com.devcli.tool.CommandResultMetadata;
 import com.devcli.tool.ToolSideChannel;
 import com.devcli.tool.ToolStatus;
 import com.devcli.tool.ToolErrorCode;
@@ -270,10 +271,19 @@ public class SessionMemory {
                                           List<String> modifiedResources) {
         if (toolName == null || result == null) return;
         String safeArgs = argsJson == null ? "" : argsJson;
-        EvidenceKind kind = classifyEvidence(toolName, result, status);
+        CommandResultMetadata commandMetadata = sideChannels == null ? null : sideChannels.stream()
+                .filter(CommandResultMetadata.class::isInstance)
+                .map(CommandResultMetadata.class::cast)
+                .findFirst().orElse(null);
+        EvidenceKind kind = classifyEvidence(toolName, result, status, commandMetadata);
         int importance = baselineImportance(kind, toolName, result);
         String reference = evidenceReference(toolName, safeArgs, result);
         String normalizedResult = normalizeEvidenceResult(kind, toolName, safeArgs, result, reference);
+        if (commandMetadata != null) {
+            normalizedResult += "\n[command_metadata exit_code=" + commandMetadata.exitCode()
+                    + " timed_out=" + commandMetadata.timedOut()
+                    + " cancelled=" + commandMetadata.cancelled() + "]";
+        }
         ToolResultArtifact artifact = sideChannels == null ? null : sideChannels.stream()
                 .filter(ToolResultArtifact.class::isInstance)
                 .map(ToolResultArtifact.class::cast)
@@ -401,8 +411,14 @@ public class SessionMemory {
                 evidence.importance, evidence.agentId, evidence.stepId, evidence.sequence);
     }
 
-    private static EvidenceKind classifyEvidence(String toolName, String result, ToolStatus status) {
+    private static EvidenceKind classifyEvidence(String toolName, String result, ToolStatus status,
+                                                 CommandResultMetadata commandMetadata) {
         if (status != null && status != ToolStatus.SUCCESS) {
+            return EvidenceKind.FAILURE;
+        }
+        if (commandMetadata != null
+                && (commandMetadata.timedOut() || commandMetadata.cancelled()
+                || commandMetadata.exitCode() != 0)) {
             return EvidenceKind.FAILURE;
         }
         String normalized = result == null ? "" : result.toLowerCase(Locale.ROOT);
@@ -432,7 +448,6 @@ public class SessionMemory {
 
     private static boolean looksLikeFailure(String normalized) {
         return normalized.contains("toolstatus=error") || normalized.contains("execution_failed")
-                || normalized.contains("exit code: 1") || normalized.contains("exitcode=1")
                 || normalized.contains("build failure") || normalized.contains("失败")
                 || normalized.contains("exception") || normalized.contains("error:");
     }

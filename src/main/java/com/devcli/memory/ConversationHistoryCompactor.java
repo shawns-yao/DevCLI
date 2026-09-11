@@ -1,5 +1,7 @@
 package com.devcli.memory;
 
+import java.util.stream.Collectors;
+
 import com.devcli.context.ContextProfile;
 import com.devcli.llm.LlmClient;
 import com.devcli.tool.ToolResultArtifactStore;
@@ -20,6 +22,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -292,9 +295,8 @@ public class ConversationHistoryCompactor {
     private volatile CompactBoundarySnapshot lastBoundarySnapshot;
     private Supplier<SessionMemory.SessionSnapshot> sessionSnapshotSupplier;
     private final String boundaryScopeId = UUID.randomUUID().toString();
-    private final CompactBoundarySnapshotStore boundarySnapshotStore =
-            new CompactBoundarySnapshotStore(Path.of(System.getProperty("user.home"), ".devcli",
-                    "compaction-boundaries", boundaryScopeId + ".json"));
+    private volatile CompactBoundarySnapshotStore boundarySnapshotStore =
+            new CompactBoundarySnapshotStore(defaultBoundarySnapshotPath());
     private volatile CompactionResult lastCompactionResult =
             new CompactionResult(false, List.of(), null, List.of(), 0, 0);
     private volatile CompactionSummaryEnvelope lastSummaryEnvelope;
@@ -387,6 +389,7 @@ public class ConversationHistoryCompactor {
     private Supplier<CompactBoundaryRuntimeState> compactBoundaryRuntimeStateSupplier;
     private Supplier<CompactionSourceCursor> compactionSourceCursorSupplier;
     private Supplier<List<LlmClient.Message>> originalHistorySupplier;
+    private Function<LlmClient.Message, String> imageSummarySupplier = message -> "";
     private BooleanSupplier summaryCallGuard = () -> true;
     private Consumer<LlmClient.ChatResponse> summaryUsageConsumer = response -> { };
     private Path microcompactOutputRoot;
@@ -412,15 +415,30 @@ public class ConversationHistoryCompactor {
     }
 
     /** Runtime 事件日志中可持久定位的摘要来源范围。 */
-    public record CompactionSourceCursor(long eventStart, long eventEnd, String sourceHash) {
+    public record CompactionSourceCursor(long eventStart, long eventEnd, String sourceHash,
+                                         List<Long> messageEventIds,
+                                         Map<String, Long> messageEventIdsByFingerprint) {
         public CompactionSourceCursor {
             eventStart = Math.max(0L, eventStart);
             eventEnd = Math.max(eventStart, eventEnd);
             sourceHash = sourceHash == null || sourceHash.isBlank() ? "none" : sourceHash.trim();
+            messageEventIds = messageEventIds == null ? List.of()
+                    : messageEventIds.stream().map(value -> value == null ? 0L : Math.max(0L, value)).toList();
+            messageEventIdsByFingerprint = messageEventIdsByFingerprint == null ? Map.of()
+                    : Map.copyOf(messageEventIdsByFingerprint);
+        }
+
+        public CompactionSourceCursor(long eventStart, long eventEnd, String sourceHash) {
+            this(eventStart, eventEnd, sourceHash, List.of(), Map.of());
+        }
+
+        public CompactionSourceCursor(long eventStart, long eventEnd, String sourceHash,
+                                      List<Long> messageEventIds) {
+            this(eventStart, eventEnd, sourceHash, messageEventIds, Map.of());
         }
 
         public static CompactionSourceCursor none() {
-            return new CompactionSourceCursor(0L, 0L, "none");
+            return new CompactionSourceCursor(0L, 0L, "none", List.of(), Map.of());
         }
     }
 
@@ -490,9 +508,20 @@ public class ConversationHistoryCompactor {
         this.compactionSourceCursorSupplier = compactionSourceCursorSupplier;
     }
 
+    public void setBoundarySnapshotPath(Path path) {
+        if (path != null) {
+            this.boundarySnapshotStore = new CompactBoundarySnapshotStore(path);
+        }
+    }
+
     /** 提供 Runtime 原始事件重放结果，用于周期性纠正滚动摘要。 */
     public void setOriginalHistorySupplier(Supplier<List<LlmClient.Message>> supplier) {
         this.originalHistorySupplier = supplier;
+    }
+
+    /** 可选 OCR/视觉摘要钩子；摘要输入始终保留图片字节指纹，避免依赖描述文本。 */
+    public void setImageSummarySupplier(Function<LlmClient.Message, String> supplier) {
+        this.imageSummarySupplier = supplier == null ? message -> "" : supplier;
     }
 
     /** 将摘要调用纳入外层 Agent 的 Token 预算；不设置时保持兼容的无限制行为。 */
@@ -545,6 +574,18 @@ public class ConversationHistoryCompactor {
         List<LlmClient.Message> candidate = history == null ? null : new ArrayList<>(history);
         boolean changed = compactIfNeededInternal(candidate, effective);
         if (changed) {
+            String projected = candidate.stream().map(m -> m.content() == null ? "" : m.content())
+                    .collect(Collectors.joining("\n"));
+            var coverage = consistencyValidator.validate(projected, factLedger);
+            int after = TokenBudget.estimateMessagesTokens(candidate);
+            if (consistencyValidator.hasBlockingMissingFacts(coverage)
+                    || !fitsPostCompactionBudget(after)) {
+                lastCompactionResult = new CompactionResult(false, factLedger.snapshot(), null,
+                        List.of("final_coverage_or_budget_rejected"), before, before);
+                return lastCompactionResult;
+            }
+        }
+        if (changed) {
             history.clear();
             history.addAll(candidate);
             if (previous == lastCompactionResult) {
@@ -559,6 +600,14 @@ public class ConversationHistoryCompactor {
         return lastCompactionResult;
     }
 
+    private boolean fitsPostCompactionBudget(int tokens) {
+        if (llmClient == null) return true;
+        int window = llmClient.maxContextWindow();
+        int output = Math.max(0, llmClient.maxOutputTokens());
+        if (window <= 0 || window == Integer.MAX_VALUE) return true;
+        return tokens + output < window;
+    }
+
     /** Compatibility API retained for existing callers. */
     public boolean compactIfNeeded(List<LlmClient.Message> history, int triggerTokens) {
         return compactIfNeeded(history, CompactionContext.forTrigger(triggerTokens)).compacted();
@@ -566,7 +615,8 @@ public class ConversationHistoryCompactor {
 
     private boolean compactIfNeededInternal(List<LlmClient.Message> history, CompactionContext context) {
         if (history == null || history.isEmpty()) return false;
-        activeCompactionContext = context == null ? CompactionContext.empty() : context;
+        activeCompactionContext = enrichCompactionContext(
+                context == null ? CompactionContext.empty() : context, history);
         int triggerTokens = activeCompactionContext.triggerTokens();
         int preCompactionTokens = TokenBudget.estimateMessagesTokens(history);
         boolean metrics = Boolean.parseBoolean(System.getProperty(COMPACTION_METRICS_PROPERTY, "false"));
@@ -610,6 +660,8 @@ public class ConversationHistoryCompactor {
         // 保留本次压缩开始时的原始消息快照。MicroCompact 只改变模型窗口投影，
         // 语义摘要仍必须从原始工具结果取证，避免“先裁剪、再摘要”的二次损失。
         List<LlmClient.Message> summarySourceHistory = List.copyOf(history);
+        // 所有出口（包括冷却期与熔断降级）共用原始事实集。
+        mergeContextFacts(activeCompactionContext);
 
         // 历史淘汰只属于一次已经发生的触发事件。不要用淘汰后的 token 再次决定
         // 是否触发语义压缩，否则微压缩会把 crossed 状态悄悄清掉，导致模型摘要永远不执行。
@@ -628,6 +680,7 @@ public class ConversationHistoryCompactor {
             // 但 token 再次越过阈值说明有真实新增内容，允许结构性截断兜底，
             // 否则冷却期内会裸奔撞窗口。
             if (TokenBudget.estimateMessagesTokens(history) >= triggerTokens) {
+                factExtractor.extract(summarySourceHistory, factLedger, activeCompactionContext);
                 boolean truncated = fallbackTruncate(history, triggerTokens);
                 if (truncated) {
                     lastFallbackTimestamp = now;
@@ -646,6 +699,7 @@ public class ConversationHistoryCompactor {
         if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
             // circuit breaker 已熔断：启用降级截断策略
             log.warn("压缩连续失败 {} 次，启用降级截断策略", MAX_CONSECUTIVE_FAILURES);
+            factExtractor.extract(summarySourceHistory, factLedger, activeCompactionContext);
             boolean truncated = fallbackTruncate(history, triggerTokens);
             if (truncated) {
                 lastFallbackTimestamp = now;
@@ -690,8 +744,8 @@ public class ConversationHistoryCompactor {
         //    若有 prev 摘要，oldMsgs 包括 prev 那条 user 消息（增量摘要 prompt 会把它单独识别出来当 base）
         List<LlmClient.Message> oldMsgs = new ArrayList<>(summarySourceHistory.subList(systemEnd, splitIdx));
         if (oldMsgs.isEmpty()) return false;
-        mergeContextFacts(activeCompactionContext);
-        factExtractor.extract(oldMsgs, factLedger);
+        factExtractor.extract(oldMsgs, factLedger, activeCompactionContext);
+        configureBoundarySnapshotStore(activeCompactionContext);
         lastBoundarySnapshot = captureBoundarySnapshot(summarySourceHistory.size());
         try { boundarySnapshotStore.save(lastBoundarySnapshot); }
         catch (IOException e) { log.warn("failed to persist compaction boundary snapshot", e); }
@@ -764,7 +818,8 @@ public class ConversationHistoryCompactor {
         summary = compactionRepairer.repair(summary, factValidation);
         CompactionConsistencyValidator.Validation repairedFacts =
                 consistencyValidator.validate(summary, factLedger);
-        if (consistencyValidator.hasBlockingMissingFacts(repairedFacts)
+        if (summary.length() > MAX_SUMMARY_CHARS
+                || consistencyValidator.hasBlockingMissingFacts(repairedFacts)
                 || !repairedFacts.stateConflicts().isEmpty()) {
             log.warn("compaction summary still misses blocking facts; retaining original history");
             triggerStateStore.recordRetry(pendingTrigger);
@@ -819,7 +874,9 @@ public class ConversationHistoryCompactor {
                 sourceCursor.eventEnd() > 0 ? 0 : splitIdx,
                 checkpointProjectionHash,
                 sourceCursor.eventStart(),
-                sourceCursor.eventEnd());
+                sourceCursor.eventEnd(),
+                boundarySnapshotStore.file().toString(),
+                lastBoundarySnapshot == null ? "none" : lastBoundarySnapshot.checksum());
         rebuilt.set(systemEnd, LlmClient.Message.internalUser(
                 SUMMARY_MARKER + metadata.renderBoundaryBlock() + "\n" + summary.trim()));
         history.clear();
@@ -880,6 +937,54 @@ public class ConversationHistoryCompactor {
         } catch (Exception e) {
             log.warn("compaction source cursor supplier failed; use legacy message range", e);
             return CompactionSourceCursor.none();
+        }
+    }
+
+    private CompactionContext enrichCompactionContext(CompactionContext input,
+                                                      List<LlmClient.Message> history) {
+        SessionMemory.SessionSnapshot snapshot = input.sessionSnapshot();
+        if (snapshot == null && sessionSnapshotSupplier != null) {
+            try {
+                snapshot = sessionSnapshotSupplier.get();
+            } catch (RuntimeException ignored) {
+                snapshot = null;
+            }
+        }
+        CompactionSourceCursor cursor = compactionSourceCursor();
+        String projectId = input.projectId();
+        if (projectId.isBlank() && microcompactOutputRoot != null) {
+            projectId = microcompactOutputRoot.toString();
+        }
+        String sessionId = input.sessionId();
+        if (sessionId.isBlank() && snapshot != null) sessionId = snapshot.taskId();
+        if (sessionId.isBlank()) sessionId = "session-" + sha256(projectId).substring(0, 12);
+        long epoch = input.contextEpoch() > 0 ? input.contextEpoch()
+                : snapshot == null ? cursor.eventEnd() : snapshot.sequence();
+        long historySequence = input.historySequence() > 0 ? input.historySequence()
+                : snapshot == null ? history.size() : snapshot.sequence();
+        long sourceStart = input.sourceEventStart() > 0 ? input.sourceEventStart() : cursor.eventStart();
+        long sourceEnd = input.sourceEventEnd() > 0 ? input.sourceEventEnd() : cursor.eventEnd();
+        String sourceHash = input.sourceHash();
+        if (sourceHash.isBlank() || "none".equalsIgnoreCase(sourceHash)) sourceHash = cursor.sourceHash();
+        List<Long> messageEventIds = input.sourceMessageEventIds().isEmpty()
+                ? cursor.messageEventIds() : input.sourceMessageEventIds();
+        Map<String, Long> messageEventIdsByFingerprint = input.sourceMessageEventIdsByFingerprint().isEmpty()
+                ? cursor.messageEventIdsByFingerprint() : input.sourceMessageEventIdsByFingerprint();
+        return CompactionContext.forTrigger(input.triggerTokens(), projectId, sessionId, epoch,
+                historySequence, sourceStart, sourceEnd, sourceHash, snapshot,
+                input.sourceFacts(), input.taskState().isEmpty()
+                        ? snapshot == null ? Map.of() : snapshot.workState() : input.taskState(),
+                messageEventIds, messageEventIdsByFingerprint);
+    }
+
+    private void configureBoundarySnapshotStore(CompactionContext context) {
+        if (context == null) return;
+        String project = context.projectId().isBlank() ? "default" : context.projectId();
+        String session = context.sessionId().isBlank() ? "default" : context.sessionId();
+        Path root = Path.of(System.getProperty("user.home"), ".devcli", "compaction-boundaries");
+        Path target = root.resolve("boundary-" + sha256(project + "\n" + session) + ".json");
+        if (!target.equals(boundarySnapshotStore.file())) {
+            boundarySnapshotStore = new CompactBoundarySnapshotStore(target);
         }
     }
 
@@ -1456,30 +1561,7 @@ public class ConversationHistoryCompactor {
         // 1) 拼成完整字符串（不截断）
         StringBuilder full = new StringBuilder();
         for (LlmClient.Message m : messages) {
-            full.append(m.role().toUpperCase(Locale.ROOT)).append(": ");
-            if (m.content() != null) {
-                String content = m.content();
-                if (content.length() > 12_000) {
-                    String toolCallId = m.toolCallId() == null || m.toolCallId().isBlank()
-                                    ? "history-" + Integer.toHexString(System.identityHashCode(m))
-                                    : m.toolCallId();
-                    DeterministicContentReducer.Reduced reduced =
-                            DeterministicContentReducer.reduceAndStore(content, 6_000, toolCallId);
-                    full.append("[content_kind=").append(reduced.kind())
-                            .append(", original_chars=").append(reduced.originalChars())
-                            .append(", reference=").append(reduced.reference()).append("]\n")
-                            .append(reduced.preview());
-                } else {
-                    full.append(content);
-                }
-            }
-            if (m.toolCalls() != null) {
-                for (LlmClient.ToolCall tc : m.toolCalls()) {
-                    full.append("\n  TOOL_CALL ").append(tc.function().name())
-                            .append(": ").append(tc.function().arguments());
-                }
-            }
-            full.append("\n\n");
+            full.append(renderMessageForSummary(m)).append("\n\n");
         }
 
         // 2) 整体请求能放进摘要模型窗口时直接单次摘要。固定字符阈值会把长窗口模型
@@ -1517,16 +1599,121 @@ public class ConversationHistoryCompactor {
                 SNAPSHOT_PROTOCOL + content);
     }
 
+    private String renderMessageForSummary(LlmClient.Message message) {
+        if (message == null) return "";
+        StringBuilder rendered = new StringBuilder()
+                .append(message.role().toUpperCase(Locale.ROOT)).append(": ");
+        String content = message.content() == null ? "" : message.content();
+        boolean reducible = "tool".equalsIgnoreCase(message.role())
+                || message.toolCallId() != null && !message.toolCallId().isBlank()
+                || DeterministicContentReducer.classify(content) != DeterministicContentReducer.Kind.TEXT;
+        if (content.length() > 12_000 && reducible) {
+            String toolCallId = message.toolCallId() == null || message.toolCallId().isBlank()
+                    ? "history-" + Integer.toHexString(System.identityHashCode(message))
+                    : message.toolCallId();
+            try {
+                DeterministicContentReducer.Reduced reduced =
+                        DeterministicContentReducer.reduceAndStore(content, 6_000, toolCallId);
+                rendered.append("[content_kind=").append(reduced.kind())
+                        .append(", original_chars=").append(reduced.originalChars())
+                        .append(", reference=").append(reduced.reference()).append("]\n")
+                        .append(reduced.preview());
+                appendMetadata(rendered, reduced.metadata());
+            } catch (IOException e) {
+                rendered.append(content);
+            }
+        } else {
+            rendered.append(content);
+        }
+        if (message.toolCalls() != null) {
+            for (LlmClient.ToolCall call : message.toolCalls()) {
+                if (call == null || call.function() == null) continue;
+                rendered.append("\n  TOOL_CALL ").append(call.function().name())
+                        .append(": ").append(call.function().arguments());
+            }
+        }
+        appendImageMetadata(rendered, message);
+        return rendered.toString();
+    }
+
+    private void appendImageMetadata(StringBuilder rendered, LlmClient.Message message) {
+        if (!message.hasContentParts()) return;
+        for (LlmClient.ContentPart part : message.contentParts()) {
+            if (part == null || !part.isImage()) continue;
+            rendered.append("\n[image_metadata");
+            if (part.mimeType() != null && !part.mimeType().isBlank()) {
+                rendered.append(" mime=").append(part.mimeType());
+            }
+            if (part.imageBase64() != null && !part.imageBase64().isBlank()) {
+                try {
+                    byte[] bytes = Base64.getDecoder().decode(part.imageBase64());
+                    rendered.append(" bytes=").append(bytes.length)
+                            .append(" sha256=").append(sha256Bytes(bytes));
+                } catch (IllegalArgumentException invalidBase64) {
+                    rendered.append(" bytes=invalid");
+                }
+            } else if (part.imageUrl() != null && !part.imageUrl().isBlank()) {
+                rendered.append(" source=").append(part.imageUrl());
+            }
+            rendered.append("]");
+        }
+        try {
+            String vision = imageSummarySupplier.apply(message);
+            if (vision != null && !vision.isBlank()) {
+                rendered.append("\n[vision_summary]").append(vision.trim()).append("[/vision_summary]");
+            }
+        } catch (RuntimeException ignored) {
+            // Visual/OCR providers are optional; byte metadata remains authoritative.
+        }
+    }
+
+    private static void appendMetadata(StringBuilder rendered, Map<String, String> metadata) {
+        if (metadata == null || metadata.isEmpty()) return;
+        rendered.append("\n[content_metadata ");
+        metadata.entrySet().stream().sorted(Map.Entry.comparingByKey())
+                .forEach(entry -> rendered.append(entry.getKey()).append('=').append(entry.getValue()).append(' '));
+        rendered.append(']');
+    }
+
+    private static String sha256Bytes(byte[] bytes) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+        } catch (NoSuchAlgorithmException e) {
+            return "";
+        }
+    }
+
     private String structuredSnapshot(String system, String prompt) throws IOException {
         for (int attempt = 0; attempt < 2; attempt++) {
             String response = chatOnce(system, prompt);
             CompactionSummaryEnvelope envelope = CompactionSummaryEnvelope.parse(response);
-            if (envelope != null && envelope.isValid() && envelope.protectedFacts().isEmpty()) {
+            if (envelope != null && envelope.isValid()) {
                 return normalizeStructuredSummary(response);
+            }
+            // 保留旧版摘要客户端的六段 Markdown 兼容性：历史测试、旧 provider
+            // 以及已落盘的预摘要仍可能返回 Markdown，但不接受任意纯文本或 JSON。
+            if (isLegacyMarkdownSummary(response)) {
+                return response;
             }
             // 有界重试复用来源，不把损坏的模型输出作为事实再次输入。
         }
         throw new IOException("Structured summary protocol rejected after repair; original history retained");
+    }
+
+    private static boolean isLegacyMarkdownSummary(String response) {
+        if (response == null || response.isBlank()) return false;
+        String candidate = response.stripLeading();
+        if (candidate.startsWith("{") || candidate.startsWith("[")
+                || candidate.startsWith("```json")) return false;
+        boolean hasKnownHeading = false;
+        for (String line : response.split("\\R")) {
+            String heading = line.strip().replaceFirst("^#+\\s*", "");
+            if (RollingSummary.SECTIONS.contains(heading)) {
+                hasKnownHeading = true;
+                break;
+            }
+        }
+        return hasKnownHeading && !RollingSummary.parse(response).isEmpty();
     }
 
     /**
@@ -1541,17 +1728,7 @@ public class ConversationHistoryCompactor {
         }
         StringBuilder newContent = new StringBuilder();
         for (LlmClient.Message m : newMessages) {
-            newContent.append(m.role().toUpperCase(Locale.ROOT)).append(": ");
-            if (m.content() != null) {
-                newContent.append(m.content());
-            }
-            if (m.toolCalls() != null) {
-                for (LlmClient.ToolCall tc : m.toolCalls()) {
-                    newContent.append("\n  TOOL_CALL ").append(tc.function().name())
-                            .append(": ").append(tc.function().arguments());
-                }
-            }
-            newContent.append("\n\n");
+            newContent.append(renderMessageForSummary(m)).append("\n\n");
         }
         String rolling = previousSummary;
         String text = newContent.toString();
@@ -1860,6 +2037,14 @@ public class ConversationHistoryCompactor {
             return false;
         }
 
+        configureBoundarySnapshotStore(activeCompactionContext);
+        lastBoundarySnapshot = captureBoundarySnapshot(history.size());
+        try {
+            boundarySnapshotStore.save(lastBoundarySnapshot);
+        } catch (IOException e) {
+            log.warn("failed to persist fallback compaction boundary snapshot", e);
+        }
+
         List<LlmClient.Message> preserved = new ArrayList<>();
 
         // 保留 system 消息
@@ -1867,10 +2052,23 @@ public class ConversationHistoryCompactor {
             preserved.add(history.get(i));
         }
 
-        // 插入降级标记
+        // 插入降级标记；仍使用结构化边界，让 checkpoint/resume 能识别降级结果。
         int keptMessages = history.size() - systemEnd - toRemove;
+        CompactionSourceCursor sourceCursor = compactionSourceCursor();
+        String sourceHash = sourceCursor.eventEnd() > 0 && !"none".equalsIgnoreCase(sourceCursor.sourceHash())
+                ? sourceCursor.sourceHash() : historyFingerprint(history);
+        CompactBoundaryMetadata fallbackMetadata = new CompactBoundaryMetadata(
+                "history", "token_threshold", "fallback", currentTokens,
+                0, history.size(), 0, keptMessages, 0, List.of(), "none", "none", true,
+                0, 0, "fallback", sourceHash,
+                sourceCursor.eventEnd() > 0 ? 0 : systemEnd,
+                sourceCursor.eventEnd() > 0 ? 0 : deleteUpTo,
+                "none", sourceCursor.eventStart(), sourceCursor.eventEnd(),
+                boundarySnapshotStore.file().toString(),
+                lastBoundarySnapshot == null ? "none" : lastBoundarySnapshot.checksum());
         preserved.add(LlmClient.Message.internalUser(
-            "[上下文压缩降级] 由于压缩连续失败，早期对话已截断。"
+            SUMMARY_MARKER + fallbackMetadata.renderBoundaryBlock() + "\n"
+            + "[上下文压缩降级] 由于压缩连续失败，早期对话已截断。"
             + "当前保留最近 " + keptMessages + " 条消息。"
         ));
         preserved.add(LlmClient.Message.assistant(
@@ -1880,6 +2078,46 @@ public class ConversationHistoryCompactor {
         // 保留尾部消息
         preserved.addAll(history.subList(systemEnd + toRemove, history.size()));
 
+        String projection = preserved.stream().map(m -> m.content() == null ? "" : m.content())
+                .collect(Collectors.joining("\n"));
+        var missing = consistencyValidator.validate(projection, factLedger);
+        String protectedFacts = compactionRepairer.repair("", missing);
+        if (!protectedFacts.isBlank()) {
+            preserved.set(systemEnd, LlmClient.Message.internalUser(
+                    preserved.get(systemEnd).content() + protectedFacts));
+        }
+        while (TokenBudget.estimateMessagesTokens(preserved) > targetTokens
+                && removeEarliestFallbackTurn(preserved, systemEnd)) {
+            // Snapshot metadata is cheap compared with retaining an over-budget window.
+        }
+        int fallbackProjectionHashIndex = systemEnd;
+        if (fallbackProjectionHashIndex < preserved.size()) {
+            LlmClient.Message marker = preserved.get(fallbackProjectionHashIndex);
+            String body = marker.content() == null ? "" : marker.content();
+            String projectionHash = ContextProjectionBuilder.fingerprintOf(
+                    preserved.stream().filter(message -> !"system".equals(message.role()))
+                            .map(message -> message.withoutImageContent().withoutReasoningContent()).toList());
+            CompactBoundaryMetadata updated = new CompactBoundaryMetadata(
+                    fallbackMetadata.compactType(), fallbackMetadata.trigger(), fallbackMetadata.mode(),
+                    fallbackMetadata.preTokens(), TokenBudget.estimateMessagesTokens(preserved),
+                    fallbackMetadata.originalMessages(), preserved.size(), fallbackMetadata.retainedMessages(),
+                    body.length(), fallbackMetadata.loadedSkills(), fallbackMetadata.ragEpoch(),
+                    fallbackMetadata.mcpToolSnapshot(), fallbackMetadata.postCompactRestoreEnabled(),
+                    fallbackMetadata.protectedConstraints(), fallbackMetadata.restoredConstraints(),
+                    fallbackMetadata.semanticGuardStatus(), fallbackMetadata.sourceHash(),
+                    fallbackMetadata.sourceStart(), fallbackMetadata.sourceEnd(), projectionHash,
+                    fallbackMetadata.sourceEventStart(), fallbackMetadata.sourceEventEnd(),
+                    fallbackMetadata.snapshotRef(), fallbackMetadata.snapshotChecksum());
+            String summaryBody = CompactBoundaryMetadata.stripBoundaryBlock(
+                    body.substring(SUMMARY_MARKER.length()).trim());
+            preserved.set(fallbackProjectionHashIndex, LlmClient.Message.internalUser(
+                    SUMMARY_MARKER + updated.renderBoundaryBlock() + "\n" + summaryBody));
+        }
+        int candidateTokens = TokenBudget.estimateMessagesTokens(preserved);
+        if (candidateTokens >= currentTokens) {
+            log.warn("fallbackTruncate: protected facts do not reduce the source window; retaining source");
+            return false;
+        }
         history.clear();
         history.addAll(preserved);
 
@@ -1890,9 +2128,28 @@ public class ConversationHistoryCompactor {
         return true;
     }
 
+    private static boolean removeEarliestFallbackTurn(List<LlmClient.Message> messages,
+                                                       int systemEnd) {
+        int first = systemEnd + 2; // marker + assistant acknowledgement
+        if (first >= messages.size()) return false;
+        int nextUser = first + 1;
+        while (nextUser < messages.size()
+                && !"user".equals(messages.get(nextUser).role())) {
+            nextUser++;
+        }
+        if (nextUser >= messages.size()) return false;
+        messages.subList(first, nextUser).clear();
+        return true;
+    }
+
     private static Path defaultCompactionStatePath() {
         return ToolResultArtifactStore.rootDirectory().resolve("compaction-trigger-"
                 + UUID.randomUUID().toString().replace("-", "") + ".properties");
+    }
+
+    private static Path defaultBoundarySnapshotPath() {
+        return Path.of(System.getProperty("user.home"), ".devcli", "compaction-boundaries",
+                "boundary-default.json");
     }
 
     private static Path defaultCompactionStatePath(Path projectPath) {

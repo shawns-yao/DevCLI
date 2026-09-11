@@ -120,6 +120,19 @@ class RunEventJsonCodecTest {
     }
 
     @Test
+    void toolResultProjectsStructuredExitCode() throws Exception {
+        RunEvent.ToolResults event = new RunEvent.ToolResults(List.of(
+                new RunEvent.ToolResultData(
+                        "call_1", "check", "{}", "failed",
+                        "ERROR", "EXECUTION_FAILED", false, 12, 0, 17,
+                        ToolPresentation.defaultFor("check"))));
+
+        JsonNode payload = MAPPER.readTree(RunEventJsonCodec.encode(event, "turn_1"));
+
+        assertEquals(17, payload.path("results").get(0).path("exit_code").asInt());
+    }
+
+    @Test
     void encodesStructuredFailureGuidance() throws Exception {
         RunEvent.FailureGuidance event = new RunEvent.FailureGuidance(
                 "BUDGET_EXHAUSTED", "Token 预算已用尽", "缩小任务范围后重试",

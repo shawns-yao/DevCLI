@@ -102,6 +102,7 @@ public final class RunEventJsonCodec {
                 item.put("retryable", result.retryable());
                 item.put("elapsed_millis", result.elapsedMillis());
                 item.put("image_count", result.imageCount());
+                item.put("exit_code", result.exitCode());
                 writePresentation(item.putObject("presentation"), result.presentation());
             }
         } else if (event instanceof RunEvent.HookInvocationStarted hook) {

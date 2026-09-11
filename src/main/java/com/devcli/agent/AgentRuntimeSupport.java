@@ -1,6 +1,7 @@
 package com.devcli.agent;
 
 import com.devcli.memory.CompactBoundaryRuntimeState;
+import com.devcli.memory.CompactionContext;
 import com.devcli.memory.ConversationHistoryCompactor;
 import com.devcli.memory.MemoryManager;
 import com.devcli.memory.PostCompactRestoreContext;
@@ -67,6 +68,31 @@ final class AgentRuntimeSupport {
                         response.cachedInputTokens());
             }
         });
+    }
+
+    static CompactionContext buildCompactionContext(int triggerTokens,
+                                                    MemoryManager memoryManager,
+                                                    ToolRegistry toolRegistry,
+                                                    String sessionId) {
+        com.devcli.memory.SessionMemory.SessionSnapshot snapshot = memoryManager == null
+                ? null : memoryManager.getSessionMemory().snapshot();
+        String effectiveSession = sessionId == null ? "" : sessionId.trim();
+        if (effectiveSession.isBlank() && snapshot != null) {
+            effectiveSession = snapshot.taskId();
+        }
+        String projectId = toolRegistry == null ? "" : toolRegistry.getProjectPath();
+        long epoch = toolRegistry == null ? 0L
+                : toolRegistry.contextVersionLedger().currentGeneration();
+        long sequence = snapshot == null ? 0L : snapshot.sequence();
+        return CompactionContext.forTrigger(triggerTokens, projectId, effectiveSession,
+                epoch, sequence, 0L, 0L, "none", snapshot,
+                List.of(), snapshot == null ? java.util.Map.of() : snapshot.workState());
+    }
+
+    static CompactionContext buildCompactionContext(int triggerTokens,
+                                                    ToolRegistry toolRegistry,
+                                                    String sessionId) {
+        return buildCompactionContext(triggerTokens, null, toolRegistry, sessionId);
     }
 
     static String buildSkillIndex(SkillRegistry skillRegistry, String activationText,

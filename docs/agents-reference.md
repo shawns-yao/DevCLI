@@ -48,7 +48,8 @@ Worker 完成正常工具循环后才生成 PatchSet；未解决的写入/命令
 | RAG 索引 | `~/.devcli/rag/codebase.db` | `-Ddevcli.rag.dir` |
 | 审计日志 | `~/.devcli/audit/audit-YYYY-MM-DD.jsonl` | `DEVCLI_AUDIT_DIR` / `-Ddevcli.audit.dir` |
 | Side-Git 快照 | `~/.devcli/snapshots/<project_hash>/<worktree_hash>/.git` | `DEVCLI_SNAPSHOT_DIR` / `-Ddevcli.snapshot.dir` |
-| 后台任务 | `~/.devcli/tasks/tasks.db` | — |
+| 压缩边界快照 | `~/.devcli/compaction-boundaries/boundary-<project_session_sha256>.json` | 由 `CompactionContext` 按项目/会话选择 |
+| Runtime 与后台任务 | `~/.devcli/runtime/runtime.db` | 旧 `~/.devcli/tasks/tasks.db` 仅只读导入 |
 
 ### Snapshot Config
 
@@ -117,9 +118,10 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 - 记忆按生命周期分三层：`conversationHistory + RollingSummary` 治理当前线程窗口，`SessionMemory` 保存当前任务共享的 WorkState 与 EvidenceJournal，`LongTermMemory` 保存跨任务稳定事实
 - `SessionMemory` 统一接收幂等 SessionEvent；ReAct、Plan 和 Team 使用 beginTask/completeTask/endTask 轮换任务投影，全部 Prompt 区块共享一个硬 Token 预算；Multi-Agent 保存真实 agentId、stepId、sequence 和 context epoch，并拒绝迟到事件
-- `ConversationHistoryCompactor` 是唯一消息窗口治理点；六段 `RollingSummary` 不保存待办、当前工作或下一步，旧九段摘要只兼容读取；`CompactionSummaryCache` 只保存可复用预摘要，默认 30 分钟过期
+- `ConversationHistoryCompactor` 是唯一消息窗口治理点；六段 `RollingSummary` 不保存待办、当前工作或下一步，旧九段摘要只兼容读取；`CompactionSummaryCache` 只保存可复用预摘要，默认 30 分钟过期。摘要边界同时保存投影指纹、事件范围和稳定快照引用，checkpoint/resume 会校验后再恢复
 - `RuleContext` 加载规则文件和 `/rule add` 强约束，支持 `/rule list`、`/rule remove`；旧 pinned facts 仅列为待分类候选。敏感 `save_memory` 必须通过持久化 `confirmation_id` 和 `confirm_memory` 完成用户确认；票据默认保留 24 小时，完成后可幂等重放终态结果
 - 压缩边界 `<compact_boundary>` 记录已加载 Skill、RAG epoch、MCP 工具快照和压缩后恢复入口状态；RAG epoch 合并当前会话已命中证据与当前项目全局索引版本，MCP 工具快照包含 server 工具数量、schema 指纹和生命周期版本
+- 压缩上下文由 `CompactionContext` 绑定项目、会话、epoch、历史序号和 Runtime 来源事件范围；消息事实优先按稳定消息指纹关联真实事件 ID，`history:index` 只保留兼容回退。摘要和降级截断均经过 `CompactionSemanticGuard`，事实补回后重新校验状态与最终预算
 - 普通用户消息不直接写长期记忆。显式配置独立 Curator 后，任务完成先持久化脱敏、限长的 `TaskMemorySnapshot`，再由空工具、无旧记忆的 `IsolatedMemoryCurator` 输出 `SAVE / CONFIRM / SKIP`；未配置时跳过自动晋升，不创建无人消费的队列作业。除模型推理传输外不提供 Web、MCP、Skill、文件、命令或子 Agent 入口；待确认候选通过 `/memory pending|confirm|reject` 处理
 - 长期记忆只保存跨会话稳定事实，不保存临时指令；显式保存请求如果内容仍然明显临时或低复用，需要确认而不是直接落库；与 SessionMemory 关键事件语义重复的长期记忆在 prompt 注入时会被抑制
 - 长期检索先按 `scope_type/scope_key` 过滤，再融合关键词、向量和新鲜度；实际注入 Turn Context 只批量更新 `recallCount/lastRecalledAt` 作为观测，不刷新新鲜度、不续期、不按召回次数提权。新鲜度以 `lastValidatedAt` 为优先年龄锚点；用户确认、同值重复显式保存等强验证信号累计 `validatedUseCount` 并分档延长 TTL；到期后先软归档
@@ -213,7 +215,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 ### Post-Compact Restore
 
 - ConversationHistoryCompactor 压缩成功后会在摘要确认消息之后、保留尾部之前插入 `[压缩后恢复上下文]`
-- `SessionMemory` 的恢复段不复用完整 system prompt 视图，而是按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 输出短结构化上下文
+- `SessionMemory` 的恢复段不复用完整 system prompt 视图，而是按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 输出短结构化上下文；代码与图片归约元数据会随内容进入摘要输入，图片身份以字节 SHA-256 为准
 - Agent / PlanExecuteAgent / SubAgent 会在恢复段追加 MCP 工具状态和本地 SkillContextBuffer 的已加载 Skill、context、allowedTools 与内容摘要
 - 恢复段通过 `PostCompactRestoreContext` 做统一预算控制和行级去重；SubAgent 恢复区使用 Planner / Worker / Reviewer 角色视图裁剪，Planner 不携带工具证据，Reviewer 不携带会话临时事件
 - RAG 证据从 `search_code` 的工具结果强类型旁路载荷进入 `SessionMemory`；尺寸治理、只读结果缓存和批量执行结果都会保留该载荷。展示文本不再嵌入结构化 JSON；旧 JSON 与旧展示文本只用于历史兼容，typed negativeFact 仍会即时清理旧 symbolVersion。
@@ -222,7 +224,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 - Microcompact 在 LLM 摘要前执行，不删除消息，保持 assistant tool_call 与 tool result 配对。
 - 单条超大工具结果会落盘到 `.devcli/microcompact_tool_outputs/<session>/`，消息中保留 `<microcompact_boundary>`、toolCallId、originalChars 和 storedPath。
-- 最近 2 个 user round 之前的旧 tool_result 会按 toolCallId 成批折叠为 boundary 引用；最近轮次保留原文，避免影响当前任务。
+- 默认只保留最近 4 个工具结果；更早的旧 tool_result 会按 toolCallId 成批折叠为 boundary 引用，记忆型工具、外部查询和失败证据按保护规则保留。
 - `SessionMemory` 压缩后恢复区遇到 microcompact 工具引用时，只输出 toolCallId / originalChars / storedPath，并按 storedPath 或 toolCallId 去重。
 
 ### Terminal Renderer
@@ -277,14 +279,14 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - CLI `/session status|tree|fork|use|new|clear|use-thread` 直接操作同一持久事件树；`/branch` 是兼容别名并只提示一次迁移。Tree 切换只重建模型上下文，不修改工作区文件
 - thread 上下文从 SQLite 恢复最新压缩检查点，并完整追加检查点覆盖事件之后的已完成 turn；没有检查点时恢复全部已完成 turn，不再固定保留最近 20 轮
 - 历史默认达到 32,000 token 时生成持久化检查点，`DEVCLI_RUNTIME_CHECKPOINT_TRIGGER_TOKENS` / `devcli.runtime.checkpoint.trigger.tokens` 可调整，最小 4,000；检查点保存压缩消息、覆盖事件、摘要、token 变化和 `CompactBoundaryMetadata` 运行态快照
-- 检查点候选会移除动态 system prompt、reasoning 和图片正文；同时保存压缩 metadata 与消息树快照（稳定 `id`、`parentId`、role、index），当前默认从压缩边界生成线性 parent 链，为后续分支恢复保留协议字段；旧 SQLite 数据库启动时自动补充 `message_tree_json` 列。保存发生在 `turn.completed` 事件之后，失败只写入 `thread.checkpoint.failed`；最新记录损坏时按时间回退到更早可解析检查点
+- 检查点候选会移除动态 system prompt、reasoning 和图片正文；同时保存压缩 metadata、稳定快照引用/校验和与消息树快照（稳定 `id`、`parentId`、role、index），当前默认从压缩边界生成线性 parent 链，为后续分支恢复保留协议字段；旧 SQLite 数据库启动时自动补充 `message_tree_json` 列。保存发生在 `turn.completed` 事件之后，失败只写入 `thread.checkpoint.failed`；恢复时校验 projection hash、来源事件范围和快照 checksum，最新记录损坏时按时间回退到更早可解析检查点
 - `RunEvent` 统一表达 reasoning/content delta、工具调用、工具结果、turn 终态和 checkpoint 事件；`AgentExecutionEngine` 将模型 StreamListener 回调转换为事件，再通过适配器投影到既有 Renderer 或 Runtime sink
 - `RunEvent` 另外提供 `session.state`（running / idle 等会话生命周期）和 `message.custom`（扩展消息类型、正文、字符串属性）；Runtime session turn 开始和结束会发布状态事件，自定义事件必须经过统一 JSON codec，不允许扩展直接拼接协议文本
 - 模型能力由 `ModelCapabilityRegistry` 统一解析 Provider 别名、上下文窗口、输出上限、prompt cache、工具调用、视觉和 reasoning 能力；`LlmClient` 的上下文策略默认从注册表读取，Provider 客户端只保留实例级差异（例如 Anthropic 的配置化输出上限）
 - Skill、Hook、MCP server 和 CLI command 的发现元数据统一通过 `ExtensionContract` / `ExtensionRegistry` 表达：稳定 id、kind、来源、启用状态、版本、能力和元数据；Main 启动后把命令、Skill、Hook 和 MCP server 注册进目录，`/skill reload` 会原子替换 Skill/Hook 目录，MCP enable/disable/restart 通过 `McpServerManager` 观察者同步 MCP 目录，CLI Skill/MCP 补全优先从统一目录读取。该目录契约不接管各自执行权限，Skill、Hook、MCP 和命令继续使用原有安全与策略管线
 - CLI 活动输入不再使用独立 `PromptQueue` / `ActiveTurnCoordinator`；生产路径唯一使用 `AgentTurnInbox`，由 AgentExecutionEngine 按 Steering / Follow-up 时机注入。旧队列实现已删除，避免两套取消和容量语义并存
 - 验证边界：plain renderer 的 `/help` 与 `/exit` 启动烟测已通过；非交互管道不能证明 JLine 补全、方向键、底部 dock 或 HITL 按键行为，未验证前不引入 TUI differential rendering 改造
-- Runtime JSON 投影集中维护协议字段和转义，每个 payload 固定携带 `schema_version=2`；工具 arguments 优先保持 JSON 对象，无法解析时保留原文本；工具结果携带 status、error_code、retryable、elapsed_millis、presentation 和 image_count，不持久化图片正文
+- Runtime JSON 投影集中维护协议字段和转义，每个 payload 固定携带 `schema_version=2`；工具 arguments 优先保持 JSON 对象，无法解析时保留原文本；工具结果携带 status、error_code、retryable、elapsed_millis、image_count、presentation 和结构化 `exit_code`，退出码来自 `CommandResultMetadata`，不依赖展示文本解析，也不持久化图片正文
 - Runtime runner 收到事件 sink 后可边执行边写入 SQLite/SSE；如果 Provider 没有产生 content delta，服务端才用最终输出补一个 `message.delta`，避免流式回答重复写入
 - 每次交互、后台任务和无头 turn 都在执行线程绑定有效 `RunContext`，其中包含项目路径与取消令牌；已有调用方上下文会跨会话工作线程复用并在任务结束后恢复，只有无外层上下文时才创建临时上下文；预先创建的线程池不读取其他运行的取消状态，线程中断也进入取消语义
 - CLI ReAct 通过 `AgentSessionRuntime.adoptOwned(...).runInCurrentContext(...)` 执行，保留输入监听线程创建的 RunContext 和取消令牌；Runtime API 与无头执行分别使用持久或临时 `AgentSessionRuntime`
@@ -307,7 +309,13 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - ImageProcessor：铺白底/缩放 2000x2000/压缩 5MB
 - 输入：`@image:file:///path.png` / `@image:/path.png` / `@image:relative.png`
 - GLM-5V-Turbo 通过 `/model glm-5v-turbo` 切换
-- 历史 image payload 替换为文本占位，避免旧截图消耗上下文
+- 历史 image payload 替换为文本占位，保留来源、尺寸和字节 SHA-256，避免旧截图消耗上下文
+
+### Deterministic Content Reduction
+
+- `DeterministicContentReducer` 在语义摘要前识别工具输出、代码、图片和普通文本，并把 `metadata` 注入摘要输入。
+- 代码元数据包括文件路径、增删行统计与 diff 指纹、符号、编译位置，以及 `rag_epoch` / `index_epoch` / `symbol_version` / `classpath_epoch`；原文引用仍由工具结果或落盘附件提供。
+- 图片元数据包括来源、MIME、尺寸和图片字节 SHA-256；base64 或本地文件均按解码后的字节计算，无法取得字节时不回退到描述文本哈希。OCR/视觉摘要由可选 provider 注入，未配置时只保留确定性元数据。
 
 ---
 
@@ -350,7 +358,7 @@ checkpoint 协议版本 10；通过 RecoveryState 恢复共享 ExecutionArtifact
 Reviewer 前 Java 硬验证；封装 Maven/javac 命令、扫描、超时、输出解码和失败摘要，无 Maven 时使用 javac 参数文件避免命令行过长
 
 ### ToolRegistry.java
-14 个内置核心工具（含 `edit_file` 精确替换、`confirm_memory` 一次性敏感确认和 `grep_code` 实时精确文本搜索）+ MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult；`ToolExecutionPipeline` 按阶段执行取消、存在性、能力范围、Skill 权限、参数校验、HITL、审计、策略和结果治理；`ToolOutput` / `ToolExecutionResult` 携带 status、errorCode、retryable、imageParts 和 modifiedResources；内置 Provider 通过结构化执行器直接保留参数错误、策略拒绝、命令退出、超时和取消状态；HITL 作为管线中间件，不再覆写 executeTool；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会返回 `search_tools` 引导和 query 示例
+14 个内置核心工具（含 `edit_file` 精确替换、`confirm_memory` 一次性敏感确认和 `grep_code` 实时精确文本搜索）+ MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult；`ToolExecutionPipeline` 按阶段执行取消、存在性、能力范围、Skill 权限、参数校验、HITL、审计、策略和结果治理；`ToolOutput` / `ToolExecutionResult` 携带 status、errorCode、retryable、elapsedMillis、imageParts、sideChannels 和 modifiedResources；命令退出码由 `CommandResultMetadata` 旁路保留并贯通 Runtime 事件与 SessionMemory，不从展示文本提取；内置 Provider 通过结构化执行器直接保留参数错误、策略拒绝、命令退出、超时和取消状态；HITL 作为管线中间件，不再覆写 executeTool；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会返回 `search_tools` 引导和 query 示例
 
 `read_file` 同传行范围与字符范围时优先行范围并返回提示；`edit_file` 会按目标文件的 CRLF/LF 风格对齐匹配文本。
 

@@ -143,15 +143,12 @@ public final class ToolResultSizeManager {
                 base.classification(), base.originalChars(), base.originalBytes(),
                 base.previewChars(), base.artifactRef(), base.nextCursor(), base.sha256(),
                 toolUseId, normalized.status().name(), normalized.errorCode().name(),
-                extractExitCode(normalized.text()), Math.max(0L, elapsedMillis));
+                normalized.sideChannels().stream()
+                        .filter(CommandResultMetadata.class::isInstance)
+                        .map(CommandResultMetadata.class::cast)
+                        .mapToInt(CommandResultMetadata::exitCode).findFirst().orElse(Integer.MIN_VALUE),
+                Math.max(0L, elapsedMillis));
         return result.withSideChannel(enriched);
-    }
-
-    private static int extractExitCode(String text) {
-        if (text == null) return Integer.MIN_VALUE;
-        java.util.regex.Matcher matcher = java.util.regex.Pattern
-                .compile("(?i)\\bexit(?:\\s+code)?\\s*[:=]\\s*(-?\\d+)").matcher(text);
-        return matcher.find() ? Integer.parseInt(matcher.group(1)) : Integer.MIN_VALUE;
     }
 
     private static ManagedResult manage(String toolName, String toolUseId,

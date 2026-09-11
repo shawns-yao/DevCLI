@@ -4,6 +4,9 @@ import com.devcli.agent.AgentTurnInbox;
 import com.devcli.config.ConfigResolver;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.CompactBoundaryMetadata;
+import com.devcli.memory.CompactBoundarySnapshot;
+import com.devcli.memory.CompactBoundarySnapshotStore;
+import com.devcli.memory.CompactionContext;
 import com.devcli.memory.ContextProjectionBuilder;
 import com.devcli.runtime.event.RunEvent;
 import com.devcli.runtime.store.RunStore;
@@ -15,6 +18,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.*;
@@ -24,6 +28,7 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -439,7 +444,37 @@ public class RuntimeThreadStore implements RunStore {
             return com.devcli.memory.ConversationHistoryCompactor.CompactionSourceCursor.none();
         }
         return new com.devcli.memory.ConversationHistoryCompactor.CompactionSourceCursor(
-                start + 1, end, eventRangeHash(visible, start, end));
+                start + 1, end, eventRangeHash(visible, start, end),
+                List.of(), messageEventIdsByFingerprint(visible, start, end));
+    }
+
+    private static Map<String, Long> messageEventIdsByFingerprint(
+            List<RuntimeEvent> visible, long start, long end) {
+        Map<String, Long> result = new LinkedHashMap<>();
+        for (RuntimeEvent event : visible) {
+            if (event.id() <= start || event.id() > end) {
+                continue;
+            }
+            if ("model.context".equals(event.type())) {
+                RunEventJsonCodec.decodeModelContext(event.data()).ifPresent(context ->
+                        context.messages().forEach(message -> result.put(
+                                com.devcli.memory.CompactionFactExtractor.messageKey(
+                                        message.toLlmMessage()), event.id())));
+            } else if ("model.message".equals(event.type())) {
+                RunEventJsonCodec.decodeModelMessage(event.data()).ifPresent(message ->
+                        result.put(com.devcli.memory.CompactionFactExtractor.messageKey(
+                                message.message().toLlmMessage()), event.id()));
+            }
+        }
+        return Map.copyOf(result);
+    }
+
+    public synchronized CompactionContext compactionContext(String threadId, String projectId) {
+        var cursor = compactionSourceCursor(threadId);
+        long epoch = events(threadId, 0).stream().mapToLong(RuntimeEvent::id).max().orElse(0L);
+        return CompactionContext.forTrigger(Integer.MAX_VALUE, projectId, threadId, epoch, epoch,
+                cursor.eventStart(), cursor.eventEnd(), cursor.sourceHash(), null, List.of(), Map.of(),
+                cursor.messageEventIds(), cursor.messageEventIdsByFingerprint());
     }
 
     private static String eventRangeHash(List<RuntimeEvent> events, long start, long end) {
@@ -915,6 +950,7 @@ public class RuntimeThreadStore implements RunStore {
                                 throw new IllegalStateException("checkpoint projection hash mismatch");
                             }
                         }
+                        validateSnapshotReference(metadata);
                         if (metadata.sourceEventEnd() > 0
                                 && !"none".equalsIgnoreCase(metadata.sourceHash())) {
                             List<RuntimeEvent> visible = events(threadId, 0);
@@ -968,6 +1004,27 @@ public class RuntimeThreadStore implements RunStore {
             }
         }
         return false;
+    }
+
+    private static void validateSnapshotReference(CompactBoundaryMetadata metadata) throws Exception {
+        if (metadata == null || metadata.snapshotRef() == null
+                || metadata.snapshotRef().isBlank()
+                || "none".equalsIgnoreCase(metadata.snapshotRef())) {
+            return;
+        }
+        Path reference = Path.of(metadata.snapshotRef()).toAbsolutePath().normalize();
+        CompactBoundarySnapshot snapshot = new CompactBoundarySnapshotStore(reference)
+                .load().orElseThrow(() -> new IOException("compaction boundary snapshot missing"));
+        if (!"none".equalsIgnoreCase(metadata.snapshotChecksum())
+                && !metadata.snapshotChecksum().equalsIgnoreCase(snapshot.checksum())) {
+            throw new IOException("compaction boundary snapshot checksum mismatch");
+        }
+        if (metadata.sourceEventEnd() > 0
+                && (snapshot.sourceEventStart() != metadata.sourceEventStart()
+                || snapshot.sourceEventEnd() != metadata.sourceEventEnd()
+                || !metadata.sourceHash().equalsIgnoreCase(snapshot.sourceHash()))) {
+            throw new IOException("compaction boundary snapshot source mismatch");
+        }
     }
 
     private List<RuntimeEvent> filterVisibleEvents(String threadId, List<RuntimeEvent> events) {

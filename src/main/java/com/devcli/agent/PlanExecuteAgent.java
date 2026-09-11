@@ -105,6 +105,7 @@ public class PlanExecuteAgent {
     private SkillContextBuffer skillContextBuffer;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
     private final TraceRecorder traceRecorder = new TraceRecorder();
+    private volatile String currentSessionTaskId = "";
 
     public PlanExecuteAgent(LlmClient llmClient) {
         this(llmClient, (goal, plan) -> PlanReviewDecision.execute());
@@ -201,7 +202,8 @@ public class PlanExecuteAgent {
         try {
             historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(toolRegistry.getProjectPath()));
             CompactionResult compaction = historyCompactor.compactIfNeeded(
-                    messages, CompactionContext.forTrigger(trigger));
+                    messages, AgentRuntimeSupport.buildCompactionContext(
+                            trigger, memoryManager, toolRegistry, currentSessionTaskId));
             boolean compacted = compaction.compacted();
             if (compacted && out != null) {
                 out.println("📦 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
@@ -236,6 +238,7 @@ public class PlanExecuteAgent {
     public String run(String userInput) {
         log.info("Plan run started: inputLength={}", userInput == null ? 0 : userInput.length());
         String sessionTaskId = "plan-run-" + java.util.UUID.randomUUID().toString().substring(0, 8);
+        currentSessionTaskId = sessionTaskId;
         memoryManager.beginTask(sessionTaskId);
         memoryManager.setActiveProjectScope(toolRegistry.getProjectPath());
         toolRegistry.prefetchToolDefinitionsForInput(userInput);

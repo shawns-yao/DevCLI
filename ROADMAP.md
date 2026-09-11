@@ -454,7 +454,7 @@
 
 ---
 
-## 第18期：Git Side-History 快照与回滚（文件安全网）
+## 第18期：Git Side-History 快照与回滚（文件安全网） ✅ 已落地
 
 **前置依赖**：第 7 期异步执行、第 16 期 TUI 产品化
 
@@ -466,7 +466,8 @@
 - `postTurnSnapshot()`：turn 结束后异步执行第二次快照，commit message 标记 `"post-turn <turn_id>"`
 - `/restore <N>` 命令：从最近 N 个 turn 的 pre-turn 快照中恢复文件到工作区，不改变用户 `.git` 和对话历史
 - `revert_turn` 工具：LLM 可调用的回滚工具，让 Agent 自己能判断"改坏了需要撤销"
-- 快照策略可配：`max_snapshots`（默认保留最近 50 个 turn）、`snapshot_excludes`（默认排除 `.git/`、`node_modules/`、`target/`）
+- 快照策略可配：`devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX`（默认保留最近 50 条）、`devcli.snapshot.excludes` / `DEVCLI_SNAPSHOT_EXCLUDES`
+- 快照提交使用稳定 commit 引用；压缩边界和 Runtime checkpoint 持久化引用、来源范围及 checksum，resume 前重新定位并校验，不依赖随机文件名
 
 **设计参考**：DeepSeek TUI `crates/tui/src/core/engine.rs` 的 `pre_turn_snapshot()` / `post_turn_snapshot()` + `crates/tui/src/core/turn.rs` 的 `pre_tool_snapshot()`。
 
@@ -532,7 +533,7 @@
 - 持久化恢复：进程重启后未完成的任务自动重入队
 
 **Runtime API**：
-- `RuntimeApiServer`：嵌入式 HTTP/SSE 服务端（`devcli serve --http --port 8080`），基于已有的 OkHttp / Javalin 或 Spring Boot 内嵌
+- `RuntimeApiServer`：嵌入式 HTTP/SSE 服务端（`devcli serve --http --port 8080`），基于 JDK `HttpServer`
 - 兼容 OpenAI Assistants API 的端点：
   - `POST /v1/threads`：创建对话线程
   - `POST /v1/threads/{id}/turns`：发起一轮 Agent 交互
@@ -549,12 +550,14 @@
 - OpenAI Assistants API 兼容层设计
 
 **当前 MVP 已落地**：
-- `DurableTaskManager`：SQLite 后台任务队列，默认 `~/.devcli/tasks/tasks.db`
+- `DurableTaskManager`：SQLite 后台任务队列，默认与 Runtime 共用 `~/.devcli/runtime/runtime.db`；旧 `tasks.db` 仅只读导入
 - `/task`、`/task add`、`/task cancel`、`/task log` CLI 闭环
 - 进程启动时将残留 `running` 任务恢复为 `enqueued`
 - Worker Pool 默认 2，可用 `DEVCLI_TASK_WORKERS` / `-Ddevcli.task.workers` 覆盖
 - `RuntimeApiServer`：基于 JDK `HttpServer`，仅监听 `127.0.0.1`
 - `RuntimeThreadStore`：SQLite 保存 thread 与 event 时间线
+- thread 上下文从最新压缩 checkpoint 恢复，并按事件游标追加已完成 turn；checkpoint 损坏时回退到更早可解析记录或事件日志
+- `tool.results` 事件保留结构化耗时、状态、图片数量和命令退出码，退出码来自执行元数据而不是结果文本
 - Runtime API 强制 `DEVCLI_RUNTIME_API_KEY` / `-Ddevcli.runtime.api.key`
 - 详细实现文档：`docs/phase-20-runtime-api.md`
 
@@ -585,6 +588,7 @@
 - ReAct / Plan task executor / SubAgent 在工具结果后追加图片 user message，不在 CLI 输入层按模型名拦截
 - 用户输入支持 `@image:file:///abs/path.png`、`@image:/abs/path.png`、`@image:relative/path.png`
 - 图片处理对齐 Claude Code：不 OCR 成文本；统一压缩 / 缩放后以图片块发送，并只补充来源、尺寸、坐标映射元信息
+- 压缩输入保留图片字节 SHA-256；代码输入保留 diff、符号、编译位置和 RAG/index/classpath 版本元数据，未配置 OCR/视觉摘要时不伪造描述文本
 - 详细实现文档：`docs/phase-21-image-input.md`
 
 **不做**：

@@ -30,7 +30,9 @@ public record CompactBoundaryMetadata(
         int sourceEnd,
         String projectionHash,
         long sourceEventStart,
-        long sourceEventEnd
+        long sourceEventEnd,
+        String snapshotRef,
+        String snapshotChecksum
 ) {
     private static final String START = "<compact_boundary>";
     private static final String END = "</compact_boundary>";
@@ -48,6 +50,8 @@ public record CompactBoundaryMetadata(
         projectionHash = blankToNone(projectionHash);
         sourceEventStart = Math.max(0L, sourceEventStart);
         sourceEventEnd = Math.max(sourceEventStart, sourceEventEnd);
+        snapshotRef = blankToNone(snapshotRef);
+        snapshotChecksum = blankToNone(snapshotChecksum);
     }
 
     public CompactBoundaryMetadata(
@@ -62,7 +66,7 @@ public record CompactBoundaryMetadata(
             int summaryChars) {
         this(compactType, trigger, mode, preTokens, postTokens, originalMessages, rebuiltMessages,
                 retainedMessages, summaryChars, List.of(), "none", "none", false,
-                0, 0, "none", "none", 0, 0, "none", 0, 0);
+                0, 0, "none", "none", 0, 0, "none", 0, 0, "none", "none");
     }
 
     public CompactBoundaryMetadata(
@@ -81,7 +85,39 @@ public record CompactBoundaryMetadata(
             boolean postCompactRestoreEnabled) {
         this(compactType, trigger, mode, preTokens, postTokens, originalMessages, rebuiltMessages,
                 retainedMessages, summaryChars, loadedSkills, ragEpoch, mcpToolSnapshot,
-                postCompactRestoreEnabled, 0, 0, "none", "none", 0, 0, "none", 0, 0);
+                postCompactRestoreEnabled, 0, 0, "none", "none", 0, 0, "none", 0, 0,
+                "none", "none");
+    }
+
+    /** Compatibility constructor used by checkpoints written before snapshot references. */
+    public CompactBoundaryMetadata(
+            String compactType,
+            String trigger,
+            String mode,
+            int preTokens,
+            int postTokens,
+            int originalMessages,
+            int rebuiltMessages,
+            int retainedMessages,
+            int summaryChars,
+            List<String> loadedSkills,
+            String ragEpoch,
+            String mcpToolSnapshot,
+            boolean postCompactRestoreEnabled,
+            int protectedConstraints,
+            int restoredConstraints,
+            String semanticGuardStatus,
+            String sourceHash,
+            int sourceStart,
+            int sourceEnd,
+            String projectionHash,
+            long sourceEventStart,
+            long sourceEventEnd) {
+        this(compactType, trigger, mode, preTokens, postTokens, originalMessages,
+                rebuiltMessages, retainedMessages, summaryChars, loadedSkills, ragEpoch,
+                mcpToolSnapshot, postCompactRestoreEnabled, protectedConstraints,
+                restoredConstraints, semanticGuardStatus, sourceHash, sourceStart, sourceEnd,
+                projectionHash, sourceEventStart, sourceEventEnd, "none", "none");
     }
 
     /** 兼容旧内存下标字段；新代码应使用 sourceEventStart/sourceEventEnd。 */
@@ -118,6 +154,8 @@ public record CompactBoundaryMetadata(
                 + "messageRange=" + sourceStart + ":" + sourceEnd + "\n"
                 + "sourceEventRange=" + sourceEventStart + ":" + sourceEventEnd + "\n"
                 + "projectionHash=" + projectionHash + "\n"
+                + "snapshotRef=" + snapshotRef + "\n"
+                + "snapshotChecksum=" + snapshotChecksum + "\n"
                 + END;
     }
 
@@ -173,7 +211,9 @@ public record CompactBoundaryMetadata(
                     parseRangeEnd(values.getOrDefault("messageRange", values.get("sourceRange"))),
                     blankToNone(values.get("projectionHash")),
                     parseLongRangeStart(values.getOrDefault("sourceEventRange", "0:0")),
-                    parseLongRangeEnd(values.getOrDefault("sourceEventRange", "0:0"))
+                    parseLongRangeEnd(values.getOrDefault("sourceEventRange", "0:0")),
+                    blankToNone(values.get("snapshotRef")),
+                    blankToNone(values.get("snapshotChecksum"))
             ));
         } catch (RuntimeException e) {
             return Optional.empty();

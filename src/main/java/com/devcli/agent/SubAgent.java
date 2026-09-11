@@ -380,8 +380,9 @@ public class SubAgent {
             int toolDefinitionTokens = TokenBudget.estimateToolDefinitionsTokens(
                     toolRegistry.getToolDefinitions());
             CompactionResult compaction = historyCompactor.compactIfNeeded(
-                    history, CompactionContext.forTrigger(
-                            profile.historyTriggerTokens(toolDefinitionTokens)));
+                    history, AgentRuntimeSupport.buildCompactionContext(
+                            profile.historyTriggerTokens(toolDefinitionTokens),
+                            toolRegistry, name));
             boolean compacted = compaction.compacted();
             if (compacted && out != null) {
                 out.println("📦 [" + name + "] 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");

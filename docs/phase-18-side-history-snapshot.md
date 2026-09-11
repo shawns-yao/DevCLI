@@ -1,6 +1,6 @@
 # 第 18 期：Git Side-History 快照与回滚
 
-> 当前状态：MVP 开发中。第 18 期目标是给 Agent 改文件加一层文件安全网：每个 turn 前后自动快照，用户可以恢复到某个 turn 开始前，而且不污染用户项目自己的 `.git` 历史。
+> 当前状态：已落地。Side-Git 已接入 ReAct、Plan、Multi-Agent 和 TUI 的 turn wrapper；压缩边界与 Runtime checkpoint/resume 使用稳定快照引用和 checksum 做恢复校验。
 
 ## 目标
 
@@ -33,6 +33,7 @@ Agent 能放心改代码的前提不是“永远不犯错”，而是“改坏�
   - `commitId`
   - `createdAt`
   - `summary`
+- 边界恢复元数据：稳定 snapshot 引用、来源事件范围、projection hash 和 snapshot checksum
 - `RestoreResult`
   - `success`
   - `restoredCommit`
@@ -162,7 +163,13 @@ DEVCLI_SNAPSHOT_EXCLUDES=.git,.devcli/snapshots,target,node_modules,dist,.idea,*
 
 恢复前必须先做 `pre-restore` 快照，避免用户恢复错了没有退路。
 
-### 8. Agent 工具
+### 8. checkpoint / resume 接入
+
+- 压缩成功或降级截断后，边界元数据保存稳定 snapshot 引用、来源事件起止序号、来源 hash、projection hash 和 checksum；引用默认按项目/会话稳定生成，不使用随机文件名。
+- Runtime checkpoint 在 `turn.completed` 后持久化上述引用。resume 先校验快照文件可定位、checksum、项目/会话边界、来源事件范围和当前投影；任一项失败则回退到更早可解析 checkpoint 或事件日志，不把旧摘要直接注入新会话。
+- `/restore` 与 `revert_turn` 仍只修改用户工作区文件，不修改用户项目 `.git`；恢复前自动创建 pre-restore 快照。
+
+### 9. Agent 工具
 
 新增工具：
 
@@ -192,7 +199,7 @@ revert_turn
 - 不改变用户项目 `.git` 的 branch、index、HEAD。
 - 不自动提交用户项目 Git。
 - 不做远程备份。
-- 不做冲突交互式 merge。恢复就是把目标快照内容写回工作区。
+- 不做冲突交互式 merge。恢复就是在校验通过后把目标快照内容写回工作区。
 
 ## 开发拆分
 
@@ -215,7 +222,7 @@ revert_turn
 
 - [x] 实现最近快照列表
 - [x] 实现按 turn offset 定位 pre-turn 快照
-- [ ] 实现 `maxSnapshots` 历史压缩策略
+- [x] 实现 `maxSnapshots` 历史压缩策略
 - [ ] 写 `SnapshotStoreTest`
 
 ### Day 4：恢复
@@ -288,5 +295,5 @@ mvn -q clean package -DskipTests
 - 自动快照默认开启，但失败不阻塞 Agent。
 - `/restore 1` 能恢复最近 turn 开始前的工作区文件。
 - 用户项目 `.git` 不被写入、不被 reset、不被 checkout。
-- `maxSnapshots` 对列表/定位上限生效；历史压缩留作后续增强。
+- `maxSnapshots` 对列表/定位上限生效；裁剪后重写 side-history 并调用 JGit `autoGC`。
 - ReAct / Plan / Team / TUI 四条入口行为一致。

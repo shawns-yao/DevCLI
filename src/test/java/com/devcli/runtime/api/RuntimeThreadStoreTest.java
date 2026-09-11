@@ -164,6 +164,35 @@ class RuntimeThreadStoreTest {
     }
 
     @Test
+    void compactionCursorCarriesPersistedModelMessageEventIds(@TempDir Path tempDir)
+            throws Exception {
+        try (RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"))) {
+            String threadId = store.createThread();
+            String turnId = "turn-events";
+            store.appendEvent(threadId, "turn.started", RunEventJsonCodec.encode(
+                    new RunEvent.TurnStarted("input"), turnId));
+            long contextId = store.appendEvent(threadId, "model.context",
+                    RunEventJsonCodec.encode(RunEvent.ModelContext.from(1,
+                            List.of(LlmClient.Message.user("input"))), turnId));
+            long messageId = store.appendEvent(threadId, "model.message",
+                    RunEventJsonCodec.encode(RunEvent.ModelMessage.from(
+                            LlmClient.Message.assistant("answer")), turnId));
+            store.appendEvent(threadId, "turn.completed",
+                    RunEventJsonCodec.encode(new RunEvent.TurnCompleted("completed"), turnId));
+
+            var cursor = store.compactionSourceCursor(threadId);
+            String inputKey = com.devcli.memory.CompactionFactExtractor.messageKey(
+                    LlmClient.Message.user("input"));
+            String answerKey = com.devcli.memory.CompactionFactExtractor.messageKey(
+                    LlmClient.Message.assistant("answer"));
+            assertEquals(contextId, cursor.messageEventIdsByFingerprint().get(inputKey));
+            assertEquals(messageId, cursor.messageEventIdsByFingerprint().get(answerKey));
+            assertEquals(cursor.messageEventIdsByFingerprint(), store.compactionContext(threadId, "project")
+                    .sourceMessageEventIdsByFingerprint());
+        }
+    }
+
+    @Test
     void branchesPreserveForkHistoryAndDivergeAfterActivation(@TempDir Path tempDir) throws Exception {
         try (RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"))) {
             String threadId = store.createThread();

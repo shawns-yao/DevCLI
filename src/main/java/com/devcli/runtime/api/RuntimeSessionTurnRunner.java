@@ -55,6 +55,8 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
     public TurnResult run(String threadId, String input, RunEventSink eventSink) {
         AgentSessionRuntime session = session(threadId);
         session.agent().setCompactionSourceCursorSupplier(() -> store.compactionSourceCursor(threadId));
+        session.agent().setCompactionContextSupplier(
+                () -> store.compactionContext(threadId, projectPath.toString()));
         session.agent().setOriginalHistorySupplier(() -> store.originalConversationMessages(threadId));
         session.setRunEventSink(eventSink);
         eventSink.emit(new com.devcli.runtime.event.RunEvent.SessionStateChanged(

@@ -1460,8 +1460,9 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                                          ToolExecutionContext executionContext,
                                          ToolSnapshot snapshot) {
         if (isLegacyExecuteToolOverride() || isExecuteToolOutputOverride()) {
+            ToolOutput output = executeToolOutput(invocation.name(), invocation.argumentsJson());
             return governToolOutput(invocation.name(), invocation.id(),
-                    executeToolOutput(invocation.name(), invocation.argumentsJson()));
+                    output, executionContext.elapsedMillis());
         }
         return runWithToolSnapshot(snapshot, () -> executionPipeline.execute(
                 invocation.name(), invocation.argumentsJson(), invocation.id(), executionContext));

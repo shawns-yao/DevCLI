@@ -1,6 +1,7 @@
 package com.devcli.runtime.event;
 
 import com.devcli.llm.LlmClient;
+import com.devcli.tool.CommandResultMetadata;
 import com.devcli.tool.ToolPresentation;
 import com.devcli.tool.ToolRegistry;
 
@@ -305,6 +306,11 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
                         result.retryable(),
                         result.elapsedMillis(),
                         result.imageParts() == null ? 0 : result.imageParts().size(),
+                        result.sideChannels().stream()
+                                .filter(CommandResultMetadata.class::isInstance)
+                                .map(CommandResultMetadata.class::cast)
+                                .mapToInt(CommandResultMetadata::exitCode)
+                                .findFirst().orElse(Integer.MIN_VALUE),
                         result.presentation()));
             }
             return new ToolResults(values);
@@ -454,7 +460,8 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
 
     record ToolResultData(String id, String name, String argumentsJson, String result,
                           String status, String errorCode, boolean retryable,
-                          long elapsedMillis, int imageCount, ToolPresentation presentation) {
+                          long elapsedMillis, int imageCount, int exitCode,
+                          ToolPresentation presentation) {
         public ToolResultData {
             id = text(id);
             name = text(name);
@@ -471,7 +478,14 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
                               String status, String errorCode, boolean retryable,
                               long elapsedMillis, int imageCount) {
             this(id, name, argumentsJson, result, status, errorCode, retryable,
-                    elapsedMillis, imageCount, ToolPresentation.defaultFor(name));
+                    elapsedMillis, imageCount, Integer.MIN_VALUE, ToolPresentation.defaultFor(name));
+        }
+
+        public ToolResultData(String id, String name, String argumentsJson, String result,
+                              String status, String errorCode, boolean retryable,
+                              long elapsedMillis, int imageCount, ToolPresentation presentation) {
+            this(id, name, argumentsJson, result, status, errorCode, retryable,
+                    elapsedMillis, imageCount, Integer.MIN_VALUE, presentation);
         }
     }
 

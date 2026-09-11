@@ -3,12 +3,18 @@ package com.devcli.memory;
 import com.devcli.tool.ToolResultArtifactStore;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.regex.Pattern;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.security.MessageDigest;
+import java.util.regex.Matcher;
 
 /** Classifies oversized context before semantic summarization. */
 public final class DeterministicContentReducer {
@@ -61,25 +67,68 @@ public final class DeterministicContentReducer {
         if (kind == Kind.CODE) {
             var path = Pattern.compile("(?im)(?:file|path|source)\\s*[:=]\\s*([^\\s]+)").matcher(value);
             if (path.find()) result.put("file_path", path.group(1));
-            var diff = Pattern.compile("(?m)^[+-]{3}\\s+.*$").matcher(value);
-            if (diff.find()) result.put("has_diff", "true");
-            var symbol = Pattern.compile("\\b(class|interface|enum|record|void|int|String)\\s+([A-Za-z_$][\\w$]*)").matcher(value);
-            if (symbol.find()) result.put("symbol", symbol.group(2));
+            int added = 0;
+            int removed = 0;
+            StringBuilder diff = new StringBuilder();
+            for (String line : value.replace("\r", "").split("\n", -1)) {
+                if (line.startsWith("+++") || line.startsWith("---")) continue;
+                if (line.startsWith("+")) { added++; diff.append(line).append('\n'); }
+                if (line.startsWith("-")) { removed++; diff.append(line).append('\n'); }
+            }
+            if (added > 0 || removed > 0) {
+                result.put("diff_added_lines", Integer.toString(added));
+                result.put("diff_removed_lines", Integer.toString(removed));
+                result.put("diff_sha256", sha256(diff.toString()));
+            }
+            var symbol = Pattern.compile("\\b(?:class|interface|enum|record|void|int|String|boolean|long|private|public|protected)\\s+([A-Za-z_$][\\w$]*)").matcher(value);
+            LinkedHashSet<String> symbols = new LinkedHashSet<>();
+            while (symbol.find() && symbols.size() < 64) symbols.add(symbol.group(1));
+            if (!symbols.isEmpty()) result.put("symbols", String.join(",", symbols));
             var location = Pattern.compile("(?m)\\b([^\\s:]+\\.java):(\\d+)(?::(\\d+))?").matcher(value);
             if (location.find()) result.put("compiler_location", location.group());
+            addVersionMetadata(result, value);
         } else if (kind == Kind.IMAGE) {
             var path = Pattern.compile("(?i)(?:path|src|url)\\s*[:=]\\s*([^\\s]+)").matcher(value);
             if (path.find()) result.put("image_source", path.group(1));
             var mime = Pattern.compile("(?i)data:(image/[a-z0-9.+-]+)").matcher(value);
             if (mime.find()) result.put("mime_type", mime.group(1));
-            result.put("image_sha256", sha256(value));
+            String imageHash = imageBytesHash(value, result.get("image_source"));
+            if (!imageHash.isBlank()) result.put("image_sha256", imageHash);
         }
         return Map.copyOf(result);
     }
 
-    private static String sha256(String value) {
+    private static void addVersionMetadata(Map<String, String> result, String value) {
+        for (String key : List.of("rag_epoch", "index_epoch", "symbol_version", "classpath_epoch")) {
+            Matcher matcher = Pattern.compile("(?i)\\b" + key + "\\s*[:=]\\s*([^\\s,;]+)").matcher(value);
+            if (matcher.find()) result.put(key, matcher.group(1));
+        }
+    }
+
+    private static String imageBytesHash(String value, String source) {
         try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            if (source != null && !source.isBlank()) {
+                Path path = Path.of(source);
+                if (Files.isRegularFile(path)) return sha256(Files.readAllBytes(path));
+            }
+            int comma = value.indexOf("base64,");
+            if (comma >= 0) {
+                byte[] bytes = Base64.getDecoder().decode(value.substring(comma + 7).trim());
+                return sha256(bytes);
+            }
+        } catch (Exception ignored) {
+            // Do not fall back to hashing the description text.
+        }
+        return "";
+    }
+
+    private static String sha256(String value) {
+        return sha256(value == null ? new byte[0] : value.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String sha256(byte[] bytes) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes);
             StringBuilder out = new StringBuilder();
             for (byte b : digest) out.append(String.format("%02x", b));
             return out.toString();

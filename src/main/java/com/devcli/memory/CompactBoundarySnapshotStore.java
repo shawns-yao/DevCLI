@@ -16,6 +16,10 @@ public final class CompactBoundarySnapshotStore {
         this.file = file.toAbsolutePath().normalize();
     }
 
+    public Path file() {
+        return file;
+    }
+
     public synchronized void save(CompactBoundarySnapshot snapshot) throws IOException {
         if (snapshot == null) return;
         if (!snapshot.checksumValid()) throw new IOException("Invalid compaction boundary checksum");

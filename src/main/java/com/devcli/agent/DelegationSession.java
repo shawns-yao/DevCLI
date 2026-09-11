@@ -443,9 +443,10 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             };
         }
         @Override public void beforeIteration(int iteration, AgentBudget currentBudget) {
-            compactor.compactIfNeeded(history, CompactionContext.forTrigger(
+            compactor.compactIfNeeded(history, AgentRuntimeSupport.buildCompactionContext(
                     ContextProfile.from(client).historyTriggerTokens(
-                            TokenBudget.estimateToolDefinitionsTokens(tools))));
+                            TokenBudget.estimateToolDefinitionsTokens(tools)),
+                    registry, id));
             if (registry.getSkillContextBuffer() != null) {
                 String pending = registry.getSkillContextBuffer().drain();
                 if (!pending.isBlank()) history.add(LlmClient.Message.internalUser(pending));

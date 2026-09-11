@@ -61,6 +61,7 @@ public class Agent implements AutoCloseable {
             new ContextReferenceGuard.ReferenceRegistry();
     private Supplier<String> externalContextSupplier = () -> "";
     private Supplier<String> ruleContextSupplier = () -> "";
+    private Supplier<CompactionContext> compactionContextSupplier;
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private Renderer renderer;
@@ -178,6 +179,20 @@ public class Agent implements AutoCloseable {
     public void setCompactionSourceCursorSupplier(
             java.util.function.Supplier<ConversationHistoryCompactor.CompactionSourceCursor> supplier) {
         historyCompactor.setCompactionSourceCursorSupplier(supplier);
+    }
+
+    public void setCompactionContextSupplier(Supplier<CompactionContext> supplier) {
+        this.compactionContextSupplier = supplier;
+    }
+
+    private CompactionContext compactionContext(int triggerTokens) {
+        CompactionContext supplied = compactionContextSupplier == null
+                ? null : compactionContextSupplier.get();
+        if (supplied == null) {
+            supplied = AgentRuntimeSupport.buildCompactionContext(
+                    triggerTokens, memoryManager, toolRegistry, sessionTaskId);
+        }
+        return supplied.withTriggerTokens(triggerTokens);
     }
 
     public void setOriginalHistorySupplier(
@@ -639,7 +654,7 @@ public class Agent implements AutoCloseable {
                 historyCompactor.setMicrocompactOutputRoot(Path.of(projectPath));
             }
             CompactionResult compaction = historyCompactor.compactIfNeeded(
-                    conversationHistory, CompactionContext.forTrigger(trigger));
+                    conversationHistory, compactionContext(trigger));
             boolean compacted = compaction.compacted();
             if (compacted) {
                 renderer().stream().println("📦 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
@@ -753,7 +768,7 @@ public class Agent implements AutoCloseable {
     public boolean compactHistoryForPersistence(int triggerTokens) {
         if (triggerTokens <= 0) return false;
         return historyCompactor.compactIfNeeded(
-                conversationHistory, CompactionContext.forTrigger(triggerTokens)).compacted();
+                conversationHistory, compactionContext(triggerTokens)).compacted();
     }
 
     /**
