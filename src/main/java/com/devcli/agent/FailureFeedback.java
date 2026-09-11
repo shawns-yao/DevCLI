@@ -121,7 +121,8 @@ final class FailureFeedback {
             return Category.BUDGET_EXHAUSTED;
         }
         if (containsAny(normalized, "docker", "环境不可用", "环境故障", "网络", "连接", "超时",
-                "认证", "限流", "服务端", "llm 调用失败")) {
+                "认证", "限流", "服务端", "llm 调用失败", "llm request failed",
+                "rate_limit", "server_error", "no_available_account")) {
             return Category.ENVIRONMENT_FAILURE;
         }
         if (containsAny(normalized, "校验", "验证", "参数", "schema", "编译失败", "测试失败", "未满足")) {

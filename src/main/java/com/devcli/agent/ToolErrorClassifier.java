@@ -18,6 +18,7 @@ final class ToolErrorClassifier {
             case NONE -> status.name().toLowerCase(Locale.ROOT);
             case UNKNOWN_TOOL -> "unknown-tool";
             case INVALID_ARGUMENTS -> "schema";
+            case SEMANTIC_VALIDATION_FAILED -> "semantic";
             case CAPABILITY_DENIED, SKILL_PERMISSION_DENIED, HITL_REJECTED, POLICY_DENIED -> "policy";
             case RESOURCE_CONFLICT -> "resource-conflict";
             case STALE_CONTEXT -> "stale-context";
@@ -34,6 +35,10 @@ final class ToolErrorClassifier {
             return "";
         }
         String normalized = result.toLowerCase(Locale.ROOT);
+        if (normalized.contains("业务语义校验失败")
+                || normalized.contains("semantic_validation_failed")) {
+            return "semantic";
+        }
         if (normalized.contains("mcp 参数校验失败")
                 || normalized.contains("is required")
                 || normalized.contains("must be")) {

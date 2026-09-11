@@ -110,6 +110,10 @@ public class HitlToolRegistry extends ToolRegistry {
             if (validationError != null) {
                 return validationError;
             }
+            validationError = validateToolSemantics(context.name(), effectiveArguments);
+            if (validationError != null) {
+                return validationError;
+            }
             context.replaceArguments(effectiveArguments);
         }
         return chain.proceed(context);

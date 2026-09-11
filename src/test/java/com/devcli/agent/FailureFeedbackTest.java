@@ -19,6 +19,9 @@ class FailureFeedbackTest {
                 FailureFeedback.fromReason("Token 预算已用尽").category());
         assertEquals(FailureFeedback.Category.ENVIRONMENT_FAILURE,
                 FailureFeedback.fromReason("Docker 环境不可用").category());
+        assertEquals(FailureFeedback.Category.ENVIRONMENT_FAILURE,
+                FailureFeedback.fromReason(
+                        "LLM request failed: status=503 code=SERVER_ERROR no_available_account").category());
         assertEquals(FailureFeedback.Category.TASK_AMBIGUITY,
                 FailureFeedback.fromReason("任务边界不明确，缺少验收标准").category());
     }

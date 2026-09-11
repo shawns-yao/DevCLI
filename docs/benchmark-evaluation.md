@@ -6,6 +6,8 @@
 
 本轮只评测四块：多智能体、上下文压缩、记忆、工具安全。RAG 暂不纳入本轮，避免把尚未接入官方 qrels 的内部检索结果写成公开成绩。每个条件只运行一轮；同一题目、同一模型、同一预算、同一数据版本做配对比较。现有入口的完成状态另见“公开集合接入状态”。
 
+终端 Agent 的 Agent Evals 适配器见 [终端 Agent Evals](agent-evals.md)。它通过 `AgentSessionRuntime` 和 `ToolRegistry.ISOLATED_PROJECT` 执行定向样本，记录 trace、工作区 diff、结构化退出码和确定性 checks；该入口用于工程定向/冒烟评测，不替代公开 benchmark 的官方 evaluator。
+
 | 链路 | 数据来源 | 核心指标 |
 | --- | --- | --- |
 | RAG | 本轮不测试 | 不产出结果，不写入简历 |

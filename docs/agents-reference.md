@@ -358,7 +358,7 @@ checkpoint 协议版本 10；通过 RecoveryState 恢复共享 ExecutionArtifact
 Reviewer 前 Java 硬验证；封装 Maven/javac 命令、扫描、超时、输出解码和失败摘要，无 Maven 时使用 javac 参数文件避免命令行过长
 
 ### ToolRegistry.java
-14 个内置核心工具（含 `edit_file` 精确替换、`confirm_memory` 一次性敏感确认和 `grep_code` 实时精确文本搜索）+ MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult；`ToolExecutionPipeline` 按阶段执行取消、存在性、能力范围、Skill 权限、参数校验、HITL、审计、策略和结果治理；`ToolOutput` / `ToolExecutionResult` 携带 status、errorCode、retryable、elapsedMillis、imageParts、sideChannels 和 modifiedResources；命令退出码由 `CommandResultMetadata` 旁路保留并贯通 Runtime 事件与 SessionMemory，不从展示文本提取；内置 Provider 通过结构化执行器直接保留参数错误、策略拒绝、命令退出、超时和取消状态；HITL 作为管线中间件，不再覆写 executeTool；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会返回 `search_tools` 引导和 query 示例
+14 个内置核心工具（含 `edit_file` 精确替换、`confirm_memory` 一次性敏感确认和 `grep_code` 实时精确文本搜索）+ MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult；`ToolExecutionPipeline` 按阶段执行取消、存在性、能力范围、Skill 权限、Schema 参数校验、HITL、语义/业务校验、审计、策略和结果治理；`ToolSemanticValidator` 负责本地可判定的参数组合、路径/资源状态、范围和协议语义，业务扩展可通过 `ToolRegistry.registerSemanticValidator` 注入规则；`ToolOutput` / `ToolExecutionResult` 携带 status、errorCode、retryable、elapsedMillis、imageParts、sideChannels 和 modifiedResources；命令退出码由 `CommandResultMetadata` 旁路保留并贯通 Runtime 事件与 SessionMemory，不从展示文本提取；内置 Provider 通过结构化执行器直接保留参数错误、语义拒绝、策略拒绝、命令退出、超时和取消状态；HITL 作为管线中间件，不再覆写 executeTool；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会返回 `search_tools` 引导和 query 示例
 
 `read_file` 同传行范围与字符范围时优先行范围并返回提示；`edit_file` 会按目标文件的 CRLF/LF 风格对齐匹配文本。
 

@@ -6,6 +6,8 @@
 
 本轮实验只执行量化评测规范中的四项单轮配对：SWE-bench `solo/delegate`、LongBench/RULER 上下文压缩、LongMemEval 记忆、AgentDojo/ToolSandbox 工具安全；RAG 和固定 `plan` 流水线暂停。只有项目功能真正接入对应链路并满足文档中的执行前硬门，才允许调用真实模型。
 
+终端 Agent 的最小 Agent Evals 入口为 `pwsh benchmarks/agent-evals/run.ps1 -DryRun`。它先验证样本和评测卡；真实运行时每题使用新的隔离工作区，命令默认进入 Docker 沙箱。详细样本格式、checks 和产物见 [终端 Agent Evals](agent-evals.md)。
+
 ## 本轮配对入口
 
 以 [本轮记录](benchmark-paired-run-20260830.md) 为准，下面的历史三模式 SOP 不用于本轮。

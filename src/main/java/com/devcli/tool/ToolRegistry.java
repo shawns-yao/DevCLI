@@ -70,6 +70,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     private static final String PIPELINE_BROWSER_AUDIT = "browserAuditMetadata";
     private final Map<String, Tool> tools = new ConcurrentHashMap<>();
     private final Map<String, McpRegisteredTool> mcpTools = new ConcurrentHashMap<>();
+    private final Map<String, ToolSemanticValidator.CustomRule> semanticValidators = new ConcurrentHashMap<>();
+    private final Set<String> builtInSemanticToolNames = ConcurrentHashMap.newKeySet();
     private final Map<String, McpToolTrustPolicy> mcpTrustPolicies = new ConcurrentHashMap<>();
     private final Map<String, Long> mcpServerLifecycleVersions = new ConcurrentHashMap<>();
     private final Set<String> activatedMcpToolDefinitions = ConcurrentHashMap.newKeySet();
@@ -176,6 +178,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         toolSearchProvider.register(this);
         new SnapshotToolProvider().register(this);
         registerTool(DelegateTaskTool.definition(this));
+        builtInSemanticToolNames.addAll(tools.keySet());
     }
 
     /**
@@ -318,6 +321,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         fork.skillContextBuffer = skillContextBuffer == null ? null : skillContextBuffer.copy();
         fork.commandExecutionService = commandExecutionService;
         fork.mcpTrustPolicies.putAll(mcpTrustPolicies);
+        fork.semanticValidators.putAll(semanticValidators);
         mcpTools.values().forEach(registered ->
                 fork.registerContextualMcpToolOutput(
                         registered.descriptor(), registered.invoker()));
@@ -543,6 +547,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
             return;
         }
         tools.put(tool.name(), tool);
+        builtInSemanticToolNames.remove(tool.name());
         invalidateToolSearchIndex();
     }
 
@@ -556,6 +561,20 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         }
         if (tools.remove(toolName) != null) {
             invalidateToolSearchIndex();
+        }
+    }
+
+    /** 为 MCP 或业务扩展工具注册客户端侧语义校验；Schema 通过后才会调用该规则。 */
+    public void registerSemanticValidator(String toolName, ToolSemanticValidator.CustomRule validator) {
+        if (toolName == null || toolName.isBlank() || validator == null) {
+            return;
+        }
+        semanticValidators.put(toolName, validator);
+    }
+
+    public void removeSemanticValidator(String toolName) {
+        if (toolName != null && !toolName.isBlank()) {
+            semanticValidators.remove(toolName);
         }
     }
 
@@ -1254,6 +1273,10 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
             context.putAttribute(PIPELINE_PARSED_ARGUMENTS, parseValidatedArguments(context.argumentsJson()));
             return chain.proceed(context);
         });
+        executionPipeline.register(ToolExecutionPipeline.Stage.SEMANTIC_VALIDATION, (context, chain) -> {
+            ToolOutput error = validateToolSemantics(context.name(), context.argumentsJson());
+            return error == null ? chain.proceed(context) : error;
+        });
         executionPipeline.register(ToolExecutionPipeline.Stage.AUDIT, this::executeWithAudit);
         executionPipeline.register(ToolExecutionPipeline.Stage.POLICY, (context, chain) -> {
             if ((delegatedChild || currentToolAccessScope() != ToolAccessScope.FULL)
@@ -1431,6 +1454,34 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
             return validationFailed(validation.message());
         }
         return null;
+    }
+
+    /** 在 Schema 校验后执行参数组合、资源状态和扩展业务规则校验。 */
+    protected ToolOutput validateToolSemantics(String name, String argumentsJson) {
+        JsonNode parsedArgs;
+        try {
+            parsedArgs = parseArguments(argumentsJson);
+        } catch (JsonProcessingException e) {
+            return validationFailed("不是合法 JSON: " + e.getOriginalMessage());
+        }
+        ToolSemanticValidator.ValidationResult result = ToolSemanticValidator.validate(
+                name, parsedArgs,
+                new ToolSemanticValidator.Context(
+                        contextProjectRoot,
+                        this::resolveSafePath,
+                        this::isWritePathAllowed,
+                        semanticValidators.get(name),
+                        builtInSemanticToolNames.contains(name)));
+        if (result.valid()) {
+            return null;
+        }
+        if (result.errorCode() == ToolErrorCode.POLICY_DENIED
+                || result.errorCode() == ToolErrorCode.CAPABILITY_DENIED) {
+            String prefix = result.errorCode() == ToolErrorCode.POLICY_DENIED ? "策略拒绝: " : "";
+            return ToolOutput.rejected(result.errorCode(), prefix + result.message(), result.retryable());
+        }
+        return ToolOutput.rejected(result.errorCode(),
+                "业务语义校验失败: " + result.message(), result.retryable());
     }
 
     private JsonNode parseValidatedArguments(String argumentsJson) {

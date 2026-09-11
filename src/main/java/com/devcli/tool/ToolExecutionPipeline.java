@@ -22,6 +22,7 @@ public final class ToolExecutionPipeline {
         ARGUMENT_VALIDATION,
         HITL,
         AUDIT,
+        SEMANTIC_VALIDATION,
         POLICY,
         RESULT_CACHE,
         RESULT_GOVERNANCE
