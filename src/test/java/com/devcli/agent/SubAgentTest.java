@@ -27,6 +27,64 @@ import static org.junit.jupiter.api.Assertions.*;
 class SubAgentTest {
 
     @Test
+    void reviewerIterationLimitDefaultsToFiveRounds() {
+        String previous = System.getProperty("devcli.team.reviewer.max.iterations");
+        try {
+            System.clearProperty("devcli.team.reviewer.max.iterations");
+            assertEquals(5, SubAgent.resolveReviewerMaxIterations());
+        } finally {
+            if (previous == null) {
+                System.clearProperty("devcli.team.reviewer.max.iterations");
+            } else {
+                System.setProperty("devcli.team.reviewer.max.iterations", previous);
+            }
+        }
+    }
+
+    @Test
+    void reviewerFinalIterationDisablesToolsAndForcesDecision(@TempDir Path tempDir) throws Exception {
+        String previous = System.getProperty("devcli.team.reviewer.max.iterations");
+        System.setProperty("devcli.team.reviewer.max.iterations", "5");
+        Files.writeString(tempDir.resolve("evidence.txt"), "evidence");
+        try (ToolRegistry tools = new ToolRegistry()) {
+            tools.setProjectPath(tempDir.toString());
+            List<CallScript> calls = new java.util.ArrayList<>();
+            for (int index = 0; index < 4; index++) {
+                calls.add(new CallScript(listener -> { }, new LlmClient.ChatResponse(
+                        "assistant", "", null,
+                        List.of(new LlmClient.ToolCall(
+                                "read_" + index,
+                                new LlmClient.ToolCall.Function("read_file",
+                                        "{\"path\":\"evidence.txt\",\"offset\":" + index
+                                                + ",\"limit\":1}"))),
+                        8, 3)));
+            }
+            calls.add(new CallScript(listener -> { }, new LlmClient.ChatResponse(
+                    "assistant", "{\"approved\":false}", null, 8, 3)));
+            MultiCallStreamClient llm = new MultiCallStreamClient(calls);
+            SubAgent reviewer = new SubAgent("reviewer", AgentRole.REVIEWER, llm, tools);
+
+            reviewer.review("检查实现", "worker result",
+                    new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+
+            assertEquals(5, llm.toolsByCall.size());
+            assertTrue(llm.toolsByCall.get(4) == null || llm.toolsByCall.get(4).isEmpty());
+            String finalPrompt = llm.messagesByCall.get(4).stream()
+                    .filter(message -> "user".equals(message.role()))
+                    .reduce((first, second) -> second)
+                    .orElseThrow()
+                    .content();
+            assertTrue(finalPrompt.contains("最终裁决"), finalPrompt);
+        } finally {
+            if (previous == null) {
+                System.clearProperty("devcli.team.reviewer.max.iterations");
+            } else {
+                System.setProperty("devcli.team.reviewer.max.iterations", previous);
+            }
+        }
+    }
+
+    @Test
     void reviewerIterationLimitShouldRejectInvalidExplicitValues() {
         String previous = System.getProperty("devcli.team.reviewer.max.iterations");
         try {
@@ -95,6 +153,18 @@ class SubAgentTest {
     }
 
     @Test
+    void reviewerAllowlistIncludesRecoverableToolResults() throws Exception {
+        SubAgent reviewer = new SubAgent("reviewer", AgentRole.REVIEWER,
+                new GLMClient("test-key"), new ToolRegistry());
+        Method method = SubAgent.class.getDeclaredMethod("allowedToolNamesForRole");
+        method.setAccessible(true);
+
+        @SuppressWarnings("unchecked")
+        List<String> allowed = (List<String>) method.invoke(reviewer);
+        assertTrue(allowed.contains("read_tool_result"), allowed.toString());
+    }
+
+    @Test
     void plannerPromptShouldTreatEmptyWorkspaceAsValidAndAvoidBlockingDiscoverySteps() {
         SubAgent planner = new SubAgent("planner", AgentRole.PLANNER,
                 new GLMClient("test-key"), new ToolRegistry());
@@ -141,11 +211,11 @@ class SubAgentTest {
                         new LlmClient.ChatResponse("assistant", "完成", null, 8, 3))
         ));
         SubAgent worker = new SubAgent("worker", AgentRole.WORKER, llm, new ToolRegistry());
-        AtomicReference<String> workingMemory = new AtomicReference<>("wave-snapshot-before");
-        worker.setWorkingMemorySupplier(workingMemory::get);
+        AtomicReference<String> sessionMemory = new AtomicReference<>("wave-snapshot-before");
+        worker.setSessionMemorySupplier(sessionMemory::get);
 
         SubAgent.ForkContext forkContext = worker.createForkContext();
-        workingMemory.set("wave-snapshot-after");
+        sessionMemory.set("wave-snapshot-after");
         worker.executeForked(AgentMessage.task("orchestrator", "执行独立步骤"), forkContext,
                 new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
 
@@ -156,6 +226,25 @@ class SubAgentTest {
                 .content();
         assertTrue(userMessage.contains("wave-snapshot-before"), userMessage);
         assertFalse(userMessage.contains("wave-snapshot-after"), userMessage);
+    }
+
+    @Test
+    void forkContextCapturesContextEpochAndIncludesItInFingerprint(@TempDir Path project)
+            throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(project.toString());
+        SubAgent worker = new SubAgent("worker", AgentRole.WORKER,
+                new GLMClient("test-key"), registry);
+        SubAgent.ForkContext before = worker.createForkContext();
+        Path target = project.resolve("State.java");
+        Files.writeString(target, "class State {}\n");
+        registry.contextVersionLedger().publishWrite(
+                "external", "State.java", target, Files.readString(target));
+
+        SubAgent.ForkContext after = worker.createForkContext();
+
+        assertTrue(after.contextEpoch() > before.contextEpoch());
+        assertNotEquals(before.fingerprint(), after.fingerprint());
     }
 
     @Test
@@ -184,6 +273,26 @@ class SubAgentTest {
                 "late reasoning must appear under 补充思考 heading AFTER content, not mixed in");
         assertTrue(lateReasoningIdx > supplementalHeadingIdx,
                 "late reasoning body should follow 补充思考 heading");
+    }
+
+    @Test
+    void additionalEventSinkShouldReceiveStructuredEvents() {
+        // 编排路径注入的额外 sink（Execution Trace）必须收到 SubAgent 的结构化事件
+        ScriptedStreamClient llm = new ScriptedStreamClient(listener ->
+                listener.onContentDelta("完成"));
+        SubAgent worker = new SubAgent("trace-worker", AgentRole.WORKER, llm, new ToolRegistry());
+        java.util.List<com.devcli.event.RunEvent> received = new java.util.ArrayList<>();
+        worker.setAdditionalEventSink(received::add);
+
+        worker.execute(AgentMessage.task("orchestrator", "任务"),
+                new java.io.PrintStream(new java.io.ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+
+        assertFalse(received.isEmpty(), "注入 sink 应收到结构化事件");
+        // SubAgent 层从 execution.state 起，不发 turn.started；断言至少收到一个结构诊断事件
+        assertTrue(received.stream().anyMatch(e ->
+                        "execution.state".equals(e.type()) || "model.usage".equals(e.type())),
+                "应收到 execution.state/model.usage: "
+                        + received.stream().map(com.devcli.event.RunEvent::type).toList());
     }
 
     @Test

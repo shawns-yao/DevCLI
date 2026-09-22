@@ -1,7 +1,7 @@
 package com.devcli.tool;
 
-import com.devcli.runtime.CancellationContext;
-import com.devcli.runtime.CancellationToken;
+import com.devcli.concurrent.CancellationContext;
+import com.devcli.concurrent.CancellationToken;
 
 import java.util.Objects;
 import java.util.Optional;

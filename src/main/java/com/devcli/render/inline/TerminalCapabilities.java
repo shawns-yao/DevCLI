@@ -22,16 +22,17 @@ public final class TerminalCapabilities {
                 || Boolean.parseBoolean(System.getenv("DEVCLI_TERMINAL_FORCE_ANSI"))) {
             return true;
         }
+        // 以 Terminal 自身报告的类型为准：JLine 的类型本就由 TERM 推导而来，再读一次进程环境
+        // 只会让判定依赖运行环境、无法稳定验证。仅在类型缺失时回落到 TERM。
         String type = terminal.getType();
-        if (type != null && type.equalsIgnoreCase("dumb")) {
-            return false;
+        if (type == null || type.isBlank()) {
+            type = System.getenv("TERM");
         }
         if (System.getenv("NO_COLOR") != null) {
             // NO_COLOR 只影响样式，不影响光标控制——保留 true，颜色由 AnsiStyle 自己关
             return true;
         }
-        String envTerm = System.getenv("TERM");
-        return envTerm == null || !envTerm.equalsIgnoreCase("dumb");
+        return type == null || !type.equalsIgnoreCase("dumb");
     }
 
     /**

@@ -71,6 +71,21 @@ final class WorkspaceSourceTree {
         });
     }
 
+    static void removeSensitiveFiles(Path workspacePath) throws IOException {
+        Path workspace = WorkspacePathPolicy.normalize(workspacePath);
+        Files.walkFileTree(workspace, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs)
+                    throws IOException {
+                if (attrs.isRegularFile() && WorkspacePathPolicy.isSensitiveFile(
+                        workspace.relativize(file))) {
+                    Files.deleteIfExists(file);
+                }
+                return FileVisitResult.CONTINUE;
+            }
+        });
+    }
+
     static void resetWorkspace(Path workspaceBase, Path workspacePath) throws IOException {
         Path base = WorkspacePathPolicy.normalize(workspaceBase);
         Path workspace = WorkspacePathPolicy.normalize(workspacePath);

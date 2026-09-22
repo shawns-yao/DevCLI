@@ -3,6 +3,7 @@ package com.devcli.rag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.sql.SQLException;
@@ -28,6 +29,7 @@ public class CodeRetriever implements AutoCloseable {
     private final EmbeddingClient embeddingClient;
     private final VectorStore vectorStore;
     private final CodeReranker reranker;
+    private final ProjectIndexWatcher indexWatcher;
     /**
      * 最近一次 {@link #search} 是否因 embedding/语义检索不可用而降级为关键词+结构化检索。
      * 每次 search 入口重置，调用方据此向用户显式标记降级（不把降级结果伪装成完整 RAG）。
@@ -37,25 +39,40 @@ public class CodeRetriever implements AutoCloseable {
     private RetrievalAudit lastAudit = RetrievalAudit.empty();
 
     public CodeRetriever(String projectPath) throws SQLException {
-        this.embeddingClient = new EmbeddingClient();
-        this.vectorStore = new VectorStore(Paths.get(projectPath).toAbsolutePath().normalize().toString());
-        this.reranker = new CrossEncoderReranker();
+        this(projectPath, new EmbeddingClient(), defaultReranker());
     }
 
     public CodeRetriever(String projectPath, EmbeddingClient embeddingClient) throws SQLException {
-        this(projectPath, embeddingClient, new CrossEncoderReranker());
+        this(projectPath, embeddingClient, defaultReranker());
+    }
+
+    private static CodeReranker defaultReranker() {
+        String backend = System.getProperty("devcli.rag.rerank.backend");
+        if (backend == null || backend.isBlank()) {
+            backend = System.getenv("DEVCLI_RAG_RERANK_BACKEND");
+        }
+        if ("remote".equalsIgnoreCase(backend) || "cross_encoder".equalsIgnoreCase(backend)) {
+            return new CrossEncoderReranker();
+        }
+        if ("none".equalsIgnoreCase(backend) || "disabled".equalsIgnoreCase(backend)) {
+            return new NoopCodeReranker();
+        }
+        return new LocalCodeReranker();
     }
 
     public CodeRetriever(String projectPath, EmbeddingClient embeddingClient, CodeReranker reranker) throws SQLException {
         this.embeddingClient = embeddingClient;
-        this.vectorStore = new VectorStore(Paths.get(projectPath).toAbsolutePath().normalize().toString());
+        Path projectRoot = Paths.get(projectPath).toAbsolutePath().normalize();
+        this.vectorStore = new VectorStore(projectRoot.toString());
         this.reranker = reranker == null ? new NoopCodeReranker() : reranker;
+        this.indexWatcher = startIndexWatcher(projectRoot);
     }
 
     /**
      * 语义检索：用自然语言查询最相关的代码块
      */
     public List<VectorStore.SearchResult> semanticSearch(String query, int topK) throws Exception {
+        publishExternalChanges();
         float[] queryEmbedding = embeddingClient.embed(query);
         return vectorStore.search(queryEmbedding, topK);
     }
@@ -64,7 +81,26 @@ public class CodeRetriever implements AutoCloseable {
      * 关键词检索：按类名/方法名/内容精确匹配
      */
     public List<VectorStore.SearchResult> keywordSearch(String keyword) throws SQLException {
+        publishExternalChanges();
         return vectorStore.searchByKeyword(keyword);
+    }
+
+    private ProjectIndexWatcher startIndexWatcher(Path projectRoot) {
+        try {
+            return new ProjectIndexWatcher(projectRoot, vectorStore.indexWatchSnapshot());
+        } catch (IOException e) {
+            log.warn("项目索引文件监听不可用，将依赖受控写入和候选回读检测: {}", e.getMessage());
+            return null;
+        } catch (SQLException e) {
+            log.warn("读取索引监听基线失败，将依赖受控写入和候选回读检测: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private void publishExternalChanges() throws SQLException {
+        if (indexWatcher == null) return;
+        List<String> changedPaths = indexWatcher.drainChanges();
+        if (!changedPaths.isEmpty()) vectorStore.markDirtyFiles(changedPaths);
     }
 
     /**
@@ -90,12 +126,13 @@ public class CodeRetriever implements AutoCloseable {
             return results;
         }
         RetrievalFusion fusion = new RetrievalFusion();
+        RetrievalScoringProfile scoring = RetrievalScoringProfile.forMode(options.mode());
 
         switch (options.mode()) {
-            case DEFINITION, CONFIG -> searchPreciseFirst(query, topK, fusion);
-            case ERROR_TRACE -> searchErrorTrace(query, topK, options, fusion);
-            case CALL_CHAIN -> searchCallChain(query, topK, options, fusion);
-            case AUTO, GENERAL -> searchGeneral(query, topK, options, fusion);
+            case DEFINITION, CONFIG -> searchPreciseFirst(query, topK, fusion, scoring);
+            case ERROR_TRACE -> searchErrorTrace(query, topK, options, fusion, scoring);
+            case CALL_CHAIN -> searchCallChain(query, topK, options, fusion, scoring);
+            case AUTO, GENERAL -> searchGeneral(query, topK, options, fusion, scoring);
         }
 
         List<VectorStore.SearchResult> fused = fusion.rank(query, Math.max(topK * 3, topK));
@@ -130,35 +167,39 @@ public class CodeRetriever implements AutoCloseable {
         return lastAudit;
     }
 
-    private void searchGeneral(String query, int topK, CodeSearchOptions options, RetrievalFusion fusion) throws Exception {
+    private void searchGeneral(String query, int topK, CodeSearchOptions options, RetrievalFusion fusion,
+                               RetrievalScoringProfile scoring) throws Exception {
         List<VectorStore.SearchResult> semantic = safeSemanticResults(query, topK);
         List<VectorStore.SearchResult> keyword = keywordResults(query);
-        fusion.addChannel("semantic", semantic, 1.0);
-        fusion.addChannel("keyword", keyword, 1.15);
-        addGraphResults(options.graphDepth(), fusion, semantic, keyword);
+        fusion.addChannel("semantic", semantic, scoring.semanticWeight());
+        fusion.addChannel("keyword", keyword, scoring.keywordWeight());
+        addGraphResults(options.graphDepth(), fusion, semantic, keyword, scoring.graphWeight());
     }
 
-    private void searchCallChain(String query, int topK, CodeSearchOptions options, RetrievalFusion fusion) throws Exception {
+    private void searchCallChain(String query, int topK, CodeSearchOptions options, RetrievalFusion fusion,
+                                 RetrievalScoringProfile scoring) throws Exception {
         List<VectorStore.SearchResult> semantic = safeSemanticResults(query, topK);
         List<VectorStore.SearchResult> keyword = keywordResults(query);
-        fusion.addChannel("semantic", semantic, 1.0);
-        fusion.addChannel("keyword", keyword, 1.20);
-        addGraphResults(options.graphDepth(), fusion, semantic, keyword);
+        fusion.addChannel("semantic", semantic, scoring.semanticWeight());
+        fusion.addChannel("keyword", keyword, scoring.keywordWeight());
+        addGraphResults(options.graphDepth(), fusion, semantic, keyword, scoring.graphWeight());
     }
 
-    private void searchErrorTrace(String query, int topK, CodeSearchOptions options, RetrievalFusion fusion) throws Exception {
+    private void searchErrorTrace(String query, int topK, CodeSearchOptions options, RetrievalFusion fusion,
+                                  RetrievalScoringProfile scoring) throws Exception {
         List<VectorStore.SearchResult> keyword = keywordResults(query);
         List<VectorStore.SearchResult> semantic = safeSemanticResults(query, topK);
-        fusion.addChannel("keyword", keyword, 1.30);
-        fusion.addChannel("semantic", semantic, 0.90);
-        addGraphResults(options.graphDepth(), fusion, keyword, semantic);
+        fusion.addChannel("keyword", keyword, scoring.keywordWeight());
+        fusion.addChannel("semantic", semantic, scoring.semanticWeight());
+        addGraphResults(options.graphDepth(), fusion, keyword, semantic, scoring.graphWeight());
     }
 
-    private void searchPreciseFirst(String query, int topK, RetrievalFusion fusion) throws Exception {
+    private void searchPreciseFirst(String query, int topK, RetrievalFusion fusion,
+                                    RetrievalScoringProfile scoring) throws Exception {
         List<VectorStore.SearchResult> keyword = keywordResults(query);
-        fusion.addChannel("keyword", keyword, 1.35);
+        fusion.addChannel("keyword", keyword, scoring.keywordWeight());
         if (keyword.size() < Math.max(topK, 5)) {
-            fusion.addChannel("semantic", safeSemanticResults(query, topK), 0.75);
+            fusion.addChannel("semantic", safeSemanticResults(query, topK), scoring.semanticWeight());
         }
     }
 
@@ -211,10 +252,11 @@ public class CodeRetriever implements AutoCloseable {
 
     private void addGraphResults(int graphDepth, RetrievalFusion fusion,
                                  List<VectorStore.SearchResult> first,
-                                 List<VectorStore.SearchResult> second) throws SQLException {
+                                 List<VectorStore.SearchResult> second,
+                                 double graphWeight) throws SQLException {
         if (graphDepth > 0) {
             List<VectorStore.SearchResult> graph = expandGraphNeighbors(seedResults(first, second), graphDepth);
-            fusion.addChannel("graph", graph, 0.85);
+            fusion.addChannel("graph", graph, graphWeight);
         }
     }
 
@@ -438,6 +480,7 @@ public class CodeRetriever implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
+        if (indexWatcher != null) indexWatcher.close();
         vectorStore.close();
     }
 }

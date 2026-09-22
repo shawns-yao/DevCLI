@@ -29,6 +29,13 @@
             <version>2.17.3</version>
         </dependency>
 
+        <!-- 受限 YAML 1.2 解析（Skill frontmatter） -->
+        <dependency>
+            <groupId>org.snakeyaml</groupId>
+            <artifactId>snakeyaml-engine</artifactId>
+            <version>3.1.1</version>
+        </dependency>
+
         <!-- JSON Schema 校验（工具调用参数执行前强校验，Jackson 2 兼容线） -->
         <dependency>
             <groupId>com.networknt</groupId>
@@ -79,6 +86,13 @@
             <version>3.49.1.0</version>
         </dependency>
 
+        <!-- 进程内代码向量近似最近邻索引 -->
+        <dependency>
+            <groupId>com.github.jelmerk</groupId>
+            <artifactId>hnswlib-core</artifactId>
+            <version>1.2.1</version>
+        </dependency>
+
         <!-- Java AST 解析 -->
         <dependency>
             <groupId>com.github.javaparser</groupId>
@@ -122,16 +136,25 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- Lanterna TUI -->
-        <dependency>
-            <groupId>com.googlecode.lanterna</groupId>
-            <artifactId>lanterna</artifactId>
-            <version>3.1.3</version>
-        </dependency>
     </dependencies>
 
     <build>
         <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.6.1</version>
+                <executions>
+                    <execution>
+                        <id>public-benchmark-support</id>
+                        <phase>generate-test-sources</phase>
+                        <goals><goal>add-test-source</goal></goals>
+                        <configuration>
+                            <sources><source>benchmarks/src/main/java</source></sources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
@@ -256,9 +279,32 @@
                                 <include>**/render/inline/BlockRegistryTest.java</include>
                                 <include>**/render/inline/FoldableBlockTest.java</include>
                                 <include>**/render/inline/SlashPaletteTest.java</include>
-                                <include>**/tui/TuiBootstrapTest.java</include>
-                                <include>**/tui/highlight/CodeHighlighterTest.java</include>
-                                <include>**/tui/history/ConversationSnapshotTest.java</include>
+                            </includes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>protocol-regression</id>
+            <properties>
+                <skipTests>false</skipTests>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <version>3.2.5</version>
+                        <configuration>
+                            <argLine>-Dfile.encoding=UTF-8</argLine>
+                            <includes>
+                                <include>**/workspace/ContextVersionLedgerContractTest.java</include>
+                                <include>**/agent/AgentExecutionEngineTest.java</include>
+                                <include>**/rag/VectorStoreTest.java</include>
+                                <include>**/memory/MemoryWriteProtocolTest.java</include>
+                                <include>**/runtime/RunEventExecutionStateTest.java</include>
+                                <include>**/benchmark/ProtocolBaselineGateTest.java</include>
                             </includes>
                         </configuration>
                     </plugin>

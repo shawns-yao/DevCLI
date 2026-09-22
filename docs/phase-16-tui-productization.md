@@ -1,10 +1,15 @@
 # 第 16 期开发任务：TUI 界面 + 产品化
 
-> ⚠️ **形态修正提示（2026-05-08）**：本文的"Lanterna 三栏全屏"形态选型已被
+> ⚠️ **形态修正提示（2026-05-08，2026-09-17 更新）**：本文的"Lanterna 三栏全屏"形态选型已被
 > [`docs/inline-tui-pivot.md`](inline-tui-pivot.md) 修正。
-> 默认渲染器切换为 **inline 流式 TUI**（Claude Code 风格）；
-> Lanterna 三栏 TUI 作为可切换形态保留，通过 `DEVCLI_RENDERER=lanterna` 启用。
-> phase-16 实现的 widget 代码（CenterPane / StatusPane / FileTreePane）继续可用，只是默认不再启动。
+> 默认渲染器切换为 **inline 流式 TUI**（Claude Code 风格）。
+>
+> **最终结果：Lanterna 形态已被彻底移除，不再"可切换保留"。** `com.devcli.tui.*` 全部类、
+> Lanterna 依赖和 `DEVCLI_RENDERER=lanterna` 的实际分支都已删除；`lanterna` / `tui` 只作为
+> 兼容值映射到 inline 并输出停用提示，渲染器只剩 Inline 与 Plain。
+> 因此本文列出的 `TuiBootstrap` / `TuiSessionController` / `LanternaWindow` / `CenterPane` /
+> `StatusPane` / `FileTreePane` 等类**均已不存在**，本文仅作历史设计记录保留。
+> 当前事实以 `AGENTS.md` 为准。
 
 
 > 这份文档是给执行 Agent 的开发任务说明书，自包含、可直接照着推进。

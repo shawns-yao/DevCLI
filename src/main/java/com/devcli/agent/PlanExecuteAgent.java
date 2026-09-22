@@ -8,6 +8,8 @@ import com.devcli.llm.LlmClient;
 import com.devcli.llm.LlmTraceLogger;
 import com.devcli.lsp.LspDiagnosticReport;
 import com.devcli.memory.ConversationHistoryCompactor;
+import com.devcli.memory.CompactionContext;
+import com.devcli.memory.CompactionResult;
 import com.devcli.memory.MemoryManager;
 import com.devcli.memory.TokenBudget;
 import com.devcli.context.ContextProfile;
@@ -15,7 +17,7 @@ import com.devcli.plan.*;
 import com.devcli.prompt.PromptAssembler;
 import com.devcli.prompt.PromptContext;
 import com.devcli.prompt.PromptMode;
-import com.devcli.runtime.CancellationContext;
+import com.devcli.concurrent.CancellationContext;
 import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.util.AnsiStyle;
@@ -98,11 +100,12 @@ public class PlanExecuteAgent {
     private final ConversationHistoryCompactor historyCompactor;
     private final PrintStream out;
     private Supplier<String> externalContextSupplier = () -> "";
-    private Supplier<String> stickyMemorySupplier = () -> "";
+    private Supplier<String> ruleContextSupplier = () -> "";
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
     private final TraceRecorder traceRecorder = new TraceRecorder();
+    private volatile String currentSessionTaskId = "";
 
     public PlanExecuteAgent(LlmClient llmClient) {
         this(llmClient, (goal, plan) -> PlanReviewDecision.execute());
@@ -173,9 +176,14 @@ public class PlanExecuteAgent {
     /**
      * 注入 Sticky Memory 渲染源（PR-B）：与 Agent 一致语义，由 Main 启动时接进来。
      */
-    public void setStickyMemorySupplier(Supplier<String> stickyMemorySupplier) {
-        this.stickyMemorySupplier = stickyMemorySupplier == null ? () -> "" : stickyMemorySupplier;
+    public void setRuleContextSupplier(Supplier<String> ruleContextSupplier) {
+        this.ruleContextSupplier = ruleContextSupplier == null ? () -> "" : ruleContextSupplier;
+        memoryManager.setRuleContextSupplier(this.ruleContextSupplier);
     }
+
+    /** @deprecated 使用 {@link #setRuleContextSupplier(Supplier)}。 */
+    @Deprecated
+    public void setStickyMemorySupplier(Supplier<String> supplier) { setRuleContextSupplier(supplier); }
 
     public void setSkillRegistry(SkillRegistry skillRegistry) {
         this.skillRegistry = skillRegistry;
@@ -193,7 +201,10 @@ public class PlanExecuteAgent {
         int trigger = profile.historyTriggerTokens(toolDefinitionTokens);
         try {
             historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(toolRegistry.getProjectPath()));
-            boolean compacted = historyCompactor.compactIfNeeded(messages, trigger);
+            CompactionResult compaction = historyCompactor.compactIfNeeded(
+                    messages, AgentRuntimeSupport.buildCompactionContext(
+                            trigger, memoryManager, toolRegistry, currentSessionTaskId));
+            boolean compacted = compaction.compacted();
             if (compacted && out != null) {
                 out.println("📦 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
             }
@@ -226,6 +237,10 @@ public class PlanExecuteAgent {
      */
     public String run(String userInput) {
         log.info("Plan run started: inputLength={}", userInput == null ? 0 : userInput.length());
+        String sessionTaskId = "plan-run-" + java.util.UUID.randomUUID().toString().substring(0, 8);
+        currentSessionTaskId = sessionTaskId;
+        memoryManager.beginTask(sessionTaskId);
+        memoryManager.setActiveProjectScope(toolRegistry.getProjectPath());
         toolRegistry.prefetchToolDefinitionsForInput(userInput);
         memoryManager.addUserMessage(userInput);
         StreamState streamState = new StreamState();
@@ -252,6 +267,9 @@ public class PlanExecuteAgent {
             resultForSummary = errorMessage;
             return errorMessage;
         } finally {
+            memoryManager.completeTask(sessionTaskId, userInput, resultForSummary,
+                    toolRegistry.getProjectPath());
+            memoryManager.endTask(sessionTaskId);
             scheduleSessionPreSummaryMaintenance(userInput, resultForSummary, streamState);
         }
     }
@@ -367,7 +385,10 @@ public class PlanExecuteAgent {
 
         if (!plan.isAllCompleted() && !plan.hasFailed()) {
             plan.markFailed();
-            return "⚠️ 计划未能继续推进，存在未满足依赖的任务。";
+            String reason = "计划未能继续推进，存在未满足依赖的任务";
+            return "⚠️ " + FailureFeedback.fromReason(reason)
+                    .withRetryInstruction("修正任务依赖后重新发起 `/plan`")
+                    .render();
         }
 
         // Bug #7 修复：始终调用 buildFinalResult 生成完整摘要（包含成功和失败）
@@ -379,10 +400,17 @@ public class PlanExecuteAgent {
 
         if (plan.hasFailed()) {
             plan.markFailed();
+            String failureReason = finalResult.isEmpty()
+                    ? "计划部分完成，有任务失败"
+                    : finalResult.toString();
+            String guidance = FailureFeedback.fromReason(failureReason)
+                    .withRetryInstruction("修正失败任务后重新发起 `/plan`")
+                    .render();
             if (planSummary.isBlank()) {
-                return "⚠️ 计划部分完成，有任务失败。";
+                return "⚠️ " + guidance;
             }
-            return "⚠️ 计划部分完成，有任务失败。\n" + planSummary;
+            return "⚠️ 计划部分完成，有任务失败。\n" + planSummary
+                    + "\n\n" + guidance;
         }
 
         plan.markCompleted();
@@ -412,7 +440,8 @@ public class PlanExecuteAgent {
                     memoryManager.startTaskStep(task.getId());
                 },
                 (task, taskOut) -> executeTaskWithArtifact(plan, task, streamState, taskOut),
-                task -> consumeTaskModifiedFiles(task.getId()));
+                task -> consumeTaskModifiedFiles(task.getId()),
+                Path.of(toolRegistry.getProjectPath()));
         return batchExecutor.execute(executableTasks);
     }
 
@@ -506,6 +535,7 @@ public class PlanExecuteAgent {
         ));
 
         AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
+        AgentRuntimeSupport.bindCompactionBudget(historyCompactor, budget, memoryManager);
         return new AgentExecutionEngine<TaskRunResult>(
                 llmClient, budget, HookLifecycle.load(activeTaskToolRegistry())).run(
                 new AgentExecutionEngine.Delegate<>() {
@@ -516,7 +546,12 @@ public class PlanExecuteAgent {
 
                     @Override
                     public List<LlmClient.Tool> toolDefinitions(int iteration) {
-                        return activeTaskToolRegistry().getToolDefinitions();
+                        return toolSnapshot(iteration).definitions();
+                    }
+
+                    @Override
+                    public ToolRegistry.ToolSnapshot toolSnapshot(int iteration) {
+                        return activeTaskToolRegistry().snapshotForCurrentAccess();
                     }
 
                     @Override
@@ -578,6 +613,13 @@ public class PlanExecuteAgent {
                     }
 
                     @Override
+                    public List<ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
+                                                                  int iteration,
+                                                                  ToolRegistry.ToolSnapshot snapshot) {
+                        return executeToolCalls(task.getId(), toolCalls, snapshot);
+                    }
+
+                    @Override
                     public void afterToolResults(LlmClient.ChatResponse response,
                                                  List<ToolExecutionResult> toolResults,
                                                  int iteration,
@@ -592,12 +634,30 @@ public class PlanExecuteAgent {
                                     "timedOut", toolResult.timedOut(),
                                     "resultPreview", preview(toolResult.result(), 300)
                             ));
-                            memoryManager.addToolResult(
-                                    toolResult.name(), toolResult.argumentsJson(), toolResult.result(),
-                                    toolResult.sideChannels());
+                            memoryManager.addToolResult(toolResult);
                             allResults.append(toolResult.result()).append("\n");
                         }
                         appendImageToolMessages(messages, toolResults);
+                    }
+
+                    @Override
+                    public String instructionAfterToolResults(
+                            LlmClient.ChatResponse response,
+                            List<ToolExecutionResult> toolResults,
+                            int iteration,
+                            AgentBudget currentBudget) {
+                        return memoryManager.drainCurrentStateConflictInstruction();
+                    }
+
+                    @Override
+                    public java.util.Map<String, String> refreshStaleContext() {
+                        ToolRegistry registry = activeTaskToolRegistry();
+                        return registry.refreshStaleContext(task.getId());
+                    }
+
+                    @Override
+                    public String contextScope() {
+                        return task.getId();
                     }
 
                     @Override
@@ -640,7 +700,7 @@ public class PlanExecuteAgent {
                                                         AgentBudget currentBudget) {
                         streamRenderer.finish();
                         return TaskRunResult.of(
-                                currentBudget.describeExit(reason),
+                                FailureFeedback.forBudget(reason, currentBudget).render(),
                                 streamRenderer.hasStreamedOutput());
                     }
 
@@ -652,8 +712,13 @@ public class PlanExecuteAgent {
                                     "[计划任务 " + task.getId() + "] " + fallbackResult);
                         }
                         streamRenderer.finish();
+                        String guidance = FailureFeedback.forBudget(
+                                AgentBudget.ExitReason.HARD_ITERATION_LIMIT, currentBudget).render();
                         return TaskRunResult.of(
-                                fallbackResult, streamRenderer.hasStreamedOutput());
+                                fallbackResult.isBlank()
+                                        ? guidance
+                                        : fallbackResult + "\n\n" + guidance,
+                                streamRenderer.hasStreamedOutput());
                     }
 
                     @Override
@@ -673,7 +738,7 @@ public class PlanExecuteAgent {
                 .variable("taskType", task.getType())
                 .variable("taskDescription", task.getDescription())
                 .externalContext(buildExternalContext())
-                .stickyMemory(buildStickyMemory())
+                .ruleContext(buildRuleContext())
                 .build());
     }
 
@@ -681,7 +746,7 @@ public class PlanExecuteAgent {
     private String buildTurnContext(String memoryContext, String activationText) {
         return promptAssembler.assembleTurnContext(PromptContext.builder()
                 .memoryContext(memoryContext)
-                .workingMemory(memoryManager.buildWorkingMemorySection())
+                .sessionMemory(memoryManager.buildSessionMemorySection())
                 .skillIndex(buildSkillIndex(activationText))
                 .build());
     }
@@ -699,12 +764,12 @@ public class PlanExecuteAgent {
         }
     }
 
-    private String buildStickyMemory() {
+    private String buildRuleContext() {
         try {
-            String sticky = stickyMemorySupplier.get();
-            return sticky == null ? "" : sticky.trim();
+            String rules = ruleContextSupplier.get();
+            return rules == null ? "" : rules.trim();
         } catch (Exception e) {
-            log.warn("Failed to render sticky memory for plan task", e);
+            log.warn("Failed to render rule context for plan task", e);
             return "";
         }
     }
@@ -731,6 +796,13 @@ public class PlanExecuteAgent {
     }
 
     private List<ToolExecutionResult> executeToolCalls(String taskId, List<LlmClient.ToolCall> toolCalls) {
+        return executeToolCalls(taskId, toolCalls, null);
+    }
+
+    private List<ToolExecutionResult> executeToolCalls(
+            String taskId,
+            List<LlmClient.ToolCall> toolCalls,
+            ToolRegistry.ToolSnapshot snapshot) {
         List<ToolInvocation> invocations = new ArrayList<>();
         for (LlmClient.ToolCall toolCall : toolCalls) {
             String toolName = toolCall.function().name();
@@ -743,7 +815,7 @@ public class PlanExecuteAgent {
         if (invocations.size() > 1) {
             log.info("Task {} executing {} tool calls in parallel", taskId, invocations.size());
         }
-        List<ToolExecutionResult> results = activeTaskToolRegistry().executeTools(invocations);
+        List<ToolExecutionResult> results = activeTaskToolRegistry().executeTools(invocations, snapshot);
         for (ToolExecutionResult result : results) {
             log.debug("Task {} tool result preview [{}]: {}", taskId, result.name(), preview(result.result(), 300));
         }

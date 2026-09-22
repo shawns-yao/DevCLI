@@ -15,13 +15,21 @@ final class CliCommandParser {
         HISTORY_CLEAR,
         SWITCH_MODEL,
         ORCHESTRATE,
-        SWITCH_HITL,
+        PERMISSION_MODE,
+        GRANT,
         MEMORY_STATUS,
+        MEMORY_EXPORT,
         MEMORY_ORGANIZE,
+        MEMORY_PENDING,
+        MEMORY_CONFIRM,
+        MEMORY_REJECT,
         MEMORY_CLEAR,
         MEMORY_FORGET,
         MEMORY_SAVE,
         MEMORY_PIN,
+        RULE_ADD,
+        RULE_LIST,
+        RULE_REMOVE,
         INDEX_CODE,
         SEARCH_CODE,
         GRAPH_QUERY,
@@ -43,10 +51,13 @@ final class CliCommandParser {
         SKILL_SHOW,
         SKILL_ON,
         SKILL_OFF,
+        SKILL_TRUST_PROJECT,
+        SKILL_UNTRUST_PROJECT,
         SKILL_RELOAD,
         CONFIG,
         SESSION,
-        BRANCH
+        BRANCH,
+        TRACE
     }
 
     record ParsedCommand(CommandType type, String payload, OrchestrationProfile orchestrationProfile) {
@@ -121,35 +132,43 @@ final class CliCommandParser {
 
         if (trimmed.regionMatches(true, 0, "/plan ", 0, 6)) {
             String planInput = trimmed.substring(6).trim();
-            if (planInput.equalsIgnoreCase("--team")) {
-                return ParsedCommand.orchestrate(OrchestrationProfile.TEAM, null);
-            }
-            if (planInput.regionMatches(true, 0, "--team ", 0, 7)) {
-                return ParsedCommand.orchestrate(
-                        OrchestrationProfile.TEAM, planInput.substring(7).trim());
+            if (planInput.startsWith("--")) {
+                return new ParsedCommand(CommandType.UNKNOWN_COMMAND, trimmed);
             }
             return ParsedCommand.orchestrate(OrchestrationProfile.TEAM, planInput);
         }
 
-        if (trimmed.equalsIgnoreCase("/team")) {
-            return ParsedCommand.orchestrate(OrchestrationProfile.TEAM, null);
+        // /mode：权限模式，唯一用户可见的权限预设。/hitl 与 /readonly 已并入这里。
+        if (trimmed.regionMatches(true, 0, "/mode ", 0, 6)) {
+            return new ParsedCommand(CommandType.PERMISSION_MODE, trimmed.substring(6).trim());
         }
 
-        if (trimmed.regionMatches(true, 0, "/team ", 0, 6)) {
-            return ParsedCommand.orchestrate(
-                    OrchestrationProfile.TEAM, trimmed.substring(6).trim());
+        if (trimmed.equalsIgnoreCase("/mode")) {
+            return new ParsedCommand(CommandType.PERMISSION_MODE, null);
         }
 
-        if (trimmed.equalsIgnoreCase("/hitl on")) {
-            return new ParsedCommand(CommandType.SWITCH_HITL, "on");
+        // /grant：下一条任务的任务级授权范围。只接受用户显式选择，不接受模型推断。
+        // 形如 /grant [write [glob...]|commands|all|off]，未知子命令继续走未识别命令。
+        if (trimmed.regionMatches(true, 0, "/grant ", 0, 7)) {
+            String arguments = trimmed.substring(7).trim();
+            String[] parts = arguments.isEmpty() ? new String[0] : arguments.split("\\s+");
+            String mode = parts.length == 0 ? "" : parts[0].toLowerCase(java.util.Locale.ROOT);
+            if ("write".equals(mode) || "net".equals(mode) || "commands".equals(mode)
+                    || "all".equals(mode) || "off".equals(mode)) {
+                // 子命令统一小写，后续 glob 保持原样（路径大小写敏感）
+                String payload = mode + arguments.substring(parts[0].length());
+                return new ParsedCommand(CommandType.GRANT, payload);
+            }
+            return new ParsedCommand(CommandType.UNKNOWN_COMMAND, trimmed);
         }
 
-        if (trimmed.equalsIgnoreCase("/hitl off")) {
-            return new ParsedCommand(CommandType.SWITCH_HITL, "off");
+        if (trimmed.equalsIgnoreCase("/grant")) {
+            return new ParsedCommand(CommandType.GRANT, null);
         }
 
-        if (trimmed.equalsIgnoreCase("/hitl")) {
-            return new ParsedCommand(CommandType.SWITCH_HITL, null);
+        if (trimmed.equalsIgnoreCase("/memory export")
+                || trimmed.equalsIgnoreCase("/mem export")) {
+            return new ParsedCommand(CommandType.MEMORY_EXPORT, null);
         }
 
         if (trimmed.equalsIgnoreCase("/memory") || trimmed.equalsIgnoreCase("/mem")) {
@@ -166,8 +185,33 @@ final class CliCommandParser {
             return new ParsedCommand(CommandType.MEMORY_ORGANIZE, "apply");
         }
 
+        if (trimmed.equalsIgnoreCase("/memory pending")
+                || trimmed.equalsIgnoreCase("/mem pending")) {
+            return new ParsedCommand(CommandType.MEMORY_PENDING, null);
+        }
+
+        if (trimmed.regionMatches(true, 0, "/memory confirm", 0, "/memory confirm".length())
+                || trimmed.regionMatches(true, 0, "/mem confirm", 0, "/mem confirm".length())) {
+            String id = trimmed.substring(trimmed.indexOf("confirm") + "confirm".length()).trim();
+            return new ParsedCommand(CommandType.MEMORY_CONFIRM, id);
+        }
+
+        if (trimmed.regionMatches(true, 0, "/memory reject", 0, "/memory reject".length())
+                || trimmed.regionMatches(true, 0, "/mem reject", 0, "/mem reject".length())) {
+            String id = trimmed.substring(trimmed.indexOf("reject") + "reject".length()).trim();
+            return new ParsedCommand(CommandType.MEMORY_REJECT, id);
+        }
+
         if (trimmed.equalsIgnoreCase("/memory clear") || trimmed.equalsIgnoreCase("/mem clear")) {
             return new ParsedCommand(CommandType.MEMORY_CLEAR, null);
+        }
+
+        // /memory clear <scope>：显式指定只清全局或只清项目
+        if (trimmed.regionMatches(true, 0, "/memory clear ", 0, "/memory clear ".length())
+                || trimmed.regionMatches(true, 0, "/mem clear ", 0, "/mem clear ".length())) {
+            String scope = trimmed.substring(trimmed.toLowerCase(java.util.Locale.ROOT)
+                    .indexOf("clear") + "clear".length()).trim();
+            return new ParsedCommand(CommandType.MEMORY_CLEAR, scope);
         }
 
         // /memory forget <id>：删除单条长期记忆，配合自动写入提示里给出的 id
@@ -192,6 +236,22 @@ final class CliCommandParser {
 
         if (trimmed.regionMatches(true, 0, "/save ", 0, 6)) {
             return new ParsedCommand(CommandType.MEMORY_SAVE, trimmed.substring(6).trim());
+        }
+
+        if (trimmed.equalsIgnoreCase("/rule add")) {
+            return new ParsedCommand(CommandType.RULE_ADD, null);
+        }
+        if (trimmed.regionMatches(true, 0, "/rule add ", 0, 10)) {
+            return new ParsedCommand(CommandType.RULE_ADD, trimmed.substring(10).trim());
+        }
+        if (trimmed.equalsIgnoreCase("/rule") || trimmed.equalsIgnoreCase("/rule list")) {
+            return new ParsedCommand(CommandType.RULE_LIST, null);
+        }
+        if (trimmed.equalsIgnoreCase("/rule remove")) {
+            return new ParsedCommand(CommandType.RULE_REMOVE, null);
+        }
+        if (trimmed.regionMatches(true, 0, "/rule remove ", 0, 13)) {
+            return new ParsedCommand(CommandType.RULE_REMOVE, trimmed.substring(13).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/index")) {
@@ -254,6 +314,14 @@ final class CliCommandParser {
             return new ParsedCommand(CommandType.RESTORE_SNAPSHOT, trimmed.substring(9).trim());
         }
 
+        if (trimmed.equalsIgnoreCase("/trace")) {
+            return new ParsedCommand(CommandType.TRACE, "latest");
+        }
+
+        if (trimmed.regionMatches(true, 0, "/trace ", 0, 7)) {
+            return new ParsedCommand(CommandType.TRACE, trimmed.substring(7).trim());
+        }
+
         if (trimmed.equalsIgnoreCase("/browser")) {
             return new ParsedCommand(CommandType.BROWSER, "status");
         }
@@ -290,6 +358,14 @@ final class CliCommandParser {
 
         if (trimmed.equalsIgnoreCase("/skill reload")) {
             return new ParsedCommand(CommandType.SKILL_RELOAD, null);
+        }
+
+        if (trimmed.equalsIgnoreCase("/skill trust project")) {
+            return new ParsedCommand(CommandType.SKILL_TRUST_PROJECT, null);
+        }
+
+        if (trimmed.equalsIgnoreCase("/skill untrust project")) {
+            return new ParsedCommand(CommandType.SKILL_UNTRUST_PROJECT, null);
         }
 
         if (trimmed.regionMatches(true, 0, "/skill show ", 0, 12)) {

@@ -46,7 +46,7 @@ class TerminalHitlHandlerTest {
 
         ApprovalResult cached = h.handler.requestApproval(WRITE_FILE_REQUEST);
         assertEquals(ApprovalResult.Decision.APPROVED_ALL, cached.decision());
-        assertTrue(h.output().contains("已在本次会话中全部放行"),
+        assertTrue(h.output().contains("已在本次任务中全部放行"),
                 "第二次应命中缓存；实际输出：" + h.output());
     }
 
@@ -69,7 +69,7 @@ class TerminalHitlHandlerTest {
         ApprovalResult cached = h.handler.requestApproval(MCP_CHROME_CLICK_REQUEST);
 
         assertEquals(ApprovalResult.Decision.APPROVED_ALL_BY_SERVER, cached.decision());
-        assertTrue(h.output().contains("已在本次会话中全部放行"));
+        assertTrue(h.output().contains("已在本次任务中全部放行"));
     }
 
     @Test

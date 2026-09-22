@@ -9,9 +9,17 @@ public final class MemoryToolProvider implements ToolProvider {
     public void register(ToolContext context) {
         context.registerTool(ToolRegistry.Tool.structured(
                 "save_memory",
-                "当且仅当用户明确说“记一下”“记住”“以后记得”或要求保存长期偏好/稳定事实时调用，把精炼事实写入长期记忆；不要保存一次性任务请求、临时文件名或模型猜测。",
-                context.createToolParameters(new ToolParameter("fact", "string", "要长期保存的稳定事实或用户偏好，必须精炼、可跨会话复用", true)),
-                args -> saveMemory(context, args.get("fact"))
+                "当且仅当用户明确要求记住长期偏好或稳定事实时调用。默认写当前项目；只有明确跨项目偏好才使用 global。",
+                context.createToolParameters(
+                        new ToolParameter("fact", "string", "要长期保存的稳定事实或用户偏好", true),
+                        new ToolParameter("name", "string", "稳定的主题名；留空时从 fact 首句推导", false),
+                        new ToolParameter("description", "string", "供相关性选择的一句话描述", false),
+                        new ToolParameter("type", "string", "记忆类型", false,
+                                java.util.List.of("user", "feedback", "project", "reference")),
+                        new ToolParameter("scope", "string", "作用域；留空默认当前项目", false,
+                                java.util.List.of("global", "project")),
+                        new ToolParameter("valid_days", "integer", "可选有效天数，1–3650；留空为长期有效", false)),
+                args -> saveMemory(context, args)
         ));
         context.registerTool(ToolRegistry.Tool.structured(
                 "list_memory",
@@ -21,7 +29,8 @@ public final class MemoryToolProvider implements ToolProvider {
         ));
     }
 
-    private ToolOutput saveMemory(ToolContext context, String fact) {
+    private ToolOutput saveMemory(ToolContext context, java.util.Map<String, String> args) {
+        String fact = args.get("fact");
         if (fact == null || fact.isBlank()) {
             return ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS,
                     "保存长期记忆失败: fact 不能为空", false);
@@ -29,7 +38,16 @@ public final class MemoryToolProvider implements ToolProvider {
         String normalized = fact.trim();
         ToolRegistry.MemorySaver saveHandler = context.memorySaveHandler();
         if (saveHandler != null) {
-            ToolRegistry.MemorySaveResult saveResult = saveHandler.save(normalized);
+            Integer validDays;
+            try {
+                validDays = parseOptionalInt(args.get("valid_days"));
+            } catch (IllegalArgumentException e) {
+                return ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS, e.getMessage(), false);
+            }
+            ToolRegistry.MemorySaveResult saveResult = saveHandler.save(
+                    new ToolRegistry.MemorySaveRequest(normalized, args.get("name"),
+                            args.get("description"), args.get("type"), args.get("scope"),
+                            validDays));
             if (saveResult == null) {
                 return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
                         "保存长期记忆失败: 记忆保存器未返回结果", false);
@@ -40,7 +58,10 @@ public final class MemoryToolProvider implements ToolProvider {
                         : saveResult.message();
                 return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED, message);
             }
-            return ToolOutput.success("已保存到长期记忆: " + normalized);
+            String message = saveResult.message() == null || saveResult.message().isBlank()
+                    ? "已保存到长期记忆"
+                    : saveResult.message();
+            return ToolOutput.success(message);
         }
         java.util.function.Consumer<String> memorySaver = context.memorySaver();
         if (memorySaver == null) {
@@ -48,7 +69,7 @@ public final class MemoryToolProvider implements ToolProvider {
                     "保存长期记忆失败: 记忆保存器未初始化", false);
         }
         memorySaver.accept(normalized);
-        return ToolOutput.success("已保存到长期记忆: " + normalized);
+        return ToolOutput.success("已保存到长期记忆");
     }
 
     private ToolOutput listMemory(ToolContext context, String limitValue) {
@@ -69,6 +90,15 @@ public final class MemoryToolProvider implements ToolProvider {
             return Integer.parseInt(value.trim());
         } catch (NumberFormatException e) {
             return fallback;
+        }
+    }
+
+    private static Integer parseOptionalInt(String value) {
+        if (value == null || value.isBlank()) return null;
+        try {
+            return Integer.valueOf(value.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("valid_days 必须是整数");
         }
     }
 }

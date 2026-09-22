@@ -6,7 +6,7 @@ import com.devcli.hitl.ApprovalPolicy;
 import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.llm.LlmClient;
-import com.devcli.runtime.event.RunEvent;
+import com.devcli.event.RunEvent;
 import com.devcli.util.AnsiStyle;
 import org.jline.reader.EndOfFileException;
 import org.jline.reader.LineReader;
@@ -25,7 +25,7 @@ import java.util.Map;
 /**
  * Plain 渲染器：纯 println 模式，等价 phase-15 行为，无折叠、无状态栏。
  *
- * <p>同时充当 inline / lanterna 两套实现的回退基线——任何高级特性都退化成普通文本。
+ * <p>作为 inline 交互能力不可用时的纯文本回退基线。
  */
 public final class PlainRenderer implements Renderer {
 
@@ -139,7 +139,13 @@ public final class PlainRenderer implements Renderer {
 
         for (int attempt = 0; attempt < 5; attempt++) {
             out.println();
-            if (sensitivePerCall) {
+            if (request.hostExecution()) {
+                out.println("请选择：[y] 单次允许执行  [n/Enter] 拒绝");
+            } else if (request.singleDecisionOnly()) {
+                out.println(request.redactionAllowed()
+                        ? "请选择：[y] 单次允许原文  [r] 脱敏后继续  [n/Enter] 拒绝"
+                        : "请选择：[y] 单次允许原文  [n/Enter] 拒绝");
+            } else if (sensitivePerCall) {
                 out.println("请选择操作：[y/Enter] 批准本次  [n] 拒绝  [s] 跳过  [m] 修改参数");
             } else {
                 out.println("请选择操作：[y/Enter] 批准  [a] 全部放行  [n] 拒绝  [s] 跳过  [m] 修改参数");
@@ -160,6 +166,13 @@ public final class PlainRenderer implements Renderer {
             }
 
             String normalized = input.trim().toLowerCase();
+            if (request.singleDecisionOnly()) {
+                if ("y".equals(normalized)) return ApprovalResult.approve();
+                if ("r".equals(normalized) && request.redactionAllowed()) return ApprovalResult.redact();
+                if (normalized.isEmpty() || "n".equals(normalized)) return ApprovalResult.reject("用户拒绝本次操作");
+                out.println("请选择单次允许、拒绝或可用的脱敏选项");
+                continue;
+            }
             if (normalized.isEmpty() || normalized.equals("y")) {
                 out.println("  已批准");
                 return ApprovalResult.approve();

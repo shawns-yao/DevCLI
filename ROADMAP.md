@@ -410,10 +410,10 @@
 - 安装包分发
 
 **第 16.1 期形态修正（v16.1.0）**：
-- 抽出 `Renderer` 接口 + 三个实现：inline 流式（默认）/ lanterna 全屏（保留）/ plain 兜底
+- 抽出 `Renderer` 接口；当前保留 inline 流式（默认）与 plain 兜底两种实现
 - 默认形态切换为 **inline 流式 TUI**（Claude Code 风格），主屏直出 + 底部 DECSTBM 状态栏 + 行内可折叠工具块（`ctrl+o`）+ 行内 diff
 - HITL 改为单字符 `[y/n/a/s/m]` 提示；`/config` 改为浮起 palette
-- 切换：`DEVCLI_RENDERER=inline|lanterna|plain`，旧 `DEVCLI_TUI=true` 兼容映射到 lanterna
+- 切换：`DEVCLI_RENDERER=inline|plain`；旧 `lanterna`、`tui` 和 `DEVCLI_TUI=true` 兼容映射到 inline
 
 **核心知识点**：
 - TUI开发
@@ -424,7 +424,7 @@
 
 ---
 
-## 第17期：LSP 诊断注入（开发体验安全网）
+## 第17期：LSP 诊断注入（开发体验安全网） ✅ MVP
 
 **前置依赖**：第 6 期 HITL 审批流、第 16 期 TUI 产品化
 
@@ -454,7 +454,7 @@
 
 ---
 
-## 第18期：Git Side-History 快照与回滚（文件安全网）
+## 第18期：Git Side-History 快照与回滚（文件安全网） ✅ 已落地
 
 **前置依赖**：第 7 期异步执行、第 16 期 TUI 产品化
 
@@ -466,7 +466,8 @@
 - `postTurnSnapshot()`：turn 结束后异步执行第二次快照，commit message 标记 `"post-turn <turn_id>"`
 - `/restore <N>` 命令：从最近 N 个 turn 的 pre-turn 快照中恢复文件到工作区，不改变用户 `.git` 和对话历史
 - `revert_turn` 工具：LLM 可调用的回滚工具，让 Agent 自己能判断"改坏了需要撤销"
-- 快照策略可配：`max_snapshots`（默认保留最近 50 个 turn）、`snapshot_excludes`（默认排除 `.git/`、`node_modules/`、`target/`）
+- 快照策略可配：`devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX`（默认保留最近 50 条）、`devcli.snapshot.excludes` / `DEVCLI_SNAPSHOT_EXCLUDES`
+- 快照提交使用稳定 commit 引用；压缩边界和 Runtime checkpoint 持久化引用、来源范围及 checksum，resume 前重新定位并校验，不依赖随机文件名
 
 **设计参考**：DeepSeek TUI `crates/tui/src/core/engine.rs` 的 `pre_turn_snapshot()` / `post_turn_snapshot()` + `crates/tui/src/core/turn.rs` 的 `pre_tool_snapshot()`。
 
@@ -480,7 +481,7 @@
 
 ---
 
-## 第19期：Prompt 分层架构（可维护性重构）
+## 第19期：Prompt 分层架构（可维护性重构） ✅ MVP
 
 **前置依赖**：第 1–16 期全链路（所有 system prompt 的累积）
 
@@ -532,7 +533,7 @@
 - 持久化恢复：进程重启后未完成的任务自动重入队
 
 **Runtime API**：
-- `RuntimeApiServer`：嵌入式 HTTP/SSE 服务端（`devcli serve --http --port 8080`），基于已有的 OkHttp / Javalin 或 Spring Boot 内嵌
+- `RuntimeApiServer`：嵌入式 HTTP/SSE 服务端（`devcli serve --http --port 8080`），基于 JDK `HttpServer`
 - 兼容 OpenAI Assistants API 的端点：
   - `POST /v1/threads`：创建对话线程
   - `POST /v1/threads/{id}/turns`：发起一轮 Agent 交互
@@ -549,12 +550,14 @@
 - OpenAI Assistants API 兼容层设计
 
 **当前 MVP 已落地**：
-- `DurableTaskManager`：SQLite 后台任务队列，默认 `~/.devcli/tasks/tasks.db`
+- `DurableTaskManager`：SQLite 后台任务队列，默认与 Runtime 共用 `~/.devcli/runtime/runtime.db`；旧 `tasks.db` 仅只读导入
 - `/task`、`/task add`、`/task cancel`、`/task log` CLI 闭环
 - 进程启动时将残留 `running` 任务恢复为 `enqueued`
 - Worker Pool 默认 2，可用 `DEVCLI_TASK_WORKERS` / `-Ddevcli.task.workers` 覆盖
 - `RuntimeApiServer`：基于 JDK `HttpServer`，仅监听 `127.0.0.1`
 - `RuntimeThreadStore`：SQLite 保存 thread 与 event 时间线
+- thread 上下文从最新压缩 checkpoint 恢复，并按事件游标追加已完成 turn；checkpoint 损坏时回退到更早可解析记录或事件日志
+- `tool.results` 事件保留结构化耗时、状态、图片数量和命令退出码，退出码来自执行元数据而不是结果文本
 - Runtime API 强制 `DEVCLI_RUNTIME_API_KEY` / `-Ddevcli.runtime.api.key`
 - 详细实现文档：`docs/phase-20-runtime-api.md`
 
@@ -585,6 +588,7 @@
 - ReAct / Plan task executor / SubAgent 在工具结果后追加图片 user message，不在 CLI 输入层按模型名拦截
 - 用户输入支持 `@image:file:///abs/path.png`、`@image:/abs/path.png`、`@image:relative/path.png`
 - 图片处理对齐 Claude Code：不 OCR 成文本；统一压缩 / 缩放后以图片块发送，并只补充来源、尺寸、坐标映射元信息
+- 压缩输入保留图片字节 SHA-256；代码输入保留 diff、符号、编译位置和 RAG/index/classpath 版本元数据，未配置 OCR/视觉摘要时不伪造描述文本
 - 详细实现文档：`docs/phase-21-image-input.md`
 
 **不做**：
@@ -603,6 +607,130 @@
 **估算**：5–6 天
 
 ---
+
+## 第22期：JLine-first 交互升级 ✅ 已落地
+
+**前置依赖**：第 16 期 TUI 产品化（inline 流式终端形态）；第 19 期 Prompt 分层。
+
+**目标**：把 DevCLI 从「使用 JLine 的 CLI」升级为「**以 JLine 4 为核心 UI runtime 的 Agent 终端**」，交互体验对齐 Claude Code / Qoder CLI 一类产品。
+
+**功能迭代**：
+
+- 架构收敛为 `Terminal → LineReader（prompt / right prompt / history / completer / highlighter / widgets）+ InlineRenderer（printAbove 桥 / JLine Status 底部 dock / 可折叠块）`
+- 交互期所有用户可见输出优先走 `Renderer.stream()`
+- inline 模式下 `Renderer.stream()` 优先通过 `LineReader#printAbove` 输出到当前输入行上方
+- **启动顺序**：先 `Renderer.start()` 初始化 Status dock，再用 `InlineRenderer.installStartupScreen(...)` 把 Banner + tips 挂到 `LineReader.CALLBACK_INIT`，首次 `readLine` 时一次性渲染首屏——保证 logo、tips、输入行、底部 dock 在同一个 JLine 生命周期里协调
+- 任务提交后先把原始用户 prompt 以 `>` 暗色整行块回写 transcript（输入态用 `* `），再进入 mention 展开、Thinking 面板和工具调用，避免提交行被 dock 刷新吞掉
+- ReAct inline 模式下 LLM 请求期间显示固定高度 live thinking 区；reasoning delta 以灰色引用行出现，content / tool call 开始前只清理 live 区自己占用的行
+
+**核心知识点**：JLine 4 LineReader / printAbove / Tab Completion / History / Key Bindings；终端 UI 的「谁占哪些行」与生命周期协调
+
+**详细文档**：`docs/phase-22-jline-interaction-upgrade.md`
+
+---
+
+## 第23期：P1 Agent 加固 ✅ 已落地
+
+**前置依赖**：第 10–11 期 MCP；第 7 期并行工具调用；第 5 期 Multi-Agent。
+
+**背景**：访谈复盘暴露四个明确的工程边界——MCP 工具参数主要靠远端服务器校验；ReAct 循环保护能抓完全相同的重复调用，**抓不住参数略异但语义等价的重复错误**；并行任务依赖感知，但**没有文件级资源感知**；日志与 AuditLog 都有，但**没有统一的 run trace** 串联 planner / worker / reviewer / LLM 调用 / 工具调用 / token 用量 / 失败。
+
+**目标**：把这些边界变成显式工程工作，聚焦**可靠性、可观测性、更安全的动态工具执行**，且不夸大现有能力。
+
+**功能迭代**：
+
+- **MCP Schema Validator**：调用远端前先做本地轻量校验——捕获缺失必填参数、明显的 JSON 类型不符，返回**模型可读的错误**让下一轮 tool_call 自我纠正；刻意不推断业务语义
+- 语义等价错误检测（补足只比较完全相同的循环保护）
+- 文件级资源感知的并行调度
+- 统一 run trace，串联计划、执行、评审与模型/工具调用
+
+**核心知识点**：工具调用的前置校验边界（本地校验什么、不校验什么）；可观测性如何从「有日志」升级为「有链路」
+
+**详细文档**：`docs/phase-23-p1-agent-hardening.md`
+
+---
+
+## 第24期：RAG 调用图扩展 ✅ 已落地
+
+**前置依赖**：第 4 期 RAG 检索；第 12 期长上下文。
+
+**目标**：让代码 RAG 真正打通 Java Web 常见链路 `Controller → Service 接口 → ServiceImpl → Mapper / DAO`。此前代码关系虽已存进 SQLite，但主检索路径 `hybridSearch` 主要只用语义召回、关键词召回和类型加权，**存下来的关系图没有接回检索**。
+
+**功能迭代**：
+
+- **`calls` 关系建模改进**：`CodeAnalyzer` 解析基于接收者的方法调用。从 `UserController.detail -> detail` 变为 `UserController.detail -> UserService.detail`——用 JavaParser AST 加一张「字段/局部变量名 → 声明类型」的轻量映射
+- **接口与实现的方法级链接**：对 `implements` / `extends` 的类，方法级链接一并记录
+- 把关系图接回 `hybridSearch`
+
+**定位（重要）**：**刻意保持启发式**——覆盖 `userService.detail()`、`userMapper.selectById()` 这类 Spring 风格字段调用，**不是完整的 Java 符号求解器**。
+
+**核心知识点**：AST 能做什么、不能做什么；启发式解析的收益边界
+
+**详细文档**：`docs/phase-24-rag-callgraph-expansion.md`
+
+---
+
+## 第25期：RAG 检索意图控制 ✅ 已落地
+
+**前置依赖**：第 24 期调用图扩展。
+
+**目标**：让 Agent 把检索意图传进 `search_code`，同时**后端守住防线，不让模型幻觉出参数**。DevCLI 是 Agent CLI，外层 LLM 往往自己知道在找调用链、定义、报错位置还是配置项——RAG 层接受这个提示，但不盲信。
+
+**工具参数**：
+
+```text
+query          required
+top_k          optional, clamped to 1-30
+mode           optional: auto / general / call_chain / definition / error_trace / config
+graph_depth    optional, clamped to 0-3
+```
+
+**后端守门**：
+
+- 未知 `mode` 回退 `auto`
+- `auto` 从查询关键词推断意图
+- 明显的 query/mode 冲突由后端规则纠正
+- `graph_depth` 截断到 0–3
+- 非 call-chain 模式收窄或关闭图扩展
+- 空结果回退 general search
+
+**原则**：**LLM 只当意图提供者，不控制检索成本与上下文扩展的上界。**
+
+**核心知识点**：如何接受模型提示而不让模型控制成本；参数校验的「钳制」与「纠正」两种策略
+
+**详细文档**：`docs/phase-25-rag-search-intent.md`
+
+---
+
+## 第26期：（无独立设计文档）
+
+**说明**：第 26 期**全仓无设计文档、无对应 git 记录**，`AGENTS.md` 仅注明「第 26 期无独立文档」。其位置在第 25 期（RAG 检索意图）与第 27 期（滚动摘要裁剪）之间。
+
+**本文无法回填这一期**——没有可依据的材料。**如需补齐，请提供该期的范围说明**；在此之前不应据本文推断第 26 期内容。
+
+---
+
+## 第27期：滚动摘要裁剪 ✅ 已落地
+
+**前置依赖**：第 3 期 Memory 与上下文工程；第 12 期长上下文；第 19 期 Prompt 分层。
+
+**要解决的问题**：`ConversationHistoryCompactor` 已把压缩点收敛到真实 `conversationHistory`，并用 Map-Reduce（分片归并）+ incremental summary（增量滚动摘要）避免反复套娃压缩。**但增量摘要只解决「不要重复压旧内容」，不解决「旧内容什么时候该丢弃」**——如果每次都要求 LLM 保留已有摘要里的全部事实，长期运行后摘要本身会变成新的上下文垃圾堆。
+
+**成功标准**：
+
+- 保留 active context（活跃上下文）与 open issue（未解决问题）
+- completed milestone（已完成里程碑）压成低成本状态，不再保留过程细节
+- superseded fact（已覆盖事实）只保留最终值，不让旧值反复污染模型判断
+- **plan progress 不依赖摘要文本承载**，改由结构化 `TaskLedger`（任务账本）承载
+- 多次压缩后 summary token 有上限，**不随会话轮数线性增长**
+
+**落地状态（2026-08-27）**：摘要从九段收敛为**六段**；待办、当前工作、下一步**只由 `SessionMemory` 提供**；`RollingSummary` 保留主题、版本、重要性、证据引用与生命周期；旧九段摘要仍可兼容解析，但三个任务状态段**不迁移、不重新渲染**；模型只提出**受限增量操作**，`SummaryLifecycleReducer` 负责确定性更新，`SummaryGarbageCollector` 负责过期与覆盖审计回收。
+
+**核心知识点**：滚动摘要的「增长」问题；如何用结构化账本替摘要文本承载状态；模型提议 + 确定性 reducer 的分工
+
+**详细文档**：`docs/phase-27-rolling-summary-pruning.md`
+
+---
 ## 技术栈演进图
 
 ```
@@ -614,18 +742,23 @@ ReAct    执行     上下文    检索       协作      协同      并行    
 联网     MCP核心    MCP高级     长上下文    Chrome     CDP        Skill      TUI       LSP
 能力     stdio+HTTP rsc/sample  200k-1M    DevTools   会话复用    系统       产品化     诊断注入
 
-第18期 ──► 第19期 ──► 第20期 ──► 第21期
-Git       Prompt    异步后台    图片
-快照回滚   分层架构    Runtime API  图片输入
+第18期 ──► 第19期 ──► 第20期 ──► 第21期 ──► 第22期 ──► 第23期 ──► 第24期
+Git       Prompt    异步后台    图片        JLine      Agent      RAG
+快照回滚   分层架构    Runtime API  图片输入     交互升级    加固       调用图扩展
+
+第25期 ──► 第26期 ──► 第27期
+RAG        （无独立     滚动摘要
+检索意图     文档）      裁剪
 ```
 
 ## 学习路径建议
 
 **入门**：按顺序 1 → 2 → 3 → 6 → 16，掌握核心即可
 **进阶**：1 → 2 → 3 → 4 → 7 → 8 → 9 → 10 → 12 → 13 → 15，深入技术细节
-**全套**：全部 21 期
+**全套**：全部 27 期
 **安全优先**：6（HITL）→ 17（LSP）→ 18（Git快照）→ 其他按需
 **架构优先**：19（Prompt重构）→ 20（Task Manager）→ 其他按需
+**工程加固**：23（Agent 加固）→ 27（滚动摘要裁剪），看一个原型如何补可靠性、可观测性与长跑稳定性
 
 ## 参考项目
 
@@ -652,4 +785,15 @@ Git       Prompt    异步后台    图片
 
 ---
 
-*已完成第 16 期 TUI 产品化（含 16.1 形态修正：默认切换为 inline 流式 TUI，Lanterna 全屏 TUI 通过 `DEVCLI_RENDERER=lanterna` 保留）、第 17 期 LSP 诊断注入 MVP、第 18 期 Git Side-History 快照与回滚 MVP、第 19 期 Prompt 分层架构 MVP、第 20 期后台任务 + Runtime API MVP、第 21 期图片复制粘贴输入 MVP。*
+*已完成第 16 期 TUI 产品化（含 16.1 形态修正：默认切换为 inline 流式终端；旧 Lanterna 实现已删除，配置值兼容映射到 inline）、第 17 期 LSP 诊断注入 MVP、第 18 期 Git Side-History 快照与回滚 MVP、第 19 期 Prompt 分层架构 MVP、第 20 期后台任务 + Runtime API MVP、第 21 期图片复制粘贴输入 MVP。*
+
+*第 22–27 期已交付，正文已于 2026-09-19 回填（**第 26 期除外**——该期无设计文档、无 git 记录，无法回填，已在正文中标注）。各期设计说明见 `docs/`：*
+
+- 第 22 期：JLine-first 交互升级（`docs/phase-22-jline-interaction-upgrade.md`）
+- 第 23 期：P1 Agent 加固（`docs/phase-23-p1-agent-hardening.md`）
+- 第 24 期：RAG 调用图扩展（`docs/phase-24-rag-callgraph-expansion.md`）
+- 第 25 期：RAG 检索意图控制（`docs/phase-25-rag-search-intent.md`）
+- 第 26 期：**无独立文档**
+- 第 27 期：滚动摘要裁剪（`docs/phase-27-rolling-summary-pruning.md`）
+
+*回填依据是各期设计文档；**第 23–27 期的能力边界以 `docs/` 与代码实际行为为准**，本文为索引性质，不替代设计文档。*

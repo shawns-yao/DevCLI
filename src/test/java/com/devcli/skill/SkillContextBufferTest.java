@@ -135,4 +135,17 @@ class SkillContextBufferTest {
         buffer.push("ok", null);
         assertTrue(buffer.isEmpty());
     }
+
+    @Test
+    void pinnedPathSkillSurvivesLruEviction() {
+        SkillContextBuffer buffer = new SkillContextBuffer();
+        buffer.push("java-core", "core", java.util.List.of(), Skill.Context.INLINE, true);
+        buffer.push("a", "A");
+        buffer.push("b", "B");
+        buffer.push("c", "C");
+
+        assertTrue(buffer.activeSkillNames().contains("java-core"));
+        assertFalse(buffer.activeSkillNames().contains("a"));
+        assertEquals(3, buffer.activeSkillNames().size());
+    }
 }

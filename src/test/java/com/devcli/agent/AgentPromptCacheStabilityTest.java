@@ -112,8 +112,8 @@ class AgentPromptCacheStabilityTest {
                     "工具证据不得进入 system prompt，否则破坏前缀稳定性");
 
             String lastUser = lastUserContent(secondTurn);
-            assertTrue(lastUser.contains("Working Memory"),
-                    "第二轮 user 消息应前置注入工作记忆块，实际内容: " + lastUser);
+            assertTrue(lastUser.contains("Session Memory"),
+                    "第二轮 user 消息应前置注入会话记忆块，实际内容: " + lastUser);
             assertTrue(lastUser.contains("turn-context-evidence"),
                     "上一轮的精确工具证据应通过 turn context 抵达 LLM，实际内容: " + lastUser);
         });

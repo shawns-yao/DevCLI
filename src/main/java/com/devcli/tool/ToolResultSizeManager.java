@@ -5,13 +5,12 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.time.Instant;
-import java.time.format.DateTimeFormatter;
-import java.time.ZoneId;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -26,18 +25,18 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <p><b>三级处理策略</b>（按结果字符数）：
  * <ol>
- *   <li>≤ {@link #INLINE_THRESHOLD_CHARS} (5K)：原文进 messages，零额外开销</li>
- *   <li>{@link #INLINE_THRESHOLD_CHARS} ~ {@link #PERSIST_THRESHOLD_CHARS} (5K~50K)：
- *       尾部截断到 5K + 标注剩余字符数。中等输出，截断后能保留 LLM 最关心的命令前缀（路径/文件名/错误关键字一般在前部）</li>
- *   <li>> {@link #PERSIST_THRESHOLD_CHARS} (50K)：完整落盘到
- *       {@code <projectPath>/.devcli/tool_outputs/<sessionId>/<toolUseId>.txt}，
- *       messages 里只保留 1.5K 预览 + 文件路径 + 提示"用 read_file 看完整内容"</li>
+ *   <li>≤ {@link #INLINE_THRESHOLD_CHARS} (20K)：原文进 messages，零额外开销</li>
+ *   <li>{@link #INLINE_THRESHOLD_CHARS} ~ {@link #PERSIST_THRESHOLD_CHARS} (20K~100K)：
+ *       保留 20K 预览，完整原文写入运行时结果存储并返回 result_ref</li>
+ *   <li>> {@link #PERSIST_THRESHOLD_CHARS} (100K)：完整落盘到
+ *       受控运行时结果目录，messages 里只保留 5K 预览 + result_ref</li>
  * </ol>
  *
- * <p><b>不参与治理的工具白名单</b>（{@link #PASSTHROUGH_TOOLS}）：
+ * <p>阈值量级对齐 cc（单条 50K 内直接进、超限落盘给预览），但 DevCLI 把「直接进」
+ * 的放行线定在 20K，给后续对话与压缩留出更多余量。
+ *
+ * <p><b>不参与尺寸治理的工具白名单</b>（{@link #PASSTHROUGH_TOOLS}）：
  * <ul>
- *   <li>{@code read_file}：自身就是文件读取，再次落盘等于 read→file→read 死循环</li>
- *   <li>{@code list_dir}：目录树本身就是结构化短输出，截断会破坏可读性</li>
  *   <li>{@code revert_turn}：状态控制工具，结果是简单确认信息</li>
  *   <li>image-bearing 结果（含 imageParts）：图片 part 不能截断</li>
  * </ul>
@@ -46,45 +45,30 @@ import java.util.concurrent.atomic.AtomicInteger;
  * DevCLI 选择全局阈值 + 白名单——简单，且 DevCLI 工具数量小（9 个内置 + MCP 动态），
  * 不需要细粒度配置。
  *
- * <p>线程安全：{@link #process} 静态调用，无可变状态。落盘时按 {@code toolUseId}
- * 命名文件，并行工具调用不会冲突。
+ * <p>线程安全：尺寸预算和本轮精确重复索引均为线程隔离状态；并行工具线程共享父轮快照。
+ * 落盘时按 {@code toolUseId} 命名文件，并行工具调用不会冲突。
  */
 public final class ToolResultSizeManager {
 
     private static final Logger log = LoggerFactory.getLogger(ToolResultSizeManager.class);
 
     /** 不参与尺寸治理的工具名白名单。 */
-    private static final Set<String> PASSTHROUGH_TOOLS = Set.of(
-            "read_file",     // 自身就是文件读取，截断等于破坏功能
-            "list_dir",      // 短结构化输出
-            "revert_turn",    // 状态控制
-            "search_code"    // 尾部含 RAG 证据 JSON，截断会破坏 WorkingMemory 解析
-    );
+    private static final Set<String> PASSTHROUGH_TOOLS = Set.of("revert_turn");
 
     /** ≤ 此字符数的结果直接原文返回，不做任何处理。 */
-    public static final int INLINE_THRESHOLD_CHARS = 5_000;
+    public static final int INLINE_THRESHOLD_CHARS = 20_000;
 
     /** > 此字符数的结果完整落盘，messages 只放预览 + 路径。 */
-    public static final int PERSIST_THRESHOLD_CHARS = 50_000;
+    public static final int PERSIST_THRESHOLD_CHARS = 100_000;
 
     /** 落盘时 messages 里保留的预览字符数。 */
-    public static final int PERSIST_PREVIEW_CHARS = 1_500;
+    public static final int PERSIST_PREVIEW_CHARS = 5_000;
 
-    /** 中间档（5K~50K）的截断目标长度。 */
+    /** 中间档（20K~100K）的截断目标长度。 */
     public static final int TRUNCATE_TARGET_CHARS = INLINE_THRESHOLD_CHARS;
 
-    /** 落盘根目录名（在 projectPath 下）。 */
-    public static final String OUTPUTS_DIR = ".devcli/tool_outputs";
-
-    private static final DateTimeFormatter SESSION_ID_FMT =
-            DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", Locale.ROOT)
-                    .withZone(ZoneId.systemDefault());
-
-    /** 当前会话的目录名（启动时确定，进程内复用）。 */
-    private static final String SESSION_ID = SESSION_ID_FMT.format(Instant.now());
-
     /** 同轮所有工具结果聚合预算上限：超过此值后继续降低每项截断阈值。 */
-    public static final int AGGREGATE_LIMIT_CHARS = INLINE_THRESHOLD_CHARS * 4;  // 20K
+    public static final int AGGREGATE_LIMIT_CHARS = INLINE_THRESHOLD_CHARS * 5;  // 100K
 
     /** 同轮已消耗的聚合预算；并行工具线程共享同一个计数器。 */
     private static final InheritableThreadLocal<AtomicInteger> currentTurnUsedBudget =
@@ -100,8 +84,22 @@ public final class ToolResultSizeManager {
                 }
             };
 
-    /** 中间档（5K~50K）在聚合超限后的截断目标长度。 */
-    private static final int TRUNCATE_TARGET_UNDER_PRESSURE = INLINE_THRESHOLD_CHARS / 2; // 2500
+    /** 本轮已落盘结果索引；只用于新结果写入时的精确重复引用。 */
+    private static final InheritableThreadLocal<Map<String, ToolResultArtifact>> recentArtifacts =
+            new InheritableThreadLocal<>() {
+                @Override
+                protected Map<String, ToolResultArtifact> initialValue() {
+                    return new ConcurrentHashMap<>();
+                }
+
+                @Override
+                protected Map<String, ToolResultArtifact> childValue(Map<String, ToolResultArtifact> parentValue) {
+                    return parentValue == null ? new ConcurrentHashMap<>() : parentValue;
+                }
+            };
+
+    /** 中间档（20K~100K）在聚合超限后的截断目标长度。 */
+    private static final int TRUNCATE_TARGET_UNDER_PRESSURE = INLINE_THRESHOLD_CHARS / 2; // 10K
 
     private ToolResultSizeManager() {}
 
@@ -125,38 +123,106 @@ public final class ToolResultSizeManager {
      */
     public static String process(String toolName, String toolUseId, String projectPath,
                                  boolean hasImages, String result) {
+        return manage(toolName, toolUseId, hasImages, result).text();
+    }
+
+    /** 治理完整 ToolOutput，并把可恢复引用作为强类型 side channel 继续向下游传播。 */
+    public static ToolOutput processOutput(String toolName, String toolUseId, ToolOutput output) {
+        return processOutput(toolName, toolUseId, output, 0L);
+    }
+
+    public static ToolOutput processOutput(String toolName, String toolUseId,
+                                           ToolOutput output, long elapsedMillis) {
+        ToolOutput normalized = output == null ? ToolOutput.success("") : output;
+        ManagedResult managed = manage(
+                toolName, toolUseId, normalized.hasImageParts(), normalized.text());
+        ToolOutput result = new ToolOutput(
+                normalized.status(), normalized.errorCode(), normalized.retryable(),
+                managed.text(), normalized.imageParts(), normalized.modifiedResources(),
+                normalized.sideChannels());
+        if (managed.artifact() == null) return result;
+        ToolResultArtifact base = managed.artifact();
+        ToolResultArtifact enriched = new ToolResultArtifact(
+                base.classification(), base.originalChars(), base.originalBytes(),
+                base.previewChars(), base.artifactRef(), base.nextCursor(), base.sha256(),
+                toolUseId, normalized.status().name(), normalized.errorCode().name(),
+                normalized.sideChannels().stream()
+                        .filter(CommandResultMetadata.class::isInstance)
+                        .map(CommandResultMetadata.class::cast)
+                        .mapToInt(CommandResultMetadata::exitCode).findFirst().orElse(Integer.MIN_VALUE),
+                Math.max(0L, elapsedMillis));
+        return result.withSideChannel(enriched);
+    }
+
+    private static ManagedResult manage(String toolName, String toolUseId,
+                                        boolean hasImages, String result) {
         // 空结果注入：避免 LLM 看到空 tool_result 后断裂对话
         if (result == null || result.isBlank()) {
             String label = toolName == null ? "工具" : toolName;
-            return "(" + label + " 执行完毕无输出)";
+            return new ManagedResult("(" + label + " 执行完毕无输出)", null);
         }
         CollapseClassification classification = classify(toolName, hasImages, result);
+        if (classification != CollapseClassification.IMAGE_PASSTHROUGH
+                && classification != CollapseClassification.PASSTHROUGH
+                && classification != CollapseClassification.INLINE) {
+            String duplicateKey = duplicateKey(toolName, result);
+            ToolResultArtifact previous = recentArtifacts.get().get(duplicateKey);
+            if (previous != null && !previous.artifactRef().isBlank()) {
+                String reference = duplicateReference(toolName, result.length(), previous);
+                if (estimateTokens(reference) < estimateTokens(result)) {
+                    currentBudget().addAndGet(reference.length());
+                    return new ManagedResult(reference, previous);
+                }
+            }
+        }
         if (classification == CollapseClassification.IMAGE_PASSTHROUGH
                 || classification == CollapseClassification.PASSTHROUGH
                 || classification == CollapseClassification.INLINE) {
             // 低档不治理：直接计入聚合预算但不截断
             currentBudget().addAndGet(result.length());
-            return result;
+            return new ManagedResult(result, null);
         }
 
         // 防御 MCP 工具默认全部进入 size 治理（mcp__server__tool 命名）
         // 已经在 PASSTHROUGH 之外，自动接管
 
-        String managed;
+        int previewChars;
+        int reservedBudget = 0;
         if (classification == CollapseClassification.INLINE_TRUNCATED) {
             AtomicInteger budget = currentBudget();
             int usedBefore = budget.getAndAdd(TRUNCATE_TARGET_CHARS);
+            reservedBudget = TRUNCATE_TARGET_CHARS;
             boolean underPressure = usedBefore >= AGGREGATE_LIMIT_CHARS;
-            managed = underPressure
-                    ? truncateInline(result, TRUNCATE_TARGET_UNDER_PRESSURE)
-                    : truncateInline(result, TRUNCATE_TARGET_CHARS);
-            budget.addAndGet(managed.length() - TRUNCATE_TARGET_CHARS);
+            previewChars = underPressure
+                    ? TRUNCATE_TARGET_UNDER_PRESSURE : TRUNCATE_TARGET_CHARS;
         } else {
-            managed = persistAndPreview(toolName, toolUseId, projectPath, result);
-            // 治理后的结果长度为实际注入长度，而非原始长度
-            currentBudget().addAndGet(managed.length());
+            previewChars = PERSIST_PREVIEW_CHARS;
         }
-        return appendMcpClassification(toolName, managed, classification);
+        try {
+            ToolResultArtifactStore.StoredArtifact stored =
+                    ToolResultArtifactStore.store(toolUseId, result);
+            int kept = Math.min(previewChars, result.length());
+            String preview = diagnosticPreview(result, kept);
+            int dropped = result.length() - kept;
+            String nextCursor = dropped > 0 ? Integer.toString(kept) : "";
+            ToolResultArtifact artifact = new ToolResultArtifact(
+                    classification.name(), stored.chars(), stored.bytes(), kept,
+                    stored.ref(), nextCursor, stored.sha256());
+            recentArtifacts.get().putIfAbsent(duplicateKey(toolName, result), artifact);
+            String managed = renderArtifactPreview(
+                    preview, dropped, result.length(), classification, artifact);
+            currentBudget().addAndGet(managed.length() - reservedBudget);
+            return new ManagedResult(
+                    appendMcpClassification(toolName, managed, classification), artifact);
+        } catch (IOException | RuntimeException e) {
+            log.warn("Failed to persist tool output for {} ({}): {} — falling back to inline truncation",
+                    toolName, toolUseId, e.getMessage());
+            String fallback = truncateInline(result, TRUNCATE_TARGET_CHARS)
+                    + "\n[原文落盘失败；仅保留预览，无法通过 result_ref 恢复完整结果]";
+            currentBudget().addAndGet(fallback.length() - reservedBudget);
+            return new ManagedResult(
+                    appendMcpClassification(toolName, fallback, classification), null);
+        }
     }
 
     /** 暴露给测试或 Agent：当前轮已消耗的聚合预算。 */
@@ -167,6 +233,7 @@ public final class ToolResultSizeManager {
     /** Agent 每轮工具执行前调用，重置聚合预算计数器。 */
     public static void resetTurnBudget() {
         currentTurnUsedBudget.set(new AtomicInteger(0));
+        recentArtifacts.set(new ConcurrentHashMap<>());
     }
 
     private static AtomicInteger currentBudget() {
@@ -183,6 +250,7 @@ public final class ToolResultSizeManager {
             return CollapseClassification.INLINE;
         }
         if (hasImages) {
+            // 含图片的结果整体跳过治理：图片 part 截断会损坏视觉信息。
             return CollapseClassification.IMAGE_PASSTHROUGH;
         }
         if (PASSTHROUGH_TOOLS.contains(toolName)) {
@@ -206,65 +274,79 @@ public final class ToolResultSizeManager {
         return managedResult + "\n[工具结果折叠分类: " + classification + "]";
     }
 
+    private static String duplicateKey(String toolName, String result) {
+        return (toolName == null ? "" : toolName) + "\n" + sha256(result);
+    }
+
+    private static String duplicateReference(String toolName, int chars, ToolResultArtifact artifact) {
+        return String.format(Locale.ROOT,
+                "[重复工具结果已折叠: tool=%s, original_chars=%d, result_ref=%s, sha256=%s；复用前一次结果]",
+                toolName == null ? "unknown" : toolName, chars,
+                artifact.artifactRef(), artifact.sha256());
+    }
+
+    private static int estimateTokens(String value) {
+        return Math.max(1, (value == null ? 0 : value.length() + 3) / 4);
+    }
+
+    private static String sha256(String value) {
+        try {
+            return java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 不可用", e);
+        }
+    }
+
     /**
-     * 中间档：头部截断到 {@code keepChars}，加截断提示。
+     * 中间档：保留头部和有限尾部预览，加截断提示。
      */
     static String truncateInline(String result, int keepChars) {
         int total = result.length();
         int kept = Math.min(keepChars, total);
         int dropped = total - kept;
-        return result.substring(0, kept)
+        return diagnosticPreview(result, kept)
                 + "\n\n...(已截断 " + dropped + " 字符 / 共 " + total
                 + " 字符；使用 search_code 或 grep 进一步过滤可避免截断)";
     }
 
     /**
-     * 高档：落盘 + 预览。落盘失败时降级为 {@link #truncateInline}（不阻断主流程）。
+     * 保留完整头部预览，并追加有限尾部预览。头部长度保持原有预算语义，
+     * 尾部用于暴露命令最终退出信息、测试失败摘要等诊断内容。
      */
-    static String persistAndPreview(String toolName, String toolUseId, String projectPath, String result) {
-        Path outFile;
-        try {
-            Path outDir = Path.of(projectPath, OUTPUTS_DIR, SESSION_ID);
-            Files.createDirectories(outDir);
-            String safeId = sanitizeFileName(toolUseId == null ? "anon" : toolUseId);
-            outFile = outDir.resolve(safeId + ".txt");
-            Files.writeString(outFile, result, StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            log.warn("Failed to persist tool output for {} ({}): {} — falling back to inline truncation",
-                    toolName, toolUseId, e.getMessage());
-            return truncateInline(result, TRUNCATE_TARGET_CHARS);
+    private static String diagnosticPreview(String result, int headChars) {
+        if (result == null || result.length() <= headChars) {
+            return result == null ? "" : result;
         }
+        int tailChars = Math.min(1_000, result.length() - headChars);
+        return result.substring(0, headChars)
+                + "\n\n...[中间内容已省略，保留尾部 " + tailChars + " 字符]...\n\n"
+                + result.substring(result.length() - tailChars);
+    }
 
-        int total = result.length();
-        String preview = result.length() <= PERSIST_PREVIEW_CHARS
-                ? result
-                : result.substring(0, PERSIST_PREVIEW_CHARS);
-
+    private static String renderArtifactPreview(
+            String preview, int dropped, int total,
+            CollapseClassification classification, ToolResultArtifact artifact) {
+        String headline = classification == CollapseClassification.PERSISTED_PREVIEW
+                ? "[工具输出过大已落盘 " + total + " 字符]"
+                : "...(已截断 " + dropped + " 字符 / 共 " + total + " 字符)";
         return String.format(Locale.ROOT,
-                "%s\n\n[工具输出过大已落盘 %d 字符 → 完整内容: %s]\n"
-                        + "(以上为前 %d 字符预览，需要完整内容请用 read_file 读取该文件)",
+                "%s\n\n%s\n"
+                        + "[tool_result metadata: classification=%s, original_chars=%d, "
+                        + "original_bytes=%d, preview_chars=%d, result_ref=%s, "
+                        + "next_cursor=%s, sha256=%s]\n"
+                        + "(需要精确恢复时调用 read_tool_result，并传入 result_ref 与 next_cursor)",
                 preview,
-                total,
-                outFile.toAbsolutePath(),
-                Math.min(PERSIST_PREVIEW_CHARS, total));
+                headline,
+                classification,
+                artifact.originalChars(),
+                artifact.originalBytes(),
+                artifact.previewChars(),
+                artifact.artifactRef(),
+                artifact.nextCursor().isBlank() ? "none" : artifact.nextCursor(),
+                artifact.sha256());
     }
 
-    /** 文件名安全化：去掉路径分隔符和控制字符。 */
-    private static String sanitizeFileName(String raw) {
-        StringBuilder sb = new StringBuilder(raw.length());
-        for (int i = 0; i < raw.length() && sb.length() < 128; i++) {
-            char c = raw.charAt(i);
-            if (Character.isLetterOrDigit(c) || c == '-' || c == '_' || c == '.') {
-                sb.append(c);
-            } else {
-                sb.append('_');
-            }
-        }
-        return sb.length() == 0 ? "anon" : sb.toString();
-    }
-
-    /** 暴露给测试：当前会话目录名。 */
-    public static String currentSessionId() {
-        return SESSION_ID;
+    private record ManagedResult(String text, ToolResultArtifact artifact) {
     }
 }

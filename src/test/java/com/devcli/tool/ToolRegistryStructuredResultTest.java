@@ -1,17 +1,33 @@
 package com.devcli.tool;
 
-import com.devcli.runtime.CancellationContext;
-import com.devcli.runtime.RunContext;
+import com.devcli.concurrent.CancellationContext;
+import com.devcli.concurrent.RunContext;
+import com.devcli.memory.SessionMemory;
+import com.devcli.hitl.HitlToolRegistry;
+import com.devcli.hitl.HitlHandler;
+import com.devcli.hitl.ApprovalRequest;
+import com.devcli.hitl.ApprovalResult;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ToolRegistryStructuredResultTest {
+
+    private ToolRegistry commandRegistry() {
+        return new HitlToolRegistry(new HitlHandler() {
+            public ApprovalResult requestApproval(ApprovalRequest request) {
+                return ApprovalResult.approve();
+            }
+            public boolean isEnabled() { return true; }
+            public void setEnabled(boolean enabled) { }
+        });
+    }
 
     @Test
     void reportsUnknownToolWithoutParsingMessageText() {
@@ -81,7 +97,7 @@ class ToolRegistryStructuredResultTest {
 
     @Test
     void reportsCommandExitFailureWithoutParsingText(@TempDir Path projectRoot) {
-        try (ToolRegistry registry = new ToolRegistry()) {
+        try (ToolRegistry registry = commandRegistry()) {
             registry.setProjectPath(projectRoot.toString());
             registry.setCommandExecutionService(request ->
                     com.devcli.tool.command.CommandExecutionService.Result.completed(7, "failed"));
@@ -92,6 +108,35 @@ class ToolRegistryStructuredResultTest {
             assertEquals(ToolStatus.ERROR, output.status());
             assertEquals(ToolErrorCode.EXECUTION_FAILED, output.errorCode());
             assertFalse(output.retryable());
+        }
+    }
+
+    @Test
+    void truncatedResultCarriesStructuredArtifactMetadata(@TempDir Path projectRoot) {
+        System.setProperty("devcli.tool.results.root",
+                projectRoot.resolve("runtime-tool-results").toString());
+        try (ToolRegistry registry = commandRegistry()) {
+            registry.setProjectPath(projectRoot.toString());
+            registry.setCommandExecutionService(request ->
+                    com.devcli.tool.command.CommandExecutionService.Result.completed(
+                            0, "m".repeat(20_000)));
+
+            ToolRegistry.ToolExecutionResult result = registry.executeTools(List.of(
+                    new ToolRegistry.ToolInvocation(
+                            "call_medium", "execute_command", "{\"command\":\"build\"}")))
+                    .get(0);
+
+            assertTrue(result.result().contains("result_ref"), result.result());
+            assertTrue(result.sideChannels().stream()
+                    .anyMatch(channel -> channel.getClass().getSimpleName()
+                            .equals("ToolResultArtifact")));
+            SessionMemory memory = new SessionMemory();
+            memory.recordToolResult(result.name(), result.argumentsJson(),
+                    result.result(), result.sideChannels());
+            assertTrue(memory.snapshot().evidenceJournal().get(0).toString().contains("artifactRef="),
+                    memory.snapshot().evidenceJournal().get(0).toString());
+        } finally {
+            System.clearProperty("devcli.tool.results.root");
         }
     }
 }

@@ -83,6 +83,11 @@ public class BrowserGuard {
         return toolName != null && toolName.startsWith(SERVER_PREFIX);
     }
 
+    public String contentTarget() {
+        return com.devcli.policy.SensitiveContentPolicy.hostOnly(session.lastNavigatedUrl())
+                + "（最近导航记录，不保证当前标签页仍相同）";
+    }
+
     private static String localToolName(String toolName) {
         return toolName.substring(SERVER_PREFIX.length());
     }

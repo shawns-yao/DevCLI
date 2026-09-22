@@ -105,6 +105,149 @@ class PreReviewVerifierTest {
         assertEquals("mvn -q -DskipTests test-compile", captured.get().command());
     }
 
+    @Test
+    void shouldRunMavenAtMultiModuleRootWithoutRootJavaSources(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        AtomicReference<CommandExecutionService.Request> captured = new AtomicReference<>();
+        PreReviewVerifier verifier = new PreReviewVerifier(30, request -> {
+            captured.set(request);
+            return CommandExecutionService.Result.completed(0, "");
+        });
+
+        PreReviewVerifier.Result result = verifier.verify(tempDir, "step-multi-module");
+
+        assertTrue(result.passed(), result.feedback());
+        assertTrue(result.hardCheckExecuted());
+        assertEquals("mvn -q -DskipTests test-compile", captured.get().command());
+    }
+
+    @Test
+    void shouldUsePinnedSandboxMavenWhenWrapperExists(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        Files.writeString(tempDir.resolve("mvnw"), "#!/bin/sh", StandardCharsets.UTF_8);
+        AtomicReference<CommandExecutionService.Request> captured = new AtomicReference<>();
+        PreReviewVerifier verifier = new PreReviewVerifier(30, request -> {
+            captured.set(request);
+            return CommandExecutionService.Result.completed(0, "");
+        });
+
+        PreReviewVerifier.Result result = verifier.verify(tempDir, "step-wrapper");
+
+        assertTrue(result.passed(), result.feedback());
+        assertEquals("mvn -q -DskipTests test-compile", captured.get().command());
+    }
+
+    @Test
+    void shouldNotInspectCrlfWrapperWhenUsingPinnedSandboxMaven(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        // 禁网 Pre-Review 固定使用镜像 Maven，不让 Wrapper 重新下载 Maven 本体。
+        Files.writeString(tempDir.resolve("mvnw"), "#!/bin/sh\r\necho wrapper\r\n", StandardCharsets.UTF_8);
+        AtomicReference<CommandExecutionService.Request> captured = new AtomicReference<>();
+        PreReviewVerifier verifier = new PreReviewVerifier(30, request -> {
+            captured.set(request);
+            return CommandExecutionService.Result.completed(0, "");
+        });
+
+        PreReviewVerifier.Result result = verifier.verify(tempDir, "step-crlf-wrapper");
+
+        assertTrue(result.passed(), result.feedback());
+        assertEquals("mvn -q -DskipTests test-compile", captured.get().command());
+    }
+
+    @Test
+    void shouldClassifyCompilerFailureAsCodeFailure(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        PreReviewVerifier verifier = new PreReviewVerifier(30, request ->
+                CommandExecutionService.Result.completed(1,
+                        "[ERROR] /src/Foo.java:[3,9] cannot find symbol"));
+
+        PreReviewVerifier.Result result = verifier.verify(tempDir, "step-code-failure");
+
+        assertFalse(result.passed());
+        assertEquals(PreReviewVerifier.FailureKind.CODE, result.failureKind());
+    }
+
+    @Test
+    void shouldClassifyDependencyResolutionFailureAsInfrastructure(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        PreReviewVerifier verifier = new PreReviewVerifier(30, request ->
+                CommandExecutionService.Result.completed(1,
+                        "Plugin org.apache.maven.plugins:maven-compiler-plugin could not be resolved in offline mode"));
+
+        PreReviewVerifier.Result result = verifier.verify(tempDir, "step-missing-plugin");
+
+        assertFalse(result.passed());
+        assertEquals(PreReviewVerifier.FailureKind.INFRASTRUCTURE, result.failureKind());
+    }
+
+    @Test
+    void shouldNotTreatGenericCannotAccessCompilerErrorAsInfrastructure(
+            @TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        PreReviewVerifier verifier = new PreReviewVerifier(30, request ->
+                CommandExecutionService.Result.completed(1,
+                        "[ERROR] /src/App.java:[7,12] cannot access BrokenType\n"
+                                + "bad source file: BrokenType.java does not contain class BrokenType"));
+
+        PreReviewVerifier.Result result = verifier.verify(tempDir, "step-source-error");
+
+        assertFalse(result.passed());
+        assertEquals(PreReviewVerifier.FailureKind.CODE, result.failureKind());
+    }
+
+    @Test
+    void shouldClassifyReadonlyMavenRepositoryFailureAsInfrastructure(
+            @TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        PreReviewVerifier verifier = new PreReviewVerifier(30, request ->
+                CommandExecutionService.Result.completed(1,
+                        "Could not create tracking file /maven-repository/example.lastUpdated: "
+                                + "Read-only file system"));
+
+        PreReviewVerifier.Result result = verifier.verify(tempDir, "step-readonly-repository");
+
+        assertFalse(result.passed());
+        assertEquals(PreReviewVerifier.FailureKind.INFRASTRUCTURE, result.failureKind());
+    }
+
+    @Test
+    void shouldClassifyTimeoutCancellationAndSandboxFailureAsInfrastructure(@TempDir Path tempDir)
+            throws Exception {
+        Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+
+        PreReviewVerifier.Result timedOut = new PreReviewVerifier(30,
+                request -> CommandExecutionService.Result.timedOut("timeout"))
+                .verify(tempDir, "step-timeout");
+        PreReviewVerifier.Result cancelled = new PreReviewVerifier(30,
+                request -> CommandExecutionService.Result.cancelled("cancelled"))
+                .verify(tempDir, "step-cancelled");
+        PreReviewVerifier.Result sandboxFailure = new PreReviewVerifier(30, request -> {
+            throw new IllegalStateException("Docker daemon unavailable");
+        }).verify(tempDir, "step-sandbox");
+
+        assertEquals(PreReviewVerifier.FailureKind.INFRASTRUCTURE, timedOut.failureKind());
+        assertEquals(PreReviewVerifier.FailureKind.INFRASTRUCTURE, cancelled.failureKind());
+        assertEquals(PreReviewVerifier.FailureKind.INFRASTRUCTURE, sandboxFailure.failureKind());
+    }
+
+    @Test
+    void shouldPreserveHostWarnNoticeFromSuccessfulHardCheck(@TempDir Path tempDir) throws Exception {
+        Path javaRoot = tempDir.resolve("src/main/java");
+        Files.createDirectories(javaRoot);
+        Files.writeString(javaRoot.resolve("Hello.java"), "public class Hello {}",
+                StandardCharsets.UTF_8);
+        Files.writeString(tempDir.resolve("pom.xml"), "<project/>", StandardCharsets.UTF_8);
+        PreReviewVerifier verifier = new PreReviewVerifier(30, request ->
+                CommandExecutionService.Result.completed(0,
+                        "⚠️ 沙箱模式 HOST_WARN：隔离命令在主机上执行，风险由用户承担。"));
+
+        PreReviewVerifier.Result result = verifier.verify(tempDir, "step-host-warn");
+
+        assertTrue(result.passed(), result.feedback());
+        assertTrue(result.hardCheckExecuted());
+        assertTrue(result.feedback().contains("HOST_WARN"), result.feedback());
+    }
+
     private PreReviewVerifier verifierWithHostBackend() {
         return new PreReviewVerifier(60, PreReviewVerifierTest::executeOnHost);
     }

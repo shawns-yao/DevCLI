@@ -1,5 +1,7 @@
 package com.devcli.hitl;
 
+import java.util.Set;
+
 /**
  * HITL 审批交互接口 - 定义人工审批的交互契约
  *
@@ -46,5 +48,28 @@ public interface HitlHandler {
     }
 
     default void clearApprovedAllForServer(String serverName) {
+    }
+
+    /**
+     * 当前「全部放行」缓存的只读快照（工具维度）。
+     *
+     * <p>只读视图只用于让用户查看当前生效的放行范围；判定仍走
+     * {@link #isApprovedAllByTool(String)}。默认返回空集合，便于不维护该状态的实现直接继承。</p>
+     */
+    default Set<String> approvedAllTools() {
+        return Set.of();
+    }
+
+    /** 当前「全部放行」缓存的只读快照（MCP server 维度）。 */
+    default Set<String> approvedAllServers() {
+        return Set.of();
+    }
+
+    /**
+     * 命中任务级授权、无需人工审批时的可见通知。
+     *
+     * <p>自动放行必须可见且可归因，不能静默通过；实现类只负责展示，不参与判定。</p>
+     */
+    default void onTaskGrantAllow(String toolName, String reason) {
     }
 }

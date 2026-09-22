@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
@@ -118,6 +119,11 @@ class IsolatedWorkspaceTest {
         Files.writeString(project.resolve("visible.txt"), "visible");
         Files.writeString(project.resolve(".git").resolve("config"), "secret");
         Files.writeString(project.resolve("target").resolve("artifact.jar"), "artifact");
+        Files.createDirectories(project.resolve("module/.git"));
+        Files.createDirectories(project.resolve("module/target"));
+        Files.writeString(project.resolve("module/.git/config"), "nested-secret");
+        Files.writeString(project.resolve("module/target/artifact.jar"), "nested-artifact");
+        Files.writeString(project.resolve(".env"), "TOKEN=secret");
 
         Path outside = tempDir.resolve("outside.txt");
         Files.writeString(outside, "outside");
@@ -134,10 +140,25 @@ class IsolatedWorkspaceTest {
             assertTrue(Files.exists(workspace.path().resolve("visible.txt")));
             assertFalse(Files.exists(workspace.path().resolve(".git")));
             assertFalse(Files.exists(workspace.path().resolve("target")));
+            assertFalse(Files.exists(workspace.path().resolve("module/.git")));
+            assertFalse(Files.exists(workspace.path().resolve("module/target")));
+            assertFalse(Files.exists(workspace.path().resolve(".env")));
             if (linkCreated) {
                 assertFalse(Files.exists(workspace.path().resolve("outside-link.txt")));
             }
         }
+    }
+
+    @Test
+    void rejectsWorkspaceBaseThatContainsProjectRoot(@TempDir Path tempDir) throws Exception {
+        Path project = Files.createDirectories(tempDir.resolve("project"));
+        Files.writeString(project.resolve("visible.txt"), "visible");
+
+        IOException error = assertThrows(IOException.class, () -> IsolatedWorkspace.create(
+                project, tempDir, "invalid-base", new CopyWorkspaceBackend(2),
+                new WorkspaceCleanupPolicy(Duration.ofHours(1))));
+
+        assertTrue(error.getMessage().contains("workspace base"), error.getMessage());
     }
 
     @Test

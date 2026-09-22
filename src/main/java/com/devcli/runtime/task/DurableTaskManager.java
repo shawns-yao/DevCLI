@@ -1,8 +1,8 @@
 package com.devcli.runtime.task;
 
 import com.devcli.config.ConfigResolver;
-import com.devcli.runtime.CancellationContext;
-import com.devcli.runtime.RunContext;
+import com.devcli.concurrent.CancellationContext;
+import com.devcli.concurrent.RunContext;
 import com.devcli.runtime.RunCoordinator;
 import com.devcli.runtime.api.RuntimeThreadStore;
 import com.devcli.runtime.store.RunStore;

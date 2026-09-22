@@ -2,8 +2,8 @@ package com.devcli.agent;
 
 import com.devcli.llm.LlmClient;
 import com.devcli.render.Renderer;
-import com.devcli.runtime.event.RunEvent;
-import com.devcli.runtime.event.RunEventSink;
+import com.devcli.event.RunEvent;
+import com.devcli.event.RunEventSink;
 import com.devcli.util.AnsiStyle;
 import com.devcli.util.TerminalMarkdownRenderer;
 

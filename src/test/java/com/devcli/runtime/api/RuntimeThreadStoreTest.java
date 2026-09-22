@@ -3,7 +3,7 @@ package com.devcli.runtime.api;
 import com.devcli.llm.LlmClient;
 import com.devcli.agent.AgentTurnInbox;
 import com.devcli.memory.CompactBoundaryMetadata;
-import com.devcli.runtime.event.RunEvent;
+import com.devcli.event.RunEvent;
 import com.devcli.tool.ToolPresentation;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -139,6 +139,56 @@ class RuntimeThreadStoreTest {
             RuntimeThreadStore.RuntimeCheckpoint checkpoint = store.latestCheckpoint(threadId).orElseThrow();
             assertEquals(coverage, checkpoint.coveredThroughEventId());
             assertEquals("summary", checkpoint.summary());
+        }
+    }
+
+    @Test
+    void checkpointSourceEventHashIsValidated(@TempDir Path tempDir) throws Exception {
+        Path db = tempDir.resolve("runtime.db");
+        try (RuntimeThreadStore store = new RuntimeThreadStore(db)) {
+            String threadId = store.createThread();
+            long coverage = appendTurn(store, threadId, "t1", "input", "output");
+            var cursor = store.compactionSourceCursor(threadId);
+            store.appendEvent(threadId, "context.compacted", RunEventJsonCodec.encode(
+                    new RunEvent.ContextCompacted(cursor.eventStart(), cursor.eventEnd(),
+                            cursor.sourceHash(), "none", "full"), "t1"));
+            CompactBoundaryMetadata metadata = new CompactBoundaryMetadata(
+                    "history", "token_threshold", "full", 100, 20, 4, 2, 1, 10,
+                    List.of(), "none", "none", false, 0, 0, "pass", cursor.sourceHash(),
+                    0, 0, "none", cursor.eventStart(), cursor.eventEnd());
+            store.saveCheckpoint(threadId, coverage,
+                    new TurnRunner.CheckpointCandidate(List.of(LlmClient.Message.user("summary")),
+                            "summary", metadata));
+            assertTrue(store.latestCheckpoint(threadId).isPresent());
+        }
+    }
+
+    @Test
+    void compactionCursorCarriesPersistedModelMessageEventIds(@TempDir Path tempDir)
+            throws Exception {
+        try (RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"))) {
+            String threadId = store.createThread();
+            String turnId = "turn-events";
+            store.appendEvent(threadId, "turn.started", RunEventJsonCodec.encode(
+                    new RunEvent.TurnStarted("input"), turnId));
+            long contextId = store.appendEvent(threadId, "model.context",
+                    RunEventJsonCodec.encode(RunEvent.ModelContext.from(1,
+                            List.of(LlmClient.Message.user("input"))), turnId));
+            long messageId = store.appendEvent(threadId, "model.message",
+                    RunEventJsonCodec.encode(RunEvent.ModelMessage.from(
+                            LlmClient.Message.assistant("answer")), turnId));
+            store.appendEvent(threadId, "turn.completed",
+                    RunEventJsonCodec.encode(new RunEvent.TurnCompleted("completed"), turnId));
+
+            var cursor = store.compactionSourceCursor(threadId);
+            String inputKey = com.devcli.memory.CompactionFactExtractor.messageKey(
+                    LlmClient.Message.user("input"));
+            String answerKey = com.devcli.memory.CompactionFactExtractor.messageKey(
+                    LlmClient.Message.assistant("answer"));
+            assertEquals(contextId, cursor.messageEventIdsByFingerprint().get(inputKey));
+            assertEquals(messageId, cursor.messageEventIdsByFingerprint().get(answerKey));
+            assertEquals(cursor.messageEventIdsByFingerprint(), store.compactionContext(threadId, "project")
+                    .sourceMessageEventIdsByFingerprint());
         }
     }
 

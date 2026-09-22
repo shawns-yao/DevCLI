@@ -1,7 +1,7 @@
 package com.devcli.runtime.api;
 
 import com.devcli.llm.LlmClient;
-import com.devcli.runtime.event.RunEvent;
+import com.devcli.event.RunEvent;
 import com.devcli.tool.ToolPresentation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -117,5 +117,35 @@ class RunEventJsonCodecTest {
         JsonNode encodedPresentation = payload.path("results").get(0).path("presentation");
         assertEquals("TERMINAL", encodedPresentation.path("kind").asText());
         assertEquals("stdout", encodedPresentation.path("metadata").path("stream").asText());
+    }
+
+    @Test
+    void toolResultProjectsStructuredExitCode() throws Exception {
+        RunEvent.ToolResults event = new RunEvent.ToolResults(List.of(
+                new RunEvent.ToolResultData(
+                        "call_1", "check", "{}", "failed",
+                        "ERROR", "EXECUTION_FAILED", false, 12, 0, 17,
+                        ToolPresentation.defaultFor("check"))));
+
+        JsonNode payload = MAPPER.readTree(RunEventJsonCodec.encode(event, "turn_1"));
+
+        assertEquals(17, payload.path("results").get(0).path("exit_code").asInt());
+    }
+
+    @Test
+    void encodesStructuredFailureGuidance() throws Exception {
+        RunEvent.FailureGuidance event = new RunEvent.FailureGuidance(
+                "BUDGET_EXHAUSTED", "Token 预算已用尽", "缩小任务范围后重试",
+                List.of(
+                        new RunEvent.FailureAction("RETRY", "重试", "补充优先级后重新提交"),
+                        new RunEvent.FailureAction("ROLLBACK", "回滚", "使用 /restore <N>")));
+
+        JsonNode payload = MAPPER.readTree(RunEventJsonCodec.encode(event, "turn_1"));
+
+        assertEquals("failure.guidance", event.type());
+        assertEquals("BUDGET_EXHAUSTED", payload.path("category").asText());
+        assertEquals("Token 预算已用尽", payload.path("reason").asText());
+        assertEquals("重试", payload.path("actions").get(0).path("label").asText());
+        assertEquals("使用 /restore <N>", payload.path("actions").get(1).path("instruction").asText());
     }
 }

@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.hook.HookLifecycle;
 import com.devcli.llm.LlmClient;
+import com.devcli.memory.CompactionContext;
+import com.devcli.memory.CompactionResult;
 import com.devcli.llm.LlmException;
 import com.devcli.llm.LlmTraceLogger;
 import com.devcli.lsp.LspDiagnosticReport;
@@ -53,8 +55,16 @@ import java.util.function.Supplier;
 public class SubAgent {
     private static final Logger log = LoggerFactory.getLogger(SubAgent.class);
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
-    static final int DEFAULT_REVIEWER_MAX_ITERATIONS = 2;
+    static final int DEFAULT_REVIEWER_MAX_ITERATIONS = 5;
     static final int MAX_REVIEWER_MAX_ITERATIONS = 8;
+    private static final java.util.Set<String> REVIEWER_TOOL_NAMES = java.util.Set.of(
+            "read_file", "read_tool_result", "list_dir", "grep_code", "execute_command");
+    private static final String REVIEWER_FINAL_DECISION_PROMPT = """
+            Reviewer 取证阶段已经结束。现在是最终裁决轮，禁止继续调用工具。
+            必须只输出一个完整、可解析的裁决 JSON，并严格覆盖 system prompt 要求的
+            approved、summary、verification、scores、criteria_results、must_fix、issues、suggestions。
+            证据不足时明确 approved=false，不得继续分析、请求取证或输出 Markdown。
+            """;
 
     /**
      * Forked SubAgent execution starts from a frozen shared prefix, then appends a task-specific suffix.
@@ -66,6 +76,7 @@ public class SubAgent {
                               String turnContextSnapshot,
                               String modelName,
                               String providerName,
+                              long contextEpoch,
                               String fingerprint) {
         public ForkContext {
             sharedPrefix = List.copyOf(sharedPrefix == null ? List.of() : sharedPrefix);
@@ -74,10 +85,22 @@ public class SubAgent {
             turnContextSnapshot = turnContextSnapshot == null ? "" : turnContextSnapshot;
             modelName = modelName == null ? "" : modelName;
             providerName = providerName == null ? "" : providerName;
+            contextEpoch = Math.max(0, contextEpoch);
             fingerprint = fingerprint == null || fingerprint.isBlank()
                     ? computeFingerprint(sharedPrefix, toolDefinitions, skillBodySnapshot,
-                    turnContextSnapshot, modelName, providerName)
+                    turnContextSnapshot, modelName, providerName, contextEpoch)
                     : fingerprint;
+        }
+
+        public ForkContext(List<LlmClient.Message> sharedPrefix,
+                           List<LlmClient.Tool> toolDefinitions,
+                           String skillBodySnapshot,
+                           String turnContextSnapshot,
+                           String modelName,
+                           String providerName,
+                           String fingerprint) {
+            this(sharedPrefix, toolDefinitions, skillBodySnapshot, turnContextSnapshot,
+                    modelName, providerName, 0, fingerprint);
         }
     }
 
@@ -127,12 +150,13 @@ public class SubAgent {
     private final ToolRegistry toolRegistry;
     private final List<LlmClient.Message> conversationHistory;
     private Supplier<String> externalContextSupplier = () -> "";
-    private Supplier<String> stickyMemorySupplier = () -> "";
+    private Supplier<String> ruleContextSupplier = () -> "";
     private Supplier<String> memoryContextSupplier = () -> "";
-    private Supplier<String> workingMemorySupplier = () -> "";
+    private Supplier<String> sessionMemorySupplier = () -> "";
     private Supplier<String> postCompactRestoreSupplier = () -> "";
     private TriConsumer<String, String, String> toolResultConsumer = (name, args, result) -> {};
     private Consumer<ToolExecutionResult> structuredToolResultConsumer = result -> {};
+    private Supplier<String> postToolInstructionSupplier = () -> "";
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private final ConversationHistoryCompactor historyCompactor;
@@ -141,6 +165,8 @@ public class SubAgent {
             new AtomicReference<>(new ExecutionEvidenceAccumulator());
     private String currentSkillActivationText = "";
     private String recoveryContext = "";
+    private volatile com.devcli.event.RunEventSink additionalEventSink =
+            com.devcli.event.RunEventSink.NO_OP;
 
     public SubAgent(String name, AgentRole role, LlmClient llmClient, ToolRegistry toolRegistry) {
         this.name = name;
@@ -166,22 +192,39 @@ public class SubAgent {
     }
 
     /**
+     * 注入额外结构化事件出口（如 Execution Trace 落盘），与 SubAgent 自身流式渲染 sink
+     * 并列组合，不替代渲染；null 时回到 NO_OP。
+     */
+    public void setAdditionalEventSink(com.devcli.event.RunEventSink sink) {
+        this.additionalEventSink = sink == null
+                ? com.devcli.event.RunEventSink.NO_OP : sink;
+    }
+
+    /**
      * 注入 Sticky Memory 渲染源（PR-B）：与 Agent 一致语义，由 Main 启动时接进来。
      * SubAgent 在 setStickyMemorySupplier 后不立即重建 system prompt——下次调 LLM 时
      * 由 getSystemPrompt 拿到最新 sticky 内容。
      */
-    public void setStickyMemorySupplier(Supplier<String> stickyMemorySupplier) {
-        this.stickyMemorySupplier = stickyMemorySupplier == null ? () -> "" : stickyMemorySupplier;
+    public void setRuleContextSupplier(Supplier<String> ruleContextSupplier) {
+        this.ruleContextSupplier = ruleContextSupplier == null ? () -> "" : ruleContextSupplier;
         refreshSystemPrompt();
     }
+
+    /** @deprecated 使用 {@link #setRuleContextSupplier(Supplier)}。 */
+    @Deprecated
+    public void setStickyMemorySupplier(Supplier<String> supplier) { setRuleContextSupplier(supplier); }
 
     public void setMemoryContextSupplier(Supplier<String> memoryContextSupplier) {
         this.memoryContextSupplier = memoryContextSupplier == null ? () -> "" : memoryContextSupplier;
     }
 
-    public void setWorkingMemorySupplier(Supplier<String> workingMemorySupplier) {
-        this.workingMemorySupplier = workingMemorySupplier == null ? () -> "" : workingMemorySupplier;
+    public void setSessionMemorySupplier(Supplier<String> sessionMemorySupplier) {
+        this.sessionMemorySupplier = sessionMemorySupplier == null ? () -> "" : sessionMemorySupplier;
     }
+
+    /** @deprecated 使用 {@link #setSessionMemorySupplier(Supplier)}。 */
+    @Deprecated
+    public void setWorkingMemorySupplier(Supplier<String> supplier) { setSessionMemorySupplier(supplier); }
 
     public void setPostCompactRestoreSupplier(Supplier<String> postCompactRestoreSupplier) {
         this.postCompactRestoreSupplier = postCompactRestoreSupplier == null ? () -> "" : postCompactRestoreSupplier;
@@ -193,6 +236,10 @@ public class SubAgent {
 
     public void setStructuredToolResultConsumer(Consumer<ToolExecutionResult> toolResultConsumer) {
         this.structuredToolResultConsumer = toolResultConsumer == null ? result -> {} : toolResultConsumer;
+    }
+
+    public void setPostToolInstructionSupplier(Supplier<String> supplier) {
+        this.postToolInstructionSupplier = supplier == null ? () -> "" : supplier;
     }
 
     public void setSkillRegistry(SkillRegistry skillRegistry) {
@@ -216,7 +263,7 @@ public class SubAgent {
     private String getSystemPrompt(PromptMode mode) {
         return promptAssembler.assemble(mode, PromptContext.builder()
                 .externalContext(buildExternalContext())
-                .stickyMemory(buildStickyMemory())
+                .ruleContext(buildRuleContext())
                 .build());
     }
 
@@ -227,7 +274,7 @@ public class SubAgent {
     private String buildTurnContext() {
         return promptAssembler.assembleTurnContext(PromptContext.builder()
                 .memoryContext(buildMemoryContext())
-                .workingMemory(buildWorkingMemory())
+                .sessionMemory(buildSessionMemory())
                 .skillIndex(buildSkillIndex())
                 .build());
     }
@@ -242,9 +289,9 @@ public class SubAgent {
         }
     }
 
-    private String buildWorkingMemory() {
+    private String buildSessionMemory() {
         try {
-            String memory = workingMemorySupplier.get();
+            String memory = sessionMemorySupplier.get();
             String normalized = memory == null ? "" : memory.trim();
             if (recoveryContext.isBlank()) {
                 return normalized;
@@ -252,7 +299,7 @@ public class SubAgent {
             String recovered = "## 子代理恢复状态\n" + recoveryContext;
             return normalized.isBlank() ? recovered : normalized + "\n\n" + recovered;
         } catch (Exception e) {
-            log.warn("Failed to render working memory in SubAgent {}", name, e);
+            log.warn("Failed to render session memory in SubAgent {}", name, e);
             return "";
         }
     }
@@ -276,18 +323,18 @@ public class SubAgent {
         return new CompactBoundaryRuntimeState(
                 skillContextBuffer == null ? List.of() : skillContextBuffer.activeSkillNames(),
                 CompactBoundaryRuntimeState.mergeRagEpochSnapshots(
-                        extractRagEpochSnapshot(buildWorkingMemory()),
+                        extractRagEpochSnapshot(buildSessionMemory()),
                         toolRegistry.currentRagIndexEpochSnapshot()),
                 toolRegistry.mcpToolSnapshot(),
                 false);
     }
 
-    private static String extractRagEpochSnapshot(String workingMemory) {
-        if (workingMemory == null || workingMemory.isBlank()) {
+    private static String extractRagEpochSnapshot(String sessionMemory) {
+        if (sessionMemory == null || sessionMemory.isBlank()) {
             return "none";
         }
         LinkedHashSet<String> epochs = new LinkedHashSet<>();
-        for (String line : workingMemory.split("\\R")) {
+        for (String line : sessionMemory.split("\\R")) {
             int idx = line.indexOf("indexEpoch=");
             if (idx < 0) {
                 continue;
@@ -302,12 +349,12 @@ public class SubAgent {
         return epochs.isEmpty() ? "none" : String.join(", ", epochs);
     }
 
-    private String buildStickyMemory() {
+    private String buildRuleContext() {
         try {
-            String sticky = stickyMemorySupplier.get();
-            return sticky == null ? "" : sticky.trim();
+            String rules = ruleContextSupplier.get();
+            return rules == null ? "" : rules.trim();
         } catch (Exception e) {
-            log.warn("Failed to render sticky memory in SubAgent {}", name, e);
+            log.warn("Failed to render rule context in SubAgent {}", name, e);
             return "";
         }
     }
@@ -332,8 +379,11 @@ public class SubAgent {
             historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(toolRegistry.getProjectPath()));
             int toolDefinitionTokens = TokenBudget.estimateToolDefinitionsTokens(
                     toolRegistry.getToolDefinitions());
-            boolean compacted = historyCompactor.compactIfNeeded(
-                    history, profile.historyTriggerTokens(toolDefinitionTokens));
+            CompactionResult compaction = historyCompactor.compactIfNeeded(
+                    history, AgentRuntimeSupport.buildCompactionContext(
+                            profile.historyTriggerTokens(toolDefinitionTokens),
+                            toolRegistry, name));
+            boolean compacted = compaction.compacted();
             if (compacted && out != null) {
                 out.println("📦 [" + name + "] 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
             }
@@ -389,8 +439,9 @@ public class SubAgent {
         String turnContextSnapshot = buildTurnContext();
         String modelName = llmClient == null ? "" : llmClient.getModelName();
         String providerName = llmClient == null ? "" : llmClient.getProviderName();
+        long contextEpoch = toolRegistry.contextVersionLedger().currentGeneration();
         return new ForkContext(sharedPrefix, toolDefinitions, skillBodySnapshot, turnContextSnapshot,
-                modelName, providerName, null);
+                modelName, providerName, contextEpoch, null);
     }
 
     /**
@@ -462,6 +513,10 @@ public class SubAgent {
                                             boolean toolsEnabled) {
         // 当轮快照：非 fork 路径实时渲染，fork 路径用冻结快照（同批 Worker 一致且无并发读竞争）
         String turnContext = forkContext == null ? buildTurnContext() : forkContext.turnContextSnapshot();
+        if (forkContext != null) {
+            turnContext = "上下文快照：context_epoch=" + forkContext.contextEpoch()
+                    + "，fork_fingerprint=" + forkContext.fingerprint() + "\n" + turnContext;
+        }
         String taskContent = prependTurnContext(forkContext == null
                 ? prependSkillBodies(task.content(), true)
                 : AgentRuntimeSupport.prependSkillBodies(
@@ -475,6 +530,7 @@ public class SubAgent {
         SubAgentStreamRenderer streamRenderer = new SubAgentStreamRenderer(name, role, out);
 
         AgentBudget budget = createExecutionBudget();
+        AgentRuntimeSupport.bindCompactionBudget(historyCompactor, budget, null);
         return new AgentExecutionEngine<AgentMessage>(
                 llmClient, budget, HookLifecycle.load(toolRegistry)).run(
                 new AgentExecutionEngine.Delegate<>() {
@@ -485,7 +541,28 @@ public class SubAgent {
 
                     @Override
                     public List<LlmClient.Tool> toolDefinitions(int iteration) {
-                        return toolsEnabled ? toolDefinitionsFor(forkContext) : null;
+                        return toolsEnabled && !isReviewerFinalIteration(iteration)
+                                ? toolDefinitionsFor(forkContext)
+                                : null;
+                    }
+
+                    @Override
+                    public boolean allowsToolRouting() {
+                        return forkContext == null;
+                    }
+
+                    @Override
+                    public ToolRegistry.ToolSnapshot toolSnapshot(int iteration) {
+                        if (!toolsEnabled || !shouldUseTools() || isReviewerFinalIteration(iteration)) {
+                            return null;
+                        }
+                        ToolRegistry.ToolSnapshot snapshot = toolRegistry.snapshotForCurrentAccess();
+                        if (forkContext != null) {
+                            return snapshot.withDefinitions(forkContext.toolDefinitions());
+                        }
+                        return role == AgentRole.REVIEWER
+                                ? snapshot.filter(REVIEWER_TOOL_NAMES)
+                                : snapshot;
                     }
 
                     @Override
@@ -496,6 +573,12 @@ public class SubAgent {
                     @Override
                     public LlmClient.StreamListener streamListener() {
                         return streamRenderer;
+                    }
+
+                    @Override
+                    public com.devcli.event.RunEventSink eventSink() {
+                        return com.devcli.event.RunEventSink.composite(
+                                additionalEventSink, streamRenderer);
                     }
 
                     @Override
@@ -511,6 +594,10 @@ public class SubAgent {
                         // 前缀失配。它现在只含会话级稳定内容，任务级内容已在任务消息的当轮快照里。
                         injectPendingLspDiagnostics(history, out);
                         maybeCompactHistory(history, out);
+                        if (toolsEnabled && isReviewerFinalIteration(iteration)) {
+                            history.add(LlmClient.Message.internalUser(
+                                    REVIEWER_FINAL_DECISION_PROMPT));
+                        }
                     }
 
                     @Override
@@ -559,6 +646,13 @@ public class SubAgent {
                     }
 
                     @Override
+                    public List<ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
+                                                                  int iteration,
+                                                                  ToolRegistry.ToolSnapshot snapshot) {
+                        return executeToolCalls(toolCalls, snapshot);
+                    }
+
+                    @Override
                     public void afterToolResults(LlmClient.ChatResponse response,
                                                  List<ToolExecutionResult> toolResults,
                                                  int iteration,
@@ -570,6 +664,26 @@ public class SubAgent {
                             structuredToolResultConsumer.accept(toolResult);
                         }
                         appendImageToolMessages(history, toolResults);
+                    }
+
+                    @Override
+                    public String instructionAfterToolResults(
+                            LlmClient.ChatResponse response,
+                            List<ToolExecutionResult> toolResults,
+                            int iteration,
+                            AgentBudget currentBudget) {
+                        return postToolInstructionSupplier.get();
+                    }
+
+                    @Override
+                    public java.util.Map<String, String> refreshStaleContext() {
+                        return toolRegistry.refreshStaleContext(
+                                toolRegistry.currentResourceLeaseStep());
+                    }
+
+                    @Override
+                    public String contextScope() {
+                        return toolRegistry.currentResourceLeaseStep();
                     }
 
                     @Override
@@ -612,12 +726,12 @@ public class SubAgent {
                     public AgentMessage budgetExceeded(AgentBudget.ExitReason reason,
                                                        AgentBudget currentBudget) {
                         streamRenderer.finish();
-                        String description = currentBudget.describeExit(reason);
+                        FailureFeedback feedback = FailureFeedback.forBudget(reason, currentBudget);
                         log.warn("[{}] run exhausted budget: reason={}, iteration={}, tokens={}/{}",
                                 name, reason, currentBudget.iteration(),
                                 currentBudget.totalInputTokens() + currentBudget.totalOutputTokens(),
                                 currentBudget.tokenBudget());
-                        return AgentMessage.error(name, role, description);
+                        return AgentMessage.error(name, role, feedback.render());
                     }
 
                     @Override
@@ -630,9 +744,15 @@ public class SubAgent {
                     public AgentMessage failed(IOException error, AgentBudget currentBudget) {
                         log.error("[{}] LLM call failed", name, error);
                         streamRenderer.finish();
-                        return AgentMessage.error(name, role, describeLlmFailure(error));
+                        return AgentMessage.error(name, role,
+                                FailureFeedback.fromReason(describeLlmFailure(error)).render());
                     }
                 });
+    }
+
+    private boolean isReviewerFinalIteration(int iteration) {
+        return role == AgentRole.REVIEWER
+                && iteration >= resolveReviewerMaxIterations();
     }
 
     private AgentBudget createExecutionBudget() {
@@ -829,6 +949,7 @@ public class SubAgent {
         }
         return tools.stream()
                 .filter(tool -> tool.name().equals("read_file")
+                        || tool.name().equals("read_tool_result")
                         || tool.name().equals("list_dir")
                         || tool.name().equals("grep_code")
                         || tool.name().equals("execute_command"))
@@ -872,6 +993,12 @@ public class SubAgent {
     }
 
     private List<ToolExecutionResult> executeToolCalls(List<LlmClient.ToolCall> toolCalls) {
+        return executeToolCalls(toolCalls, null);
+    }
+
+    private List<ToolExecutionResult> executeToolCalls(
+            List<LlmClient.ToolCall> toolCalls,
+            ToolRegistry.ToolSnapshot snapshot) {
         List<ToolExecutionResult> results = new ArrayList<>();
         List<ToolInvocation> invocations = new ArrayList<>();
         List<String> allowedToolNames = allowedToolNamesForRole();
@@ -895,7 +1022,7 @@ public class SubAgent {
         if (!invocations.isEmpty()) {
             AtomicReference<List<ToolExecutionResult>> executed = new AtomicReference<>(List.of());
             toolRegistry.runWithSkillContextBuffer(skillContextBuffer,
-                    () -> executed.set(toolRegistry.executeTools(invocations)));
+                    () -> executed.set(toolRegistry.executeTools(invocations, snapshot)));
             results.addAll(executed.get());
         }
         return results;
@@ -905,7 +1032,7 @@ public class SubAgent {
         if (role != AgentRole.REVIEWER) {
             return null;
         }
-        return List.of("read_file", "list_dir", "grep_code", "execute_command");
+        return List.of("read_file", "read_tool_result", "list_dir", "grep_code", "execute_command");
     }
 
     private void appendImageToolMessages(List<ToolExecutionResult> toolResults) {
@@ -1017,10 +1144,12 @@ public class SubAgent {
                                              String skillBodySnapshot,
                                              String turnContextSnapshot,
                                              String modelName,
-                                             String providerName) {
+                                             String providerName,
+                                             long contextEpoch) {
         StringBuilder sb = new StringBuilder();
         sb.append("provider=").append(providerName == null ? "" : providerName).append('\n');
         sb.append("model=").append(modelName == null ? "" : modelName).append('\n');
+        sb.append("contextEpoch=").append(Math.max(0, contextEpoch)).append('\n');
         sb.append("messages=").append(sharedPrefix == null ? 0 : sharedPrefix.size()).append('\n');
         if (sharedPrefix != null) {
             for (LlmClient.Message message : sharedPrefix) {
@@ -1067,11 +1196,17 @@ public class SubAgent {
      * "content 开始后又追加 reasoning"的场景：迟到的 reasoning 会被累积到 lateReasoning，
      * 在 finish() 时以"🧠 补充思考"独立展示，避免混入结果区。
      */
-    private static final class SubAgentStreamRenderer implements LlmClient.StreamListener {
+    private static final class SubAgentStreamRenderer
+            implements LlmClient.StreamListener, com.devcli.event.RunEventSink {
         private final AgentStreamPresenter delegate;
 
         private SubAgentStreamRenderer(String agentName, AgentRole role, PrintStream out) {
             this.delegate = AgentStreamPresenter.subAgent(agentName, role, out);
+        }
+
+        @Override
+        public void emit(com.devcli.event.RunEvent event) {
+            delegate.emit(event);
         }
 
         @Override

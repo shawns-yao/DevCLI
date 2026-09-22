@@ -1,7 +1,7 @@
 package com.devcli.mcp.transport;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.devcli.runtime.CancellationToken;
+import com.devcli.concurrent.CancellationToken;
 
 import java.io.IOException;
 import java.util.List;

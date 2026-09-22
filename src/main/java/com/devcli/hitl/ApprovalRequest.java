@@ -20,8 +20,53 @@ public record ApprovalRequest(
         String riskDescription,
         String suggestion,
         String callerContext,
-        String sensitiveNotice
+        String sensitiveNotice,
+        boolean contentReview,
+        boolean redactionAllowed,
+        boolean hostExecution
 ) {
+    public ApprovalRequest(String toolName, String arguments, String dangerLevel,
+                           String riskDescription, String suggestion, String callerContext,
+                           String sensitiveNotice) {
+        this(toolName, arguments, dangerLevel, riskDescription, suggestion, callerContext,
+                sensitiveNotice, false, false, false);
+    }
+
+    public ApprovalRequest(String toolName, String arguments, String dangerLevel,
+                           String riskDescription, String suggestion, String callerContext,
+                           String sensitiveNotice, boolean contentReview, boolean redactionAllowed) {
+        this(toolName, arguments, dangerLevel, riskDescription, suggestion, callerContext,
+                sensitiveNotice, contentReview, redactionAllowed, false);
+    }
+
+    public boolean singleDecisionOnly() {
+        return contentReview || hostExecution;
+    }
+
+    public ApprovalRequest {
+        arguments = com.devcli.policy.SensitiveContentPolicy.safeDisplayArguments(arguments);
+    }
+
+    public static ApprovalRequest content(String toolName, String types, String purpose,
+                                          String target, boolean redactionAllowed) {
+        return new ApprovalRequest(toolName, "{}", "敏感内容",
+                "原文可能包含秘密或个人信息", null, null,
+                "敏感类型: " + types + "\n操作目的: " + purpose + "\n发送目标: " + target
+                        + "\n只对本次内容有效，不复用任务授权或全部放行；弹窗不展示原文。",
+                true, redactionAllowed);
+    }
+
+    public static ApprovalRequest hostCommand(String arguments, String approvalId) {
+        String notice = "即将在主机执行，仅本次批准有效。\n"
+                + "文件工具的配置写保护不能约束此命令；构建脚本也可能执行任意主机代码。";
+        if (com.devcli.policy.CommandGuard.containsDeletion(arguments)) {
+            notice += "\n检测到删除操作，无法可靠统计目标数量及递归范围；恢复依赖已有备份。";
+        }
+        return new ApprovalRequest("execute_command", arguments, "主机执行",
+                "没有操作系统隔离，命令及其子进程可能修改配置或访问网络",
+                null, approvalId, notice,
+                false, false, true);
+    }
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BOX_INNER_WIDTH = 58;
     private static final int FIELD_WIDTH = BOX_INNER_WIDTH - 8;  // 为"│  xxx: "留出
@@ -72,7 +117,12 @@ public record ApprovalRequest(
             sb.append(formatBoxField("来源", callerContext)).append("\n");
         }
         if (sensitiveNotice != null && !sensitiveNotice.isBlank()) {
-            sb.append(formatBoxField("敏感页面", sensitiveNotice)).append("\n");
+            sb.append(formatBoxLine("操作提醒:")).append("\n");
+            for (String line : sensitiveNotice.split("\\R")) {
+                for (String part : wrapByDisplayWidth(line, ARG_LINE_WIDTH)) {
+                    sb.append(formatBoxIndented(part)).append("\n");
+                }
+            }
         }
         sb.append("├").append(border).append("┤\n");
         sb.append(formatBoxLine("参数:")).append("\n");
@@ -145,6 +195,11 @@ public record ApprovalRequest(
                     String key = entry.getKey();
                     JsonNode valNode = entry.getValue();
                     if (valNode.isTextual()) {
+                        if (hostExecution || ("execute_command".equals(toolName) && "command".equals(key))) {
+                            // JSON escaping keeps terminal control sequences visible instead of executing them.
+                            lines.addAll(wrapByDisplayWidth(key + ": " + valNode.toString(), ARG_LINE_WIDTH));
+                            continue;
+                        }
                         String v = valNode.asText();
                         if (v.length() > MAX_LONG_VALUE_PREVIEW) {
                             String head = v.substring(0, MAX_LONG_VALUE_PREVIEW)

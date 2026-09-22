@@ -64,6 +64,8 @@ java -jar target/devcli-1.0-SNAPSHOT.jar serve --http --port 8080
 - `message.delta`
 - `turn.completed`
 - `turn.failed`
+- `context.compacted`：压缩来源事件范围、来源 hash、projection hash 和模式
+- `thread.checkpoint.created` / `thread.checkpoint.failed`
 
 ## 当前边界
 
@@ -71,7 +73,8 @@ java -jar target/devcli-1.0-SNAPSHOT.jar serve --http --port 8080
 - 后台任务 runner 使用 headless ReAct Agent，不复用交互式 TUI 的 HITL 输入
 - 工具取消使用调用级协作信号；命令进程树、Web HTTP Call 和 MCP 请求会收到取消，MCP 同时发送 `notifications/cancelled`
 - Runtime API 当前不模拟完整 OpenAI Assistants API schema，只保留兼容方向的 threads / turns / events 主路径
-- 事件日志是会话恢复事实来源；`model.context` 只从已完成 turn 重放。checkpoint 与会话投影是可重建缓存，损坏时回退事件日志
+- 事件日志是会话恢复事实来源；`model.context` 只从已完成 turn 重放。checkpoint 与会话投影是可重建缓存，checkpoint 同时持久化稳定快照引用并校验 projection hash、来源事件范围和 snapshot checksum，损坏时回退事件日志或更早 checkpoint
+- `tool.results` 的 `elapsed_millis` 和 `exit_code` 来自结构化执行元数据；兼容调用没有命令元数据时才使用明确的未知值，不从展示文本猜测退出码
 - CLI `/session` 复用相同 thread/branch/event 存储；切换会话树不修改 Side-Git、PatchSet 或工作区文件
 
 ## 验证

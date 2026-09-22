@@ -21,6 +21,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class InlineApprovalPrompterTest {
 
     @Test
+    void sensitiveContentCanRedactAndEnterRejects() throws Exception {
+        ApprovalRequest request = ApprovalRequest.content("read_file", "凭据", "读取", "模型", true);
+        for (char key : new char[] {'r', '\r'}) {
+            InlineApprovalPrompter prompter = new InlineApprovalPrompter(
+                    new PrintStream(new ByteArrayOutputStream()), mockTerminalReturning(key),
+                    new BufferedReader(new StringReader("")));
+            assertEquals(key == 'r' ? ApprovalResult.Decision.REDACTED : ApprovalResult.Decision.REJECTED,
+                    prompter.prompt(request).decision());
+        }
+    }
+
+    @Test
     void singleCharYReturnsApprove() throws Exception {
         Terminal terminal = mockTerminalReturning('y');
         ByteArrayOutputStream sink = new ByteArrayOutputStream();

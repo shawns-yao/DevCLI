@@ -4,12 +4,13 @@ import com.devcli.agent.AgentTurnInbox;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.CompactBoundaryMetadata;
 import com.devcli.runtime.AgentSessionRuntime;
-import com.devcli.runtime.event.RunEventSink;
+import com.devcli.event.RunEventSink;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 
 /**
  * Runtime API 的持久会话执行器：每个 thread 绑定一个 AgentSessionRuntime，
@@ -20,26 +21,45 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
     private final RuntimeThreadStore store;
     private final Path projectPath;
     private final int checkpointTriggerTokens;
+    private final Supplier<LlmClient> memoryCuratorClientSupplier;
     private final ConcurrentHashMap<String, AgentSessionRuntime> sessions = new ConcurrentHashMap<>();
 
     public RuntimeSessionTurnRunner(LlmClient llmClient, RuntimeThreadStore store, Path projectPath) {
-        this(llmClient, store, projectPath, RuntimeCheckpointPolicy.configuredTriggerTokens());
+        this(llmClient, store, projectPath, RuntimeCheckpointPolicy.configuredTriggerTokens(), () -> null);
+    }
+
+    public RuntimeSessionTurnRunner(LlmClient llmClient, RuntimeThreadStore store, Path projectPath,
+                                    Supplier<LlmClient> memoryCuratorClientSupplier) {
+        this(llmClient, store, projectPath, RuntimeCheckpointPolicy.configuredTriggerTokens(),
+                memoryCuratorClientSupplier);
     }
 
     public RuntimeSessionTurnRunner(LlmClient llmClient, RuntimeThreadStore store,
                                     Path projectPath, int checkpointTriggerTokens) {
+        this(llmClient, store, projectPath, checkpointTriggerTokens, () -> null);
+    }
+
+    private RuntimeSessionTurnRunner(LlmClient llmClient, RuntimeThreadStore store,
+                                     Path projectPath, int checkpointTriggerTokens,
+                                     Supplier<LlmClient> memoryCuratorClientSupplier) {
         this.llmClient = java.util.Objects.requireNonNull(llmClient, "llmClient");
         this.store = java.util.Objects.requireNonNull(store, "store");
         this.projectPath = java.util.Objects.requireNonNull(projectPath, "projectPath")
                 .toAbsolutePath().normalize();
         this.checkpointTriggerTokens = Math.max(0, checkpointTriggerTokens);
+        this.memoryCuratorClientSupplier = memoryCuratorClientSupplier == null ? () -> null
+                : memoryCuratorClientSupplier;
     }
 
     @Override
     public TurnResult run(String threadId, String input, RunEventSink eventSink) {
         AgentSessionRuntime session = session(threadId);
+        session.agent().setCompactionSourceCursorSupplier(() -> store.compactionSourceCursor(threadId));
+        session.agent().setCompactionContextSupplier(
+                () -> store.compactionContext(threadId, projectPath.toString()));
+        session.agent().setOriginalHistorySupplier(() -> store.originalConversationMessages(threadId));
         session.setRunEventSink(eventSink);
-        eventSink.emit(new com.devcli.runtime.event.RunEvent.SessionStateChanged(
+        eventSink.emit(new com.devcli.event.RunEvent.SessionStateChanged(
                 threadId, "running", "turn_started"));
         List<LlmClient.Message> before = session.agent().getConversationHistory();
         try {
@@ -48,6 +68,9 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
                     && session.agent().compactHistoryForPersistence(checkpointTriggerTokens);
             List<LlmClient.Message> history = session.agent().getConversationHistory();
             compacted |= hasNewCompactionBoundary(before, history);
+            if (compacted) {
+                emitCompactionBoundary(history, eventSink);
+            }
             TurnRunner.CheckpointCandidate checkpoint = RuntimeCheckpointCandidateFactory
                     .fromHistory(history, compacted)
                     .orElse(null);
@@ -55,7 +78,7 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
             return new TurnResult(output, checkpoint);
         } finally {
             store.saveQueueSnapshot(threadId, session.inbox().snapshot());
-            eventSink.emit(new com.devcli.runtime.event.RunEvent.SessionStateChanged(
+            eventSink.emit(new com.devcli.event.RunEvent.SessionStateChanged(
                     threadId, "idle", "turn_finished"));
         }
     }
@@ -111,8 +134,8 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
             throw new IllegalArgumentException("threadId is required");
         }
         return sessions.computeIfAbsent(threadId, id -> {
-            AgentSessionRuntime session = AgentSessionRuntime.create(llmClient, projectPath,
-                    RunEventSink.NO_OP);
+            AgentSessionRuntime session = AgentSessionRuntime.create(
+                    llmClient, memoryCuratorClientSupplier.get(), projectPath, RunEventSink.NO_OP);
             RuntimeThreadStore.ContextView view = store.contextView(id);
             List<LlmClient.Message> seed = new ArrayList<>(view.checkpointMessages());
             for (RuntimeThreadStore.TurnRecord turn : view.turns()) {
@@ -142,6 +165,21 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
             }
         }
         return latest;
+    }
+
+    private static void emitCompactionBoundary(List<LlmClient.Message> history,
+                                               RunEventSink eventSink) {
+        String boundary = latestCompactionBoundary(history);
+        CompactBoundaryMetadata.parseFromSummaryMessage(boundary).ifPresent(metadata -> {
+            if (metadata.sourceEventEnd() > 0) {
+                eventSink.emit(new com.devcli.event.RunEvent.ContextCompacted(
+                        metadata.sourceEventStart(),
+                        metadata.sourceEventEnd(),
+                        metadata.sourceHash(),
+                        metadata.projectionHash(),
+                        metadata.mode()));
+            }
+        });
     }
 
     private static String latestAssistantContent(List<LlmClient.Message> history) {

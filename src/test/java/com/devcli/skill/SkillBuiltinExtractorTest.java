@@ -55,4 +55,21 @@ class SkillBuiltinExtractorTest {
         assertEquals(SkillBuiltinExtractor.CURRENT_VERSION,
                 Files.readString(versionFile).trim());
     }
+
+    @Test
+    void repairsCorruptCacheEvenWhenVersionMatches(@TempDir Path tempDir) throws IOException {
+        SkillBuiltinExtractor extractor = new SkillBuiltinExtractor(tempDir);
+        extractor.extractAll();
+        Path skill = tempDir.resolve("web-access/SKILL.md");
+        String expected = Files.readString(skill);
+        Files.writeString(skill, "corrupted");
+
+        extractor.extractAll();
+
+        assertEquals(expected, Files.readString(skill));
+        assertTrue(Files.isRegularFile(tempDir.resolve("web-access/.manifest.json")));
+        try (var paths = Files.list(tempDir)) {
+            assertFalse(paths.anyMatch(path -> path.getFileName().toString().contains("staging")));
+        }
+    }
 }

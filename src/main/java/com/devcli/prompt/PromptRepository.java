@@ -6,9 +6,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Objects;
+import java.util.Set;
 
 public class PromptRepository {
     private static final String RESOURCE_PREFIX = "prompts/";
+    /** 安全判定提示词只能由内置资源或用户级可信配置覆盖，不能由当前仓库控制。 */
+    private static final Set<String> USER_SCOPED_PROMPTS = Set.of("permission-classifier.md");
 
     private final Path userPromptsDir;
     private final Path projectPromptsDir;
@@ -34,7 +37,9 @@ public class PromptRepository {
         String normalized = normalize(relativePath);
         String content = loadBuiltin(normalized);
         content = overrideIfPresent(userPromptsDir, normalized, content);
-        content = overrideIfPresent(projectPromptsDir, normalized, content);
+        if (!USER_SCOPED_PROMPTS.contains(normalized)) {
+            content = overrideIfPresent(projectPromptsDir, normalized, content);
+        }
         if (content == null || content.isBlank()) {
             throw new IllegalStateException("Prompt resource missing: " + normalized);
         }

@@ -22,6 +22,7 @@ public record ApprovalResult(
         APPROVED_ALL_BY_SERVER,
         REJECTED,
         MODIFIED,
+        REDACTED,
         SKIPPED
     }
 
@@ -47,6 +48,14 @@ public record ApprovalResult(
 
     public static ApprovalResult skip() {
         return new ApprovalResult(Decision.SKIPPED, null, null);
+    }
+
+    public static ApprovalResult redact() {
+        return new ApprovalResult(Decision.REDACTED, null, null);
+    }
+
+    public boolean isRedacted() {
+        return decision == Decision.REDACTED;
     }
 
     public boolean isApproved() {

@@ -6,16 +6,19 @@ import org.slf4j.LoggerFactory;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 
 /**
- * Guards runtime writes performed by parallel agent steps with idle-timeout lease expiration.
+ * Guards runtime writes with idle expiration and a bounded renewal lifetime.
  *
- * <p>租约语义为"空闲超时"而非"绝对超时"：同一步骤每次申请写入都会刷新租约时间戳（续租），
- * 因此正在持续写入的慢步骤不会被误判超时而被抢占；只有真正空闲超过阈值的步骤才会被回收。
- * 这避免了"合法但慢的步骤被抢占后续写入被拒"的问题。
+ * <p>同一步骤每次申请写入都会刷新空闲时间戳（续租），但保留首次获取时间。
+ * 持续写入不会触发空闲超时，但达到绝对期限后不能续租，必须重新竞争。
  *
  * <p>超时阈值可配：系统属性 {@code devcli.team.lease.timeout.ms} 优先，其次环境变量
  * {@code DEVCLI_TEAM_LEASE_TIMEOUT_MS}，缺省 30000ms；非法值回退缺省。
+ * 绝对期限由 {@code devcli.team.lease.max.lifetime.ms} /
+ * {@code DEVCLI_TEAM_LEASE_MAX_LIFETIME_MS} 配置，缺省 600000ms。
  *
  * <p>抢占（超时回收他人租约）通过 {@link PreemptionListener} 上报，由上层接入审计链。
  * 监听回调在 {@link Map#compute} 之外执行，避免在 ConcurrentHashMap 桶锁内做文件 IO。
@@ -25,6 +28,9 @@ public class ResourceLeaseManager {
     private static final long DEFAULT_LEASE_TIMEOUT_MS = 30_000; // 30 seconds
     private static final String LEASE_TIMEOUT_PROPERTY = "devcli.team.lease.timeout.ms";
     private static final String LEASE_TIMEOUT_ENV = "DEVCLI_TEAM_LEASE_TIMEOUT_MS";
+    private static final long DEFAULT_MAX_LIFETIME_MS = 600_000;
+    private static final String MAX_LIFETIME_PROPERTY = "devcli.team.lease.max.lifetime.ms";
+    private static final String MAX_LIFETIME_ENV = "DEVCLI_TEAM_LEASE_MAX_LIFETIME_MS";
 
     /** 抢占事件监听：超时回收他人租约时触发，供上层写入审计。默认 no-op。 */
     @FunctionalInterface
@@ -33,17 +39,27 @@ public class ResourceLeaseManager {
     }
 
     private final long leaseTimeoutMs;
+    private final long maxLifetimeMs;
+    private final LongSupplier clock;
     private final Map<Path, LeaseEntry> writeOwners = new ConcurrentHashMap<>();
     private volatile PreemptionListener preemptionListener = (p, evicted, next, held) -> {};
 
-    private record LeaseEntry(String stepId, long acquireTime) {}
+    private record LeaseEntry(String stepId, long acquiredAt, long renewedAt) {}
 
     public ResourceLeaseManager() {
-        this(resolveLeaseTimeoutMs());
+        this(resolveLeaseTimeoutMs(), resolveMaxLifetimeMs(),
+                () -> TimeUnit.NANOSECONDS.toMillis(System.nanoTime()));
     }
 
     ResourceLeaseManager(long leaseTimeoutMs) {
+        this(leaseTimeoutMs, DEFAULT_MAX_LIFETIME_MS,
+                () -> TimeUnit.NANOSECONDS.toMillis(System.nanoTime()));
+    }
+
+    ResourceLeaseManager(long leaseTimeoutMs, long maxLifetimeMs, LongSupplier clock) {
         this.leaseTimeoutMs = leaseTimeoutMs > 0 ? leaseTimeoutMs : DEFAULT_LEASE_TIMEOUT_MS;
+        this.maxLifetimeMs = maxLifetimeMs > 0 ? maxLifetimeMs : DEFAULT_MAX_LIFETIME_MS;
+        this.clock = java.util.Objects.requireNonNull(clock);
     }
 
     /** 注入抢占审计监听；传 null 视为清除（恢复 no-op）。 */
@@ -60,24 +76,29 @@ public class ResourceLeaseManager {
             return;
         }
         Path normalized = path.toAbsolutePath().normalize();
-        long now = System.currentTimeMillis();
+        long now = clock.getAsLong();
         // compute 内不做 IO；抢占信息暂存，compute 返回后再回调监听。
         PreemptionEvent[] preemption = new PreemptionEvent[1];
+        boolean[] renewalExpired = new boolean[1];
 
         LeaseEntry result = writeOwners.compute(normalized, (k, oldEntry) -> {
             if (oldEntry == null) {
-                return new LeaseEntry(stepId, now);
+                return new LeaseEntry(stepId, now, now);
             }
 
+            if (oldEntry.stepId.equals(stepId) && now - oldEntry.acquiredAt >= maxLifetimeMs) {
+                renewalExpired[0] = true;
+                return null;
+            }
             // 同一步骤重入：续租，刷新时间戳（避免慢但活跃的步骤被误判空闲超时）
             if (oldEntry.stepId.equals(stepId)) {
-                return new LeaseEntry(stepId, now);
+                return new LeaseEntry(stepId, oldEntry.acquiredAt, now);
             }
 
-            // 他人持有但已空闲超时：抢占回收
-            if (now - oldEntry.acquireTime > leaseTimeoutMs) {
-                preemption[0] = new PreemptionEvent(oldEntry.stepId, now - oldEntry.acquireTime);
-                return new LeaseEntry(stepId, now);
+            // 他人持有但已到期：重新竞争。
+            if (expired(oldEntry, now)) {
+                preemption[0] = new PreemptionEvent(oldEntry.stepId, now - oldEntry.acquiredAt);
+                return new LeaseEntry(stepId, now, now);
             }
 
             // 冲突：其他步骤持有且未超时，保持原持有者
@@ -87,7 +108,7 @@ public class ResourceLeaseManager {
         // 抢占审计（在 compute 之外执行 IO）
         if (preemption[0] != null) {
             PreemptionEvent event = preemption[0];
-            log.warn("租约空闲超时，强制回收: {} (被回收者: {}, 空闲: {}ms, 新持有者: {})",
+            log.warn("租约到期，强制回收: {} (被回收者: {}, 持有: {}ms, 新持有者: {})",
                     normalized, event.evictedStepId, event.heldMs, stepId);
             try {
                 preemptionListener.onPreempt(normalized, event.evictedStepId, stepId, event.heldMs);
@@ -97,6 +118,9 @@ public class ResourceLeaseManager {
         }
 
         // 冲突检查（compute 后再抛异常，避免破坏原子性）
+        if (renewalExpired[0]) {
+            throw new ResourceLeaseException("资源租约达到绝对期限，已释放，请重新申请: " + normalized);
+        }
         if (result != null && !result.stepId.equals(stepId)) {
             throw new ResourceLeaseException("资源写入冲突: " + normalized
                     + " 已由步骤 [" + result.stepId + "] 持有，当前步骤 [" + stepId + "] 不能并发写入");
@@ -118,8 +142,7 @@ public class ResourceLeaseManager {
         if (entry == null || !entry.stepId.equals(stepId)) {
             return false;
         }
-        long now = System.currentTimeMillis();
-        return (now - entry.acquireTime) <= leaseTimeoutMs;
+        return !expired(entry, clock.getAsLong());
     }
 
     public void releaseStep(String stepId) {
@@ -141,19 +164,39 @@ public class ResourceLeaseManager {
      * 主动清理超时租约（可选，定时任务调用）
      */
     public int pruneExpiredLeases() {
-        long now = System.currentTimeMillis();
+        long now = clock.getAsLong();
         int removed = 0;
 
         for (var iterator = writeOwners.entrySet().iterator(); iterator.hasNext(); ) {
             var entry = iterator.next();
-            if (now - entry.getValue().acquireTime > leaseTimeoutMs) {
+            if (expired(entry.getValue(), now)
+                    && writeOwners.remove(entry.getKey(), entry.getValue())) {
                 log.info("清理超时租约: {} (持有者: {})", entry.getKey(), entry.getValue().stepId);
-                iterator.remove();
                 removed++;
             }
         }
 
         return removed;
+    }
+
+    private boolean expired(LeaseEntry entry, long now) {
+        return now - entry.renewedAt > leaseTimeoutMs
+                || now - entry.acquiredAt >= maxLifetimeMs;
+    }
+
+    private static long resolveMaxLifetimeMs() {
+        String configured = System.getProperty(MAX_LIFETIME_PROPERTY);
+        if (configured == null || configured.isBlank()) configured = System.getenv(MAX_LIFETIME_ENV);
+        if (configured != null && !configured.isBlank()) {
+            try {
+                long parsed = Long.parseLong(configured.trim());
+                if (parsed > 0) return parsed;
+            } catch (NumberFormatException ignored) {
+                // Fall back to a bounded lifetime.
+            }
+            log.warn("租约绝对期限配置非法，回退默认 {}ms", DEFAULT_MAX_LIFETIME_MS);
+        }
+        return DEFAULT_MAX_LIFETIME_MS;
     }
 
     private static long resolveLeaseTimeoutMs() {

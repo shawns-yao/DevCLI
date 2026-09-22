@@ -180,7 +180,8 @@ public class CrossEncoderReranker implements CodeReranker {
 
     private VectorStore.SearchResult withScore(VectorStore.SearchResult result, double score) {
         return new VectorStore.SearchResult(result.filePath(), result.chunkType(), result.name(), result.content(),
-                score, result.symbolVersion(), result.classpathEpoch(), result.indexEpoch(), result.invalidations());
+                score, result.symbolVersion(), result.classpathEpoch(), result.indexEpoch(), result.invalidations(),
+                result.freshness());
     }
 
     private static boolean parseBoolean(String raw) {

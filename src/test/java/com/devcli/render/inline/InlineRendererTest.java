@@ -35,7 +35,7 @@ class InlineRendererTest {
         try {
             assertTrue(renderer.hasStatusBar());
             renderer.start();
-            renderer.updateStatus(StatusInfo.idle("glm-5.1", 200_000L, false));
+            renderer.updateStatus(StatusInfo.idle("glm-5.1", 200_000L, null));
         } finally {
             renderer.close();
         }
@@ -52,7 +52,7 @@ class InlineRendererTest {
             assertFalse(renderer.hasStatusBar());
             // updateStatus should still not throw
             renderer.start();
-            renderer.updateStatus(StatusInfo.idle("glm-5.1", 200_000L, false));
+            renderer.updateStatus(StatusInfo.idle("glm-5.1", 200_000L, null));
         } finally {
             renderer.close();
         }

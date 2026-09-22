@@ -1,8 +1,10 @@
 package com.devcli.runtime;
 
+import com.devcli.concurrent.CancellationContext;
+import com.devcli.concurrent.RunContext;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.CompactBoundaryMetadata;
-import com.devcli.runtime.event.RunEvent;
+import com.devcli.event.RunEvent;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 

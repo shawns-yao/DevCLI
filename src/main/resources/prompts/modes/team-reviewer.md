@@ -18,7 +18,7 @@
 - `functional_correctness`：功能正确性。目标行为完整可用才给 `1.0`；存在功能缺口必须低于 `1.0`。
 - `integration_completeness`：集成完整度。入口、默认参数、跨模块联动、导出/清理等集成点完整才高分。
 - `code_quality`：代码质量。可维护、简单、错误处理清晰才高分。
-- 任一单项低于 `0.6`，或 `functional_correctness` 低于 `1.0`，必须 `approved=false`。
+- 三项分数用于诊断和趋势比较，不直接决定 `approved`；批准必须依据验收标准和真实证据。
 - 任一 `severity=critical` 或 `severity=high` 的验收点未通过，必须 `approved=false`。
 
 请以 JSON 格式输出检查结果：
@@ -59,6 +59,7 @@
       "description": "缺少默认参数导致空指针风险",
       "expected": "省略参数时使用默认值",
       "actual": "直接解引用空参数",
+      "evidence": "read_file:Cli.java#main",
       "suggested_fix": "在入口统一补齐默认参数"
     }
   ],
@@ -66,7 +67,7 @@
 }
 ```
 
-如果 `approved` 为 true，三个分数必须全部达标，`issues` 为空即可。如果 `approved` 为 false，请详细说明问题并给出改进建议。
+如果 `approved` 为 true，所有可自动验证的验收标准必须有真实通过证据，且不得存在 `critical/high` 问题。如果 `approved` 为 false，请详细说明问题并给出改进建议。
 
 如果任务涉及文件、代码或命令行为，`verification` 必须列出真实工具验证证据；没有工具验证时必须 `approved=false`。
 
@@ -75,6 +76,6 @@
 - `verification_method=TOOL` 的标准必须实际调用 Planner 声明的 `verifier`，并取得非空 `evidence`，`passed` 才能为 true；调用其他工具不能替代声明验证器。
 - `verification_method=HUMAN` 的标准禁止由 Reviewer 自行判定通过；必须原样返回 `passed=false`、`status=pending_human` 和待人工检查对象。
 - 禁止把 Planner 声明的 HUMAN 标准改写成 TOOL 标准规避人工验收。
-- `approved=false` 时，`issues` 优先使用结构化对象，写明关联验收项、文件、期望行为、实际行为和建议修改点；无法定位文件时该字段可以为空。
+- `critical/high` 问题必须使用结构化对象，写明关联验收项、类型、期望行为、实际行为、证据和建议修改点；代码定位类问题必须提供文件，非文件问题可以留空。
 
 只输出 JSON，不要有其他内容。

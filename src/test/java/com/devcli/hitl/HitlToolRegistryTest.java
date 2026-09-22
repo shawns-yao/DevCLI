@@ -7,7 +7,9 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.devcli.browser.BrowserGuard;
 import com.devcli.browser.BrowserSession;
 import com.devcli.browser.SensitivePagePolicy;
+import com.devcli.mcp.config.McpToolTrustPolicy;
 import com.devcli.mcp.protocol.McpToolDescriptor;
+import com.devcli.policy.TaskGrant;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
@@ -17,6 +19,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
@@ -70,6 +74,7 @@ class HitlToolRegistryTest {
         Path target = tempDir.resolve("should-not-exist.txt");
         StubHandler stub = new StubHandler(req -> ApprovalResult.reject("too risky"));
         HitlToolRegistry registry = new HitlToolRegistry(stub);
+        registry.setProjectPath(tempDir.toString());
 
         String result = registry.executeTool("write_file",
                 "{\"path\":\"" + target.toString().replace("\\", "\\\\") + "\",\"content\":\"x\"}");
@@ -85,6 +90,7 @@ class HitlToolRegistryTest {
         Path target = tempDir.resolve("structured-reject.txt");
         StubHandler stub = new StubHandler(req -> ApprovalResult.reject("denied"));
         HitlToolRegistry registry = new HitlToolRegistry(stub);
+        registry.setProjectPath(tempDir.toString());
 
         ToolOutput output = registry.executeToolOutput("write_file",
                 "{\"path\":\"" + target.toString().replace("\\", "\\\\") + "\",\"content\":\"x\"}");
@@ -125,6 +131,7 @@ class HitlToolRegistryTest {
         Path target = tempDir.resolve("skipped.txt");
         StubHandler stub = new StubHandler(req -> ApprovalResult.skip());
         HitlToolRegistry registry = new HitlToolRegistry(stub);
+        registry.setProjectPath(tempDir.toString());
 
         String result = registry.executeTool("write_file",
                 "{\"path\":\"" + target.toString().replace("\\", "\\\\") + "\",\"content\":\"x\"}");
@@ -147,6 +154,22 @@ class HitlToolRegistryTest {
         assertFalse(result.startsWith("[HITL]"));
         assertTrue(Files.exists(target));
         assertEquals("approved", Files.readString(target));
+    }
+
+    @Test
+    void editFileRequiresApprovalBeforeMutation(@TempDir Path tempDir) throws Exception {
+        Files.writeString(tempDir.resolve("editable.txt"), "before");
+        StubHandler stub = new StubHandler(req -> ApprovalResult.reject("review edit"));
+        HitlToolRegistry registry = new HitlToolRegistry(stub);
+        registry.setProjectPath(tempDir.toString());
+
+        ToolOutput output = registry.executeToolOutput("edit_file",
+                "{\"path\":\"editable.txt\",\"old_string\":\"before\",\"new_string\":\"after\"}");
+
+        assertEquals(ToolStatus.REJECTED, output.status());
+        assertEquals(ToolErrorCode.HITL_REJECTED, output.errorCode());
+        assertEquals(1, stub.requestCount());
+        assertEquals("before", Files.readString(tempDir.resolve("editable.txt")));
     }
 
     @Test
@@ -180,6 +203,100 @@ class HitlToolRegistryTest {
 
         assertFalse(result.startsWith("[HITL]"));
         assertTrue(Files.exists(target));
+    }
+
+    /**
+     * 放行缓存按任务边界收敛：任务内复用，任务边界后必须重新询问用户。
+     */
+    @Test
+    void approvalAllIsReusedWithinTaskAndClearedAtTaskBoundary(@TempDir Path tempDir) throws Exception {
+        TaskScopedApprovalHandler handler = new TaskScopedApprovalHandler();
+        HitlToolRegistry registry = new HitlToolRegistry(handler);
+        registry.setProjectPath(tempDir.toString());
+
+        registry.executeTool("write_file", "{\"path\":\"a.txt\",\"content\":\"1\"}");
+        assertEquals(1, handler.requestCount(), "首次调用需要审批");
+
+        registry.executeTool("write_file", "{\"path\":\"b.txt\",\"content\":\"2\"}");
+        assertEquals(1, handler.requestCount(), "同一任务内应复用放行结果");
+
+        handler.clearApprovedAll();
+        registry.executeTool("write_file", "{\"path\":\"c.txt\",\"content\":\"3\"}");
+        assertEquals(2, handler.requestCount(), "任务边界后必须重新询问用户，不得跨任务静默放行");
+        assertTrue(Files.exists(tempDir.resolve("c.txt")));
+    }
+
+    /**
+     * 任务级授权：范围内的写在执行管线里静默放行，不再逐次打扰用户。
+     */
+    @Test
+    void taskGrantAllowsWorkspaceWriteWithoutPrompting(@TempDir Path tempDir) throws Exception {
+        StubHandler stub = new StubHandler(req -> {
+            throw new AssertionError("已授权范围内的写不应触发审批");
+        });
+        HitlToolRegistry registry = new HitlToolRegistry(stub);
+        registry.setProjectPath(tempDir.toString());
+
+        String result = registry.runWithTaskGrant(TaskGrant.WORKSPACE_WRITES,
+                () -> registry.executeTool("write_file", "{\"path\":\"granted.txt\",\"content\":\"ok\"}"));
+
+        assertFalse(result.startsWith("[HITL]"), result);
+        assertEquals(0, stub.requestCount(), "命中授权后不应再询问用户");
+        assertEquals("ok", Files.readString(tempDir.resolve("granted.txt")));
+    }
+
+    /**
+     * 策略硬边界优先于授权：越界写直接拒绝，且不先弹一次注定会被拒的审批。
+     */
+    @Test
+    void taskGrantNeverOverridesPolicyBoundaryAndDoesNotPromptFirst(@TempDir Path tempDir) {
+        StubHandler stub = new StubHandler(req -> ApprovalResult.approve());
+        HitlToolRegistry registry = new HitlToolRegistry(stub);
+        registry.setProjectPath(tempDir.toString());
+        Path outside = tempDir.getParent().resolve("outside-grant.txt");
+
+        String result = registry.runWithTaskGrant(TaskGrant.WORKSPACE_WRITES_AND_COMMANDS,
+                () -> registry.executeTool("write_file",
+                        "{\"path\":\"" + outside.toString().replace("\\", "\\\\")
+                                + "\",\"content\":\"x\"}"));
+
+        assertTrue(result.contains("[策略] 已拒绝"), result);
+        assertFalse(Files.exists(outside), "越界写即使有授权也必须被策略拒绝");
+        assertEquals(0, stub.requestCount(), "策略必然拒绝的操作不应先打扰用户");
+    }
+
+    /** 资源粒度授权：授权 glob 内的写静默放行，glob 外的写仍逐次确认。 */
+    @Test
+    void scopedTaskGrantOnlySilencesWritesInsideGrantedGlobs(@TempDir Path tempDir) throws Exception {
+        StubHandler stub = new StubHandler(req -> ApprovalResult.approve());
+        HitlToolRegistry registry = new HitlToolRegistry(stub);
+        registry.setProjectPath(tempDir.toString());
+        Files.createDirectories(tempDir.resolve("src"));
+
+        registry.runWithTaskGrant(new TaskGrant(java.util.List.of("src/**"), false), () -> {
+            String granted = registry.executeTool("write_file",
+                    "{\"path\":\"src/granted.txt\",\"content\":\"ok\"}");
+            assertFalse(granted.startsWith("[HITL]"), granted);
+
+            // glob 外的写会重新触发审批；批准后照常执行
+            registry.executeTool("write_file", "{\"path\":\"other.txt\",\"content\":\"ok\"}");
+            return null;
+        });
+
+        assertEquals(1, stub.requestCount(), "只有超出授权 glob 的写需要审批");
+        assertEquals("ok", Files.readString(tempDir.resolve("src/granted.txt")));
+        assertTrue(Files.exists(tempDir.resolve("other.txt")));
+    }
+
+    @Test
+    void withoutTaskGrantWorkspaceWriteStillPrompts(@TempDir Path tempDir) {
+        StubHandler stub = new StubHandler(req -> ApprovalResult.approve());
+        HitlToolRegistry registry = new HitlToolRegistry(stub);
+        registry.setProjectPath(tempDir.toString());
+
+        registry.executeTool("write_file", "{\"path\":\"plain.txt\",\"content\":\"ok\"}");
+
+        assertEquals(1, stub.requestCount(), "未授权时必须逐次确认");
     }
 
     @Test
@@ -223,6 +340,24 @@ class HitlToolRegistryTest {
 
         assertEquals("deleted", result);
         assertEquals(1, stub.requestCount());
+    }
+
+    @Test
+    void trustedReadOnlyMcpToolSkipsApproval() {
+        StubHandler stub = new StubHandler(req -> {
+            throw new AssertionError("受信任只读 MCP 工具不应触发审批");
+        });
+        HitlToolRegistry registry = new HitlToolRegistry(stub);
+        registry.setMcpToolTrustPolicy("calendar", new McpToolTrustPolicy(true, Set.of(), Set.of()));
+        registerMcpTool(registry, "calendar", "search_events",
+                new McpToolDescriptor.Annotations(true, false, false),
+                args -> "events");
+
+        String result = registry.executeTool("mcp__calendar__search_events", "{}");
+
+        assertEquals("events", result);
+        assertFalse(registry.requiresApproval("mcp__calendar__search_events"));
+        assertEquals(0, stub.requestCount());
     }
 
     @Test
@@ -286,6 +421,42 @@ class HitlToolRegistryTest {
         assertEquals(1, handler.maxConcurrent(), "审批输入必须串行化");
         assertEquals(2, handler.requestCount());
         assertTrue(results.stream().allMatch(result -> result.status() == ToolStatus.SUCCESS));
+    }
+
+    /** 复刻真实 handler 的「全部放行」任务级缓存语义。 */
+    private static final class TaskScopedApprovalHandler implements HitlHandler {
+        private final Set<String> approvedAllByTool = ConcurrentHashMap.newKeySet();
+        private int requests;
+
+        @Override
+        public ApprovalResult requestApproval(ApprovalRequest request) {
+            requests++;
+            approvedAllByTool.add(request.toolName());
+            return ApprovalResult.approveAll();
+        }
+
+        @Override
+        public boolean isEnabled() {
+            return true;
+        }
+
+        @Override
+        public void setEnabled(boolean enabled) {
+        }
+
+        @Override
+        public boolean isApprovedAllByTool(String toolName) {
+            return toolName != null && approvedAllByTool.contains(toolName);
+        }
+
+        @Override
+        public void clearApprovedAll() {
+            approvedAllByTool.clear();
+        }
+
+        int requestCount() {
+            return requests;
+        }
     }
 
     /** 可预设决策结果的 HitlHandler stub。 */

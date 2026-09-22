@@ -1,5 +1,6 @@
 package com.devcli.policy;
 
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -82,8 +83,12 @@ class PathGuardTest {
             Files.createSymbolicLink(linkInsideRoot, outside);
         } catch (UnsupportedOperationException | IOException e) {
             // 当前文件系统不支持符号链接（Windows 无管理员权限），跳过此用例
-            return;
+            Assumptions.abort("当前文件系统不支持符号链接，跳过符号链接逃逸用例");
         }
+        // 部分环境（受限沙箱、无特权的 Windows）下 createSymbolicLink 会返回成功却不产生可解析的
+        // 软链，此时用例无法验证逃逸检测，按跳过处理而不是误报失败。
+        Assumptions.assumeTrue(Files.isSymbolicLink(linkInsideRoot) && Files.exists(outsideTarget),
+                "当前环境未真正创建可解析的符号链接，跳过符号链接逃逸用例");
 
         PathGuard guard = new PathGuard(root.toString());
         PolicyException ex = assertThrows(PolicyException.class,

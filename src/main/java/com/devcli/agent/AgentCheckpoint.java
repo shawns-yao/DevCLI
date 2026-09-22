@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.devcli.plan.ExecutionArtifact;
 import com.devcli.plan.ExecutionGraph;
+import com.devcli.workspace.FileModeSnapshot;
 import com.devcli.workspace.PatchSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.LinkedHashMap;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * Multi-Agent orchestration checkpoint for failure recovery.
@@ -45,8 +47,10 @@ public class AgentCheckpoint {
         .enable(SerializationFeature.INDENT_OUTPUT);
     /** 步骤 result 落盘上限：buildStepContext 注入依赖结果最多 800 字符，8KB 足够保真。 */
     public static final int MAX_SUMMARY_LENGTH = 8 * 1024;
-    public static final int CURRENT_PROTOCOL_VERSION = 7;
+    public static final int CURRENT_PROTOCOL_VERSION = 10;
     private static final int MAX_AGENT_SUMMARY_LENGTH = 2 * 1024;
+    private static final int MAX_ATTEMPT_DIGESTS = 32;
+    private static final int MAX_ATTEMPT_DIGEST_LENGTH = 1_024;
 
     private int protocolVersion = CURRENT_PROTOCOL_VERSION;
     private String orchestrationId;
@@ -66,9 +70,13 @@ public class AgentCheckpoint {
     private Map<String, Integer> redoCounts;
     /** 每次在位重做的失败现场摘要，用于恢复、审计和避免把重做次数与失败产物混为一谈。 */
     private List<RedoAttemptRecord> redoAttempts;
+    /** 有界、按步骤归属的失败尝试摘要，恢复后用于避免重复已排除方案。 */
+    private List<AttemptDigestRecord> attemptDigests;
     /** 已批准且尚未形成成功或失败终态的重做步骤，用于区分中途崩溃与额度耗尽。 */
     private Set<String> redoPendingSteps;
     private Map<String, PendingPatchCommit> pendingPatchCommits;
+    /** 硬验证环境故障时保留的未验证补丁；内容存放在 checkpoint 私有旁路目录。 */
+    private Map<String, DeferredPatch> deferredPatches;
     private List<AgentIdentityRecord> agentIdentities;
     private Map<String, AgentCursorRecord> agentCursors;
     private Map<String, StepAssignmentRecord> stepAssignments;
@@ -110,9 +118,29 @@ public class AgentCheckpoint {
         }
     }
 
+    public record AttemptDigestRecord(String stepId, String digest,
+                                      String reference, long sequence) {
+        public AttemptDigestRecord {
+            stepId = stepId == null ? "" : stepId.trim();
+            digest = digest == null ? "" : digest.trim();
+            if (digest.length() > MAX_ATTEMPT_DIGEST_LENGTH) {
+                digest = digest.substring(0, MAX_ATTEMPT_DIGEST_LENGTH) + "...(截断)";
+            }
+            reference = reference == null ? "" : reference.trim();
+            sequence = Math.max(0, sequence);
+        }
+    }
+
     public record PendingPatchEntry(String relativePath, PatchSet.ChangeType type,
                                     String beforeHash, String afterHash,
-                                    boolean backupPresent) {
+                                    boolean backupPresent,
+                                    FileModeSnapshot beforeMode,
+                                    FileModeSnapshot afterMode) {
+        public PendingPatchEntry(String relativePath, PatchSet.ChangeType type,
+                                 String beforeHash, String afterHash,
+                                 boolean backupPresent) {
+            this(relativePath, type, beforeHash, afterHash, backupPresent, null, null);
+        }
     }
 
     public record PendingPatchCommit(String stepId, List<PendingPatchEntry> entries,
@@ -147,7 +175,9 @@ public class AgentCheckpoint {
                                 long messageSequence,
                                 Map<String, Integer> redoCounts,
                                 List<RedoAttemptRecord> redoAttempts,
-                                Set<String> redoPendingSteps) {
+                                Set<String> redoPendingSteps,
+                                List<AttemptDigestRecord> attemptDigests,
+                                Set<String> deferredPatchSteps) {
         public RecoveryState {
             planSteps = planSteps == null ? List.of() : List.copyOf(planSteps);
             acceptanceCriteria = acceptanceCriteria == null ? List.of() : List.copyOf(acceptanceCriteria);
@@ -158,6 +188,27 @@ public class AgentCheckpoint {
             redoCounts = redoCounts == null ? Map.of() : Map.copyOf(redoCounts);
             redoAttempts = redoAttempts == null ? List.of() : List.copyOf(redoAttempts);
             redoPendingSteps = redoPendingSteps == null ? Set.of() : Set.copyOf(redoPendingSteps);
+            attemptDigests = attemptDigests == null ? List.of() : List.copyOf(attemptDigests);
+            deferredPatchSteps = deferredPatchSteps == null
+                    ? Set.of() : Set.copyOf(deferredPatchSteps);
+        }
+    }
+
+    public record DeferredPatchEntry(String relativePath, PatchSet.ChangeType type,
+                                     String beforeHash, String afterHash,
+                                     FileModeSnapshot beforeMode,
+                                     FileModeSnapshot afterMode) {
+    }
+
+    public record DeferredPatch(String stepId, String storageKey,
+                                List<DeferredPatchEntry> entries,
+                                String failureReason, long recordedAt) {
+        public DeferredPatch {
+            stepId = stepId == null ? "" : stepId;
+            storageKey = storageKey == null ? "" : storageKey;
+            entries = entries == null ? List.of() : List.copyOf(entries);
+            failureReason = failureReason == null ? "" : failureReason;
+            recordedAt = recordedAt <= 0 ? System.currentTimeMillis() : recordedAt;
         }
     }
 
@@ -237,8 +288,10 @@ public class AgentCheckpoint {
         this.failedArtifacts = new HashMap<>();
         this.redoCounts = new HashMap<>();
         this.redoAttempts = new ArrayList<>();
+        this.attemptDigests = new ArrayList<>();
         this.redoPendingSteps = new HashSet<>();
         this.pendingPatchCommits = new HashMap<>();
+        this.deferredPatches = new HashMap<>();
         this.planSteps = new ArrayList<>();
         this.acceptanceCriteria = new ArrayList<>();
         this.supersededSteps = new ArrayList<>();
@@ -395,6 +448,35 @@ public class AgentCheckpoint {
         timestamp = System.currentTimeMillis();
     }
 
+    public synchronized void recordAttemptDigests(List<AttemptDigestRecord> records) {
+        if (records == null || records.isEmpty()) return;
+        LinkedHashMap<String, AttemptDigestRecord> merged = new LinkedHashMap<>();
+        for (AttemptDigestRecord existing : attemptDigests()) {
+            merged.put(attemptKey(existing), existing);
+        }
+        for (AttemptDigestRecord record : records) {
+            if (record == null || record.digest().isBlank()) continue;
+            merged.remove(attemptKey(record));
+            merged.put(attemptKey(record), record);
+        }
+        while (merged.size() > MAX_ATTEMPT_DIGESTS) {
+            merged.remove(merged.keySet().iterator().next());
+        }
+        attemptDigests = new ArrayList<>(merged.values());
+        timestamp = System.currentTimeMillis();
+    }
+
+    private static String attemptKey(AttemptDigestRecord record) {
+        return record.reference().isBlank()
+                ? record.stepId() + "#" + record.sequence() + "#" + record.digest().hashCode()
+                : record.reference();
+    }
+
+    private List<AttemptDigestRecord> attemptDigests() {
+        if (attemptDigests == null) attemptDigests = new ArrayList<>();
+        return attemptDigests;
+    }
+
     public synchronized void preparePatchCommit(String stepId, Path projectRoot,
                                                 PatchSet patchSet,
                                                 ExecutionArtifact intendedArtifact) throws IOException {
@@ -414,6 +496,9 @@ public class AgentCheckpoint {
                 if (!currentHash.equals(change.beforeHash())) {
                     throw new IOException("PatchSet 写前日志前置版本冲突: " + change.relativePath());
                 }
+                if (!modeMatches(target, change.beforeMode())) {
+                    throw new IOException("PatchSet 写前日志前置权限冲突: " + change.relativePath());
+                }
                 boolean backupPresent = !PatchSet.isMissingHash(change.beforeHash());
                 if (backupPresent) {
                     Path backup = resolveSafe(journal, change.relativePath());
@@ -423,7 +508,8 @@ public class AgentCheckpoint {
                 }
                 entries.add(new PendingPatchEntry(
                         change.relativePath(), change.type(), change.beforeHash(),
-                        change.afterHash(), backupPresent));
+                        change.afterHash(), backupPresent,
+                        change.beforeMode(), change.afterMode()));
             }
             ExecutionArtifact intended = intendedArtifact == null
                     ? ExecutionArtifact.pending(stepId)
@@ -447,6 +533,136 @@ public class AgentCheckpoint {
         pendingPatchCommits().remove(stepId);
     }
 
+    public synchronized void preserveDeferredPatch(String stepId, PatchSet patchSet,
+                                                   String failureReason) throws IOException {
+        String normalizedStepId = normalizeRequired(stepId, "stepId");
+        if (patchSet == null || patchSet.isEmpty()) {
+            return;
+        }
+        String storageKey = UUID.randomUUID().toString();
+        Path directory = deferredPatchDir(normalizedStepId, storageKey);
+        PatchJournalPolicy.secureDirectory(directory);
+        List<DeferredPatchEntry> entries = new ArrayList<>();
+        DeferredPatch previous = deferredPatches().get(normalizedStepId);
+        try {
+            for (PatchSet.FileChange change : patchSet.changes()) {
+                if (change.type() == PatchSet.ChangeType.DELETE) {
+                    if (!PatchSet.isMissingHash(change.afterHash())) {
+                        throw new IOException("延迟补丁删除项 afterHash 非法: "
+                                + change.relativePath());
+                    }
+                } else {
+                    String actualHash = PatchSet.hash(change.content());
+                    if (!actualHash.equals(change.afterHash())) {
+                        throw new IOException("延迟补丁内容哈希不匹配: "
+                                + change.relativePath());
+                    }
+                    Path contentFile = resolveSafe(directory.resolve("after"),
+                            change.relativePath());
+                    PatchJournalPolicy.secureDirectory(contentFile.getParent());
+                    Files.write(contentFile, change.content());
+                    PatchJournalPolicy.secureFile(contentFile);
+                }
+                entries.add(new DeferredPatchEntry(
+                        change.relativePath(), change.type(), change.beforeHash(),
+                        change.afterHash(), change.beforeMode(), change.afterMode()));
+            }
+            deferredPatches().put(normalizedStepId, new DeferredPatch(
+                    normalizedStepId, storageKey, entries,
+                    failureReason, System.currentTimeMillis()));
+            timestamp = System.currentTimeMillis();
+            saveOrThrow();
+            if (previous != null) {
+                try {
+                    deleteTree(deferredPatchDir(previous.stepId(), previous.storageKey()));
+                } catch (IOException cleanupFailure) {
+                    log.warn("清理旧待验证 PatchSet 失败: step={}, error={}",
+                            normalizedStepId, cleanupFailure.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            if (previous == null) {
+                deferredPatches().remove(normalizedStepId);
+            } else {
+                deferredPatches().put(normalizedStepId, previous);
+            }
+            deleteTree(directory);
+            if (e instanceof IOException ioException) {
+                throw ioException;
+            }
+            throw new IOException("保存待验证 PatchSet 失败: " + e.getMessage(), e);
+        }
+    }
+
+    public synchronized PatchSet loadDeferredPatch(String stepId) throws IOException {
+        String normalizedStepId = normalizeRequired(stepId, "stepId");
+        DeferredPatch deferred = deferredPatches().get(normalizedStepId);
+        if (deferred == null) {
+            return new PatchSet(List.of());
+        }
+        Path directory = deferredPatchDir(deferred.stepId(), deferred.storageKey());
+        List<PatchSet.FileChange> changes = new ArrayList<>();
+        for (DeferredPatchEntry entry : deferred.entries()) {
+            byte[] content = entry.type() == PatchSet.ChangeType.DELETE
+                    ? new byte[0]
+                    : Files.readAllBytes(resolveSafe(directory.resolve("after"),
+                    entry.relativePath()));
+            if (entry.type() != PatchSet.ChangeType.DELETE
+                    && !PatchSet.hash(content).equals(entry.afterHash())) {
+                throw new IOException("待验证 PatchSet 内容损坏: " + entry.relativePath());
+            }
+            changes.add(new PatchSet.FileChange(
+                    entry.relativePath(), entry.type(), entry.beforeHash(), entry.afterHash(),
+                    content, entry.beforeMode(), entry.afterMode()));
+        }
+        return new PatchSet(changes);
+    }
+
+    public synchronized boolean hasDeferredPatch(String stepId) {
+        return stepId != null && deferredPatches().containsKey(stepId);
+    }
+
+    synchronized DeferredPatch markDeferredPatchTerminal(String stepId) {
+        return stepId == null ? null : deferredPatches().remove(stepId);
+    }
+
+    synchronized void restoreDeferredPatchMetadata(DeferredPatch deferredPatch) {
+        if (deferredPatch != null && !deferredPatch.stepId().isBlank()) {
+            deferredPatches().put(deferredPatch.stepId(), deferredPatch);
+        }
+    }
+
+    synchronized void cleanupDeferredPatchFiles(DeferredPatch deferredPatch) {
+        if (deferredPatch == null) {
+            return;
+        }
+        try {
+            deleteTree(deferredPatchDir(
+                    deferredPatch.stepId(), deferredPatch.storageKey()));
+        } catch (IOException cleanupFailure) {
+            log.warn("清理待验证 PatchSet 失败: step={}, error={}",
+                    deferredPatch.stepId(), cleanupFailure.getMessage());
+        }
+    }
+
+    public synchronized void clearDeferredPatch(String stepId) throws IOException {
+        if (stepId == null || stepId.isBlank()) {
+            return;
+        }
+        DeferredPatch removed = deferredPatches().remove(stepId);
+        if (removed == null) {
+            return;
+        }
+        timestamp = System.currentTimeMillis();
+        try {
+            saveOrThrow();
+        } catch (IOException e) {
+            deferredPatches().put(stepId, removed);
+            throw e;
+        }
+        cleanupDeferredPatchFiles(removed);
+    }
+
     public synchronized void cleanupPatchJournal(String stepId) {
         try {
             deleteTree(patchJournalDir(stepId));
@@ -468,9 +684,12 @@ public class AgentCheckpoint {
             boolean allBefore = true;
             boolean allAfter = true;
             for (PendingPatchEntry entry : pending.entries()) {
-                String current = currentHash(resolveSafe(root, entry.relativePath()));
-                allBefore &= current.equals(entry.beforeHash());
-                allAfter &= current.equals(entry.afterHash());
+                Path target = resolveSafe(root, entry.relativePath());
+                String current = currentHash(target);
+                allBefore &= current.equals(entry.beforeHash())
+                        && modeMatches(target, entry.beforeMode());
+                allAfter &= current.equals(entry.afterHash())
+                        && modeMatches(target, entry.afterMode());
             }
 
             if (allAfter) {
@@ -532,9 +751,14 @@ public class AgentCheckpoint {
                 } else {
                     Files.deleteIfExists(target);
                 }
+                if (entry.backupPresent() && entry.beforeMode() != null) {
+                    entry.beforeMode().apply(target);
+                }
                 String restored = currentHash(target);
                 if (!restored.equals(entry.beforeHash())) {
                     failures.add(entry.relativePath() + ": 回滚后哈希不匹配");
+                } else if (!modeMatches(target, entry.beforeMode())) {
+                    failures.add(entry.relativePath() + ": 回滚后权限不匹配");
                 }
             } catch (Exception e) {
                 failures.add(entry.relativePath() + ": "
@@ -564,6 +788,13 @@ public class AgentCheckpoint {
             pendingPatchCommits = new HashMap<>();
         }
         return pendingPatchCommits;
+    }
+
+    private Map<String, DeferredPatch> deferredPatches() {
+        if (deferredPatches == null) {
+            deferredPatches = new HashMap<>();
+        }
+        return deferredPatches;
     }
 
     private Map<String, AgentCursorRecord> agentCursors() {
@@ -654,7 +885,9 @@ public class AgentCheckpoint {
                 messageSequence,
                 redoCounts(),
                 redoAttempts(),
-                redoPendingSteps());
+                redoPendingSteps(),
+                attemptDigests(),
+                Set.copyOf(deferredPatches().keySet()));
     }
 
     // ─────────────────────────────────────────────────────────
@@ -828,6 +1061,7 @@ public class AgentCheckpoint {
         if (redoAttempts == null) redoAttempts = new ArrayList<>();
         if (redoPendingSteps == null) redoPendingSteps = new HashSet<>();
         if (pendingPatchCommits == null) pendingPatchCommits = new HashMap<>();
+        if (deferredPatches == null) deferredPatches = new HashMap<>();
         if (planSteps == null) planSteps = new ArrayList<>();
         if (acceptanceCriteria == null) acceptanceCriteria = new ArrayList<>();
         if (agentIdentities == null) agentIdentities = new ArrayList<>();
@@ -853,6 +1087,21 @@ public class AgentCheckpoint {
             throw new IllegalArgumentException("invalid patch journal step id");
         }
         return journal;
+    }
+
+    private Path deferredPatchDir(String stepId, String storageKey) {
+        String safeStep = stepId == null || stepId.isBlank()
+                ? "step"
+                : stepId.replaceAll("[^a-zA-Z0-9._-]", "-");
+        String safeStorage = storageKey == null || storageKey.isBlank()
+                ? "legacy"
+                : storageKey.replaceAll("[^a-zA-Z0-9._-]", "-");
+        Path root = patchJournalRoot().normalize();
+        Path directory = root.resolve("deferred-step-" + safeStep + "-" + safeStorage).normalize();
+        if (directory.equals(root) || !directory.startsWith(root)) {
+            throw new IllegalArgumentException("invalid deferred patch step id");
+        }
+        return directory;
     }
 
     private static Path normalizeProjectRoot(Path projectRoot) {
@@ -978,6 +1227,17 @@ public class AgentCheckpoint {
         this.failedArtifacts = failedArtifacts == null ? new HashMap<>() : failedArtifacts;
     }
 
+    private static boolean modeMatches(Path path, FileModeSnapshot expected) {
+        if (expected == null) {
+            return true;
+        }
+        try {
+            return expected.matches(path);
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
     public Map<String, Integer> getRedoCounts() {
         return Map.copyOf(redoCounts());
     }
@@ -988,6 +1248,10 @@ public class AgentCheckpoint {
 
     public List<RedoAttemptRecord> getRedoAttempts() {
         return List.copyOf(redoAttempts());
+    }
+
+    public List<AttemptDigestRecord> getAttemptDigests() {
+        return List.copyOf(attemptDigests());
     }
 
     public void setRedoAttempts(List<RedoAttemptRecord> redoAttempts) {
@@ -1008,6 +1272,15 @@ public class AgentCheckpoint {
 
     public void setPendingPatchCommits(Map<String, PendingPatchCommit> pendingPatchCommits) {
         this.pendingPatchCommits = pendingPatchCommits == null ? new HashMap<>() : pendingPatchCommits;
+    }
+
+    public Map<String, DeferredPatch> getDeferredPatches() {
+        return Map.copyOf(deferredPatches());
+    }
+
+    public void setDeferredPatches(Map<String, DeferredPatch> deferredPatches) {
+        this.deferredPatches = deferredPatches == null
+                ? new HashMap<>() : new HashMap<>(deferredPatches);
     }
 
     public List<AgentIdentityRecord> getAgentIdentities() {

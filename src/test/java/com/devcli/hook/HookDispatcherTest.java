@@ -6,7 +6,7 @@ import com.devcli.hitl.HitlHandler;
 import com.devcli.hitl.HitlToolRegistry;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
-import com.devcli.runtime.event.RunEvent;
+import com.devcli.event.RunEvent;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;

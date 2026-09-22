@@ -10,6 +10,9 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -41,7 +44,7 @@ class ToolCapabilityTest {
     }
 
     @Test
-    void isolatedProjectScopeRejectsOpenWorldMcpButAllowsProjectWrite(@TempDir Path tempDir) {
+    void isolatedProjectScopeRejectsOpenWorldMcpButAllowsProjectWrite(@TempDir Path tempDir) throws Exception {
         ToolRegistry registry = new ToolRegistry();
         registry.setProjectPath(tempDir.toString());
         McpToolDescriptor descriptor = descriptor("dangerous",
@@ -53,6 +56,11 @@ class ToolCapabilityTest {
                     "write_file", "{\"path\":\"allowed.txt\",\"content\":\"ok\"}");
             assertTrue(write.isSuccess(), write.text());
 
+            ToolOutput edit = registry.executeToolOutput(
+                    "edit_file",
+                    "{\"path\":\"allowed.txt\",\"old_string\":\"ok\",\"new_string\":\"edited\"}");
+            assertTrue(edit.isSuccess(), edit.text());
+
             ToolOutput browserConnect = registry.executeToolOutput("browser_connect", "{}");
             assertEquals(ToolStatus.REJECTED, browserConnect.status());
             assertEquals(ToolErrorCode.CAPABILITY_DENIED, browserConnect.errorCode());
@@ -63,7 +71,7 @@ class ToolCapabilityTest {
             return null;
         });
 
-        assertTrue(Files.exists(tempDir.resolve("allowed.txt")));
+        assertEquals("edited", Files.readString(tempDir.resolve("allowed.txt")));
     }
 
     @Test
@@ -119,13 +127,53 @@ class ToolCapabilityTest {
     }
 
     @Test
+    void parallelToolBatchSerializesSideEffectExecutions() {
+        try (ToolRegistry registry = new ToolRegistry()) {
+            AtomicInteger active = new AtomicInteger();
+            AtomicInteger peak = new AtomicInteger();
+            CountDownLatch bothEntered = new CountDownLatch(2);
+            ToolRegistry.ToolExecutor mutation = args -> {
+                int current = active.incrementAndGet();
+                peak.accumulateAndGet(current, Math::max);
+                bothEntered.countDown();
+                try {
+                    bothEntered.await(500, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    active.decrementAndGet();
+                }
+                return "ok";
+            };
+            registry.registerTool(new ToolRegistry.Tool(
+                    "mutate_a", "mutation a", JsonNodeFactory.instance.objectNode(), mutation,
+                    ToolRegistry.ToolEffect.PROJECT_MUTATION));
+            registry.registerTool(new ToolRegistry.Tool(
+                    "mutate_b", "mutation b", JsonNodeFactory.instance.objectNode(), mutation,
+                    ToolRegistry.ToolEffect.PROJECT_MUTATION));
+
+            List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
+                    new ToolRegistry.ToolInvocation("a", "mutate_a", "{}"),
+                    new ToolRegistry.ToolInvocation("b", "mutate_b", "{}")));
+
+            assertTrue(results.stream().allMatch(result -> result.status() == ToolStatus.SUCCESS));
+            assertEquals(1, peak.get(), "同一批次的副作用工具不得并行执行");
+        }
+    }
+
+    @Test
     void isolatedCommandRequiresSandboxBackend(@TempDir Path tempDir) {
         ToolRegistry registry = new ToolRegistry();
         registry.setProjectPath(tempDir.toString());
         AtomicReference<CommandExecutionService.Request> captured = new AtomicReference<>();
-        registry.setCommandExecutionService(request -> {
-            captured.set(request);
-            return CommandExecutionService.Result.completed(0, "sandbox");
+        registry.setCommandExecutionService(new CommandExecutionService() {
+            public boolean executesOnHost(boolean sandboxRequired) {
+                return !sandboxRequired;
+            }
+            public Result execute(Request request) {
+                captured.set(request);
+                return Result.completed(0, "sandbox");
+            }
         });
 
         ToolOutput output = registry.runWithToolAccess(

@@ -169,6 +169,24 @@ class AgentCheckpointTest {
     }
 
     @Test
+    void roundTripsBoundedStepScopedAttemptDigests() {
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-attempt-digests", "目标");
+        checkpoint.recordAttemptDigests(List.of(
+                new AgentCheckpoint.AttemptDigestRecord(
+                        "step-1", "execute_command: mvn test 失败，已排除缺少 JDK", "tool-failure-1", 10),
+                new AgentCheckpoint.AttemptDigestRecord(
+                        "step-2", "write_file: 参数校验失败", "tool-failure-2", 11)));
+        checkpoint.save();
+
+        AgentCheckpoint.RecoveryState recovery = AgentCheckpoint
+                .load("orch-attempt-digests").recoveryState();
+
+        assertEquals(2, recovery.attemptDigests().size());
+        assertEquals("step-1", recovery.attemptDigests().getFirst().stepId());
+        assertTrue(recovery.attemptDigests().getFirst().digest().contains("已排除缺少 JDK"));
+    }
+
+    @Test
     void clearsRedoPendingMarkerWhenAttemptReachesTerminalState() {
         AgentCheckpoint checkpoint = new AgentCheckpoint("orch-redo-terminal", "目标");
         checkpoint.recordRedoAttempt("step-1", 1, "首次失败", List.of("src/A.java"));
@@ -204,6 +222,35 @@ class AgentCheckpointTest {
         assertTrue(loaded.recoveryState().artifacts().get("step-1").successful());
         assertEquals("after", Files.readString(target));
         assertTrue(loaded.getPendingPatchCommits().isEmpty());
+    }
+
+    @Test
+    void roundTripsDeferredVerificationPatchAndRestoresIt(@TempDir Path project) throws Exception {
+        byte[] before = "before".getBytes(StandardCharsets.UTF_8);
+        byte[] after = "after".getBytes(StandardCharsets.UTF_8);
+        Files.write(project.resolve("Result.java"), before);
+        PatchSet patchSet = new PatchSet(List.of(new PatchSet.FileChange(
+                "Result.java", PatchSet.ChangeType.MODIFY,
+                PatchSet.hash(before), PatchSet.hash(after), after)));
+        AgentCheckpoint checkpoint = new AgentCheckpoint("orch-deferred", "goal");
+
+        checkpoint.preserveDeferredPatch(
+                "step-1", patchSet, "Docker daemon unavailable");
+        AgentCheckpoint loaded = AgentCheckpoint.load("orch-deferred");
+
+        assertNotNull(loaded);
+        assertTrue(loaded.hasDeferredPatch("step-1"));
+        assertEquals(Set.of("step-1"), loaded.recoveryState().deferredPatchSteps());
+        Path restoredWorkspace = tempDir.resolve("restored-workspace");
+        Files.createDirectories(restoredWorkspace);
+        Files.write(restoredWorkspace.resolve("Result.java"), before);
+        PatchSet.ApplyResult result = loaded.loadDeferredPatch("step-1")
+                .apply(restoredWorkspace);
+        assertTrue(result.applied(), result.failureDescription());
+        assertEquals("after", Files.readString(restoredWorkspace.resolve("Result.java")));
+
+        loaded.clearDeferredPatch("step-1");
+        assertFalse(loaded.hasDeferredPatch("step-1"));
     }
 
     @Test

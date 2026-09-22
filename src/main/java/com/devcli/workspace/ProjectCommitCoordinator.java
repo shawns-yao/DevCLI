@@ -20,8 +20,9 @@ import java.util.concurrent.locks.ReentrantLock;
  * JVM 内使用公平锁保持线程顺序，进程间使用 JDK FileLock 共享同一临界区。
  */
 public final class ProjectCommitCoordinator {
-    static final String LOCK_DIR_PROPERTY = "devcli.project.commit.lock.dir";
-    static final String LOCK_DIR_ENV = "DEVCLI_PROJECT_COMMIT_LOCK_DIR";
+    /** 锁目录覆盖项：受限环境（沙箱、只读家目录、CI）与测试用它把锁放到可写位置。 */
+    public static final String LOCK_DIR_PROPERTY = "devcli.project.commit.lock.dir";
+    public static final String LOCK_DIR_ENV = "DEVCLI_PROJECT_COMMIT_LOCK_DIR";
     private static final ConcurrentHashMap<Path, LockEntry> LOCKS = new ConcurrentHashMap<>();
 
     private ProjectCommitCoordinator() {

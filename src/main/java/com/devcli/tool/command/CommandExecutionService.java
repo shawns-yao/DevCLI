@@ -3,6 +3,8 @@ package com.devcli.tool.command;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolExecutionContext;
 import com.devcli.tool.ToolOutput;
+import com.devcli.tool.CommandResultMetadata;
+import com.devcli.tool.ToolResultArtifact;
 
 import java.nio.file.Path;
 
@@ -10,7 +12,20 @@ import java.nio.file.Path;
 public interface CommandExecutionService {
     Result execute(Request request);
 
-    record Result(int exitCode, String output, boolean timedOut, boolean cancelled) {
+    /** Unknown/custom backends are treated as host execution unless explicitly declared otherwise. */
+    default boolean executesOnHost(boolean sandboxRequired) {
+        return true;
+    }
+
+    /** Run deterministic backend policy checks before presenting an approval request. */
+    default void validateRequest(Request request) {
+    }
+
+    record Result(int exitCode, String output, boolean timedOut, boolean cancelled,
+                  ToolResultArtifact artifact, boolean outputIncomplete) {
+        public Result(int exitCode, String output, boolean timedOut, boolean cancelled) {
+            this(exitCode, output, timedOut, cancelled, null, false);
+        }
         public Result {
             output = output == null ? "" : output;
         }
@@ -28,20 +43,28 @@ public interface CommandExecutionService {
         }
 
         public boolean succeeded() {
-            return !timedOut && !cancelled && exitCode == 0;
+            return !timedOut && !cancelled && !outputIncomplete && exitCode == 0;
         }
 
         public ToolOutput toToolOutput() {
             if (timedOut) {
-                return ToolOutput.timedOut(output);
+                return ToolOutput.timedOut(output)
+                        .withSideChannel(new CommandResultMetadata(exitCode, true, cancelled));
             }
             if (cancelled) {
-                return ToolOutput.cancelled(output);
+                return ToolOutput.cancelled(output)
+                        .withSideChannel(new CommandResultMetadata(exitCode, false, true));
             }
             String text = "命令执行完成 (exit code: " + exitCode + ")\n" + output;
-            return exitCode == 0
+            ToolOutput result = exitCode == 0 && !outputIncomplete
                     ? ToolOutput.success(text)
                     : ToolOutput.error(ToolErrorCode.EXECUTION_FAILED, text, false);
+            result = result.withSideChannel(new CommandResultMetadata(exitCode, false, false));
+            if (artifact != null) result = result.withSideChannel(new ToolResultArtifact(
+                    artifact.classification(), artifact.originalChars(), artifact.originalBytes(),
+                    artifact.previewChars(), artifact.artifactRef(), artifact.nextCursor(), artifact.sha256(),
+                    artifact.toolCallId(), result.status().name(), result.errorCode().name(), exitCode, 0));
+            return result;
         }
 
         public String toToolText() {

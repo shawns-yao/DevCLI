@@ -36,6 +36,7 @@ public record ToolPresentation(
         return switch (toolName == null ? "" : toolName) {
             case "execute_command" -> new ToolPresentation(Kind.TERMINAL, "执行命令", "command");
             case "write_file" -> new ToolPresentation(Kind.DIFF, "写入文件", "path");
+            case "edit_file" -> new ToolPresentation(Kind.DIFF, "编辑文件", "path");
             case "read_file" -> new ToolPresentation(Kind.LOCATIONS, "读取文件", "path");
             case "list_dir" -> new ToolPresentation(Kind.LOCATIONS, "列出目录", "path");
             case "grep_code" -> new ToolPresentation(Kind.LOCATIONS, "精确搜索代码", "pattern");

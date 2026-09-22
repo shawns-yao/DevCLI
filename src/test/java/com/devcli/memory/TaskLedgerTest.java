@@ -8,7 +8,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * TaskLedger 单元测试 + 经 {@link WorkingMemory#renderForPrompt()} 的注入闭环验证。
+ * TaskLedger 单元测试 + 经 {@link SessionMemory#renderForPrompt()} 的注入闭环验证。
  */
 class TaskLedgerTest {
 
@@ -108,8 +108,8 @@ class TaskLedgerTest {
     }
 
     @Test
-    void injectedIntoWorkingMemoryRender() {
-        WorkingMemory wm = new WorkingMemory();
+    void injectedIntoSessionMemoryRender() {
+        SessionMemory wm = new SessionMemory();
         wm.taskLedger().setPlan("plan-1", "重构上下文", steps("task_1", "读", "task_2", "写"));
         wm.taskLedger().startStep("task_1");
         String section = wm.renderForPrompt();

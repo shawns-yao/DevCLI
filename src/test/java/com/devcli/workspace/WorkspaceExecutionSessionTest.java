@@ -1,6 +1,10 @@
 package com.devcli.workspace;
 
 import com.devcli.tool.ToolRegistry;
+import com.devcli.rag.CodeChunk;
+import com.devcli.rag.VectorStore;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -11,6 +15,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -18,6 +23,30 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WorkspaceExecutionSessionTest {
+
+    /**
+     * 跨进程提交锁默认落在 {@code ~/.devcli/locks}；受限环境（沙箱、CI 只读家目录）下不可写，
+     * 因此测试统一把锁目录重定向到临时目录。生产代码本来就支持该覆盖项。
+     */
+    @TempDir
+    Path lockDir;
+
+    private String previousLockDir;
+
+    @BeforeEach
+    void redirectCommitLocks() {
+        previousLockDir = System.getProperty(ProjectCommitCoordinator.LOCK_DIR_PROPERTY);
+        System.setProperty(ProjectCommitCoordinator.LOCK_DIR_PROPERTY, lockDir.toString());
+    }
+
+    @AfterEach
+    void restoreCommitLocks() {
+        if (previousLockDir == null) {
+            System.clearProperty(ProjectCommitCoordinator.LOCK_DIR_PROPERTY);
+        } else {
+            System.setProperty(ProjectCommitCoordinator.LOCK_DIR_PROPERTY, previousLockDir);
+        }
+    }
 
     @Test
     void serializesCommitAcrossProcesses(@TempDir Path tempDir) throws Exception {
@@ -43,6 +72,7 @@ class WorkspaceExecutionSessionTest {
                     + Path.of("target", "classes").toAbsolutePath();
             child = new ProcessBuilder(
                     javaExecutable,
+                    "-D" + ProjectCommitCoordinator.LOCK_DIR_PROPERTY + "=" + lockDir,
                     "-cp", classpath,
                     ProjectCommitLockProcess.class.getName(),
                     project.toString(),
@@ -128,6 +158,38 @@ class WorkspaceExecutionSessionTest {
             }
         } finally {
             parent.close();
+        }
+    }
+
+    @Test
+    void successfulPatchCommitMarksParentIndexDirty(@TempDir Path tempDir) throws Exception {
+        String oldRagDir = System.getProperty("devcli.rag.dir");
+        System.setProperty("devcli.rag.dir", tempDir.resolve("rag").toString());
+        Path project = Files.createDirectories(tempDir.resolve("project"));
+        Files.writeString(project.resolve("README.md"), "indexed content");
+        ToolRegistry parent = new ToolRegistry();
+        parent.setProjectPath(project.toString());
+        try {
+            try (VectorStore store = new VectorStore(project.toString())) {
+                store.clearProject();
+                store.replaceProjectIndex(List.of(new VectorStore.CodeChunkEntry(
+                        CodeChunk.fileChunk("README.md", "indexed content"),
+                        new float[]{1.0f})), List.of(), "idx-1");
+            }
+            try (WorkspaceExecutionSession session = WorkspaceExecutionSession.open(parent, "worker")) {
+                assertTrue(session.toolRegistry().executeToolOutput("write_file",
+                        "{\"path\":\"README.md\",\"content\":\"changed content\"}")
+                        .isSuccess());
+                assertTrue(session.apply(session.patchSet()).applied());
+            }
+            try (VectorStore store = new VectorStore(project.toString())) {
+                assertEquals(VectorStore.IndexFreshness.DIRTY,
+                        store.searchByKeyword("indexed content").getFirst().freshness());
+            }
+        } finally {
+            parent.close();
+            if (oldRagDir == null) System.clearProperty("devcli.rag.dir");
+            else System.setProperty("devcli.rag.dir", oldRagDir);
         }
     }
 }

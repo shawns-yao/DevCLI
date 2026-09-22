@@ -3,7 +3,7 @@ package com.devcli.runtime.api;
 import com.devcli.agent.AgentTurnInbox;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.CompactBoundaryMetadata;
-import com.devcli.runtime.event.RunEventSink;
+import com.devcli.event.RunEventSink;
 
 import java.util.List;
 import java.util.Objects;

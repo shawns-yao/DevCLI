@@ -15,6 +15,8 @@ import java.util.regex.Pattern;
  * - curl / git / 网络命令默认放行，只拦真正破坏性的（rm -rf 全盘、sudo、mkfs 等）
  */
 public final class CommandGuard {
+    private static final Pattern DELETION_COMMAND = Pattern.compile(
+            "(?i)(?<![\\w-])(rm|rmdir|del|erase|rd|remove-item|ri|unlink)(?![\\w-])");
 
     private static final List<DenyRule> RULES = List.of(
             new DenyRule("禁止 sudo 提权",
@@ -36,10 +38,22 @@ public final class CommandGuard {
             new DenyRule("禁止 chmod 777 全盘",
                     Pattern.compile("(?i)\\bchmod\\s+-R\\s+777\\s+(/|~)")),
             new DenyRule("禁止 shutdown / reboot / halt",
-                    Pattern.compile("(?i)\\b(shutdown|reboot|halt|poweroff)\\b"))
+                    Pattern.compile("(?i)\\b(shutdown|reboot|halt|poweroff)\\b")),
+            // 与 SensitivePathPolicy 呼应：文件写入有策略层围栏，但 shell 能绕过它。
+            // 这里只拦最常见的两种破坏形态，CommandGuard 仍是辅助黑名单而非主防线。
+            new DenyRule("禁止删除 .git 目录",
+                    Pattern.compile("(?i)\\brm\\s+(-[a-z]*r[a-z]*|--recursive|-R)[^\\n]*\\.git(\\s|/|$)")),
+            new DenyRule("禁止把输出重定向写入凭据或私钥文件",
+                    Pattern.compile("(?i)(>>?|\\btee\\b)[^\\n]*(\\.env|\\.pem|\\.key"
+                            + "|id_rsa|id_ed25519|credentials\\.json)(\\s|$|[\"'])"))
     );
 
     private CommandGuard() {
+    }
+
+    /** Approval hint only: unknown shell syntax is never interpreted as a safe deletion. */
+    public static boolean containsDeletion(String command) {
+        return command != null && DELETION_COMMAND.matcher(command).find();
     }
 
     /**

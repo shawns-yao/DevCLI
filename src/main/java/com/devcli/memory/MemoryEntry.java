@@ -6,10 +6,22 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * 记忆条目 - Memory 系统的基础数据单元
+ * 记忆条目 —— 一条长期记忆在内存中的视图。
+ *
+ * <p>它只是**主题文件的一次投影**：{@code id} 是文件名，{@code content} 是正文，
+ * {@code metadata} 携带 frontmatter 的 {@code name} / {@code description} / {@code scope}，
+ * {@code timestamp} 是文件修改时间。权威始终是磁盘上的 Markdown，
+ * 本类不持有任何磁盘上没有的状态。
+ *
+ * <p>原先挂在条目上的证据（confidence / reviewState）、生命周期（expiresAt / revision /
+ * supersededBy）、计数（recallCount / validatedUseCount）字段已全部移除：
+ * 它们没有对应的持久化字段，只存在于进程内存里，重启即失真，
+ * 却让检索侧和写入侧都要围着它们做判断。
+ *
+ * <p>{@link #estimateTokens(String)} 是唯一被记忆之外的子系统（压缩、工作记忆、规则上下文）
+ * 使用的成员，保留。
  */
 public class MemoryEntry {
-    public static final int CURRENT_SCHEMA_VERSION = 2;
 
     private final String id;
     private final String content;
@@ -17,127 +29,101 @@ public class MemoryEntry {
     private final Instant timestamp;
     private final Map<String, String> metadata;
     private final int tokenCount;
-    /** 主题键：同主题的旧事实在写入新事实时被标记为失效（用于冲突消解）。空串表示不参与主题归并。 */
-    private final String subject;
-    /** 是否为当前有效事实；被同主题新事实取代后置 false（软删除，保留审计）。 */
-    private final boolean active;
-    /** 取代本条的新事实 id；active=false 时有意义，否则为空串。 */
-    private final String supersededBy;
-    /** 持久化结构版本，用于后续无损迁移。 */
-    private final int schemaVersion;
-    /** 同一主题内的递增修订号；普通记忆从 1 开始。 */
-    private final int revision;
-    /** 过期时间；null 表示不过期。 */
-    private final Instant expiresAt;
-    /** 结构化证据、置信度和审核状态。 */
-    private final MemoryEvidence evidence;
 
     public enum MemoryType {
-        CONVERSATION,  // 对话记忆
-        FACT,          // 事实记忆（用户偏好、项目信息等）
-        SUMMARY,       // 摘要记忆
-        TOOL_RESULT,    // 工具执行结果
-        FEEDBACK       // 用户反馈（正面 / 负面确认）
+        CONVERSATION,
+        FACT,
+        SUMMARY,
+        TOOL_RESULT,
+        FEEDBACK
     }
 
-    public MemoryEntry(String id, String content, MemoryType type, Map<String, String> metadata, int tokenCount) {
+    /** 元数据键：主题名。 */
+    public static final String META_NAME = "name";
+    /** 元数据键：主题描述。 */
+    public static final String META_DESCRIPTION = "description";
+    /** 元数据键：所属作用域（{@code global} / {@code project}）。 */
+    public static final String META_SCOPE = "scope";
+    public static final String META_MEMORY_TYPE = "memory_type";
+    public static final String META_CREATED_AT = "created_at";
+    public static final String META_UPDATED_AT = "updated_at";
+    public static final String META_EXPIRES_AT = "expires_at";
+    public static final String META_REVISION = "revision";
+    public static final String META_EXPIRED = "expired";
+
+    public MemoryEntry(String id, String content, MemoryType type,
+                       Map<String, String> metadata, int tokenCount) {
         this(id, content, type, Instant.now(), metadata, tokenCount);
     }
 
     public MemoryEntry(String id, String content, MemoryType type, Instant timestamp,
                        Map<String, String> metadata, int tokenCount) {
-        this(id, content, type, timestamp, metadata, tokenCount, "", true, "",
-                CURRENT_SCHEMA_VERSION, 1, null, MemoryEvidence.legacy(metadata));
-    }
-
-    /**
-     * 完整构造（含冲突消解字段）。旧构造默认当前 schema、revision=1、永不过期，
-     * 保持对既有调用点的兼容。
-     */
-    public MemoryEntry(String id, String content, MemoryType type, Instant timestamp,
-                       Map<String, String> metadata, int tokenCount,
-                       String subject, boolean active, String supersededBy) {
-        this(id, content, type, timestamp, metadata, tokenCount, subject, active, supersededBy,
-                CURRENT_SCHEMA_VERSION, 1, null, MemoryEvidence.legacy(metadata));
-    }
-
-    public MemoryEntry(String id, String content, MemoryType type, Instant timestamp,
-                       Map<String, String> metadata, int tokenCount,
-                       String subject, boolean active, String supersededBy,
-                       int schemaVersion, int revision, Instant expiresAt) {
-        this(id, content, type, timestamp, metadata, tokenCount, subject, active, supersededBy,
-                schemaVersion, revision, expiresAt, MemoryEvidence.legacy(metadata));
-    }
-
-    public MemoryEntry(String id, String content, MemoryType type, Instant timestamp,
-                       Map<String, String> metadata, int tokenCount,
-                       String subject, boolean active, String supersededBy,
-                       int schemaVersion, int revision, Instant expiresAt,
-                       MemoryEvidence evidence) {
-        this.id = id;
-        this.content = content;
-        this.type = type;
-        this.timestamp = timestamp != null ? timestamp : Instant.now();
+        this.id = id == null ? "" : id;
+        this.content = content == null ? "" : content;
+        this.type = type == null ? MemoryType.FACT : type;
+        this.timestamp = timestamp == null ? Instant.now() : timestamp;
         this.metadata = metadata == null ? Map.of()
                 : Collections.unmodifiableMap(new HashMap<>(metadata));
-        this.tokenCount = tokenCount;
-        this.subject = subject == null ? "" : subject;
-        this.active = active;
-        this.supersededBy = supersededBy == null ? "" : supersededBy;
-        this.schemaVersion = Math.max(1, schemaVersion);
-        this.revision = Math.max(1, revision);
-        this.expiresAt = expiresAt;
-        this.evidence = evidence == null ? MemoryEvidence.legacy(this.metadata) : evidence;
+        this.tokenCount = Math.max(0, tokenCount);
     }
 
     public String getId() { return id; }
+
     public String getContent() { return content; }
+
     public MemoryType getType() { return type; }
+
     public Instant getTimestamp() { return timestamp; }
+
     public Map<String, String> getMetadata() { return metadata; }
+
     public int getTokenCount() { return tokenCount; }
-    public String getSubject() { return subject; }
-    public boolean isActive() { return active; }
-    public String getSupersededBy() { return supersededBy; }
-    public int getSchemaVersion() { return schemaVersion; }
-    public int getRevision() { return revision; }
-    public Instant getExpiresAt() { return expiresAt; }
-    public MemoryEvidence getEvidence() { return evidence; }
 
-    public boolean isRecallable() {
-        return active && evidence.isRecallable();
+    /** 主题名；缺失时回退为文件名（去掉扩展名）。 */
+    public String getName() {
+        String name = metadata.getOrDefault(META_NAME, "");
+        if (!name.isBlank()) return name;
+        int dot = id.lastIndexOf('.');
+        return dot > 0 ? id.substring(0, dot) : id;
     }
 
-    public boolean isExpired(Instant now) {
-        return expiresAt != null && !expiresAt.isAfter(now == null ? Instant.now() : now);
+    /** 主题描述；可能为空。 */
+    public String getDescription() { return metadata.getOrDefault(META_DESCRIPTION, ""); }
+
+    /** 作用域标记，仅用于展示。 */
+    public String getScope() { return metadata.getOrDefault(META_SCOPE, ""); }
+
+    /** CodeBuddy 风格的记忆类型：user / feedback / project / reference。 */
+    public String getMemoryType() { return metadata.getOrDefault(META_MEMORY_TYPE, "reference"); }
+
+    public int getRevision() {
+        try {
+            return Math.max(1, Integer.parseInt(metadata.getOrDefault(META_REVISION, "1")));
+        } catch (NumberFormatException ignored) {
+            return 1;
+        }
     }
 
-    public MemoryEntry withLifecycle(int nextRevision, Instant nextExpiresAt,
-                                     Map<String, String> nextMetadata) {
-        return copy(subject, active, supersededBy, nextRevision, nextExpiresAt, nextMetadata, evidence);
+    public java.util.Optional<Instant> getExpiresAt() {
+        String value = metadata.getOrDefault(META_EXPIRES_AT, "");
+        if (value.isBlank()) return java.util.Optional.empty();
+        try {
+            return java.util.Optional.of(Instant.parse(value));
+        } catch (RuntimeException ignored) {
+            return java.util.Optional.empty();
+        }
     }
 
-    public MemoryEntry withEvidence(MemoryEvidence nextEvidence) {
-        return copy(subject, active, supersededBy, revision, expiresAt, metadata, nextEvidence);
-    }
-
-    MemoryEntry copy(String nextSubject, boolean nextActive, String nextSupersededBy,
-                     int nextRevision, Instant nextExpiresAt, Map<String, String> nextMetadata) {
-        return copy(nextSubject, nextActive, nextSupersededBy, nextRevision, nextExpiresAt,
-                nextMetadata, evidence);
-    }
-
-    MemoryEntry copy(String nextSubject, boolean nextActive, String nextSupersededBy,
-                     int nextRevision, Instant nextExpiresAt, Map<String, String> nextMetadata,
-                     MemoryEvidence nextEvidence) {
-        return new MemoryEntry(id, content, type, timestamp,
-                nextMetadata == null ? metadata : nextMetadata, tokenCount,
-                nextSubject, nextActive, nextSupersededBy, CURRENT_SCHEMA_VERSION,
-                nextRevision, nextExpiresAt, nextEvidence);
+    /** 过期条目仍可审计，但不参与召回。 */
+    public boolean isExpired() {
+        if (Boolean.parseBoolean(metadata.getOrDefault(META_EXPIRED, "false"))) return true;
+        return getExpiresAt().map(expires -> !expires.isAfter(Instant.now())).orElse(false);
     }
 
     /**
-     * 粗略估算 token 数（中文约 1.5 字/token，英文约 4 字符/token）
+     * 粗略估算 token 数（中文约 1.5 字/token，英文约 4 字符/token）。
+     *
+     * <p>被压缩、工作记忆与规则上下文复用，改动需同时核对这三处预算。
      */
     public static int estimateTokens(String text) {
         if (text == null || text.isEmpty()) return 0;

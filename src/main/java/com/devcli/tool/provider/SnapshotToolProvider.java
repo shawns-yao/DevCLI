@@ -17,7 +17,7 @@ public final class SnapshotToolProvider implements ToolProvider {
                     try {
                         RestoreResult result = context.snapshotService().restorePreTurn(Math.max(1, offset));
                         return result.success()
-                                ? ToolOutput.success(result.formatForCli())
+                                ? ToolOutput.success(result.formatForCli() + "\nAgent 安全配置不参与快照恢复。")
                                 : ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
                                 result.formatForCli(), false);
                     } catch (Exception e) {

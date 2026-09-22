@@ -6,7 +6,7 @@ import com.devcli.llm.LlmClient;
 import com.devcli.runtime.RunCoordinator;
 import com.devcli.runtime.api.RunEventJsonCodec;
 import com.devcli.runtime.api.RuntimeThreadStore;
-import com.devcli.runtime.event.RunEvent;
+import com.devcli.event.RunEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

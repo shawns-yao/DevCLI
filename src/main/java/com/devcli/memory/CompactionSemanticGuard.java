@@ -20,8 +20,6 @@ final class CompactionSemanticGuard {
             "(?i)(mvn|gradle|npm|pnpm|yarn|pytest|java|docker|git)\\s+[^。；;\\n]{1,160}");
     private static final Pattern ANCHOR = Pattern.compile("[a-zA-Z_][a-zA-Z0-9_.:/-]{1,}|\\d+(?:\\.\\d+)*");
     private static final Pattern NEGATIVE = Pattern.compile("(?i)(禁止|不得|不要|不允许|never|do not|must not)");
-    private static final int MAX_CONSTRAINTS = 24;
-    private static final int MAX_CONSTRAINT_CHARS = 600;
 
     private CompactionSemanticGuard() {
     }
@@ -36,6 +34,23 @@ final class CompactionSemanticGuard {
             return new Validation(true, safeSummary, List.of(), constraints.size());
         }
 
+        RollingSummary structured = RollingSummary.parse(safeSummary);
+        if (!structured.isEmpty() || hasNineSectionStructure(safeSummary)) {
+            String restored = "- " + String.join("\n- ", missing);
+            structured.findItem("主要请求与意图", "semantic-guard:protected-constraints")
+                    .ifPresentOrElse(
+                            item -> structured.replaceItem(item,
+                                    item.withContent(item.content() + "\n" + restored)),
+                            () -> structured.addItem(SummaryItem.create(
+                                    "主要请求与意图",
+                                    "semantic-guard:protected-constraints",
+                                    restored,
+                                    SummaryItem.Lifecycle.STABLE,
+                                    100,
+                                    List.of("compaction-semantic-guard"))));
+            return new Validation(false, structured.render(), List.copyOf(missing), constraints.size());
+        }
+
         String repair = "\n\n## 压缩语义守卫恢复的关键约束\n- " + String.join("\n- ", missing);
         int limit = Math.max(repair.length(), maxChars);
         int available = Math.max(0, limit - repair.length());
@@ -45,6 +60,14 @@ final class CompactionSemanticGuard {
         return new Validation(false, (base + repair).trim(), List.copyOf(missing), constraints.size());
     }
 
+    private static boolean hasNineSectionStructure(String summary) {
+        if (summary == null || summary.isBlank()) {
+            return false;
+        }
+        return RollingSummary.SECTIONS.stream()
+                .allMatch(section -> summary.contains("## " + section));
+    }
+
     static List<String> extractConstraints(List<LlmClient.Message> source) {
         if (source == null || source.isEmpty()) return List.of();
         Map<String, String> latestClaims = new LinkedHashMap<>();
@@ -52,26 +75,29 @@ final class CompactionSemanticGuard {
         for (LlmClient.Message message : source) {
             if (message == null || message.content() == null || message.content().isBlank()) continue;
             for (String segment : segments(message.content())) {
+                // 大段普通文本（例如日志/代码正文）无需进入多组有界正则解析。
+                // 仅对可能承载约束的片段做结构化识别，避免长消息上的重复扫描。
+                boolean marked = PROTECTED_MARKER.matcher(segment).find()
+                        || COMMAND.matcher(segment).find();
+                if (!marked && segment.length() > 2_000) {
+                    continue;
+                }
+                if (!marked && segment.indexOf(':') < 0 && segment.indexOf('=') < 0) {
+                    continue;
+                }
                 StructuredClaim.parse(segment).ifPresentOrElse(claim -> {
                     latestClaims.remove(claim.subject());
-                    latestClaims.put(claim.subject(), limit(claim.display(), MAX_CONSTRAINT_CHARS));
+                    latestClaims.put(claim.subject(), claim.display());
                 }, () -> {
-                    if (PROTECTED_MARKER.matcher(segment).find() || COMMAND.matcher(segment).find()) {
-                        ordinary.add(limit(segment, MAX_CONSTRAINT_CHARS));
+                    if (marked) {
+                        ordinary.add(segment);
                     }
                 });
             }
         }
 
-        List<String> result = new ArrayList<>(MAX_CONSTRAINTS);
-        for (String claim : latestClaims.values()) {
-            if (result.size() >= MAX_CONSTRAINTS) break;
-            result.add(claim);
-        }
-        for (String constraint : ordinary) {
-            if (result.size() >= MAX_CONSTRAINTS) break;
-            result.add(constraint);
-        }
+        List<String> result = new ArrayList<>(latestClaims.values());
+        result.addAll(ordinary);
         return List.copyOf(result);
     }
 
@@ -134,10 +160,6 @@ final class CompactionSemanticGuard {
         return value == null ? "" : Normalizer.normalize(value, Normalizer.Form.NFKC)
                 .toLowerCase(Locale.ROOT)
                 .replaceAll("[^\\p{L}\\p{N}._:/-]+", "");
-    }
-
-    private static String limit(String value, int max) {
-        return value.length() <= max ? value : value.substring(0, max) + "...";
     }
 
     record Validation(boolean validBeforeRepair, String repairedSummary,

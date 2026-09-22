@@ -78,13 +78,16 @@ public final class RagToolProvider implements ToolProvider, AutoCloseable {
                 var stats = retriever.getStats();
                 if (stats.chunkCount() == 0) {
                     return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
-                            "代码库尚未索引，请先使用 /index 命令索引当前项目。", false);
+                            "代码库尚未索引，请先使用 /index 命令索引当前项目；"
+                                    + "若只是定位类名、方法名、配置键或错误文本，改用 grep_code "
+                                    + "可直接精确检索，无需建立索引。", false);
                 }
 
                 List<VectorStore.SearchResult> results = retriever.search(query, topK, args.get("mode"), graphDepth);
                 if (results.isEmpty()) {
                     results = retriever.search(query, topK, "general", 1);
                 }
+                recordCodeEvidence(context, results);
                 auditRecorder.record(retriever.lastAudit());
                 List<SymbolInvalidation> invalidations =
                         retriever.relevantInvalidations(query, Math.min(topK, 10));
@@ -94,6 +97,26 @@ public final class RagToolProvider implements ToolProvider, AutoCloseable {
             closeCachedCodeRetriever();
             return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
                     "代码检索失败: " + e.getMessage(), true);
+        }
+    }
+
+    private static void recordCodeEvidence(ToolContext context,
+                                           List<VectorStore.SearchResult> results) {
+        String stepId = context.currentResourceLeaseStep();
+        if (stepId == null || stepId.isBlank() || results == null) {
+            return;
+        }
+        for (VectorStore.SearchResult result : results) {
+            if (result == null || result.filePath() == null || result.filePath().isBlank()) {
+                continue;
+            }
+            try {
+                Path safePath = context.resolveSafePath(result.filePath());
+                context.recordCodeEvidence(safePath, result.chunkType(), result.name(),
+                        result.symbolVersion(), result.content());
+            } catch (RuntimeException ignored) {
+                // 索引中的历史路径可能已经移除，不能让辅助证据记录阻断 search_code。
+            }
         }
     }
 

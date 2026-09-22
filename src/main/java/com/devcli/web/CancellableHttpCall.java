@@ -1,6 +1,6 @@
 package com.devcli.web;
 
-import com.devcli.runtime.CancellationToken;
+import com.devcli.concurrent.CancellationToken;
 import com.devcli.tool.ToolExecutionContext;
 import okhttp3.Call;
 import okhttp3.OkHttpClient;

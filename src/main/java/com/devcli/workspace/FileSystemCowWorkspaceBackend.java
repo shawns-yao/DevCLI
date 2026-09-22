@@ -70,6 +70,7 @@ public final class FileSystemCowWorkspaceBackend implements WorkspaceBackend {
         try {
             cloneStrategy.cloneEntries(sourceEntries, workspace, timeoutMillis);
             WorkspaceSourceTree.removeSymbolicLinks(workspace);
+            WorkspaceSourceTree.removeSensitiveFiles(workspace);
             Map<String, String> baseline = validateCloneAndSnapshot(root, base, workspace);
             clonedWorkspaces.add(workspace);
             return new Materialization(baseline);
@@ -180,7 +181,8 @@ public final class FileSystemCowWorkspaceBackend implements WorkspaceBackend {
                 @Override
                 public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs)
                         throws IOException {
-                    if (Files.isSymbolicLink(dir)) {
+                    if (Files.isSymbolicLink(dir)
+                            || WorkspacePathPolicy.isSensitiveFile(source.relativize(dir))) {
                         return FileVisitResult.SKIP_SUBTREE;
                     }
                     Files.createDirectories(target.resolve(source.relativize(dir)));
@@ -191,6 +193,9 @@ public final class FileSystemCowWorkspaceBackend implements WorkspaceBackend {
                 public FileVisitResult visitFile(Path file, BasicFileAttributes attrs)
                         throws IOException {
                     if (attrs.isRegularFile() && !Files.isSymbolicLink(file)) {
+                        if (WorkspacePathPolicy.isSensitiveFile(source.relativize(file))) {
+                            return FileVisitResult.CONTINUE;
+                        }
                         Files.copy(file, target.resolve(source.relativize(file)),
                                 StandardCopyOption.COPY_ATTRIBUTES);
                     }

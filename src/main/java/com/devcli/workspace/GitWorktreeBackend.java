@@ -10,26 +10,72 @@ import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.PriorityQueue;
+import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 /**
  * 通过原生 Git worktree 物化已跟踪基线，再叠加主工作区当前状态。
+ *
+ * <p>叠加要额外复制父工作区的未提交、删除与未跟踪内容，其体积与仓库规模无关，
+ * 因此单独计量并在超过预算时告警：这是 worktree 路径唯一会随父工作区状态膨胀的成本，
+ * 也是排除项配置不当的唯一可见信号。见 {@link #OVERLAY_BUDGET_PROPERTY}。</p>
+ *
+ * <p>本包必须保持 JDK-only：{@code IsolatedWorkspaceTest} 用最小 classpath 和 32MB 堆
+ * 在子进程里跑内存上界探针，任何第三方日志门面都会让该类在 {@code <clinit>} 阶段
+ * 抛 {@code NoClassDefFoundError}。因此这里用 {@link System.Logger} 而不是 slf4j。</p>
  */
 public final class GitWorktreeBackend implements WorkspaceBackend {
+    static final String OVERLAY_BUDGET_PROPERTY = "devcli.workspace.overlay.budget.bytes";
+    static final String OVERLAY_BUDGET_ENV = "DEVCLI_WORKSPACE_OVERLAY_BUDGET_BYTES";
+    private static final long DEFAULT_OVERLAY_BUDGET_BYTES = 256L * 1024 * 1024;
+    private static final int TOP_CONTRIBUTORS = 5;
+    private static final System.Logger LOG = System.getLogger(GitWorktreeBackend.class.getName());
+
     private final long timeoutMillis;
+    private final long overlayBudgetBytes;
 
     public GitWorktreeBackend() {
-        this(CopyWorkspaceBackend.resolveCopyTimeoutMillis(
-                System.getProperties(), System.getenv()));
+        this(CopyWorkspaceBackend.resolveCopyTimeoutMillis(System.getProperties(), System.getenv()),
+                resolveOverlayBudgetBytes(System.getProperties(), System.getenv()));
     }
 
     GitWorktreeBackend(long timeoutMillis) {
+        this(timeoutMillis, resolveOverlayBudgetBytes(System.getProperties(), System.getenv()));
+    }
+
+    GitWorktreeBackend(long timeoutMillis, long overlayBudgetBytes) {
         this.timeoutMillis = Math.max(1, timeoutMillis);
+        this.overlayBudgetBytes = overlayBudgetBytes <= 0
+                ? DEFAULT_OVERLAY_BUDGET_BYTES : overlayBudgetBytes;
+    }
+
+    /**
+     * 解析叠加成本告警预算；未配置或非法值回退默认值。
+     *
+     * <p>非法值回退而不是失败关闭：这是观测阈值，不是安全边界，缺省行为必须可用。</p>
+     */
+    static long resolveOverlayBudgetBytes(Properties properties, Map<String, String> environment) {
+        String value = properties == null ? null : properties.getProperty(OVERLAY_BUDGET_PROPERTY);
+        if (value == null || value.isBlank()) {
+            value = environment == null ? null : environment.get(OVERLAY_BUDGET_ENV);
+        }
+        if (value == null || value.isBlank()) {
+            return DEFAULT_OVERLAY_BUDGET_BYTES;
+        }
+        try {
+            long bytes = Long.parseLong(value.trim());
+            return bytes <= 0 ? DEFAULT_OVERLAY_BUDGET_BYTES : bytes;
+        } catch (NumberFormatException | ArithmeticException ignored) {
+            return DEFAULT_OVERLAY_BUDGET_BYTES;
+        }
     }
 
     static boolean supports(Path projectRoot) {
@@ -65,22 +111,13 @@ public final class GitWorktreeBackend implements WorkspaceBackend {
                                        Path workspacePath) throws IOException {
         Path root = WorkspacePathPolicy.normalize(projectRoot);
         Path workspace = WorkspacePathPolicy.normalize(workspacePath);
-        verifyRepositoryRoot(root);
-        runGit(root, List.of("worktree", "prune", "--expire", "now"));
-        runGit(root, List.of("worktree", "add", "--detach", "--force",
-                workspace.toString(), "HEAD"));
         try {
-            overlayCurrentState(root, workspaceBase, workspace);
-            removeExcludedRoots(workspace);
-            removeSymbolicLinks(workspace);
-            return new Materialization(snapshotHashes(workspace));
-        } catch (IOException | RuntimeException e) {
-            try {
-                cleanup(root, workspaceBase, workspace);
-            } catch (IOException cleanupFailure) {
-                e.addSuppressed(cleanupFailure);
-            }
+            return ProjectCommitCoordinator.withProjectLock(root,
+                    () -> materializeLocked(root, workspaceBase, workspace));
+        } catch (IOException e) {
             throw e;
+        } catch (Exception e) {
+            throw new IOException("Git worktree materialization failed: " + e.getMessage(), e);
         }
     }
 
@@ -88,6 +125,55 @@ public final class GitWorktreeBackend implements WorkspaceBackend {
     public void cleanup(Path projectRoot, Path workspaceBase, Path workspacePath) throws IOException {
         Path root = WorkspacePathPolicy.normalize(projectRoot);
         Path workspace = WorkspacePathPolicy.normalize(workspacePath);
+        try {
+            ProjectCommitCoordinator.withProjectLock(root, () -> {
+                cleanupLocked(root, workspaceBase, workspace);
+                return null;
+            });
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("Git worktree cleanup failed: " + e.getMessage(), e);
+        }
+    }
+
+    private Materialization materializeLocked(Path root, Path workspaceBase,
+                                               Path workspace) throws IOException {
+        verifyRepositoryRoot(root);
+        runGit(root, List.of("worktree", "prune", "--expire", "now"));
+        runGit(root, List.of("worktree", "add", "--detach", "--force",
+                workspace.toString(), "HEAD"));
+        try {
+            OverlayCost overlay = overlayCurrentState(root, workspaceBase, workspace);
+            removeExcludedRoots(workspace);
+            removeSymbolicLinks(workspace);
+            WorkspaceSourceTree.removeSensitiveFiles(workspace);
+            warnIfOverlayOverBudget(overlay);
+            return new Materialization(snapshotHashes(workspace), overlay.totalBytes());
+        } catch (IOException | RuntimeException e) {
+            try {
+                cleanupLocked(root, workspaceBase, workspace);
+            } catch (IOException cleanupFailure) {
+                e.addSuppressed(cleanupFailure);
+            }
+            throw e;
+        }
+    }
+
+    private void warnIfOverlayOverBudget(OverlayCost overlay) {
+        if (overlay.totalBytes() <= overlayBudgetBytes) {
+            return;
+        }
+        LOG.log(System.Logger.Level.WARNING,
+                "worktree 叠加成本 {0} 超过预算 {1}：子工作区需额外复制父工作区未提交/未跟踪内容，"
+                        + "主要来源 {2}。可收紧物化排除项，或显式设置 {3}=cow 避免复制"
+                        + "（注意 CoW 子工作区不含 .git，子任务里的 git 命令会失效）",
+                humanBytes(overlay.totalBytes()), humanBytes(overlayBudgetBytes),
+                String.join("、", overlay.topContributors()),
+                WorkspaceBackendFactory.BACKEND_ENV);
+    }
+
+    private void cleanupLocked(Path root, Path workspaceBase, Path workspace) throws IOException {
         IOException failure = null;
         try {
             runGit(root, List.of("worktree", "remove", "--force", workspace.toString()));
@@ -118,13 +204,22 @@ public final class GitWorktreeBackend implements WorkspaceBackend {
         }
     }
 
-    private void overlayCurrentState(Path root, Path workspaceBase,
-                                     Path workspace) throws IOException {
+    /**
+     * 把主工作区当前状态叠加到 worktree。
+     *
+     * <p>顺带计量叠加体积：文件树本来就要走一遍，未跟踪部分直接用已有的
+     * {@link BasicFileAttributes#size()}，已跟踪的脏文件只多一次 stat，几乎不增加成本。</p>
+     */
+    private OverlayCost overlayCurrentState(Path root, Path workspaceBase,
+                                            Path workspace) throws IOException {
         Set<String> tracked = new HashSet<>(splitZero(runGit(root,
                 List.of("ls-files", "-z", "--cached"))));
         Set<String> dirty = new HashSet<>(splitZero(runGit(root,
                 List.of("diff", "--name-only", "-z", "--no-renames", "HEAD", "--"))));
+        OverlayCostAccumulator cost = new OverlayCostAccumulator(TOP_CONTRIBUTORS);
         for (String relative : dirty) {
+            // 只统计普通文件：git diff 列出的是文件，目录分支仅为防御性处理。
+            cost.record(relative, sizeOrZero(root.resolve(relative)));
             syncPath(root, workspace, relative);
         }
 
@@ -149,11 +244,13 @@ public final class GitWorktreeBackend implements WorkspaceBackend {
                 }
                 String relative = WorkspacePathPolicy.relativePath(root, file);
                 if (!tracked.contains(relative)) {
+                    cost.record(relative, attrs.size());
                     copyFile(root, workspace, file);
                 }
                 return FileVisitResult.CONTINUE;
             }
         });
+        return cost.snapshot();
     }
 
     private void syncPath(Path root, Path workspace, String relative) throws IOException {
@@ -200,7 +297,8 @@ public final class GitWorktreeBackend implements WorkspaceBackend {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs)
                     throws IOException {
-                if (Files.isSymbolicLink(dir) || ".git".equals(dir.getFileName().toString())) {
+                if (Files.isSymbolicLink(dir) || ".git".equals(dir.getFileName().toString())
+                        || WorkspacePathPolicy.isSensitiveFile(source.relativize(dir))) {
                     return FileVisitResult.SKIP_SUBTREE;
                 }
                 Path relative = source.relativize(dir);
@@ -213,6 +311,9 @@ public final class GitWorktreeBackend implements WorkspaceBackend {
                     throws IOException {
                 if (attrs.isRegularFile() && !Files.isSymbolicLink(file)
                         && !".git".equals(file.getFileName().toString())) {
+                    if (WorkspacePathPolicy.isSensitiveFile(source.relativize(file))) {
+                        return FileVisitResult.CONTINUE;
+                    }
                     Path destination = target.resolve(source.relativize(file));
                     Files.createDirectories(destination.getParent());
                     Files.copy(file, destination, StandardCopyOption.REPLACE_EXISTING,
@@ -267,6 +368,65 @@ public final class GitWorktreeBackend implements WorkspaceBackend {
                 return FileVisitResult.CONTINUE;
             }
         });
+    }
+
+    /** 一次 worktree 叠加的实际成本。 */
+    record OverlayCost(long totalBytes, List<String> topContributors) {
+        OverlayCost {
+            topContributors = List.copyOf(topContributors);
+        }
+    }
+
+    /** 叠加成本累加器：保留总量与最大的若干来源，超预算时给出可执行的排查线索。 */
+    static final class OverlayCostAccumulator {
+        private final int limit;
+        private final PriorityQueue<Map.Entry<String, Long>> heaviest;
+        private long totalBytes;
+
+        OverlayCostAccumulator(int limit) {
+            this.limit = Math.max(1, limit);
+            this.heaviest = new PriorityQueue<>(Comparator.comparingLong(Map.Entry::getValue));
+        }
+
+        void record(String relative, long bytes) {
+            if (relative == null || relative.isBlank() || bytes <= 0) {
+                return;
+            }
+            totalBytes += bytes;
+            heaviest.add(Map.entry(relative, bytes));
+            while (heaviest.size() > limit) {
+                heaviest.poll();
+            }
+        }
+
+        OverlayCost snapshot() {
+            List<String> top = heaviest.stream()
+                    .sorted(Comparator.comparingLong(Map.Entry<String, Long>::getValue).reversed())
+                    .map(entry -> entry.getKey() + " (" + humanBytes(entry.getValue()) + ")")
+                    .toList();
+            return new OverlayCost(totalBytes, top);
+        }
+    }
+
+    private static long sizeOrZero(Path path) {
+        try {
+            return Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) ? Files.size(path) : 0L;
+        } catch (IOException e) {
+            return 0L;
+        }
+    }
+
+    private static String humanBytes(long bytes) {
+        if (bytes < 1024L) {
+            return bytes + "B";
+        }
+        if (bytes < 1024L * 1024) {
+            return String.format(Locale.ROOT, "%.1fKB", bytes / 1024.0);
+        }
+        if (bytes < 1024L * 1024 * 1024) {
+            return String.format(Locale.ROOT, "%.1fMB", bytes / (1024.0 * 1024));
+        }
+        return String.format(Locale.ROOT, "%.2fGB", bytes / (1024.0 * 1024 * 1024));
     }
 
     private byte[] runGit(Path root, List<String> arguments) throws IOException {

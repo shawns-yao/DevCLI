@@ -3,13 +3,13 @@ package com.devcli.memory;
 import java.util.List;
 
 /**
- * 摘要垃圾回收：把九段滚动摘要程序化裁剪到字符预算内，<b>不调 LLM</b>。
+ * 摘要垃圾回收：把六段滚动摘要程序化裁剪到字符预算内，<b>不调 LLM</b>。
  *
  * <p>策略：
  * <ol>
  *   <li>折叠"逐条用户消息"到最近 N 条（保尾部，最近的优先），更早的折叠成一行计数</li>
- *   <li>仍超预算则按"低→高优先级"逐段截断（保头部）；高优先段
- *       （主要请求与意图 / 待办任务 / 当前在做什么 / 下一步）不参与截断，尽量保住</li>
+ *   <li>仍超预算则按"低→高优先级"逐段截断（保头部）；主要请求与意图不参与截断。
+ *       任务状态由 SessionMemory 投影，不进入滚动摘要</li>
  * </ol>
  *
  * <p>裁剪是有损的粗操作；裁剪后仍超预算的极端情况由上层（{@code ConversationHistoryCompactor}）
@@ -24,7 +24,7 @@ public class SummaryGarbageCollector {
     private static final int MIN_SECTION_CHARS = 200;
 
     /**
-     * 低→高优先级截断顺序。GC 从前往后裁；高优先段（意图/待办/当前/下一步）<b>不在此列</b>，
+     * 低→高优先级截断顺序。GC 从前往后裁；主要请求与意图<b>不在此列</b>，
      * 尽量不动。"逐条用户消息"只折叠不在此截断（折叠保尾部，截断保头部，二者冲突）。
      */
     private static final List<String> TRUNCATE_ORDER = List.of(
@@ -48,12 +48,26 @@ public class SummaryGarbageCollector {
      * 裁剪 summary 到 maxChars 内（原地修改并返回）。未超预算时不动。
      */
     public RollingSummary gc(RollingSummary summary, int maxChars) {
-        if (summary == null || summary.totalChars() <= maxChars) {
+        return gc(summary, maxChars, false);
+    }
+
+    /**
+     * 生命周期感知的垃圾回收。过期事实立即删除；已覆盖事实仅在达到审计保留阈值，
+     * 或显式 aggressive 时删除。稳定决策、未解决事项和最终结果不因摘要轮次而删除。
+     */
+    public RollingSummary gc(RollingSummary summary, int maxChars, boolean aggressive) {
+        if (summary == null) {
+            return null;
+        }
+        summary.removeItems(item -> item.lifecycle() == SummaryItem.Lifecycle.EXPIRED
+                || item.lifecycle() == SummaryItem.Lifecycle.SUPERSEDED
+                && (aggressive || item.compactionCount() >= 5));
+        if (renderedChars(summary) <= maxChars) {
             return summary;
         }
         collapseUserMessages(summary);
         for (String section : TRUNCATE_ORDER) {
-            if (summary.totalChars() <= maxChars) {
+            if (renderedChars(summary) <= maxChars) {
                 break;
             }
             truncateSection(summary, section, maxChars);
@@ -80,21 +94,28 @@ public class SummaryGarbageCollector {
     }
 
     private void truncateSection(RollingSummary summary, String section, int maxChars) {
-        int overflow = summary.totalChars() - maxChars;
-        if (overflow <= 0) {
-            return;
+        for (SummaryItem item : summary.items(section)) {
+            int overflow = renderedChars(summary) - maxChars;
+            if (overflow <= 0) {
+                return;
+            }
+            if (!item.isVisible()
+                    || item.lifecycle() == SummaryItem.Lifecycle.STABLE
+                    || item.lifecycle() == SummaryItem.Lifecycle.UNRESOLVED
+                    || item.content().length() <= MIN_SECTION_CHARS) {
+                continue;
+            }
+            int target = Math.max(MIN_SECTION_CHARS, item.content().length() - overflow - 40);
+            if (target >= item.content().length()) {
+                continue;
+            }
+            String truncated = item.content().substring(0, target).strip()
+                    + "\n[... 已折叠 " + (item.content().length() - target) + " 字符 ...]";
+            summary.replaceItem(item, item.withContent(truncated));
         }
-        String content = summary.get(section);
-        if (content.length() <= MIN_SECTION_CHARS) {
-            return;
-        }
-        // 留 40 字符给截断标记的余量
-        int target = Math.max(MIN_SECTION_CHARS, content.length() - overflow - 40);
-        if (target >= content.length()) {
-            return;
-        }
-        String truncated = content.substring(0, target).strip()
-                + "\n[... 已折叠 " + (content.length() - target) + " 字符 ...]";
-        summary.set(section, truncated);
+    }
+
+    private static int renderedChars(RollingSummary summary) {
+        return summary == null ? 0 : summary.render().length();
     }
 }

@@ -129,15 +129,21 @@ public class AuditLog {
     }
 
     static String sanitize(String s) {
-        if (s == null) return null;
-        String sanitized = s.replaceAll("(?i)Bearer\\s+[^\\s\"'}]+", "Bearer ***");
-        sanitized = sanitized.replaceAll(
-                "(?i)(\"?(?:token|key|password|secret|authorization)\"?\\s*[:=]\\s*\")([^\"]+)(\")",
-                "$1***$3");
-        sanitized = sanitized.replaceAll(
-                "(?i)(\\b(?:token|key|password|secret|authorization)\\b\\s*[:=]\\s*)([^\\s,}]+)",
-                "$1***");
-        return sanitized;
+        return SensitiveDataRedactor.redact(s);
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record ExecutionIdentity(
+            String taskId, String stepId, String grantId, String invocationId,
+            String approvalId, String authorization) {
+        public ExecutionIdentity {
+            taskId = truncate(taskId);
+            stepId = truncate(stepId);
+            grantId = truncate(grantId);
+            invocationId = truncate(invocationId);
+            approvalId = truncate(approvalId);
+            authorization = truncate(authorization);
+        }
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
@@ -149,8 +155,21 @@ public class AuditLog {
             String reason,
             String approver,
             long durationMs,
-            BrowserAuditMetadata metadata
+            BrowserAuditMetadata metadata,
+            ExecutionIdentity identity
     ) {
+        public AuditEntry(String timestamp, String tool, String args, String outcome,
+                          String reason, String approver, long durationMs,
+                          BrowserAuditMetadata metadata) {
+            this(timestamp, tool, args, outcome, reason, approver, durationMs, metadata, null);
+        }
+
+        public AuditEntry withIdentity(ExecutionIdentity identity, String approvalSource) {
+            return new AuditEntry(timestamp, tool, args, outcome, reason,
+                    OUTCOME_ALLOW.equals(outcome) && approvalSource != null ? approvalSource : approver,
+                    durationMs, metadata, identity);
+        }
+
         public static AuditEntry allow(String tool, String args, long durationMs) {
             return new AuditEntry(Instant.now().toString(), tool, truncate(args),
                     OUTCOME_ALLOW, null, APPROVER_NONE, durationMs, null);

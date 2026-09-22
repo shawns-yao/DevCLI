@@ -27,30 +27,11 @@ class CliCommandParserTest {
     }
 
     @Test
-    void normalizesLegacyTeamFlagToUnifiedPlanPipeline() {
-        CliCommandParser.ParsedCommand next = CliCommandParser.parse("/plan --team");
-        CliCommandParser.ParsedCommand direct = CliCommandParser.parse(
-                "/plan --team 创建并验证一个 Java 项目");
-        CliCommandParser.ParsedCommand resume = CliCommandParser.parse(
-                "/plan --team resume orch-123");
+    void rejectsUnknownPlanOption() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/plan --unknown task");
 
-        assertEquals(CliCommandParser.CommandType.ORCHESTRATE, next.type());
-        assertEquals(OrchestrationProfile.TEAM, next.orchestrationProfile());
-        assertNull(next.payload());
-        assertEquals(CliCommandParser.CommandType.ORCHESTRATE, direct.type());
-        assertEquals(OrchestrationProfile.TEAM, direct.orchestrationProfile());
-        assertEquals("创建并验证一个 Java 项目", direct.payload());
-        assertEquals(OrchestrationProfile.TEAM, resume.orchestrationProfile());
-        assertEquals("resume orch-123", resume.payload());
-    }
-
-    @Test
-    void keepsTeamLikeTaskTextInUnifiedPlanPipeline() {
-        CliCommandParser.ParsedCommand command = CliCommandParser.parse(
-                "/plan --teamwork 作为普通任务文本");
-
-        assertEquals(OrchestrationProfile.TEAM, command.orchestrationProfile());
-        assertEquals("--teamwork 作为普通任务文本", command.payload());
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, command.type());
+        assertEquals("/plan --unknown task", command.payload());
     }
 
     @Test
@@ -178,6 +159,31 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesMemoryClearWithExplicitScope() {
+        CliCommandParser.ParsedCommand global = CliCommandParser.parse("/memory clear global");
+        CliCommandParser.ParsedCommand project = CliCommandParser.parse("/mem clear project");
+
+        assertEquals(CliCommandParser.CommandType.MEMORY_CLEAR, global.type());
+        assertEquals("global", global.payload());
+        assertEquals(CliCommandParser.CommandType.MEMORY_CLEAR, project.type());
+        assertEquals("project", project.payload());
+    }
+
+    @Test
+    void parsesMemoryPromotionConfirmationCommands() {
+        assertEquals(CliCommandParser.CommandType.MEMORY_PENDING,
+                CliCommandParser.parse("/memory pending").type());
+        CliCommandParser.ParsedCommand confirm = CliCommandParser.parse(
+                "/memory confirm promotion-123");
+        assertEquals(CliCommandParser.CommandType.MEMORY_CONFIRM, confirm.type());
+        assertEquals("promotion-123", confirm.payload());
+        CliCommandParser.ParsedCommand reject = CliCommandParser.parse(
+                "/memory reject promotion-456");
+        assertEquals(CliCommandParser.CommandType.MEMORY_REJECT, reject.type());
+        assertEquals("promotion-456", reject.payload());
+    }
+
+    @Test
     void parsesMemoryForgetSlashCommandWithId() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/memory forget fact-1a2b3c4d");
 
@@ -228,6 +234,23 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesRuleAddCommand() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/rule add 禁止修改生成目录");
+
+        assertEquals(CliCommandParser.CommandType.RULE_ADD, command.type());
+        assertEquals("禁止修改生成目录", command.payload());
+    }
+
+    @Test
+    void parsesRuleListAndRemoveCommands() {
+        assertEquals(CliCommandParser.CommandType.RULE_LIST,
+                CliCommandParser.parse("/rule list").type());
+        CliCommandParser.ParsedCommand remove = CliCommandParser.parse("/rule remove rule-1234");
+        assertEquals(CliCommandParser.CommandType.RULE_REMOVE, remove.type());
+        assertEquals("rule-1234", remove.payload());
+    }
+
+    @Test
     void plainSaveDoesNotMatchPin() {
         // 防止误判：/save 后跟以 - 起头的内容（但不是 --pin / -p）应仍走 MEMORY_SAVE
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/save -- 这是一个事实");
@@ -270,24 +293,6 @@ class CliCommandParserTest {
     }
 
     @Test
-    void normalizesLegacyTeamSlashCommandWithoutPayload() {
-        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/team");
-
-        assertEquals(CliCommandParser.CommandType.ORCHESTRATE, command.type());
-        assertEquals(OrchestrationProfile.TEAM, command.orchestrationProfile());
-        assertNull(command.payload());
-    }
-
-    @Test
-    void normalizesLegacyTeamSlashCommandWithPayload() {
-        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/team 创建并验证一个 Java 项目");
-
-        assertEquals(CliCommandParser.CommandType.ORCHESTRATE, command.type());
-        assertEquals(OrchestrationProfile.TEAM, command.orchestrationProfile());
-        assertEquals("创建并验证一个 Java 项目", command.payload());
-    }
-
-    @Test
     void parsesBranchCommands() {
         CliCommandParser.ParsedCommand status = CliCommandParser.parse("/branch");
         assertEquals(CliCommandParser.CommandType.BRANCH, status.type());
@@ -310,27 +315,81 @@ class CliCommandParserTest {
     }
 
     @Test
-    void parsesHitlOnCommand() {
-        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/hitl on");
-
-        assertEquals(CliCommandParser.CommandType.SWITCH_HITL, command.type());
-        assertEquals("on", command.payload());
+    void parsesModeCommandWithEachModeName() {
+        for (String name : com.devcli.policy.PermissionMode.ids()) {
+            CliCommandParser.ParsedCommand command = CliCommandParser.parse("/mode " + name);
+            assertEquals(CliCommandParser.CommandType.PERMISSION_MODE, command.type());
+            assertEquals(name, command.payload());
+        }
     }
 
     @Test
-    void parsesHitlOffCommand() {
-        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/hitl off");
+    void parsesModeStatusCommandWithoutPayload() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/mode");
 
-        assertEquals(CliCommandParser.CommandType.SWITCH_HITL, command.type());
-        assertEquals("off", command.payload());
-    }
-
-    @Test
-    void parsesHitlStatusCommand() {
-        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/hitl");
-
-        assertEquals(CliCommandParser.CommandType.SWITCH_HITL, command.type());
+        assertEquals(CliCommandParser.CommandType.PERMISSION_MODE, command.type());
         assertNull(command.payload());
+    }
+
+    @Test
+    void modeNameIsCaseInsensitive() {
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/MODE BypassPermissions");
+
+        assertEquals(CliCommandParser.CommandType.PERMISSION_MODE, command.type());
+        assertEquals("BypassPermissions", command.payload());
+    }
+
+    @Test
+    void unknownModeNameIsPassedThroughForTheHandlerToReject() {
+        // 解析层不校验模式名：拒绝时要打印可选值清单，那是处理器的事，不是解析器的事
+        CliCommandParser.ParsedCommand command = CliCommandParser.parse("/mode maybe");
+
+        assertEquals(CliCommandParser.CommandType.PERMISSION_MODE, command.type());
+        assertEquals("maybe", command.payload());
+    }
+
+    @Test
+    void removedHitlAndReadOnlyCommandsAreNoLongerRecognized() {
+        // /hitl 与 /readonly 已并入 /mode；它们不该被静默当作别的东西执行
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND,
+                CliCommandParser.parse("/hitl on").type());
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND,
+                CliCommandParser.parse("/readonly").type());
+    }
+
+    @Test
+    void parsesGrantCommandWithEachSubcommand() {
+        assertNull(CliCommandParser.parse("/grant").payload());
+        assertEquals(CliCommandParser.CommandType.GRANT, CliCommandParser.parse("/grant").type());
+        assertEquals("write", CliCommandParser.parse("/grant write").payload());
+        assertEquals("commands", CliCommandParser.parse("/grant commands").payload());
+        assertEquals("all", CliCommandParser.parse("/grant all").payload());
+        assertEquals("off", CliCommandParser.parse("/GRANT OFF").payload());
+    }
+
+    @Test
+    void unknownGrantSubcommandStaysUnknown() {
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND,
+                CliCommandParser.parse("/grant everything").type());
+    }
+
+    @Test
+    void parsesGrantWriteWithProjectRelativeGlobs() {
+        CliCommandParser.ParsedCommand command =
+                CliCommandParser.parse("/grant write src/** test/**");
+
+        assertEquals(CliCommandParser.CommandType.GRANT, command.type());
+        assertEquals("write src/** test/**", command.payload());
+    }
+
+    @Test
+    void parsesGrantNetWithDomains() {
+        CliCommandParser.ParsedCommand command =
+                CliCommandParser.parse("/grant net GitHub.com api.github.com");
+
+        assertEquals(CliCommandParser.CommandType.GRANT, command.type());
+        assertEquals("net GitHub.com api.github.com", command.payload(),
+                "子命令小写，域名保持原样交给授权模型校验");
     }
 
     @Test
@@ -446,5 +505,13 @@ class CliCommandParserTest {
         CliCommandParser.ParsedCommand off = CliCommandParser.parse("/skill off verbose-debug");
         assertEquals(CliCommandParser.CommandType.SKILL_OFF, off.type());
         assertEquals("verbose-debug", off.payload());
+    }
+
+    @Test
+    void parsesProjectSkillTrustCommands() {
+        assertEquals(CliCommandParser.CommandType.SKILL_TRUST_PROJECT,
+                CliCommandParser.parse("/skill trust project").type());
+        assertEquals(CliCommandParser.CommandType.SKILL_UNTRUST_PROJECT,
+                CliCommandParser.parse("/skill untrust project").type());
     }
 }

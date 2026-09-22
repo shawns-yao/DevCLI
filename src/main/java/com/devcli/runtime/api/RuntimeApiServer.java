@@ -2,7 +2,7 @@ package com.devcli.runtime.api;
 
 import com.devcli.config.ConfigResolver;
 import com.devcli.runtime.RunCoordinator;
-import com.devcli.runtime.event.RunEvent;
+import com.devcli.event.RunEvent;
 import com.devcli.agent.AgentTurnInbox;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;

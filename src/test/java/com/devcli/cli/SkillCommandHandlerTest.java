@@ -98,6 +98,22 @@ class SkillCommandHandlerTest {
         assertTrue(SkillCommandHandler.enable(registry, state, "ghost").contains("Skill 未找到"));
     }
 
+    @Test
+    void trustAndUntrustProjectSkillDirectory(@TempDir Path tempDir) throws IOException {
+        Path project = tempDir.resolve("project-skills");
+        Files.createDirectories(project);
+        SkillStateStore state = new SkillStateStore(tempDir.resolve("skills.json"));
+        SkillRegistry registry = new SkillRegistry(null, null, project, state);
+
+        String trusted = SkillCommandHandler.trustProject(registry);
+        assertTrue(trusted.contains("已信任"));
+        assertTrue(state.isProjectDirectoryTrusted(project));
+
+        String untrusted = SkillCommandHandler.untrustProject(registry);
+        assertTrue(untrusted.contains("已取消信任"));
+        assertFalse(state.isProjectDirectoryTrusted(project));
+    }
+
     private record SkillSpec(String name, String desc, String version) {
     }
 

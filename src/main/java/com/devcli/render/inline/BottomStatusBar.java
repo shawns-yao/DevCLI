@@ -126,13 +126,23 @@ public final class BottomStatusBar implements AutoCloseable {
     }
 
     static String formatStatusLine(StatusInfo info, int cols) {
-        String mode = info.hitlEnabled() ? "HITL Ctrl+Y for YOLO" : "YOLO Ctrl+Y to enable HITL";
+        String mode = permissionModeLabel(info.permissionMode());
         String right = environmentSummary(info);
         if (right.isBlank()) {
             return fitToColumns(" " + mode, cols);
         }
         int gap = Math.max(1, cols - visibleLength(mode) - visibleLength(right) - 2);
         return fitToColumns(" " + mode + " ".repeat(gap) + right + " ", cols);
+    }
+
+    /**
+     * 状态栏的权限模式位。取代原来的 HITL ON/OFF 单布尔——后者只能表达「问不问」，
+     * 表达不了「只读」「自动放行编辑」这些模式差异（见 docs/adr/0006）。
+     */
+    private static String permissionModeLabel(String permissionMode) {
+        return permissionMode == null || permissionMode.isBlank()
+                ? "模式 (unknown)"
+                : "模式 " + permissionMode;
     }
 
     static String formatFooterLine(StatusInfo info, int cols) {
@@ -175,10 +185,14 @@ public final class BottomStatusBar implements AutoCloseable {
         String skill = next.skillSummary() == null || next.skillSummary().isBlank()
                 ? previous.skillSummary()
                 : next.skillSummary();
-        if (mcp == next.mcpSummary() && skill == next.skillSummary()) {
+        String grant = next.grantSummary() == null || next.grantSummary().isBlank()
+                ? previous.grantSummary()
+                : next.grantSummary();
+        if (mcp == next.mcpSummary() && skill == next.skillSummary()
+                && grant == next.grantSummary()) {
             return next;
         }
-        return next.withEnvironment(mcp, skill);
+        return next.withEnvironment(mcp, skill).withGrantSummary(grant);
     }
 
     static List<AttributedString> formatStatusLines(StatusInfo info, int cols) {
@@ -206,13 +220,26 @@ public final class BottomStatusBar implements AutoCloseable {
     private static String environmentSummary(StatusInfo info) {
         String mcp = formatEnvironment(info.mcpSummary(), "MCP server", "MCP servers");
         String skill = formatEnvironment(info.skillSummary(), "skill", "skills");
-        if (mcp.isBlank()) {
-            return skill;
+        String grant = formatGrant(info.grantSummary());
+        StringBuilder sb = new StringBuilder();
+        for (String part : List.of(mcp, skill, grant)) {
+            if (part == null || part.isBlank()) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append(" · ");
+            }
+            sb.append(part);
         }
-        if (skill.isBlank()) {
-            return mcp;
-        }
-        return mcp + " · " + skill;
+        return sb.toString();
+    }
+
+    /**
+     * 授权基线摘要直接展示：它已经是状态栏用语（如 {@code write src/** · commands}），
+     * 不参与 MCP / Skill 的比率折叠。空白表示未配置基线，不占位。
+     */
+    private static String formatGrant(String raw) {
+        return raw == null ? "" : raw.trim();
     }
 
     private static String formatEnvironment(String raw, String singular, String plural) {

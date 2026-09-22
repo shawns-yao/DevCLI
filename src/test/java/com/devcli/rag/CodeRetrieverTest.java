@@ -515,4 +515,102 @@ class CodeRetrieverTest {
             assertFalse(retriever.lastSemanticDegraded(), "embedding 正常时不应标记降级");
         }
     }
+
+    @Test
+    void externalCreatedFileBecomesDirtyKeywordCandidate() throws Exception {
+        Path project = Path.of(testProject);
+        java.nio.file.Files.createDirectories(project);
+        EmbeddingClient stubClient = new EmbeddingClient("ollama", "stub", "http://localhost", "") {
+            @Override
+            public float[] embed(String text) {
+                return new float[]{1.0f};
+            }
+        };
+
+        try (CodeRetriever retriever =
+                     new CodeRetriever(testProject, stubClient, new NoopCodeReranker())) {
+            Path added = project.resolve("ExternalService.java");
+            java.nio.file.Files.writeString(added, """
+                    public class ExternalService {
+                        void watcherAddedMethod() {}
+                    }
+                    """);
+
+            List<VectorStore.SearchResult> results = List.of();
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3);
+            while (results.isEmpty() && System.nanoTime() < deadline) {
+                results = retriever.keywordSearch("watcherAddedMethod");
+                if (results.isEmpty()) Thread.sleep(25);
+            }
+
+            assertTrue(results.stream().anyMatch(result ->
+                    result.name().contains("watcherAddedMethod")
+                            && result.freshness() == VectorStore.IndexFreshness.DIRTY));
+        }
+    }
+
+    @Test
+    void externalCreatedDirectoryDoesNotLoseImmediateChildFile() throws Exception {
+        Path project = Path.of(testProject);
+        java.nio.file.Files.createDirectories(project);
+        EmbeddingClient stubClient = new EmbeddingClient("ollama", "stub", "http://localhost", "") {
+            @Override
+            public float[] embed(String text) {
+                return new float[]{1.0f};
+            }
+        };
+
+        try (CodeRetriever retriever =
+                     new CodeRetriever(testProject, stubClient, new NoopCodeReranker())) {
+            Path sourceDir = java.nio.file.Files.createDirectories(project.resolve("generated"));
+            java.nio.file.Files.writeString(sourceDir.resolve("GeneratedService.java"), """
+                    public class GeneratedService {
+                        void immediateChildMethod() {}
+                    }
+                    """);
+
+            List<VectorStore.SearchResult> results = List.of();
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3);
+            while (results.isEmpty() && System.nanoTime() < deadline) {
+                results = retriever.keywordSearch("immediateChildMethod");
+                if (results.isEmpty()) Thread.sleep(25);
+            }
+
+            assertTrue(results.stream().anyMatch(result ->
+                    result.name().contains("immediateChildMethod")
+                            && result.freshness() == VectorStore.IndexFreshness.DIRTY));
+        }
+    }
+
+    @Test
+    void fileCreatedBeforeRetrieverStartupIsReconciledAgainstIndexSnapshot() throws Exception {
+        Path project = Path.of(testProject);
+        java.nio.file.Files.createDirectories(project);
+        Path indexed = project.resolve("ExistingService.java");
+        java.nio.file.Files.writeString(indexed, "public class ExistingService {}");
+        store.replaceProjectIndex(new CodeChunker().chunkFile(indexed).stream()
+                .map(chunk -> new VectorStore.CodeChunkEntry(chunk, new float[]{1.0f}))
+                .toList(), List.of(), "idx-1");
+        Path added = project.resolve("PreexistingExternalService.java");
+        java.nio.file.Files.writeString(added, """
+                public class PreexistingExternalService {
+                    void beforeWatcherMethod() {}
+                }
+                """);
+        EmbeddingClient stubClient = new EmbeddingClient("ollama", "stub", "http://localhost", "") {
+            @Override
+            public float[] embed(String text) {
+                return new float[]{1.0f};
+            }
+        };
+
+        try (CodeRetriever retriever =
+                     new CodeRetriever(testProject, stubClient, new NoopCodeReranker())) {
+            List<VectorStore.SearchResult> results = retriever.keywordSearch("beforeWatcherMethod");
+
+            assertTrue(results.stream().anyMatch(result ->
+                    result.name().contains("beforeWatcherMethod")
+                            && result.freshness() == VectorStore.IndexFreshness.DIRTY));
+        }
+    }
 }

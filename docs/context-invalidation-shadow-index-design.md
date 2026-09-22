@@ -2,7 +2,7 @@
 
 ## Status
 
-This document describes future production-grade design. It is not implemented in the current runtime.
+This document describes the production-grade target and the parts already implemented in the current runtime.
 
 Current DevCLI behavior:
 
@@ -10,14 +10,14 @@ Current DevCLI behavior:
 - `ConversationHistoryCompactor` controls the real LLM message window.
 - `CodeIndex` builds RAG index data from code chunks and JavaParser code relations.
 - `CodeRetriever` reads the active index for semantic, keyword, and graph-expanded retrieval.
+- `VectorStore` persists an isolated `ShadowIndex`, validates it, and promotes it with `base_epoch + generation` CAS.
 - Multi-Agent Workers can run in parallel, and `ResourceLeaseManager` blocks concurrent writes to the same file.
 
 Missing today:
 
-- No active `ContextInvalidation（上下文失效）` event is sent to running Workers when a symbol changes.
-- No `ShadowIndex（影子索引）` exists for incremental index rebuild and atomic swap.
-- No `SymbolVersion（符号版本）` is attached to Worker prompt context.
-- No stale-context write barrier rejects a Worker that writes code based on an old symbol view.
+- No proactive Orchestrator interruption is triggered solely by a changed dependent symbol; refresh currently starts when the stale write barrier rejects a write.
+- No background ShadowIndex scheduler, shard-level wait, or automatic stale-candidate rebase exists.
+- No versioned code fact is persisted in `LongTermMemory（长期记忆）`.
 
 ## Problem
 
@@ -199,6 +199,19 @@ RUNNING -> STALE_CONTEXT -> FAILED_RETRYABLE
 
 ## Shadow Index Design
 
+### Implementation Status（2026-08-25）
+
+The current MVP is implemented:
+
+- `code_shadow_chunks`, `code_shadow_relations`, and `code_shadow_state` persist the isolated candidate index.
+- Full builds stage every chunk; incremental builds copy unchanged active chunks and embeddings, then rebuild only dirty files.
+- Deleted dirty files disappear from the candidate, including legacy relative-path chunks matched by an absolute dirty path.
+- Java relations are recalculated across the project to avoid stale inbound edges.
+- Promotion requires candidate validation and atomically checks `base_epoch + generation`; failed or stale candidates never replace `ActiveIndex`.
+- `CodeRetriever` continues to read only the active tables, so a `BUILDING` or `VALIDATED` candidate is invisible.
+
+The MVP remains synchronous when `/index` runs. Background queue scheduling, shard-level waiting, and automatic stale-candidate rebase remain future work.
+
 ### Why Shadow Index
 
 RAG index freshness has two conflicting requirements:
@@ -240,17 +253,17 @@ Priority is higher when:
 
 ### Incremental Rebuild
 
-`ShadowIndexBuilder（影子索引构建器）` should:
+The current shadow builder:
 
-- re-parse dirty Java files with JavaParser.
-- rebuild chunks only for dirty files.
-- delete stale chunks for changed or removed files.
-- recompute relations touching changed symbols.
-- reuse embeddings for unchanged chunks by content hash.
-- enqueue embedding jobs for changed chunks.
-- build a complete candidate `IndexEpoch`.
+- re-parses dirty Java files with JavaParser.
+- rebuilds chunks only for dirty files.
+- deletes stale chunks for changed or removed files.
+- recomputes the project relation graph conservatively.
+- reuses embeddings for unchanged chunks by copying active rows into the candidate.
+- sends changed chunks through the existing batch embedding path.
+- builds a complete candidate `IndexEpoch`.
 
-The rebuild is asynchronous but bounded. A Worker affected by a high-risk symbol change should block on the relevant index shard, not wait for a full repository rebuild.
+The current rebuild is synchronous and bounded by the `/index` invocation. A future background builder should let a Worker affected by a high-risk symbol change block only on the relevant index shard.
 
 ### Atomic Swap
 
@@ -261,7 +274,7 @@ Promotion requires:
 - relation graph validated.
 - `base_epoch` still equals current `ActiveIndex` epoch.
 
-If another swap already advanced the index, the ShadowIndex is rebased:
+If another swap already advanced the index, the current MVP rejects the stale promotion and leaves `ActiveIndex` unchanged. A future builder can rebase the remaining dirty delta:
 
 ```text
 ShadowIndex(base=N, target=N+1)
@@ -367,12 +380,13 @@ Planner can then propose `GraphPatch（图补丁）`, and `GraphPatchValidator�
 - Add refresh/retry state transitions.
 - Feed high-risk invalidations into Reviewer.
 
-### Phase 4: Shadow Index
+### Phase 4: Shadow Index（MVP 已完成）
 
-- Add `DirtyFileQueue（脏文件队列）`.
-- Build `ShadowIndex（影子索引）` incrementally.
-- Promote via `AtomicIndexSwap（原子索引切换）`.
-- Make `CodeRetriever` version-aware.
+- Reuse the persisted dirty-file set as the incremental build input.
+- Build `ShadowIndex（影子索引）` incrementally and reuse unchanged embeddings.
+- Validate and promote via `AtomicIndexSwap（原子索引切换）` with epoch/generation CAS.
+- Keep `CodeRetriever` version-aware and isolated from unpromoted candidates.
+- Remaining: background scheduling, shard-level blocking, and automatic rebase.
 
 ### Phase 5: Worktree and PatchSet Integration
 
@@ -388,6 +402,9 @@ Targeted tests:
 - signature change invalidates dependent running task.
 - completed task becomes stale only when its manifest depended on changed symbol.
 - ShadowIndex build failure does not corrupt ActiveIndex.
+- unpromoted ShadowIndex is invisible to retrieval.
+- incremental build embeds only dirty files and preserves unchanged chunks.
+- absolute dirty paths replace legacy relative-path chunks without duplication.
 - AtomicIndexSwap rejects promotion from stale base epoch.
 - retrieval result carries index and symbol versions.
 - high-risk invalidation enters Reviewer prompt context.

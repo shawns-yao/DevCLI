@@ -9,6 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.PrintStream;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -91,7 +92,8 @@ final class MultiAgentBatchExecutor {
                 executable,
                 AgentOrchestrator.ExecutionStep::id,
                 AgentOrchestrator.ExecutionStep::description,
-                AgentOrchestrator.ExecutionStep::type);
+                AgentOrchestrator.ExecutionStep::type,
+                Path.of(toolRegistry.getProjectPath()));
         for (List<AgentOrchestrator.ExecutionStep> wave : waves) {
             traceRecorder.record(traceContext, "batch.wave", Map.of(
                     "batchIndex", batchIndex,

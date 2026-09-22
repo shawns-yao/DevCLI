@@ -66,7 +66,13 @@ public final class InlineApprovalPrompter {
         out.println(request.toDisplayText());
 
         for (int attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-            String optionsLine = sensitive
+            String optionsLine = request.hostExecution()
+                    ? "请选择：[y] 单次允许执行  [n/Enter] 拒绝"
+                    : request.singleDecisionOnly()
+                    ? (request.redactionAllowed()
+                    ? "[y] 单次允许原文  [r] 脱敏后继续  [n/Enter] 拒绝"
+                    : "[y] 单次允许原文  [n/Enter] 拒绝")
+                    : sensitive
                     ? AnsiStyle.subtle("[y] approve  [n] reject  [s] skip  [m] modify")
                     : AnsiStyle.subtle("[y] approve  [a] all  [n] reject  [s] skip  [m] modify");
             out.print("> " + optionsLine + " ");
@@ -82,6 +88,13 @@ public final class InlineApprovalPrompter {
             out.println(ch);
             out.flush();
 
+            if (request.singleDecisionOnly()) {
+                if (ch == 'y') return ApprovalResult.approve();
+                if (ch == 'r' && request.redactionAllowed()) return ApprovalResult.redact();
+                if (ch == 'n' || ch == '\n' || ch == '\r') return ApprovalResult.reject("用户拒绝本次操作");
+                out.println("请选择单次允许、拒绝或可用的脱敏选项");
+                continue;
+            }
             switch (ch) {
                 case 'y', '\n', '\r' -> {
                     return ApprovalResult.approve();

@@ -1,6 +1,7 @@
 package com.devcli.agent;
 
 import com.devcli.memory.CompactBoundaryRuntimeState;
+import com.devcli.memory.CompactionContext;
 import com.devcli.memory.ConversationHistoryCompactor;
 import com.devcli.memory.MemoryManager;
 import com.devcli.memory.PostCompactRestoreContext;
@@ -22,9 +23,22 @@ final class AgentRuntimeSupport {
     static void bindMemory(ToolRegistry toolRegistry, MemoryManager memoryManager) {
         toolRegistry.setContextProfile(memoryManager.getContextProfile());
         toolRegistry.setMemorySaver(memoryManager::storeFact);
-        toolRegistry.setMemorySaveHandler(fact -> {
-            MemoryManager.StoreResult result = memoryManager.storeFactWithPolicy(fact, true);
-            return new ToolRegistry.MemorySaveResult(result.stored(), result.message());
+        toolRegistry.setMemorySaveHandler(new ToolRegistry.MemorySaver() {
+            @Override
+            public ToolRegistry.MemorySaveResult save(String fact) {
+                MemoryManager.StoreResult result = memoryManager.storeFactWithPolicy(fact, true);
+                return new ToolRegistry.MemorySaveResult(
+                        result.stored(), result.message(), result.id());
+            }
+
+            @Override
+            public ToolRegistry.MemorySaveResult save(ToolRegistry.MemorySaveRequest request) {
+                MemoryManager.StoreResult result = memoryManager.storeTopic(
+                        request.scope(), request.name(), request.description(), request.type(),
+                        request.fact(), request.validDays(), true);
+                return new ToolRegistry.MemorySaveResult(
+                        result.stored(), result.message(), result.id());
+            }
         });
         toolRegistry.setMemoryListHandler(memoryManager::listLongTermMemory);
     }
@@ -34,10 +48,52 @@ final class AgentRuntimeSupport {
                                    ToolRegistry toolRegistry,
                                    java.util.function.Supplier<String> restoreSectionSupplier,
                                    java.util.function.Supplier<CompactBoundaryRuntimeState> runtimeStateSupplier) {
-        compactor.setSessionMemory(memoryManager.getSessionMemory());
+        compactor.setCompactionSummaryCache(memoryManager.getCompactionSummaryCache());
+        compactor.setSessionSnapshotSupplier(memoryManager.getSessionMemory()::snapshot);
         compactor.setPostCompactContextSupplier(restoreSectionSupplier);
         compactor.setCompactBoundaryRuntimeStateSupplier(runtimeStateSupplier);
         compactor.setMicrocompactOutputRoot(Path.of(toolRegistry.getProjectPath()));
+    }
+
+    static void bindCompactionBudget(ConversationHistoryCompactor compactor,
+                                     AgentBudget budget,
+                                     MemoryManager memoryManager) {
+        if (compactor == null || budget == null) return;
+        compactor.setSummaryCallGuard(() ->
+                (long) budget.totalInputTokens() + budget.totalOutputTokens() < budget.tokenBudget());
+        compactor.setSummaryUsageConsumer(response -> {
+            if (response == null) return;
+            budget.recordTokens(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
+            if (memoryManager != null) {
+                memoryManager.recordTokenUsage(response.inputTokens(), response.outputTokens(),
+                        response.cachedInputTokens());
+            }
+        });
+    }
+
+    static CompactionContext buildCompactionContext(int triggerTokens,
+                                                    MemoryManager memoryManager,
+                                                    ToolRegistry toolRegistry,
+                                                    String sessionId) {
+        com.devcli.memory.SessionMemory.SessionSnapshot snapshot = memoryManager == null
+                ? null : memoryManager.getSessionMemory().snapshot();
+        String effectiveSession = sessionId == null ? "" : sessionId.trim();
+        if (effectiveSession.isBlank() && snapshot != null) {
+            effectiveSession = snapshot.taskId();
+        }
+        String projectId = toolRegistry == null ? "" : toolRegistry.getProjectPath();
+        long epoch = toolRegistry == null ? 0L
+                : toolRegistry.contextVersionLedger().currentGeneration();
+        long sequence = snapshot == null ? 0L : snapshot.sequence();
+        return CompactionContext.forTrigger(triggerTokens, projectId, effectiveSession,
+                epoch, sequence, 0L, 0L, "none", snapshot,
+                List.of(), snapshot == null ? java.util.Map.of() : snapshot.workState());
+    }
+
+    static CompactionContext buildCompactionContext(int triggerTokens,
+                                                    ToolRegistry toolRegistry,
+                                                    String sessionId) {
+        return buildCompactionContext(triggerTokens, null, toolRegistry, sessionId);
     }
 
     static String buildSkillIndex(SkillRegistry skillRegistry, String activationText,
@@ -46,8 +102,11 @@ final class AgentRuntimeSupport {
             return "";
         }
         try {
-            return SkillIndexFormatter.format(skillRegistry.enabledSkillsForText(
-                    activationText, toolRegistry.getProjectPath()));
+            SkillIndexFormatter.FormatResult result = SkillIndexFormatter.formatWithMetrics(
+                    skillRegistry.enabledSkillsForText(activationText, toolRegistry.getProjectPath()),
+                    toolRegistry.getContextProfile().skillIndexTokens());
+            skillRegistry.recordIndexRender(result.includedCount(), result.omittedCount());
+            return result.text();
         } catch (Exception e) {
             log.warn("Failed to build skill index", e);
             return "";

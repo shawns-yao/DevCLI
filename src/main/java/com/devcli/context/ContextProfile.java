@@ -14,7 +14,7 @@ import com.devcli.llm.LlmClient;
  *
  * 按 window 派生：
  * - 短期记忆预算 = window × 0.45
- * - 注入到 system prompt 的相关记忆 token 上限 = window × 0.005，封顶 5000
+ * - 相关记忆注入 token 上限 = window × 0.005，封顶 5000（前置到当轮 user 消息，不进 system prompt）
  * - MCP resource 索引注入：window ≥ 32k 才有意义（再小就挤）
  */
 public record ContextProfile(
@@ -23,18 +23,30 @@ public record ContextProfile(
         double compressionTriggerRatio,
         int shortTermMemoryBudget,
         int memoryContextTokens,
+        int skillIndexTokens,
+        int skillBodyTokens,
         boolean mcpResourceIndexEnabled,
         boolean promptCachingSupported,
         String promptCacheMode,
         int outputReserveTokens
 ) {
     public static final double DEFAULT_COMPRESSION_TRIGGER_RATIO = 0.90;
+    public static final String COMPRESSION_TRIGGER_TOKENS_PROPERTY =
+            "devcli.context.compression.trigger.tokens";
+    public static final String COMPRESSION_TRIGGER_TOKENS_ENV =
+            "DEVCLI_CONTEXT_COMPRESSION_TRIGGER_TOKENS";
     private static final int MIN_WINDOW = 8_000;
     private static final int MCP_RESOURCE_INDEX_MIN_WINDOW = 32_000;
     /** from(null) / custom() 无法得知模型输出能力时的默认输出上限，对齐请求默认 max_tokens */
     private static final int DEFAULT_MAX_OUTPUT_TOKENS = 8_192;
     /** 压缩后至少预留给"模型输出 + 估算误差 + 突发"的 token 经验下限 */
     private static final int MIN_OUTPUT_RESERVE = 20_000;
+    /** 压缩后保留的最近原文尾部默认占上下文窗口 8%。 */
+    private static final double DEFAULT_COMPACTION_TAIL_RATIO = 0.08;
+    /** 小窗口仍需保留当前决策和正在处理的文件上下文。 */
+    private static final int MIN_COMPACTION_TAIL_TOKENS = 4_000;
+    /** 大窗口不让原文尾部无限膨胀，避免稀释语义压缩收益。 */
+    private static final int MAX_COMPACTION_TAIL_TOKENS = 32_000;
 
     public static ContextProfile from(LlmClient llmClient) {
         int window = Math.max(MIN_WINDOW, llmClient == null ? 128_000 : llmClient.maxContextWindow());
@@ -44,6 +56,8 @@ public record ContextProfile(
                 DEFAULT_COMPRESSION_TRIGGER_RATIO,
                 shortTermBudget(window),
                 memoryContextTokens(window),
+                skillIndexTokens(window),
+                skillBodyTokens(window),
                 window >= MCP_RESOURCE_INDEX_MIN_WINDOW,
                 llmClient != null && llmClient.supportsPromptCaching(),
                 llmClient == null ? "none" : llmClient.promptCacheMode(),
@@ -60,6 +74,8 @@ public record ContextProfile(
                 DEFAULT_COMPRESSION_TRIGGER_RATIO,
                 shortTerm,
                 memoryContextTokens(window),
+                skillIndexTokens(window),
+                skillBodyTokens(window),
                 window >= MCP_RESOURCE_INDEX_MIN_WINDOW,
                 false,
                 "none",
@@ -81,7 +97,26 @@ public record ContextProfile(
         int ratioTrigger = (int) Math.floor(maxContextWindow * compressionTriggerRatio);
         int reserve = Math.min(Math.max(outputReserveTokens, MIN_OUTPUT_RESERVE), maxContextWindow / 2);
         int reserveTrigger = maxContextWindow - reserve;
-        return Math.min(ratioTrigger, reserveTrigger);
+        int defaultTrigger = Math.min(ratioTrigger, reserveTrigger);
+        String override = System.getProperty(COMPRESSION_TRIGGER_TOKENS_PROPERTY);
+        if (override == null || override.isBlank()) {
+            override = System.getenv(COMPRESSION_TRIGGER_TOKENS_ENV);
+        }
+        if (override == null || override.isBlank()) {
+            return defaultTrigger;
+        }
+        final int configured;
+        try {
+            configured = Integer.parseInt(override.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(COMPRESSION_TRIGGER_TOKENS_PROPERTY
+                    + " must be a positive integer, got: " + override, e);
+        }
+        if (configured <= 0 || configured > maxContextWindow) {
+            throw new IllegalArgumentException(COMPRESSION_TRIGGER_TOKENS_PROPERTY
+                    + " must be within 1.." + maxContextWindow + ", got: " + configured);
+        }
+        return Math.min(defaultTrigger, configured);
     }
 
     /**
@@ -96,11 +131,24 @@ public record ContextProfile(
         return Math.max(1, compressionTriggerTokens() - additional);
     }
 
+    /**
+     * 根据模型上下文窗口计算压缩后保留的最近原文预算。
+     *
+     * <p>该预算只约束未压缩的尾部消息；模型生成的结构化摘要另有独立预算。
+     * 调用方还应将其限制在本次触发阈值的一半以内，确保仍有可压缩的历史前缀。
+     */
+    public int compactionTailBudgetTokens() {
+        int proportional = (int) Math.floor(maxContextWindow * DEFAULT_COMPACTION_TAIL_RATIO);
+        return Math.max(MIN_COMPACTION_TAIL_TOKENS,
+                Math.min(MAX_COMPACTION_TAIL_TOKENS, proportional));
+    }
+
     public String summary() {
         return "window: " + maxContextWindow
                 + " | 压缩阈值: " + compressionTriggerTokens() + " tokens (≤" + (int) (compressionTriggerRatio * 100)
                 + "% 或预留 " + outputReserveTokens + " 输出)"
                 + " | 短期记忆预算: " + shortTermMemoryBudget
+                + " | Skill 索引/正文预算: " + skillIndexTokens + "/" + skillBodyTokens
                 + " | MCP resource 索引: " + (mcpResourceIndexEnabled ? "on" : "off")
                 + " | prompt cache: " + promptCacheMode;
     }
@@ -116,5 +164,13 @@ public record ContextProfile(
 
     private static int memoryContextTokens(int window) {
         return Math.max(500, Math.min(5_000, window / 200));
+    }
+
+    private static int skillIndexTokens(int window) {
+        return Math.max(256, Math.min(2_048, window / 200));
+    }
+
+    private static int skillBodyTokens(int window) {
+        return Math.max(1_024, Math.min(8_192, window / 50));
     }
 }

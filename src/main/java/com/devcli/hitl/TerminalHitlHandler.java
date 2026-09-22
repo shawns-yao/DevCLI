@@ -72,11 +72,11 @@ public class TerminalHitlHandler implements HitlHandler {
         String mcpServer = ApprovalPolicy.mcpServerName(request.toolName());
         boolean sensitivePerCall = request.sensitiveNotice() != null && !request.sensitiveNotice().isBlank();
         if (!sensitivePerCall && isApprovedAllByTool(request.toolName())) {
-            out.println("  [HITL] " + request.toolName() + " 已在本次会话中全部放行，自动通过");
+            out.println("  [HITL] " + request.toolName() + " 已在本次任务中全部放行，自动通过");
             return ApprovalResult.approveAll();
         }
         if (!sensitivePerCall && isApprovedAllByServer(mcpServer)) {
-            out.println("  [HITL] MCP server " + mcpServer + " 已在本次会话中全部放行，自动通过");
+            out.println("  [HITL] MCP server " + mcpServer + " 已在本次任务中全部放行，自动通过");
             return ApprovalResult.approveAllByServer();
         }
 
@@ -98,7 +98,13 @@ public class TerminalHitlHandler implements HitlHandler {
         for (int attempt = 0; attempt < 5; attempt++) {
             out.println();
             boolean sensitivePerCall = request.sensitiveNotice() != null && !request.sensitiveNotice().isBlank();
-            if (sensitivePerCall) {
+            if (request.hostExecution()) {
+                out.println("请选择：[y] 单次允许执行  [n/Enter] 拒绝");
+            } else if (request.singleDecisionOnly()) {
+                out.println(request.redactionAllowed()
+                        ? "请选择：[y] 单次允许原文  [r] 脱敏后继续  [n/Enter] 拒绝"
+                        : "请选择：[y] 单次允许原文  [n/Enter] 拒绝");
+            } else if (sensitivePerCall) {
                 out.println("请选择操作：[y/Enter] 批准本次  [n] 拒绝  [s] 跳过  [m] 修改参数");
             } else {
                 out.println("请选择操作：[y/Enter] 批准  [a] 全部放行  [n] 拒绝  [s] 跳过  [m] 修改参数");
@@ -119,6 +125,13 @@ public class TerminalHitlHandler implements HitlHandler {
             }
 
             String normalized = input.trim().toLowerCase();
+            if (request.singleDecisionOnly()) {
+                if ("y".equals(normalized)) return ApprovalResult.approve();
+                if ("r".equals(normalized) && request.redactionAllowed()) return ApprovalResult.redact();
+                if (normalized.isEmpty() || "n".equals(normalized)) return ApprovalResult.reject("用户拒绝本次操作");
+                out.println("请选择单次允许、拒绝或可用的脱敏选项");
+                continue;
+            }
 
             // Enter 或 y 等价于批准
             if (normalized.isEmpty() || normalized.equals("y")) {
@@ -185,12 +198,17 @@ public class TerminalHitlHandler implements HitlHandler {
         String normalized = scope == null ? "" : scope.trim().toLowerCase();
         if ("server".equals(normalized) || "s".equals(normalized)) {
             approvedAllByServer.add(mcpServer);
-            out.println("  已批准，后续 MCP server " + mcpServer + " 的工具调用将自动通过");
+            out.println("  已批准，本任务内后续 MCP server " + mcpServer + " 的工具调用将自动通过");
             return ApprovalResult.approveAllByServer();
         }
         approvedAllByTool.add(request.toolName());
-        out.println("  已批准，后续 " + request.toolName() + " 操作将自动通过");
+        out.println("  已批准，本任务内后续 " + request.toolName() + " 操作将自动通过");
         return ApprovalResult.approveAll();
+    }
+
+    @Override
+    public void onTaskGrantAllow(String toolName, String reason) {
+        out.println("  [授权] " + reason + "，已自动放行（未经过人工审批）");
     }
 
     /**
@@ -238,6 +256,16 @@ public class TerminalHitlHandler implements HitlHandler {
         if (serverName != null) {
             approvedAllByServer.remove(serverName);
         }
+    }
+
+    @Override
+    public Set<String> approvedAllTools() {
+        return Set.copyOf(approvedAllByTool);
+    }
+
+    @Override
+    public Set<String> approvedAllServers() {
+        return Set.copyOf(approvedAllByServer);
     }
 
     @Override

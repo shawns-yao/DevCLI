@@ -7,8 +7,8 @@ public record PromptContext(
         String approvalMode,
         String memoryContext,
         String externalContext,
-        String stickyMemory,
-        String workingMemory,
+        String ruleContext,
+        String sessionMemory,
         String skillIndex,
         Map<String, String> variables
 ) {
@@ -31,8 +31,8 @@ public record PromptContext(
         private String approvalMode = "suggest";
         private String memoryContext = "";
         private String externalContext = "";
-        private String stickyMemory = "";
-        private String workingMemory = "";
+        private String ruleContext = "";
+        private String sessionMemory = "";
         private String skillIndex = "";
         private final Map<String, String> variables = new LinkedHashMap<>();
 
@@ -58,20 +58,26 @@ public record PromptContext(
             return this;
         }
 
-        public Builder stickyMemory(String stickyMemory) {
-            this.stickyMemory = normalize(stickyMemory);
+        public Builder ruleContext(String ruleContext) {
+            this.ruleContext = normalize(ruleContext);
             return this;
         }
 
+        /** @deprecated 使用 {@link #ruleContext(String)}。 */
+        @Deprecated
+        public Builder stickyMemory(String value) { return ruleContext(value); }
+
         /**
-         * 注入工作记忆（WorkingMemory 派生视图）。每轮 user 输入后由
-         * {@code MemoryManager.buildWorkingMemorySection()} 渲染：含最近工具证据 / 任务状态 /
-         * 临时事实。与 stickyMemory（稳定）区分：workingMemory 易变、当轮重新渲染。
+         * 注入当前任务的会话记忆派生视图。
          */
-        public Builder workingMemory(String workingMemory) {
-            this.workingMemory = normalize(workingMemory);
+        public Builder sessionMemory(String sessionMemory) {
+            this.sessionMemory = normalize(sessionMemory);
             return this;
         }
+
+        /** @deprecated 使用 {@link #sessionMemory(String)}。 */
+        @Deprecated
+        public Builder workingMemory(String value) { return sessionMemory(value); }
 
         public Builder variable(String key, Object value) {
             if (key != null && !key.isBlank() && value != null) {
@@ -81,7 +87,8 @@ public record PromptContext(
         }
 
         public PromptContext build() {
-            return new PromptContext(approvalMode, memoryContext, externalContext, stickyMemory, workingMemory, skillIndex, Map.copyOf(variables));
+            return new PromptContext(approvalMode, memoryContext, externalContext, ruleContext,
+                    sessionMemory, skillIndex, Map.copyOf(variables));
         }
 
         private static String normalize(String value) {

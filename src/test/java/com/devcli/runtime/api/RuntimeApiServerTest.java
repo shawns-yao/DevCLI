@@ -2,7 +2,7 @@ package com.devcli.runtime.api;
 
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.CompactBoundaryMetadata;
-import com.devcli.runtime.event.RunEvent;
+import com.devcli.event.RunEvent;
 import com.devcli.runtime.store.RunStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -217,7 +217,7 @@ class RuntimeApiServerTest {
         TurnRunner runner = new TurnRunner() {
             @Override
             public TurnResult run(String threadId, String input,
-                                  com.devcli.runtime.event.RunEventSink eventSink) {
+                                  com.devcli.event.RunEventSink eventSink) {
                 return TurnResult.completed("ok");
             }
 
@@ -288,7 +288,7 @@ class RuntimeApiServerTest {
         TurnRunner runner = new TurnRunner() {
             @Override
             public TurnResult run(String threadId, String input,
-                                  com.devcli.runtime.event.RunEventSink eventSink) {
+                                  com.devcli.event.RunEventSink eventSink) {
                 return TurnResult.completed("ok");
             }
 

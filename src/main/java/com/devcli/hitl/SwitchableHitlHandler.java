@@ -1,13 +1,13 @@
 package com.devcli.hitl;
 
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Delegates HITL interaction to the currently active UI implementation.
  *
  * <p>The registry is created before the UI mode is selected, so this wrapper
- * lets CLI keep using {@link TerminalHitlHandler} while TUI can swap in a
- * Lanterna-backed handler without rebuilding the tool registry.
+ * lets CLI swap renderer-backed handlers without rebuilding the tool registry.
  */
 public final class SwitchableHitlHandler implements HitlHandler {
 
@@ -56,7 +56,22 @@ public final class SwitchableHitlHandler implements HitlHandler {
     }
 
     @Override
+    public Set<String> approvedAllTools() {
+        return delegate.approvedAllTools();
+    }
+
+    @Override
+    public Set<String> approvedAllServers() {
+        return delegate.approvedAllServers();
+    }
+
+    @Override
     public void clearApprovedAllForServer(String serverName) {
         delegate.clearApprovedAllForServer(serverName);
+    }
+
+    @Override
+    public void onTaskGrantAllow(String toolName, String reason) {
+        delegate.onTaskGrantAllow(toolName, reason);
     }
 }

@@ -65,6 +65,12 @@ public final class WebToolProvider implements ToolProvider {
             return ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS,
                     "搜索关键词不能为空", false);
         }
+        // 出口准入在建连之前判定：所有网络出口共享同一预算，
+        // 避免 provider 不可用时反复重试绕过限流。
+        String rateReason = admitEgress();
+        if (rateReason != null) {
+            return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED, rateReason, true);
+        }
         SearchProvider provider = searchProvider();
         if (!provider.isReady()) {
             return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
@@ -147,6 +153,21 @@ public final class WebToolProvider implements ToolProvider {
             networkPolicy = new NetworkPolicy();
         }
         return networkPolicy;
+    }
+
+    /** 注入出口策略（测试用：确定性验证共享出口预算）。 */
+    void setNetworkPolicy(NetworkPolicy policy) {
+        this.networkPolicy = policy;
+    }
+
+    /**
+     * 网络出口准入：返回 null 表示通过，否则是限流原因。
+     *
+     * <p>web_search 与 web_fetch 共用同一 {@link NetworkPolicy} 实例，因此共享同一个
+     * 60 秒 / 30 次出口预算，而不是各自一份。</p>
+     */
+    String admitEgress() {
+        return networkPolicy().acquire();
     }
 
     private static int parseInt(String value, int fallback) {

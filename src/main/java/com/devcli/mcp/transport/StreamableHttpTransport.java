@@ -3,7 +3,7 @@ package com.devcli.mcp.transport;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.mcp.protocol.McpInitializeRequest;
-import com.devcli.runtime.CancellationToken;
+import com.devcli.concurrent.CancellationToken;
 import com.devcli.web.RetryInterceptor;
 import okhttp3.Call;
 import okhttp3.Callback;

@@ -1,6 +1,6 @@
 package com.devcli.agent;
 
-import com.devcli.runtime.CancellationContext;
+import com.devcli.concurrent.CancellationContext;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.workspace.PatchSet;
 import com.devcli.workspace.WorkspaceExecutionSession;

@@ -32,18 +32,21 @@ class McpSchemaSanitizerTest {
     }
 
     @Test
-    void downgradesAnyOfAndOneOfToObjectDescription() throws Exception {
+    void preservesUnionConstraintsInsteadOfInventingObjectType() throws Exception {
         JsonNode raw = MAPPER.readTree("""
                 {
-                  "anyOf": [{"type": "string"}, {"type": "number"}],
-                  "description": "value"
+                  "type": "object",
+                  "properties": {
+                    "value": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    "count": {"oneOf": [{"type": "integer"}, {"type": "string"}]}
+                  }
                 }
                 """);
 
         JsonNode cleaned = McpSchemaSanitizer.sanitize(raw);
 
-        assertEquals("object", cleaned.path("type").asText());
-        assertTrue(cleaned.path("description").asText().contains("anyOf options"));
+        assertEquals(raw.path("properties"), cleaned.path("properties"));
+        assertFalse(cleaned.path("properties").path("value").has("type"));
     }
 
     @Test

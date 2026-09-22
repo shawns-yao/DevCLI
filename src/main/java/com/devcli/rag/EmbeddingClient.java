@@ -101,6 +101,11 @@ public class EmbeddingClient {
         };
     }
 
+    /** 当前嵌入模型标识，用于向量索引一致性校验。 */
+    public String modelName() {
+        return model;
+    }
+
     /**
      * 批量获取文本向量。
      *

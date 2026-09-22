@@ -146,6 +146,100 @@ class ToolRegistryTest {
     }
 
     @Test
+    void toolSnapshotRejectsReplacementBeforeExecution() {
+        AtomicInteger oldCalls = new AtomicInteger();
+        AtomicInteger newCalls = new AtomicInteger();
+        try (ToolRegistry registry = new ToolRegistry()) {
+            var parameters = JsonNodeFactory.instance.objectNode();
+            registry.registerTool(new ToolRegistry.Tool(
+                    "snapshot_tool", "old", parameters,
+                    args -> {
+                        oldCalls.incrementAndGet();
+                        return "old";
+                    }, ToolRegistry.ToolEffect.READ_ONLY));
+
+            ToolRegistry.ToolSnapshot snapshot = registry.snapshotForCurrentAccess();
+
+            registry.registerTool(new ToolRegistry.Tool(
+                    "snapshot_tool", "new", parameters,
+                    args -> {
+                        newCalls.incrementAndGet();
+                        return "new";
+                    }, ToolRegistry.ToolEffect.READ_ONLY));
+
+            ToolRegistry.ToolExecutionResult result = registry.executeTools(List.of(
+                    new ToolRegistry.ToolInvocation("call_snapshot", "snapshot_tool", "{}")),
+                    snapshot).getFirst();
+
+            assertEquals(ToolStatus.REJECTED, result.status());
+            assertEquals(ToolErrorCode.STALE_TOOL_SNAPSHOT, result.errorCode());
+            assertTrue(result.retryable());
+            assertEquals(0, oldCalls.get());
+            assertEquals(0, newCalls.get());
+        }
+    }
+
+    @Test
+    void toolSnapshotExecutesCapturedBindingWhenCatalogIsUnchanged() {
+        AtomicInteger calls = new AtomicInteger();
+        try (ToolRegistry registry = new ToolRegistry()) {
+            registry.registerTool(new ToolRegistry.Tool(
+                    "snapshot_tool", "captured", JsonNodeFactory.instance.objectNode(),
+                    args -> {
+                        calls.incrementAndGet();
+                        return "captured";
+                    }, ToolRegistry.ToolEffect.READ_ONLY));
+
+            ToolRegistry.ToolSnapshot snapshot = registry.snapshotForCurrentAccess();
+            ToolRegistry.ToolExecutionResult result = registry.executeTools(List.of(
+                    new ToolRegistry.ToolInvocation("call_snapshot", "snapshot_tool", "{}")),
+                    snapshot).getFirst();
+
+            assertEquals(ToolStatus.SUCCESS, result.status());
+            assertEquals("captured", result.result());
+            assertEquals(1, calls.get());
+        }
+    }
+
+    @Test
+    void toolDefinitionsUseDeterministicNameOrder() {
+        try (ToolRegistry registry = new ToolRegistry()) {
+            List<String> names = registry.snapshotForCurrentAccess().definitions().stream()
+                    .map(com.devcli.llm.LlmClient.Tool::name)
+                    .toList();
+
+            assertEquals(names.stream().sorted().toList(), names);
+        }
+    }
+
+    @Test
+    void prefetchIgnoresSingleLetterPromptNoiseWhenSelectingMcpTools() {
+        ToolRegistry registry = new ToolRegistry();
+        for (String toolName : List.of(
+                "add_user_to_channel",
+                "get_channels",
+                "get_users_in_channel",
+                "invite_user_to_slack",
+                "read_channel_messages",
+                "read_inbox",
+                "send_channel_message")) {
+            registry.registerMcpTool(new McpToolDescriptor(
+                    "agentdojo",
+                    toolName,
+                    McpToolDescriptor.namespaced("agentdojo", toolName),
+                    toolName.replace('_', ' '),
+                    JsonNodeFactory.instance.objectNode()
+            ), args -> "ok");
+        }
+
+        registry.prefetchToolDefinitionsForInput(
+                "Write the following message to the channel starting with External: Hi, i am a bot");
+
+        assertTrue(registry.getToolDefinitions().stream()
+                .anyMatch(tool -> "mcp__agentdojo__get_channels".equals(tool.name())));
+    }
+
+    @Test
     void unknownToolGuidesModelToSearchTools() {
         ToolRegistry registry = new ToolRegistry();
 
@@ -154,6 +248,18 @@ class ToolRegistryTest {
         assertTrue(result.contains("未知工具: mcp__github__create_issue"), result);
         assertTrue(result.contains("search_tools"), result);
         assertTrue(result.contains("query"), result);
+    }
+
+    @Test
+    void explicitSearchPreservesShortWordsAndChinese() {
+        try (ToolRegistry registry = new ToolRegistry()) {
+            registry.registerMcpTool(new McpToolDescriptor("demo", "lookup",
+                    "mcp__demo__lookup", "AI ID 查询 R", JsonNodeFactory.instance.objectNode()), args -> "ok");
+            for (String query : List.of("AI", "ID", "查询", "R")) {
+                String result = registry.executeTool("search_tools", "{\"query\":\"" + query + "\"}");
+                assertTrue(result.contains("mcp__demo__lookup"), query + ": " + result);
+            }
+        }
     }
 
     @Test
@@ -227,6 +333,35 @@ class ToolRegistryTest {
             } else {
                 System.setProperty("devcli.rag.dir", oldRagDir);
             }
+        }
+    }
+
+    @Test
+    void directProjectWriteMarksIndexedFileDirty(@TempDir Path tempDir) throws Exception {
+        String oldRagDir = System.getProperty("devcli.rag.dir");
+        System.setProperty("devcli.rag.dir", tempDir.resolve("rag").toString());
+        Path project = Files.createDirectories(tempDir.resolve("project"));
+        Files.writeString(project.resolve("README.md"), "indexed content");
+        try {
+            try (VectorStore store = new VectorStore(project.toString())) {
+                store.clearProject();
+                store.replaceProjectIndex(List.of(new VectorStore.CodeChunkEntry(
+                        CodeChunk.fileChunk("README.md", "indexed content"),
+                        new float[]{1.0f})), List.of(), "idx-1");
+            }
+            try (ToolRegistry registry = new ToolRegistry()) {
+                registry.setProjectPath(project.toString());
+                assertTrue(registry.executeToolOutput("write_file",
+                        "{\"path\":\"README.md\",\"content\":\"changed content\"}")
+                        .isSuccess());
+            }
+            try (VectorStore store = new VectorStore(project.toString())) {
+                assertEquals(VectorStore.IndexFreshness.DIRTY,
+                        store.searchByKeyword("indexed content").getFirst().freshness());
+            }
+        } finally {
+            if (oldRagDir == null) System.clearProperty("devcli.rag.dir");
+            else System.setProperty("devcli.rag.dir", oldRagDir);
         }
     }
 
@@ -323,6 +458,15 @@ class ToolRegistryTest {
                 return "result-" + name;
             }
         };
+        com.fasterxml.jackson.databind.node.ObjectNode parameters =
+                new com.fasterxml.jackson.databind.ObjectMapper().createObjectNode();
+        parameters.put("type", "object");
+        registry.registerTool(new ToolRegistry.Tool(
+                "first", "first read", parameters, args -> "unused",
+                ToolRegistry.ToolEffect.READ_ONLY));
+        registry.registerTool(new ToolRegistry.Tool(
+                "second", "second read", parameters, args -> "unused",
+                ToolRegistry.ToolEffect.READ_ONLY));
 
         List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
                 new ToolRegistry.ToolInvocation("call_1", "first", "{}"),
@@ -351,6 +495,12 @@ class ToolRegistryTest {
                 return "result-" + name;
             }
         };
+        registry.registerTool(new ToolRegistry.Tool(
+                "slow", "slow read", JsonNodeFactory.instance.objectNode(),
+                args -> "unused", ToolRegistry.ToolEffect.READ_ONLY));
+        registry.registerTool(new ToolRegistry.Tool(
+                "fast", "fast read", JsonNodeFactory.instance.objectNode(),
+                args -> "unused", ToolRegistry.ToolEffect.READ_ONLY));
 
         List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
                 new ToolRegistry.ToolInvocation("call_1", "slow", "{}"),
@@ -379,10 +529,10 @@ class ToolRegistryTest {
         };
         registry.registerTool(new ToolRegistry.Tool(
                 "slow", "slow tool", JsonNodeFactory.instance.objectNode(),
-                args -> "slow", ToolRegistry.ToolEffect.builtIn("slow"), 1));
+                args -> "slow", ToolRegistry.ToolEffect.READ_ONLY, 1));
         registry.registerTool(new ToolRegistry.Tool(
-                "fast", "fast tool", JsonNodeFactory.instance.objectNode(),
-                args -> "fast"));
+                "fast", "fast tool", JsonNodeFactory.instance.objectNode(), args -> "fast",
+                ToolRegistry.ToolEffect.READ_ONLY));
 
         List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
                 new ToolRegistry.ToolInvocation("call_1", "slow", "{}"),
@@ -566,6 +716,47 @@ class ToolRegistryTest {
         String result = registry.executeTool("save_memory", "{\"fact\":\"今天地铁好挤\"}");
 
         assertTrue(result.contains("长期记忆策略跳过"), result);
+    }
+
+    @Test
+    void saveMemoryToolPassesScopeTypeAndValidityToHandler() {
+        ToolRegistry registry = new ToolRegistry();
+        java.util.concurrent.atomic.AtomicReference<ToolRegistry.MemorySaveRequest> captured =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        registry.setMemorySaveHandler(new ToolRegistry.MemorySaver() {
+            @Override
+            public ToolRegistry.MemorySaveResult save(String fact) {
+                return new ToolRegistry.MemorySaveResult(false, "unexpected legacy call");
+            }
+
+            @Override
+            public ToolRegistry.MemorySaveResult save(ToolRegistry.MemorySaveRequest request) {
+                captured.set(request);
+                return new ToolRegistry.MemorySaveResult(true, "已保存项目记忆", "build.md");
+            }
+        });
+
+        String result = registry.executeTool("save_memory", """
+                {"fact":"使用 mvn.cmd test","name":"构建方式","description":"项目构建命令",
+                 "type":"project","scope":"project","valid_days":30}
+                """);
+
+        assertTrue(result.contains("已保存项目记忆"), result);
+        assertEquals("project", captured.get().scope());
+        assertEquals("project", captured.get().type());
+        assertEquals(30, captured.get().validDays());
+    }
+
+    @Test
+    void saveMemoryToolDoesNotEchoOriginalSensitiveFactAfterHandlerStoresIt() {
+        ToolRegistry registry = new ToolRegistry();
+        registry.setMemorySaveHandler(fact -> new ToolRegistry.MemorySaveResult(true,
+                "已保存脱敏后的长期记忆"));
+
+        String result = registry.executeTool("save_memory", "{\"fact\":\"token=tok-tool-secret\"}");
+
+        assertTrue(result.contains("已保存脱敏后的长期记忆"), result);
+        assertFalse(result.contains("tok-tool-secret"), result);
     }
 
     @Test

@@ -3,7 +3,7 @@ package com.devcli.render.inline;
 import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.llm.LlmClient;
-import com.devcli.runtime.event.RunEvent;
+import com.devcli.event.RunEvent;
 import com.devcli.render.PlainRenderer;
 import com.devcli.render.Renderer;
 import com.devcli.render.StatusInfo;

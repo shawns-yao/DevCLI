@@ -12,10 +12,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * 长期记忆自动写入的可见性。
+ * 长期记忆写入的可见性与晋升协议边界。
  *
- * <p>口径：保留自动保存能力，但不允许"无声"。每次自动落库都必须回传事件，
- * 让 CLI 能告诉用户"写了什么、依据哪条规则、怎么删"。
+ * <p>原始用户消息不能直接落库；显式保存仍必须回传可见事件。
  */
 class AutoMemoryNotificationTest {
 
@@ -28,22 +27,15 @@ class AutoMemoryNotificationTest {
     }
 
     @Test
-    void notifiesWhenUserMessageIsAutoPersisted() {
+    void userMessageDoesNotBypassTaskPromotionProtocol() {
         List<MemoryManager.AutoSavedFact> events = new ArrayList<>();
         try (MemoryManager manager = newManager()) {
             manager.setAutoSaveListener(events::add);
 
             manager.addUserMessage("别再自动格式化整个文件");
 
-            assertEquals(1, events.size(), "自动落库必须回传事件，不能无声");
-            MemoryManager.AutoSavedFact event = events.get(0);
-            assertEquals("别再自动格式化整个文件", event.content());
-            assertFalse(event.id().isBlank(), "必须带条目 id，否则用户无法定向删除");
-            assertEquals("feedback", event.memoryType());
-            assertFalse(event.reasonCode().isBlank(), "必须说明依据哪条规则");
-            assertTrue(manager.getLongTermMemory().getAll().stream()
-                            .anyMatch(entry -> entry.getId().equals(event.id())),
-                    "事件里的 id 必须能在长期记忆里找到");
+            assertTrue(events.isEmpty(), "任务结束前不能绕过 Curator 直接落库");
+            assertTrue(manager.getLongTermMemory().getAll().isEmpty());
         }
     }
 

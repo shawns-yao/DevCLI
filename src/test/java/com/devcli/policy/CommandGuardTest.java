@@ -90,4 +90,24 @@ class CommandGuardTest {
         assertNotNull(CommandGuard.check("echo $(rm -rf /)"));
         assertNotNull(CommandGuard.check("echo `sudo whoami`"));
     }
+
+    @Test
+    void rejectsRemovingGitDirectory() {
+        assertNotNull(CommandGuard.check("rm -rf .git"));
+        assertNotNull(CommandGuard.check("rm -rf .git/"));
+        assertNotNull(CommandGuard.check("rm -r project/.git"));
+
+        assertNull(CommandGuard.check("rm -rf .gitignore"), ".gitignore 是普通文件");
+        assertNull(CommandGuard.check("rm -rf target/classes"));
+    }
+
+    @Test
+    void rejectsRedirectingOutputIntoSensitiveFiles() {
+        assertNotNull(CommandGuard.check("echo KEY=1 > .env"));
+        assertNotNull(CommandGuard.check("echo x >> certs/server.pem"));
+        assertNotNull(CommandGuard.check("printf x | tee credentials.json"));
+
+        assertNull(CommandGuard.check("echo KEY=1 > .env.example"), "模板文件仍可写");
+        assertNull(CommandGuard.check("mvn test > build.log"));
+    }
 }

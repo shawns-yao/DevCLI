@@ -1,9 +1,9 @@
 package com.devcli.hook;
 
 import com.devcli.llm.LlmClient;
-import com.devcli.runtime.CancellationContext;
-import com.devcli.runtime.RunContext;
-import com.devcli.runtime.event.RunEventSink;
+import com.devcli.concurrent.CancellationContext;
+import com.devcli.concurrent.RunContext;
+import com.devcli.event.RunEventSink;
 import com.devcli.tool.ToolRegistry;
 
 import java.util.List;

@@ -8,6 +8,8 @@ final class ToolResultCache {
     private final int maxEntries;
     private final long ttlMillis;
     private final LinkedHashMap<String, Entry> entries = new LinkedHashMap<>(16, 0.75f, true);
+    private long generation;
+    private int mutations;
 
     ToolResultCache() {
         this(readInt("devcli.tool.result.cache.max.entries", "DEVCLI_TOOL_RESULT_CACHE_MAX_ENTRIES", 128),
@@ -21,6 +23,7 @@ final class ToolResultCache {
     }
 
     synchronized ToolOutput get(String key) {
+        if (mutations > 0) return null;
         Entry entry = entries.get(key);
         if (entry == null) return null;
         if (System.currentTimeMillis() - entry.createdAtMillis() > ttlMillis) {
@@ -31,7 +34,12 @@ final class ToolResultCache {
     }
 
     synchronized void put(String key, ToolOutput output) {
+        if (mutations > 0) return;
         if (key == null || output == null || !output.isSuccess() || output.hasImageParts()) return;
+        if (output.text().contains("result_ref=")
+                || output.sideChannels().stream().anyMatch(ToolResultArtifact.class::isInstance)) {
+            return;
+        }
         entries.put(key, new Entry(output, System.currentTimeMillis()));
         while (entries.size() > maxEntries) {
             String eldest = entries.entrySet().iterator().next().getKey();
@@ -40,7 +48,26 @@ final class ToolResultCache {
     }
 
     synchronized void clear() {
+        generation++;
         entries.clear();
+    }
+
+    synchronized long generation() {
+        return generation;
+    }
+
+    synchronized void beginMutation() {
+        mutations++;
+        clear();
+    }
+
+    synchronized void endMutation() {
+        mutations--;
+        clear();
+    }
+
+    synchronized void putIfGeneration(String key, ToolOutput output, long expectedGeneration) {
+        if (generation == expectedGeneration) put(key, output);
     }
 
     private static int readInt(String key, String environment, int fallback) {

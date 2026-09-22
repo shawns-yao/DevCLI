@@ -20,7 +20,7 @@ public final class ProjectToolProvider implements ToolProvider {
                 args -> {
                     String name = args.get("name");
                     String type = args.get("type");
-                    Path projectRoot = context.resolveSafePath(name);
+                    Path projectRoot = context.resolveSafeWritePath(name);
                     try {
                         Files.createDirectories(projectRoot);
 

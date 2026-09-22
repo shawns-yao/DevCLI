@@ -13,9 +13,12 @@ target/
 
 # AI 工具本地配置（settings / plans / memory，个人本地，不提交）
 .claude/
+.workbuddy-ai/
 
 # 日志、测试数据与运行时临时目录
 *.log
+__pycache__/
+*.pyc
 Log/
 Temp/
 /Test/
@@ -29,6 +32,7 @@ Thumbs.db
 cc/
 live/
 .ace-tool/
+learn-agent/
 
 # 检索工具索引目录
 .codegraph/

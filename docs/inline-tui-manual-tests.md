@@ -123,7 +123,7 @@ Ctrl+O 展开后看到三个文件路径都在 `└` 缩进列表里。
 
 **前置**：
 ```
-/hitl on
+/mode default
 ```
 
 **输入**：
@@ -202,7 +202,7 @@ Ctrl+O 展开后看到三个文件路径都在 `└` 缩进列表里。
 
 ## 9. HITL 单字符审批 — 跳过（用例 8）
 
-**前置**：`/hitl on`
+**前置**：`/mode default`
 
 **输入**：
 ```
@@ -306,7 +306,7 @@ TERM=dumb java -jar target/devcli-1.0-SNAPSHOT.jar
 **预期**：等待输入时，LineReader 输入行下方留 1 行间距，然后紧跟两行 inline status，中间不能出现大段空白：
 ```
 *
- DevCLI  idle  glm-5.1  ctx 0/200.0k  HITL OFF  MCP 4/4  Skill 2/2
+ DevCLI  idle  glm-5.1  ctx 0/200.0k  模式 default  MCP 4/4  Skill 2/2
  Auto Model · / commands · @path/@image · Ctrl+O fold · ESC clear
 ```
 
@@ -314,7 +314,7 @@ TERM=dumb java -jar target/devcli-1.0-SNAPSHOT.jar
 - MCP 与 Skill 摘要跟当前配置一致，形如 `MCP 4/4`、`Skill 2/2`
 - token 计数在 LLM 响应回来后跳动（如 `1.3k/200.0k`）
 - 任务运行时阶段从 `idle` 切到 `react` / `plan` / `team`，流式响应期间 elapsed 持续增长
-- HITL 列反映 `/hitl on/off` 状态
+- 状态栏模式位反映当前 `/mode`（如 `模式 default`）
 
 **通过判定**：状态区与 prompt 之间只有 1 行间距；输入文字时不与状态区冲突，输入提交后状态区和后续空白被清掉。
 
@@ -322,20 +322,21 @@ TERM=dumb java -jar target/devcli-1.0-SNAPSHOT.jar
 
 ---
 
-## 17. HITL 状态联动状态栏（用例 16）
+## 17. 权限模式联动状态栏（用例 16）
 
 **步骤**：
-1. 启动后状态栏显示 `HITL OFF`
-2. 输入 `/hitl on`
+1. 启动后状态栏显示 `模式 default`
+2. 输入 `/mode bypassPermissions`
 3. 再问任何问题（如 `列一下 src/main 目录`）
+4. 输入 `/mode auto`
 
-**预期**：下一次 LLM 调用后状态栏立刻刷新为 `HITL ON`。
+**预期**：状态栏在切换命令执行后立刻刷新为 `模式 bypassPermissions`，不需要等下一次 LLM 调用。`/mode auto` 同样立刻刷新为 `模式 auto`；此后的未获授权动作交给分类器判定——放行时出现 `[授权] 分类器放行：…`，拒绝时出现 `[分类器] 已拒绝：…`；分类器连续失败达阈值后状态栏自动回到 `模式 default`，且那次拒绝的消息里带有退出说明。
 
 ---
 
 ## 18. 行内 diff — 修改已有文件（用例 17）
 
-**前置**：`/hitl on`
+**前置**：`/mode default`
 
 **输入**：
 ```
@@ -424,7 +425,7 @@ HITL 通过后**预期**：
 
 每种确认后：
 - palette 应**完全消失**（用 `[<n>A[J` 清屏到末尾）
-- 对话流出现一行提示：`💡 切换 HITL: /hitl on / /hitl off` 等
+- 对话流出现一行提示：`💡 切换权限模式: /mode default|plan|acceptEdits|bypassPermissions|dontAsk|auto` 等
 - 取消则出现 `(已关闭)`
 
 **通过判定**：palette 不留痕迹；后续输入照常。

@@ -3,7 +3,7 @@ package com.devcli.render.inline;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.llm.LlmClient;
-import com.devcli.runtime.event.RunEvent;
+import com.devcli.event.RunEvent;
 import com.devcli.util.AnsiStyle;
 
 import java.io.PrintStream;

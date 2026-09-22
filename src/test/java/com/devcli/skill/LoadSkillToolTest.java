@@ -65,7 +65,7 @@ class LoadSkillToolTest {
     }
 
     @Test
-    void truncatesOversizedBody(@TempDir Path tempDir) throws IOException {
+    void paginatesOversizedBody(@TempDir Path tempDir) throws IOException {
         StringBuilder big = new StringBuilder();
         while (big.length() < 6 * 1024) big.append("0123456789");
         SkillRegistry registry = registryWith(tempDir, "huge", "desc", big.toString());
@@ -74,12 +74,16 @@ class LoadSkillToolTest {
         ToolRegistry tools = new ToolRegistry();
         tools.setSkillRegistry(registry);
         tools.setSkillContextBuffer(buffer);
+        tools.setContextProfile(com.devcli.context.ContextProfile.custom(8_000, 4_000));
 
         String result = tools.executeTool("load_skill", "{\"name\":\"huge\"}");
         assertTrue(result.contains("已加载 skill 'huge'"));
+        assertTrue(result.contains("page=2"), result);
 
         String drained = buffer.drain();
-        assertTrue(drained.contains("(skill body truncated"), "应包含截断标记");
+        assertFalse(drained.contains("/skill show"));
+        assertTrue(com.devcli.memory.MemoryEntry.estimateTokens(drained)
+                <= tools.getContextProfile().skillBodyTokens() + 80);
     }
 
     @Test

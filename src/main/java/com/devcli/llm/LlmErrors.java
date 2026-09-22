@@ -27,6 +27,11 @@ public final class LlmErrors {
         } else if (statusCode == 529 || lower.contains("overloaded")) {
             code = LlmErrorCode.OVERLOADED;
             retryable = true;
+        } else if (lower.contains("upstream_stream_break")
+                || lower.contains("upstream stream ended prematurely")
+                || lower.contains("safe to retry")) {
+            code = LlmErrorCode.SERVER_ERROR;
+            retryable = true;
         } else if (lower.contains("context_length") || lower.contains("context length")
                 || lower.contains("maximum context") || lower.contains("too many tokens")) {
             code = LlmErrorCode.CONTEXT_LENGTH;

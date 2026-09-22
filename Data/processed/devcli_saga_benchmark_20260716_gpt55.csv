@@ -1,3 +1,0 @@
-benchmark,date,provider,model,mode,checks_passed,checks_total,completion_rate,elapsed_ms,valid_run
-saga-collaboration,2026-07-16,openai,gpt-5.5,single-agent,27,30,0.9000,192827,saga-run-1784187900060
-saga-collaboration,2026-07-16,openai,gpt-5.5,planner-worker-reviewer,30,30,1.0000,725079,saga-run-1784187900060

@@ -18,7 +18,7 @@ import com.devcli.agent.AgentTurnInbox;
 import com.devcli.hitl.HitlHandler;
 import com.devcli.hitl.HitlToolRegistry;
 import com.devcli.hitl.SwitchableHitlHandler;
-import com.devcli.hitl.RendererHitlHandler;
+import com.devcli.render.RendererHitlHandler;
 import com.devcli.hitl.TerminalHitlHandler;
 import com.devcli.hook.HookConfigLoader;
 import com.devcli.llm.LlmClient;
@@ -36,13 +36,14 @@ import com.devcli.plan.ExecutionPlan;
 import com.devcli.rag.CodeIndex;
 import com.devcli.hitl.ApprovalPolicy;
 import com.devcli.policy.AuditLog;
+import com.devcli.policy.PermissionMode;
 import com.devcli.rag.CodeRetriever;
 import com.devcli.rag.CodeRelation;
 import com.devcli.rag.SearchResultFormatter;
-import com.devcli.runtime.CancellationContext;
-import com.devcli.runtime.CancellationToken;
+import com.devcli.concurrent.CancellationContext;
+import com.devcli.concurrent.CancellationToken;
 import com.devcli.runtime.AgentSessionRuntime;
-import com.devcli.runtime.RunContext;
+import com.devcli.concurrent.RunContext;
 import com.devcli.runtime.api.RuntimeThreadStore;
 import com.devcli.runtime.task.DurableTaskManager;
 import com.devcli.runtime.task.TaskCommandFormatter;
@@ -52,7 +53,7 @@ import com.devcli.snapshot.SnapshotService;
 import com.devcli.snapshot.TurnSnapshot;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.skill.SkillContextBuffer;
-import com.devcli.memory.StickyMemory;
+import com.devcli.memory.RuleContext;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.util.AnsiStyle;
 import org.jline.terminal.Terminal;
@@ -102,15 +103,15 @@ import java.util.concurrent.atomic.AtomicReference;
  * DevCLI v16.1.0 - Terminal-First Agent IDE
  * 支持 ReAct、Plan、Memory、RAG、HITL、并行工具调用、多模型切换、MCP、CDP 会话复用
  * 第 15 期新增：Skill 系统（三层加载 + load_skill 工具 + SkillContextBuffer 注入）、内置 web-access skill
- * 第 16 期新增：TUI 界面（Lanterna 3）、文件树浏览、代码高亮、对话历史可视化、配置管理面板
- * 第 16.1 期形态修正：抽出 Renderer 接口 + 三个实现（inline/lanterna/plain），默认形态切换为 inline 流式 TUI（Claude Code 风格）
+ * 第 16 期新增终端交互；第 16.1 期收敛为 inline / plain 两种 Renderer 实现
  *   - inline 流式：prompt 下方 inline 状态区、行内可折叠工具块、行内 git diff、单字符 HITL 提示、命令 palette
- *   - lanterna：保留 phase-16 全屏窗口（向后兼容 DEVCLI_TUI=true）
  *   - plain：纯 println 兜底
  * HITL 增强：路径围栏（PathGuard）、命令快速拒绝（CommandGuard）、操作审计链（AuditLog）—— 见 com.devcli.policy
  */
 public class Main {
     private static final Logger log = LoggerFactory.getLogger(Main.class);
+    private static final com.devcli.trace.RunEventTraceSink TRACE_SINK =
+            new com.devcli.trace.RunEventTraceSink();
     private static final String VERSION = "16.1.0";
     private static final String ENV_FILE = ".env";
     private static final String LOG_DIR_PROPERTY = "devcli.log.dir";
@@ -130,6 +131,9 @@ public class Main {
     private static final String APP_ARROW_DOWN = "OB";
     private static final int CTRL_O = 15;
     private static final long CANCEL_QUIESCE_TIMEOUT_SECONDS = 5;
+
+    /** 会话级规则层的状态栏/状态视图摘要；启动时加载后不再变化。 */
+    private static volatile String permissionRuleSummary = "";
     private static final String DEFAULT_CHROME_DEVTOOLS_MCP_JSON = """
             {
               "mcpServers": {
@@ -215,6 +219,8 @@ public class Main {
         configureLogging();
 
         DevCliConfig config = DevCliConfig.load();
+        com.devcli.policy.PermissionRuleSet permissionRules = loadPermissionRules(config);
+        permissionRuleSummary = permissionRules.compactSummary();
         LlmClient llmClient = LlmClientFactory.createFromConfig(config);
         if (llmClient == null) {
             System.err.println("❌ 错误: 未找到可用的 API Key");
@@ -226,7 +232,13 @@ public class Main {
         try (Terminal terminal = buildTerminal()) {
             TerminalHitlHandler terminalHitlHandler = new TerminalHitlHandler(false);
             SwitchableHitlHandler hitlHandler = new SwitchableHitlHandler(terminalHitlHandler);
-            HitlToolRegistry hitlToolRegistry = new HitlToolRegistry(hitlHandler);
+            // 审批通道在有终端交互时始终可用：「要不要问」由权限模式决定，不再由这个开关决定。
+            // 关掉它会让本该询问的动作静默阻塞在 stdin，比直接拒绝更难排查。
+            hitlHandler.setEnabled(true);
+            HitlToolRegistry hitlToolRegistry = new HitlToolRegistry(hitlHandler)
+                    .withPermissionRules(permissionRules)
+                    .withPermissionMode(startupPermissionMode(config))
+                    .withPermissionClassifier(permissionClassifier(llmClientRef));
             BrowserSession browserSession = new BrowserSession();
             BrowserConnectivityCheck browserConnectivityCheck = new BrowserConnectivityCheck();
             hitlToolRegistry.setBrowserGuard(new BrowserGuard(browserSession, new SensitivePagePolicy()));
@@ -265,7 +277,7 @@ public class Main {
             renderer.bindLineReader(lineReader);
             PrintStream ui = renderer.stream();
             renderer.start();
-            renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, null));
+            renderer.updateStatus(statusInfo(llmClient, hitlToolRegistry.currentPermissionMode(), "idle", mcpServerManager, null));
 
             // 统一关停协调器:JVM 多个 shutdown hook 无顺序保证,
             // 这里全部收敛到单一 hook,按显式 order 关闭(依赖方先关,被依赖资源后关)。
@@ -283,7 +295,7 @@ public class Main {
             } catch (Exception e) {
                 startupNote = "MCP 初始化失败: " + e.getMessage();
             }
-            AtMentionExpander mentionExpander = new AtMentionExpander(mcpServerManager);
+            AtMentionExpander mentionExpander = new AtMentionExpander(mcpServerManager, Path.of("."));
             LocalPathMentionExpander localPathMentionExpander = new LocalPathMentionExpander(Path.of("."));
 
             // === Skill 系统初始化 ===
@@ -292,13 +304,32 @@ public class Main {
             Path userSkillsDir = home.resolve(".devcli/skills");
             Path projectSkillsDir = Path.of(".devcli/skills").toAbsolutePath();
             try {
-                new com.devcli.skill.SkillBuiltinExtractor(skillsCacheDir).extractAll();
+                new com.devcli.skill.SkillBuiltinExtractor(skillsCacheDir,
+                        diagnostic -> TRACE_SINK.emit(new com.devcli.event.RunEvent.CustomMessage(
+                                "skill.diagnostic", diagnostic.message(), java.util.Map.of(
+                                "code", diagnostic.code(), "path", diagnostic.path())))).extractAll();
             } catch (Exception e) {
                 startupNote = appendStartupNote(startupNote, "内置 skill 解压失败: " + e.getMessage());
             }
             com.devcli.skill.SkillStateStore skillStateStore = new com.devcli.skill.SkillStateStore(home.resolve(".devcli/skills.json"));
+            skillStateStore.setDiagnosticSink(diagnostic -> TRACE_SINK.emit(
+                    new com.devcli.event.RunEvent.CustomMessage(
+                            "skill.diagnostic", diagnostic.message(), java.util.Map.of(
+                            "code", diagnostic.code(), "path", diagnostic.path()))));
             com.devcli.skill.SkillRegistry skillRegistry = new com.devcli.skill.SkillRegistry(
                     skillsCacheDir, userSkillsDir, projectSkillsDir, skillStateStore);
+            skillRegistry.setAvailableDependencies(
+                    () -> hitlToolRegistry.searchableTools().stream()
+                            .map(com.devcli.tool.ToolRegistry.Tool::name)
+                            .collect(java.util.stream.Collectors.toUnmodifiableSet()),
+                    () -> mcpServerManager.servers().stream()
+                            .filter(server -> server.status() == com.devcli.mcp.McpServerStatus.READY)
+                            .map(com.devcli.mcp.McpServer::name)
+                            .collect(java.util.stream.Collectors.toUnmodifiableSet()));
+            skillRegistry.setDiagnosticSink(diagnostic -> TRACE_SINK.emit(
+                    new com.devcli.event.RunEvent.CustomMessage(
+                            "skill.diagnostic", diagnostic.message(), java.util.Map.of(
+                            "code", diagnostic.code(), "path", diagnostic.path()))));
             skillRegistry.reload();
             skillRegistryRef.set(skillRegistry);
             skillRegistry.allSkills().forEach(skill -> extensionRegistry.registerOrReplace(
@@ -315,6 +346,8 @@ public class Main {
             hitlToolRegistry.setSkillContextBuffer(skillContextBuffer);
 
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
+            // Execution Trace：结构化运行事件自动落 ~/.devcli/traces，/trace 查看。
+            reactAgent.setRunEventSink(TRACE_SINK);
             AgentSessionRuntime reactSession = AgentSessionRuntime.adoptOwned(
                     reactAgent, Path.of(reactAgent.getToolRegistry().getProjectPath()));
             RuntimeThreadStore cliRunStore = RuntimeCommandLauncher.openRuntimeStore();
@@ -326,57 +359,25 @@ public class Main {
             reactAgent.setSkillRegistry(skillRegistry);
             reactAgent.setSkillContextBuffer(skillContextBuffer);
 
-            // 长期记忆写入可见化：写入长期记忆意味着跨会话持久化用户内容，
-            // 保留自动保存能力但不允许无声——每次落库都告知写了什么、依据哪条规则、怎么删。
+            // 长期记忆写入可见化：显式保存、证据失效与 Curator 晋升落库都必须可见。
             reactAgent.getMemoryManager().setAutoSaveListener(fact -> ui.println(
                     "🧠 已记入长期记忆 [" + fact.memoryType() + "/" + fact.source() + "]: "
                             + abbreviateMemoryNotice(fact.content())
                             + "\n   规则: " + fact.reasonCode()
                             + " | 删除: /memory forget " + fact.id()));
 
-            // === Sticky Memory 初始化（PR-B）===
-            // 三层文件式记忆 + pinned facts JSON。
-            // 启动时加载文件层；运行时变化（/save --pin 等）写 pinned_facts.json。
-            // 注入给 reactAgent / planAgent / orchestrator 三条主路径，让 system prompt 都能看到。
-            com.devcli.memory.StickyMemory stickyMemory = new com.devcli.memory.StickyMemory(
+            // === Rule Context 初始化 ===
+            // 规则文件和显式强约束每轮注入，但不计入记忆层。
+            com.devcli.memory.RuleContext ruleContext = new com.devcli.memory.RuleContext(
                     com.devcli.memory.LongTermMemory.resolveMemoryDir());
-            stickyMemory.reloadFiles(java.nio.file.Path.of(".").toAbsolutePath().normalize());
-            reactAgent.setStickyMemorySupplier(stickyMemory::renderForPrompt);
+            ruleContext.reloadFiles(java.nio.file.Path.of(".").toAbsolutePath().normalize());
+            reactAgent.setRuleContextSupplier(ruleContext::renderForPrompt);
 
-            // === Retrievable 区语义检索初始化（PR-C）===
-            // 用同一个 EmbeddingClient（启动期不强制连 Ollama）+ 独立 SQLite vector store。
-            // store 失败 / embed 失败时所有路径自动 fallback 到关键词检索，不影响 ReAct 主路径。
-            com.devcli.memory.MemoryVectorStore memoryVectorStore = new com.devcli.memory.MemoryVectorStore();
-            shutdown.register(40, "memoryVectorStore", memoryVectorStore::close);
-            com.devcli.rag.EmbeddingClient embeddingClient = new com.devcli.rag.EmbeddingClient();
-            // store 钩子：每次 LongTermMemory.store 后异步 embed 写向量库
-            reactAgent.getMemoryManager().getLongTermMemory().setVectorIndex(
-                    entry -> embedAndUpsert(memoryVectorStore, embeddingClient, entry),
-                    memoryVectorStore::delete,
-                    memoryVectorStore::clear);
-            // 检索通道：每次查询 embed 一次然后 top-k
-            reactAgent.getMemoryManager().getRetriever().setSemanticSearch((query, topK) -> {
-                if (!memoryVectorStore.isUsable() || query == null || query.isBlank()) {
-                    return java.util.List.of();
-                }
-                try {
-                    float[] vec = embeddingClient.embed(query);
-                    if (vec == null || vec.length == 0) return java.util.List.of();
-                    return memoryVectorStore.search(vec, topK,
-                                    com.devcli.memory.MemoryVectorStore.DEFAULT_SIMILARITY_THRESHOLD)
-                            .stream()
-                            .map(r -> new com.devcli.memory.MemoryRetriever.SemanticHit(r.factId(), r.similarity()))
-                            .toList();
-                } catch (Exception e) {
-                    // embed 失败（Ollama 不通 / API key 缺）静默 fallback 到关键词
-                    return java.util.List.of();
-                }
-            });
             DurableTaskManager taskManager = RuntimeCommandLauncher.openTaskManager(llmClientRef, cliRunStore);
             taskManager.start();
             // 后台任务管理器可能仍在驱动无头 Agent(依赖 MCP / 记忆资源),必须最先关闭。
             shutdown.register(10, "taskManager", taskManager::close);
-            renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
+            renderer.updateStatus(statusInfo(llmClient, hitlToolRegistry.currentPermissionMode(), "idle", mcpServerManager, skillRegistry));
             StartupScreenInfo startupScreenInfo = startupScreenInfo(llmClient, mcpServerManager, skillRegistry, startupNote);
             if (renderer instanceof InlineRenderer inline) {
                 inline.installStartupScreen(startupScreenLines(startupScreenInfo));
@@ -384,11 +385,12 @@ public class Main {
                 printStartupScreen(ui, startupScreenInfo);
             }
             OrchestrationProfile nextTaskOrchestrationProfile = null;
+            com.devcli.policy.TaskGrant nextTaskGrant = com.devcli.policy.TaskGrant.NONE;
             AgentTurnInbox turnInbox = reactAgent.getTurnInbox();
             String pendingDraft = "";
 
             reactAgent.setRenderer(renderer);
-            reactAgent.setHitlEnabledSupplier(hitlHandler::isEnabled);
+            reactAgent.setPermissionModeSupplier(() -> hitlToolRegistry.currentPermissionMode().id());
             reactAgent.getToolRegistry().setWriteFileObserver(
                     (path, ba) -> renderer.appendDiff(path, ba[0], ba[1]));
 
@@ -482,34 +484,58 @@ public class Main {
                         ui.println();
                         continue;
                     }
+                    case MEMORY_EXPORT -> {
+                        com.devcli.memory.LongTermMemory longTermMemory =
+                                reactAgent.getMemoryManager().getLongTermMemory();
+                        java.util.List<com.devcli.memory.MemoryEntry> entries = longTermMemory.getAll();
+                        String markdown = longTermMemory.exportMarkdown();
+                        try {
+                            java.nio.file.Path auditFile = longTermMemory.rootDir().resolve("memory-audit.md");
+                            java.nio.file.Files.createDirectories(auditFile.getParent());
+                            java.nio.file.Files.writeString(auditFile, markdown,
+                                    java.nio.charset.StandardCharsets.UTF_8);
+                            ui.println("已导出 " + entries.size() + " 条长期记忆到 " + auditFile);
+                            ui.println("只读审计快照，不会回写记忆库；删除条目用 /memory forget <id>。\n");
+                        } catch (java.io.IOException e) {
+                            ui.println("导出记忆审计快照失败：" + e.getMessage() + "\n");
+                        }
+                        continue;
+                    }
                     case MEMORY_STATUS -> {
                         ui.println("📋 记忆系统状态：");
                         ui.println(reactAgent.getMemoryManager().getSystemStatus());
-                        ui.println(stickyMemory.getStatusSummary());
-                        ui.println("   /memory organize - 生成长期记忆整理计划");
-                        ui.println("   /memory organize apply - 应用低风险整理项");
-                        ui.println("   /memory clear - 清空长期记忆");
+                        ui.println(ruleContext.getStatusSummary());
+                        ui.println("   /memory organize - 查看过期项与作用域冲突统计");
+                        ui.println("   /memory export - 导出可读 Markdown 审计快照");
+                        ui.println("   /memory organize apply - 重建全局与项目记忆索引");
+                        ui.println("   /memory clear [global|project] - 清空长期记忆（默认只清当前写入作用域）");
                         ui.println("   /memory forget <id> - 删除单条长期记忆");
                         ui.println("   /save <事实> - 手动保存到长期记忆（Retrievable）");
-                        ui.println("   /save --pin <事实> - 永久 pin 到 Sticky 区，每轮注入 system prompt");
+                        ui.println("   /save --pin <事实> - 已废弃，请改用 /save 或 /rule add");
                         ui.println();
                         continue;
                     }
                     case MEMORY_ORGANIZE -> {
-                        com.devcli.memory.MemoryOrganizer.Mode organizerMode =
-                                "apply".equalsIgnoreCase(command.payload())
-                                        ? com.devcli.memory.MemoryOrganizer.Mode.APPLY_SAFE
-                                        : com.devcli.memory.MemoryOrganizer.Mode.DRY_RUN;
-                        ui.println("正在整理长期记忆...");
-                        com.devcli.memory.MemoryOrganizer.Report report =
-                                reactAgent.getMemoryManager().organizeLongTermMemory(organizerMode);
-                        ui.println(report.render());
+                        if ("apply".equalsIgnoreCase(command.payload())) {
+                            int rebuilt = reactAgent.getMemoryManager().getLongTermMemory().rebuildIndexes();
+                            ui.println("已重建 " + rebuilt + " 个作用域的长期记忆索引。");
+                        } else {
+                            ui.println(reactAgent.getMemoryManager().getLongTermMemory().maintenanceReport());
+                        }
                         ui.println();
                         continue;
                     }
+                    case MEMORY_PENDING -> {
+                        ui.println("当前版本不再使用后台记忆候选队列；自动冲突会保留原记忆，显式 /save 才会更新。");
+                        ui.println();
+                        continue;
+                    }
+                    case MEMORY_CONFIRM, MEMORY_REJECT -> {
+                        ui.println("当前版本已移除记忆候选队列，无需 confirm/reject。\n");
+                        continue;
+                    }
                     case MEMORY_CLEAR -> {
-                        reactAgent.getMemoryManager().clearLongTerm();
-                        ui.println("🧹 长期记忆已清空\n");
+                        ui.println(reactAgent.getMemoryManager().clearLongTerm(command.payload()));
                         ui.println();
                         continue;
                     }
@@ -533,22 +559,47 @@ public class Main {
                             com.devcli.memory.MemoryManager.StoreResult result =
                                     reactAgent.getMemoryManager().storeFactWithPolicy(fact, true);
                             if (result.stored()) {
-                                ui.println("💾 " + result.message() + ": " + fact + "\n");
+                                ui.println("💾 " + result.message() + ": "
+                                        + com.devcli.policy.SensitiveDataRedactor.redact(fact) + "\n");
                             } else {
                                 ui.println("⚠️ " + result.message() + "\n");
                             }
                         }
                         continue;
                     }
-                    case MEMORY_PIN -> {
-                        String fact = command.payload();
-                        if (fact == null || fact.isEmpty()) {
-                            ui.println("❌ 请提供要 pin 的事实，例如 /save --pin 用户偏好简体中文\n");
+                    case RULE_ADD -> {
+                        String rule = command.payload();
+                        if (rule == null || rule.isEmpty()) {
+                            ui.println("❌ 请提供强约束，例如 /rule add 禁止修改生成目录\n");
                         } else {
-                            com.devcli.memory.StickyMemory.PinnedFact pinned = stickyMemory.pin(fact, "user-cli");
-                            ui.println("📌 已 pin 到 Sticky 区: " + pinned.content);
-                            ui.println("   (id=" + pinned.id + " · 永久注入 system prompt，跨 session 保留)\n");
+                            try {
+                                com.devcli.memory.RuleContext.Rule added = ruleContext.addRule(rule, "user-cli");
+                                ui.println("已添加强约束: " + added.content);
+                                ui.println("   (id=" + added.id + " · 规则上下文每轮生效)\n");
+                            } catch (IllegalArgumentException e) {
+                                ui.println("无法添加规则: " + e.getMessage() + "\n");
+                            }
                         }
+                        continue;
+                    }
+                    case RULE_LIST -> {
+                        ui.println(ruleContext.renderManagementReport());
+                        ui.println();
+                        continue;
+                    }
+                    case RULE_REMOVE -> {
+                        String ruleId = command.payload();
+                        if (ruleId == null || ruleId.isBlank()) {
+                            ui.println("请提供规则 id，例如 /rule remove rule-1a2b3c4d\n");
+                        } else if (ruleContext.removeRule(ruleId)) {
+                            ui.println("已删除规则 " + ruleId + "\n");
+                        } else {
+                            ui.println("未找到规则 " + ruleId + "，可用 /rule list 查看\n");
+                        }
+                        continue;
+                    }
+                    case MEMORY_PIN -> {
+                        ui.println("/save --pin 已废弃：稳定事实请用 /save，强约束请用 /rule add\n");
                         continue;
                     }
                     case ORCHESTRATE -> {
@@ -594,27 +645,95 @@ public class Main {
                                 ui.println("✅ 已切换到: " + llmClient.getModelName() + " (" + llmClient.getProviderName() + ")");
                                 ui.println("   上下文策略: " + reactAgent.getMemoryManager().getContextProfile().summary());
                                 ui.println("   对话上下文已保留，使用 /clear 可清空\n");
-                                renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
+                                renderer.updateStatus(statusInfo(llmClient, hitlToolRegistry.currentPermissionMode(), "idle", mcpServerManager, skillRegistry));
                             }
                         }
                         continue;
                     }
-                    case SWITCH_HITL -> {
+                    case PERMISSION_MODE -> {
                         String payload = command.payload();
-                        if ("on".equals(payload)) {
-                            hitlHandler.setEnabled(true);
-                            ui.println("🔒 HITL 审批已启用：write_file / execute_command / create_project 执行前将请求人工确认\n");
-                        } else if ("off".equals(payload)) {
-                            hitlHandler.setEnabled(false);
-                            hitlHandler.clearApprovedAll();
-                            ui.println("🔓 HITL 审批已关闭：危险操作将直接执行\n");
+                        if (payload == null || payload.isBlank()) {
+                            PermissionMode active = hitlToolRegistry.currentPermissionMode();
+                            ui.println("🔐 当前权限模式：" + active.id() + " — " + active.description());
+                            ui.println(PermissionMode.usage());
+                            ui.println();
                         } else {
-                            String status = hitlHandler.isEnabled() ? "启用" : "关闭";
-                            ui.println("🔒 HITL 当前状态：" + status);
-                            ui.println("   /hitl on  - 启用人工审批");
-                            ui.println("   /hitl off - 关闭人工审批\n");
+                            try {
+                                PermissionMode next = PermissionMode.parse(payload);
+                                hitlToolRegistry.withPermissionMode(next);
+                                // 放行缓存按模式边界收敛：换模式后旧的「全部放行」不再代表当前授权
+                                hitlHandler.clearApprovedAll();
+                                ui.println("🔐 权限模式已切换：" + next.id() + " — " + next.description());
+                                if (next.capability() == PermissionMode.Capability.READ_ONLY) {
+                                    ui.println("   只读在任务入口收窄能力范围：写入、命令与外部副作用工具"
+                                            + "不会暴露给模型，也不会执行。");
+                                }
+                                ui.println();
+                            } catch (IllegalArgumentException invalid) {
+                                ui.println("❌ " + invalid.getMessage());
+                                ui.println(PermissionMode.usage());
+                                ui.println();
+                            }
                         }
-                        renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
+                        renderer.updateStatus(statusInfo(llmClient, hitlToolRegistry.currentPermissionMode(), "idle", mcpServerManager, skillRegistry));
+                        continue;
+                    }
+                    case GRANT -> {
+                        String payload = command.payload();
+                        if (payload == null) {
+                            printGrantUsage(ui, nextTaskGrant);
+                            continue;
+                        }
+                        String[] tokens = payload.trim().split("\\s+");
+                        String mode = tokens[0].toLowerCase(java.util.Locale.ROOT);
+                        java.util.List<String> arguments = java.util.List.of(tokens)
+                                .subList(1, tokens.length);
+                        if (!arguments.isEmpty() && !"write".equals(mode) && !"net".equals(mode)) {
+                            ui.println("❌ /grant " + mode + " 不接受参数。\n");
+                            continue;
+                        }
+                        if ("net".equals(mode) && arguments.isEmpty()) {
+                            ui.println("❌ 请给出要授权的域名，例如 /grant net github.com\n");
+                            continue;
+                        }
+                        try {
+                            switch (mode) {
+                                case "off" -> {
+                                    nextTaskGrant = com.devcli.policy.TaskGrant.NONE;
+                                    // 撤销必须覆盖全部放行来源：只清例外却留着本轮「全部放行」缓存，
+                                    // 用户会以为授权已收回，而实际上审批仍在自动通过。
+                                    hitlHandler.clearApprovedAll();
+                                    ui.println("🔓 已取消本轮例外，并清空本轮「全部放行」缓存。");
+                                    ui.println("   持久基线不受影响；如需修改请编辑 ~/.devcli/config.json 后重启。\n");
+                                }
+                                case "status" -> printGrantStatus(ui, nextTaskGrant, hitlHandler);
+                                case "write" -> {
+                                    java.util.List<String> effective = arguments.isEmpty()
+                                            ? java.util.List.of(com.devcli.policy.WriteGlobSet.WHOLE_PROJECT)
+                                            : java.util.List.copyOf(arguments);
+                                    nextTaskGrant = nextTaskGrant.withWriteGlobs(effective);
+                                    printGrant(nextTaskGrant, ui);
+                                }
+                                case "net" -> {
+                                    nextTaskGrant = nextTaskGrant.withNetworkHosts(
+                                            java.util.List.copyOf(arguments));
+                                    printGrant(nextTaskGrant, ui);
+                                }
+                                case "commands" -> {
+                                    nextTaskGrant = new com.devcli.policy.TaskGrant(
+                                            nextTaskGrant.writeGlobs(), nextTaskGrant.networkHosts(), true);
+                                    printGrant(nextTaskGrant, ui);
+                                }
+                                default -> {
+                                    nextTaskGrant = new com.devcli.policy.TaskGrant(
+                                            java.util.List.of(com.devcli.policy.WriteGlobSet.WHOLE_PROJECT),
+                                            nextTaskGrant.networkHosts(), true);
+                                    printGrant(nextTaskGrant, ui);
+                                }
+                            }
+                        } catch (IllegalArgumentException invalidArgument) {
+                            ui.println("❌ " + invalidArgument.getMessage() + "；授权未被修改。\n");
+                        }
                         continue;
                     }
                     case POLICY_STATUS -> {
@@ -622,7 +741,8 @@ public class Main {
                         continue;
                     }
                     case CONFIG -> {
-                        handleConfigPalette(renderer, config, llmClient, hitlHandler, skillRegistry);
+                        handleConfigPalette(renderer, config, llmClient,
+                                hitlToolRegistry.currentPermissionMode(), skillRegistry);
                         continue;
                     }
                     case AUDIT_TAIL -> {
@@ -637,6 +757,15 @@ public class Main {
                         printRestoreCommand(ui, reactAgent.getToolRegistry().getSnapshotService(), command.payload());
                         continue;
                     }
+                    case TRACE -> {
+                        com.devcli.trace.TraceQuery traceQuery = new com.devcli.trace.TraceQuery();
+                        if ("list".equalsIgnoreCase(command.payload())) {
+                            ui.println(traceQuery.renderList(10));
+                        } else {
+                            ui.println(traceQuery.renderRun(command.payload()));
+                        }
+                        continue;
+                    }
                     case MCP_LIST -> {
                         ui.println(mcpServerManager.formatStatus());
                         ui.println();
@@ -644,7 +773,7 @@ public class Main {
                     }
                     case MCP_RESTART -> {
                         printMcpCommandResult(ui, mcpServerManager.restart(command.payload()));
-                        renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
+                        renderer.updateStatus(statusInfo(llmClient, hitlToolRegistry.currentPermissionMode(), "idle", mcpServerManager, skillRegistry));
                         continue;
                     }
                     case MCP_LOGS -> {
@@ -653,12 +782,12 @@ public class Main {
                     }
                     case MCP_DISABLE -> {
                         printMcpCommandResult(ui, mcpServerManager.disable(command.payload()));
-                        renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
+                        renderer.updateStatus(statusInfo(llmClient, hitlToolRegistry.currentPermissionMode(), "idle", mcpServerManager, skillRegistry));
                         continue;
                     }
                     case MCP_ENABLE -> {
                         printMcpCommandResult(ui, mcpServerManager.enable(command.payload()));
-                        renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
+                        renderer.updateStatus(statusInfo(llmClient, hitlToolRegistry.currentPermissionMode(), "idle", mcpServerManager, skillRegistry));
                         continue;
                     }
                     case MCP_RESOURCES -> {
@@ -687,12 +816,22 @@ public class Main {
                     }
                     case SKILL_ON -> {
                         ui.println(SkillCommandHandler.enable(skillRegistry, skillStateStore, command.payload()));
-                        renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
+                        renderer.updateStatus(statusInfo(llmClient, hitlToolRegistry.currentPermissionMode(), "idle", mcpServerManager, skillRegistry));
                         continue;
                     }
                     case SKILL_OFF -> {
                         ui.println(SkillCommandHandler.disable(skillRegistry, skillStateStore, command.payload()));
-                        renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
+                        renderer.updateStatus(statusInfo(llmClient, hitlToolRegistry.currentPermissionMode(), "idle", mcpServerManager, skillRegistry));
+                        continue;
+                    }
+                    case SKILL_TRUST_PROJECT -> {
+                        ui.println(SkillCommandHandler.trustProject(skillRegistry));
+                        renderer.updateStatus(statusInfo(llmClient, hitlToolRegistry.currentPermissionMode(), "idle", mcpServerManager, skillRegistry));
+                        continue;
+                    }
+                    case SKILL_UNTRUST_PROJECT -> {
+                        ui.println(SkillCommandHandler.untrustProject(skillRegistry));
+                        renderer.updateStatus(statusInfo(llmClient, hitlToolRegistry.currentPermissionMode(), "idle", mcpServerManager, skillRegistry));
                         continue;
                     }
                     case SKILL_RELOAD -> {
@@ -705,7 +844,7 @@ public class Main {
                         ui.println("🔄 已重新扫描 skill 目录");
                         ui.println(SkillCommandHandler.startupSummary(skillRegistry));
                         ui.println("✅ 下一轮 LLM 调用生效");
-                        renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
+                        renderer.updateStatus(statusInfo(llmClient, hitlToolRegistry.currentPermissionMode(), "idle", mcpServerManager, skillRegistry));
                         continue;
                     }
                     case SESSION, BRANCH -> {
@@ -814,8 +953,22 @@ public class Main {
 
                 // 运行 Agent
                 String submittedInput = input;
-                input = mentionExpander.expand(input);
-                input = localPathMentionExpander.expand(input);
+                int toolDefinitionTokens = com.devcli.memory.TokenBudget.estimateToolDefinitionsTokens(
+                        reactAgent.getToolRegistry().getToolDefinitions());
+                int historyTriggerTokens = reactAgent.getMemoryManager().getContextProfile()
+                        .historyTriggerTokens(toolDefinitionTokens);
+                int historyTokens = com.devcli.memory.TokenBudget.estimateMessagesTokens(
+                        reactAgent.getConversationHistory());
+                int submittedTokens = com.devcli.memory.TokenBudget.estimateMessagesTokens(
+                        List.of(LlmClient.Message.user(input)));
+                int remainingAttachmentTokens = Math.max(
+                        0, historyTriggerTokens - historyTokens - submittedTokens);
+                input = mentionExpander.expand(input, remainingAttachmentTokens);
+                submittedTokens = com.devcli.memory.TokenBudget.estimateMessagesTokens(
+                        List.of(LlmClient.Message.user(input)));
+                remainingAttachmentTokens = Math.max(
+                        0, historyTriggerTokens - historyTokens - submittedTokens);
+                input = localPathMentionExpander.expand(input, remainingAttachmentTokens);
                 if (!(renderer instanceof InlineRenderer)) {
                     ui.println();
                 }
@@ -831,26 +984,61 @@ public class Main {
                 OrchestrationProfile orchestrationProfile = command.type() == CliCommandParser.CommandType.ORCHESTRATE
                         ? command.orchestrationProfile()
                         : nextTaskOrchestrationProfile;
+                // 能力范围与任务级授权都作用于整轮（含编排）：波次线程池与隔离注册表在轮次内创建，
+                // 会继承当前轮次的范围与授权，因此不需要再按路径区分。
+                // 只读由权限模式声明（plan），不再是独立开关：模式是粘性的，直到 /mode 切走。
+                boolean readOnlyTurn = hitlToolRegistry.currentPermissionMode().capability()
+                        == PermissionMode.Capability.READ_ONLY;
+                // 有效授权 = 持久基线 ∪ 本轮例外：基线跨会话生效，例外只作用于这一轮。
+                // 合并是并集，例外只能加不能减，避免用户从「基线是常态」推不出结果。
+                // 持久授权由规则层承载（permissions.allow）；/grant 只表达「本轮例外」，
+                // 一轮结束即还原，不再与持久基线求并集。
+                com.devcli.policy.TaskGrant grantForTurn = nextTaskGrant;
+                nextTaskGrant = com.devcli.policy.TaskGrant.NONE;
+                ToolRegistry reactToolRegistry = reactAgent.getToolRegistry();
+                if (readOnlyTurn && orchestrationProfile != null) {
+                    // 只读编排必然失败：Worker 必须写入隔离工作区。与其跑到中途收获一片
+                    // CAPABILITY_DENIED，不如直接拒绝并说明；模式是粘性的，用户可自行切回。
+                    ui.println("❌ 只读模式（plan）无法执行 " + orchestrationProfile.displayName()
+                            + " 编排：编排必须写入隔离工作区。请先 /mode default 再执行，"
+                            + "或直接对普通任务使用 plan 模式。\n");
+                    continue;
+                }
                 if (orchestrationProfile != null) {
                     snapshotMode = orchestrationProfile.snapshotMode();
                     LlmClient activeClient = llmClient;
-                    runTask = () -> runOrchestratedTask(
-                            activeClient,
+                    OrchestrationTaskRunner orchestrationTaskRunner = new OrchestrationTaskRunner(
+                            config,
                             reactAgent,
-                            lineReader,
-                            ui,
                             mcpServerManager,
-                            stickyMemory,
+                            ruleContext,
                             skillRegistry,
                             skillContextBuffer,
-                            taskInput);
+                            createTeamPlanReviewHandler(lineReader, ui),
+                            TRACE_SINK,
+                            ui);
+                    runTask = () -> reactToolRegistry.runWithTaskGrant(grantForTurn,
+                            () -> orchestrationTaskRunner.run(activeClient, taskInput));
                 } else {
                     snapshotMode = "react";
-                    runTask = () -> reactSession.runInCurrentContext(taskInput).output();
+                    java.util.function.Supplier<String> reactTurn =
+                            () -> reactSession.runInCurrentContext(taskInput).output();
+                    java.util.function.Supplier<String> grantedTurn =
+                            () -> reactToolRegistry.runWithTaskGrant(grantForTurn, reactTurn);
+                    runTask = readOnlyTurn
+                            ? () -> reactToolRegistry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY,
+                                    grantedTurn)
+                            : grantedTurn::get;
                 }
+                // 审批放行缓存按任务边界收敛：一次「全部放行」只在本轮任务内有效，
+                // 不跨用户消息静默继承；/plan 或 Team 的一次运行属于同一任务，内部仍共享放行。
+                hitlHandler.clearApprovedAll();
                 SnapshotService snapshotService = reactAgent.getToolRegistry().getSnapshotService();
-                renderer.updateStatus(statusInfo(llmClient, hitlHandler, snapshotMode, mcpServerManager, skillRegistry));
-                boolean acceptActiveTurnInput = "react".equals(snapshotMode) && !hitlHandler.isEnabled();
+                renderer.updateStatus(statusInfo(llmClient, hitlToolRegistry.currentPermissionMode(), snapshotMode, mcpServerManager, skillRegistry));
+                // 活动轮次能否并发读终端，取决于本轮会不会弹审批，而不是「HITL 开关是否打开」——
+                // 审批通道现在恒为可用，用 isEnabled() 判断会让这个条件恒为假、功能静默失效。
+                boolean acceptActiveTurnInput = "react".equals(snapshotMode)
+                        && neverPrompts(hitlToolRegistry.currentPermissionMode(), permissionRules);
                 TurnRunResult turnResult = runWithCancelSupport(terminal,
                         lineReader,
                         renderer,
@@ -862,7 +1050,7 @@ public class Main {
                 String response = turnResult.response();
                 pendingDraft = turnResult.draft();
                 if (!"react".equals(snapshotMode)) {
-                    renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
+                    renderer.updateStatus(statusInfo(llmClient, hitlToolRegistry.currentPermissionMode(), "idle", mcpServerManager, skillRegistry));
                 }
                 nextTaskOrchestrationProfile = null;
                 if (response != null && !response.isBlank()) {
@@ -939,15 +1127,6 @@ public class Main {
         );
     }
 
-    private static AgentOrchestrator createUnifiedPlanAgent(LlmClient llmClient, Agent reactAgent,
-                                                            LineReader lineReader, PrintStream out) {
-        out.println("📋 使用 Plan 模式\n");
-        AgentOrchestrator orchestrator = new AgentOrchestrator(
-                llmClient, reactAgent.getToolRegistry(), reactAgent.getMemoryManager(), out);
-        orchestrator.setPlanReviewHandler(createTeamPlanReviewHandler(lineReader, out));
-        return orchestrator;
-    }
-
     private static AgentOrchestrator.TeamPlanReviewHandler createTeamPlanReviewHandler(
             LineReader lineReader, PrintStream out) {
         return request -> {
@@ -977,51 +1156,24 @@ public class Main {
             text.append("⚠️ 当前计划包含需要人工验收的标准，执行前必须明确确认。\n");
         }
         if (request.semanticReviewExecuted()) {
-            text.append("✅ Reviewer 计划语义评审：")
+            text.append(request.semanticReviewApproved()
+                            ? "✅ Reviewer 计划语义评审："
+                            : "⚠️ Reviewer 计划语义评审建议（不阻断）：")
                     .append(request.semanticReviewSummary().isBlank()
-                            ? "已通过" : request.semanticReviewSummary())
+                            ? (request.semanticReviewApproved() ? "已通过" : "未提供有效结论")
+                            : request.semanticReviewSummary())
                     .append('\n');
         }
         return text.toString().trim();
     }
 
-    private static String runOrchestratedTask(LlmClient llmClient,
-                                              Agent reactAgent,
-                                              LineReader lineReader,
-                                              PrintStream out,
-                                              McpServerManager mcpServerManager,
-                                              StickyMemory stickyMemory,
-                                              SkillRegistry skillRegistry,
-                                              SkillContextBuffer skillContextBuffer,
-                                              String taskInput) {
-        AgentOrchestrator orchestrator = createUnifiedPlanAgent(
-                llmClient, reactAgent, lineReader, out);
-        orchestrator.setExternalContextSupplier(mcpServerManager::resourceIndexForPrompt);
-        orchestrator.setStickyMemorySupplier(stickyMemory::renderForPrompt);
-        orchestrator.setSkillSystem(skillRegistry, skillContextBuffer);
-        String resumeId = parsePlanResumeId(taskInput);
-        return resumeId == null
-                ? orchestrator.run(taskInput)
-                : orchestrator.resume(resumeId.isBlank() ? null : resumeId);
-    }
-
     /**
-     * 解析 Plan 的 resume 子命令；旧 /plan --team 与 /team 入口由命令解析器兼容归一化：
+     * 解析 Plan 的 resume 子命令：
      * "resume" → ""（恢复最近 checkpoint）；"resume orch-xxxx" → "orch-xxxx"；
      * 其他输入 → null（按普通任务文本走 run）。
      */
     static String parsePlanResumeId(String taskInput) {
-        if (taskInput == null) {
-            return null;
-        }
-        String trimmed = taskInput.trim();
-        if (trimmed.equalsIgnoreCase("resume")) {
-            return "";
-        }
-        if (trimmed.regionMatches(true, 0, "resume ", 0, 7)) {
-            return trimmed.substring(7).trim();
-        }
-        return null;
+        return OrchestrationTaskRunner.parseResumeId(taskInput);
     }
 
     private static AgentTurnInbox.Item pollPendingAgentPrompt(AgentTurnInbox inbox) {
@@ -1584,9 +1736,21 @@ public class Main {
                 new SlashCommandHint("/plan", "/plan", "下一条任务使用 Plan 模式"),
                 new SlashCommandHint("/plan ", "/plan <任务内容>", "直接用 Plan 模式执行这条任务"),
                 new SlashCommandHint("/plan resume", "/plan resume [id]", "恢复中断的 Plan 任务"),
-                new SlashCommandHint("/hitl", "/hitl", "查看 HITL 状态"),
-                new SlashCommandHint("/hitl on", "/hitl on", "启用危险操作人工审批"),
-                new SlashCommandHint("/hitl off", "/hitl off", "关闭 HITL 审批"),
+                new SlashCommandHint("/mode", "/mode", "查看当前权限模式与可选值"),
+                new SlashCommandHint("/mode default", "/mode default", "危险操作逐个询问"),
+                new SlashCommandHint("/mode plan", "/mode plan", "只读：不暴露写入与命令工具"),
+                new SlashCommandHint("/mode acceptEdits", "/mode acceptEdits", "自动放行编辑类工具，其余仍询问"),
+                new SlashCommandHint("/mode bypassPermissions", "/mode bypassPermissions", "全部直接放行，不询问"),
+                new SlashCommandHint("/mode dontAsk", "/mode dontAsk", "不询问；未获授权的动作一律拒绝"),
+                new SlashCommandHint("/mode auto", "/mode auto", "由分类器逐个判断；分类器不可用时一律拒绝"),
+                new SlashCommandHint("/grant", "/grant", "查看持久基线与本轮授权例外"),
+                new SlashCommandHint("/grant write", "/grant write", "本轮追加授权写入项目内文件"),
+                new SlashCommandHint("/grant write ", "/grant write <路径 glob>", "本轮追加授权给定项目相对路径"),
+                new SlashCommandHint("/grant net ", "/grant net <域名>", "本轮追加授权访问该域名及其子域"),
+                new SlashCommandHint("/grant commands", "/grant commands", "本轮追加授权运行项目构建/测试命令"),
+                new SlashCommandHint("/grant all", "/grant all", "本轮追加授权项目内写入与构建测试命令"),
+                new SlashCommandHint("/grant status", "/grant status", "查看基线、本轮例外与放行缓存"),
+                new SlashCommandHint("/grant off", "/grant off", "取消本轮例外并清空放行缓存"),
                 new SlashCommandHint("/browser", "/browser", "查看浏览器会话状态"),
                 new SlashCommandHint("/browser connect", "/browser connect", "复用已允许远程调试的登录态 Chrome"),
                 new SlashCommandHint("/browser connect ", "/browser connect <port>", "旧式 CDP 端口连接"),
@@ -1619,6 +1783,9 @@ public class Main {
                 new SlashCommandHint("/session clear", "/session clear", "清空当前上下文并保留旧树"),
                 new SlashCommandHint("/branch", "/branch", "/session 的兼容别名"),
                 new SlashCommandHint("/restore ", "/restore <N>", "恢复到最近第 N 个 pre-turn 快照"),
+                new SlashCommandHint("/trace", "/trace", "查看最近一次运行的执行追踪"),
+                new SlashCommandHint("/trace list", "/trace list", "列出最近运行"),
+                new SlashCommandHint("/trace ", "/trace <runId>", "查看指定运行时间线"),
                 new SlashCommandHint("/index", "/index", "索引当前代码库"),
                 new SlashCommandHint("/index ", "/index [路径]", "索引指定路径代码库"),
                 new SlashCommandHint("/search ", "/search <查询>", "语义检索代码"),
@@ -1627,16 +1794,22 @@ public class Main {
                 new SlashCommandHint("/history clear", "/history clear", "清空本机输入历史和会话归档"),
                 new SlashCommandHint("/context", "/context", "查看上下文和记忆状态"),
                 new SlashCommandHint("/memory", "/memory", "查看记忆状态"),
-                new SlashCommandHint("/memory organize", "/memory organize", "生成长期记忆整理计划"),
-                new SlashCommandHint("/memory organize apply", "/memory organize apply", "应用低风险整理项"),
+                new SlashCommandHint("/memory export", "/memory export", "导出可读 Markdown 记忆审计快照"),
+                new SlashCommandHint("/memory organize", "/memory organize", "查看过期项与作用域冲突统计"),
+                new SlashCommandHint("/memory organize apply", "/memory organize apply", "重建全局与项目记忆索引"),
                 new SlashCommandHint("/memory clear", "/memory clear", "清空长期记忆"),
                 new SlashCommandHint("/memory forget", "/memory forget <id>", "删除单条长期记忆"),
                 new SlashCommandHint("/save ", "/save <事实内容>", "手动保存关键事实到长期记忆"),
+                new SlashCommandHint("/rule add ", "/rule add <强约束>", "添加每轮强制执行的规则"),
+                new SlashCommandHint("/rule list", "/rule list", "查看规则和旧 pinned 待迁移项"),
+                new SlashCommandHint("/rule remove ", "/rule remove <id>", "删除显式规则"),
                 new SlashCommandHint("/skill", "/skill", "查看 skill 列表"),
                 new SlashCommandHint("/skill list", "/skill list", "查看 skill 列表"),
                 new SlashCommandHint("/skill show ", "/skill show <name>", "查看 SKILL.md 全文"),
                 new SlashCommandHint("/skill on ", "/skill on <name>", "启用 skill"),
                 new SlashCommandHint("/skill off ", "/skill off <name>", "禁用 skill"),
+                new SlashCommandHint("/skill trust project", "/skill trust project", "信任项目 skill 目录"),
+                new SlashCommandHint("/skill untrust project", "/skill untrust project", "取消信任项目 skill 目录"),
                 new SlashCommandHint("/skill reload", "/skill reload", "重新扫描 skill 目录"),
                 new SlashCommandHint("/help", "/help", "查看命令帮助"),
                 new SlashCommandHint("/exit", "/exit", "退出 DevCLI"),
@@ -1644,10 +1817,136 @@ public class Main {
         );
     }
 
-    private static void printSlashCommandHelp() {
-        printSlashCommandHelp(System.out);
+    private static void printGrant(com.devcli.policy.TaskGrant exception, PrintStream ui) {
+        ui.println("🎫 本轮例外：" + describeGrant(exception));
+        ui.println("   例外只作用于下一条任务（含编排），执行后自动还原。");
+        ui.println("   跨会话生效的持久授权写在 ~/.devcli/config.json 的 permissions.allow 里。");
+        ui.println("   策略边界（项目根、命令黑名单）不受任何授权影响，越界仍会被直接拒绝。\n");
     }
 
+    private static void printGrantUsage(PrintStream ui, com.devcli.policy.TaskGrant exception) {
+        ui.println("🎫 本轮例外：" + describeGrant(exception));
+        ui.println("   /grant write             - 本轮追加授权写入项目内任意文件");
+        ui.println("   /grant write src/** ...  - 本轮追加授权给定项目相对路径");
+        ui.println("   /grant net github.com    - 本轮追加授权访问该域名及其子域");
+        ui.println("   /grant commands          - 本轮追加授权运行项目构建/测试命令");
+        ui.println("   /grant all               - 本轮追加授权写入与命令");
+        ui.println("   /grant status            - 查看本轮例外、规则层与放行缓存");
+        ui.println("   /grant off               - 取消本轮例外并清空放行缓存");
+        ui.println("   只作用于下一条任务；跨会话的持久授权请改用 permissions.allow 规则。\n");
+    }
+
+    private static void printGrantStatus(PrintStream ui,
+                                         com.devcli.policy.TaskGrant exception,
+                                         SwitchableHitlHandler hitlHandler) {
+        java.util.Set<String> tools = hitlHandler.approvedAllTools();
+        java.util.Set<String> servers = hitlHandler.approvedAllServers();
+        ui.println("🎫 授权状态：");
+        ui.println("   本轮例外：" + describeGrant(exception));
+        ui.println("   规则层（持久）：" + (permissionRuleSummary.isEmpty()
+                ? "无（只按逐次审批判定）" : permissionRuleSummary));
+        if (tools.isEmpty() && servers.isEmpty()) {
+            ui.println("   放行缓存：空");
+        } else {
+            ui.println("   放行缓存：工具 " + (tools.isEmpty() ? "无" : String.join("、", tools))
+                    + "；MCP server " + (servers.isEmpty() ? "无" : String.join("、", servers)));
+        }
+        ui.println("   放行缓存只在本轮任务内有效，每轮任务开始时自动清空。\n");
+    }
+
+    private static String describeGrant(com.devcli.policy.TaskGrant grant) {
+        String compact = grant == null ? "" : grant.compactSummary();
+        return compact.isEmpty() ? "无（需要审批的操作仍逐次确认）" : compact;
+    }
+
+    /**
+     * 从用户级配置读取规则层。
+     *
+     * <p>非法规则显式拒绝并整体降级为「无规则」：一条写错的规则如果被静默丢弃，用户会以为
+     * 拒绝规则在生效。语法与校验只保留在 {@code PermissionRule} 里，不在此重复。</p>
+     */
+    static com.devcli.policy.PermissionRuleSet loadPermissionRules(DevCliConfig config) {
+        DevCliConfig.PermissionsConfig permissions = config == null ? null : config.getPermissions();
+        if (permissions == null) {
+            return com.devcli.policy.PermissionRuleSet.EMPTY;
+        }
+        try {
+            com.devcli.policy.PermissionRuleSet parsed = com.devcli.policy.PermissionRuleSet.parse(
+                    permissions.getDeny(), permissions.getAsk(), permissions.getAllow());
+                for (String shadowed : parsed.shadowedAskRules()) {
+                    System.err.println("⚠️ " + shadowed);
+                }
+                for (com.devcli.policy.PermissionRule rule : parsed.allowRulesForTool("execute_command")) {
+                    System.err.println("⚠️ 放行规则 " + rule.raw()
+                            + " 在主机执行的命令上不生效：主机命令必须单次人工确认，不接受任何放宽。"
+                            + "要拦某条命令请改用 deny");
+                }
+                return parsed;
+        } catch (IllegalArgumentException invalid) {
+            System.err.println("⚠️ 权限规则非法，已按无规则处理: " + invalid.getMessage());
+            System.err.println("   请检查 ~/.devcli/config.json 的 permissions.deny / ask / allow。");
+            return com.devcli.policy.PermissionRuleSet.EMPTY;
+        }
+    }
+
+    /**
+     * 启动权限模式：读 {@code permissions.defaultMode}，缺省为 {@link PermissionMode#DEFAULT}。
+     *
+     * <p>非法值显式拒绝并回落到 {@code default}，与规则层的处理方式一致——一个写错的模式名
+     * 若被静默忽略，用户会以为自己已经切到了更严格的模式。</p>
+     */
+    static PermissionMode startupPermissionMode(DevCliConfig config) {
+        DevCliConfig.PermissionsConfig permissions = config == null ? null : config.getPermissions();
+        if (permissions == null) {
+            return PermissionMode.DEFAULT;
+        }
+        try {
+            return PermissionMode.parse(permissions.getDefaultMode());
+        } catch (IllegalArgumentException invalid) {
+            System.err.println("⚠️ 权限模式非法，已回落到 default: " + invalid.getMessage());
+            System.err.println("   请检查 ~/.devcli/config.json 的 permissions.defaultMode。");
+            return PermissionMode.DEFAULT;
+        }
+    }
+
+    /**
+     * 本轮执行期间是否完全不会弹出审批。
+     *
+     * <p>只有这个条件成立时，主 LineReader 才能与执行并发读取终端——审批读取器和队列读取器
+     * 同时抢 stdin 会让输入错乱。</p>
+     *
+     * <p>{@code dontAsk} 把未决动作收口为拒绝，连显式 {@code ask} 规则也被拒绝，不会弹；
+     * {@code bypassPermissions} 放行未决动作，但显式 {@code ask} 规则仍然会询问，因此要规则集里
+     * 没有 {@code ask} 规则才算不弹。其余模式（含 {@code auto}；显式 {@code ask} 与硬审批仍会弹）
+     * 都可能弹。</p>
+     */
+    static boolean neverPrompts(PermissionMode mode,
+                                com.devcli.policy.PermissionRuleSet rules) {
+        return switch (mode.askPolicy()) {
+            case DENY -> true;
+            case ALLOW -> rules == null || rules.ask().isEmpty();
+            default -> false;
+        };
+    }
+
+    /**
+     * 装配权限分类器。
+     *
+     * <p>装配失败返回 {@code null} 并告警，而不是让启动失败：分类器缺失只影响 {@code auto} 模式
+     * （该模式下未决动作失败关闭），不该阻塞其余功能。</p>
+     */
+    private static com.devcli.hitl.PermissionClassifier permissionClassifier(
+            AtomicReference<LlmClient> llmClientRef) {
+        try {
+            return com.devcli.hitl.LlmPermissionClassifier.createDefault(llmClientRef::get);
+        } catch (RuntimeException failure) {
+            System.err.println("⚠️ 权限分类器装配失败，auto 模式下未决动作将按拒绝处理: " + failure.getMessage());
+            return null;
+        }
+    }
+
+    private static void printSlashCommandHelp() {        printSlashCommandHelp(System.out);
+    }
     private static void printSlashCommandHelp(PrintStream out) {
         out.println("可用命令：");
         for (SlashCommandHint hint : slashCommandHints()) {
@@ -1735,12 +2034,12 @@ public class Main {
     private static void handleConfigPalette(Renderer renderer,
                                             DevCliConfig config,
                                             LlmClient llmClient,
-                                            SwitchableHitlHandler hitlHandler,
+                                            PermissionMode permissionMode,
                                             com.devcli.skill.SkillRegistry skillRegistry) {
         var items = java.util.List.of(
                 "模型: " + (llmClient == null ? "(none)" : llmClient.getModelName() + " / " + llmClient.getProviderName()),
                 "默认 Provider: " + (config == null ? "(none)" : config.getDefaultProvider()),
-                "HITL: " + (hitlHandler.isEnabled() ? "ON" : "OFF"),
+                "权限模式: " + (permissionMode == null ? "(none)" : permissionMode.id()),
                 "Skill 启用数: " + (skillRegistry == null ? 0 : skillRegistry.enabledSkills().size()),
                 "渲染器: " + renderer.getClass().getSimpleName(),
                 "配置文件: ~/.devcli/config.json (只读视图，编辑请用编辑器)"
@@ -1752,10 +2051,10 @@ public class Main {
         }
         String hint = switch (selected) {
             case 0, 1 -> "💡 默认 Anthropic Messages: /model anthropic；其它: /model openai|glm-5.1|deepseek|step|kimi";
-            case 2 -> "💡 切换 HITL: /hitl on / /hitl off";
+            case 2 -> "💡 切换权限模式: /mode " + String.join("|", PermissionMode.ids());
             case 3 -> "💡 管理 Skill: /skill list / /skill on <name> / /skill off <name>";
-            case 4 -> "💡 切换渲染器（重启后生效）: DEVCLI_RENDERER=inline|lanterna|plain";
-            case 5 -> "💡 当前不在 TUI 内编辑 config.json，建议在编辑器里改完重启";
+            case 4 -> "💡 切换渲染器（重启后生效）: DEVCLI_RENDERER=inline|plain";
+            case 5 -> "💡 当前不在终端内编辑 config.json，建议在编辑器里改完重启";
             default -> "(unknown)";
         };
         renderer.stream().println(hint);
@@ -1991,16 +2290,18 @@ public class Main {
     }
 
     private static StatusInfo statusInfo(LlmClient llmClient,
-                                         SwitchableHitlHandler hitlHandler,
+                                         PermissionMode permissionMode,
                                          String phase,
                                          McpServerManager mcpServerManager,
                                          SkillRegistry skillRegistry) {
         String normalizedPhase = phase == null || phase.isBlank() ? "idle" : phase;
+        String modeId = permissionMode == null ? null : permissionMode.id();
         StatusInfo base = "idle".equals(normalizedPhase)
-                ? StatusInfo.idle(llmClient.getModelName(), llmClient.maxContextWindow(), hitlHandler.isEnabled())
+                ? StatusInfo.idle(llmClient.getModelName(), llmClient.maxContextWindow(), modeId)
                 : StatusInfo.active(llmClient.getModelName(), llmClient.maxContextWindow(),
-                hitlHandler.isEnabled(), normalizedPhase);
-        return base.withEnvironment(mcpStatusSummary(mcpServerManager), skillStatusSummary(skillRegistry));
+                modeId, normalizedPhase);
+        return base.withEnvironment(mcpStatusSummary(mcpServerManager), skillStatusSummary(skillRegistry))
+                .withGrantSummary(permissionRuleSummary);
     }
 
     private static String mcpStatusSummary(McpServerManager mcpServerManager) {
@@ -2213,24 +2514,10 @@ public class Main {
     }
 
     /**
-     * PR-C：长期记忆向量同步。LongTermMemory.store 后调用，把 fact 内容 embed 后写入向量库。
+     * PR-C：长期记忆向量同步。LongTermMemory.store 后调用，把派生语义卡 embed 后写入向量库。
      * <p>失败模式：embed 失败（Ollama 不通 / API key 缺）静默跳过，不影响 store 主路径。
      * 上层检索时会自动 fallback 到关键词检索。
      */
-    private static void embedAndUpsert(com.devcli.memory.MemoryVectorStore store,
-                                        com.devcli.rag.EmbeddingClient embedder,
-                                        com.devcli.memory.MemoryEntry entry) {
-        if (!store.isUsable() || entry == null) return;
-        try {
-            float[] vec = embedder.embed(entry.getContent());
-            if (vec != null && vec.length > 0) {
-                store.upsert(entry.getId(), entry.getContent(), vec);
-            }
-        } catch (Exception e) {
-            // 静默：embed 失败让 fact 继续以"关键词可搜"形态留在 LongTermMemory
-        }
-    }
-
     /**
      * 从 .env 文件加载 API Key
      */

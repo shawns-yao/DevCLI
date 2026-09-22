@@ -138,9 +138,11 @@ class AgentBudgetTest {
         assertEquals(AgentBudget.ExitReason.WITHIN_BUDGET, budget.check());
 
         budget.recordToolResult(toolError("call_3", "请修正参数"));
-        assertEquals(AgentBudget.ExitReason.REPEATED_TOOL_ERROR, budget.check());
-        assertTrue(budget.describeExit(AgentBudget.ExitReason.REPEATED_TOOL_ERROR)
-                .contains("mcp__demo__search|schema"));
+        // 结构化错误码在连续失败熔断中被优先判定；REPEATED_TOOL_ERROR 的签名断言
+        // 由 repeatedToolErrorsTriggerCircuitBreaker 覆盖。
+        assertEquals(AgentBudget.ExitReason.CONSECUTIVE_TOOL_FAILURES, budget.check());
+        assertTrue(budget.describeExit(AgentBudget.ExitReason.CONSECUTIVE_TOOL_FAILURES)
+                .contains("连续"));
     }
 
     private static ToolRegistry.ToolExecutionResult toolError(String id, String message) {
@@ -166,12 +168,33 @@ class AgentBudgetTest {
     }
 
     @Test
-    void defaultTokenBudgetIsUnlimited() {
-        // 默认不再用 80% × window 当硬限——长上下文 + 套餐用户场景下太容易撞墙。
-        // 死循环防护交给 stagnation + hardMaxIterations 两道兜底。
+    void defaultTokenBudgetIsFiniteAndDerivedFromModelWindow() {
         AgentBudget budget = AgentBudget.fromLlmClient(new GLMClient("test-key"));
 
-        assertEquals(Integer.MAX_VALUE, budget.tokenBudget());
+        assertEquals(800_000, budget.tokenBudget());
+        assertTrue(budget.tokenBudget() < Integer.MAX_VALUE);
+    }
+
+    @Test
+    void defaultHardIterationLimitIs100() {
+        String old = System.getProperty("devcli.react.hard.max.iterations");
+        try {
+            System.clearProperty("devcli.react.hard.max.iterations");
+            assertEquals(100, AgentBudget.fromSystemProperties().hardMaxIterations());
+        } finally {
+            restoreProperty("devcli.react.hard.max.iterations", old);
+        }
+    }
+
+    @Test
+    void systemPropertyCanOverrideHardIterationLimit() {
+        String old = System.getProperty("devcli.react.hard.max.iterations");
+        try {
+            System.setProperty("devcli.react.hard.max.iterations", "7");
+            assertEquals(7, AgentBudget.fromSystemProperties().hardMaxIterations());
+        } finally {
+            restoreProperty("devcli.react.hard.max.iterations", old);
+        }
     }
 
     @Test
@@ -194,5 +217,13 @@ class AgentBudgetTest {
     private LlmClient.ToolCall toolCall(String name, String args) {
         return new LlmClient.ToolCall("call_" + name + "_" + args.hashCode(),
                 new LlmClient.ToolCall.Function(name, args));
+    }
+
+    private static void restoreProperty(String key, String old) {
+        if (old == null) {
+            System.clearProperty(key);
+        } else {
+            System.setProperty(key, old);
+        }
     }
 }

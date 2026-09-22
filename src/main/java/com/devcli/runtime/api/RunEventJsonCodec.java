@@ -1,6 +1,6 @@
 package com.devcli.runtime.api;
 
-import com.devcli.runtime.event.RunEvent;
+import com.devcli.event.RunEvent;
 import com.devcli.tool.ToolPresentation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -49,6 +49,23 @@ public final class RunEventJsonCodec {
             payload.put("iteration", state.iteration());
             payload.put("state", state.state().name());
             payload.put("reason", state.reason());
+        } else if (event instanceof RunEvent.FailureGuidance guidance) {
+            payload.put("category", guidance.category());
+            payload.put("reason", guidance.reason());
+            payload.put("suggestion", guidance.suggestion());
+            ArrayNode actions = payload.putArray("actions");
+            for (RunEvent.FailureAction action : guidance.actions()) {
+                ObjectNode item = actions.addObject();
+                item.put("type", action.type());
+                item.put("label", action.label());
+                item.put("instruction", action.instruction());
+            }
+        } else if (event instanceof RunEvent.ContextRefresh refresh) {
+            payload.put("scope", refresh.scope());
+            payload.put("state", refresh.state().name());
+            payload.put("reason", refresh.reason());
+            ArrayNode resources = payload.putArray("resources");
+            refresh.resources().forEach(resources::add);
         } else if (event instanceof RunEvent.QueueUpdated queue) {
             payload.put("channel", queue.channel());
             payload.put("steering_pending", queue.steeringPending());
@@ -85,6 +102,7 @@ public final class RunEventJsonCodec {
                 item.put("retryable", result.retryable());
                 item.put("elapsed_millis", result.elapsedMillis());
                 item.put("image_count", result.imageCount());
+                item.put("exit_code", result.exitCode());
                 writePresentation(item.putObject("presentation"), result.presentation());
             }
         } else if (event instanceof RunEvent.HookInvocationStarted hook) {
@@ -115,6 +133,12 @@ public final class RunEventJsonCodec {
         } else if (event instanceof RunEvent.CheckpointFailed checkpoint) {
             payload.put("covered_through_event_id", checkpoint.coveredThroughEventId());
             payload.put("error", checkpoint.error());
+        } else if (event instanceof RunEvent.ContextCompacted compacted) {
+            payload.put("source_event_start", compacted.sourceEventStart());
+            payload.put("source_event_end", compacted.sourceEventEnd());
+            payload.put("source_hash", compacted.sourceHash());
+            payload.put("projection_hash", compacted.projectionHash());
+            payload.put("mode", compacted.mode());
         } else {
             throw new IllegalArgumentException("不支持的运行事件: " + event.getClass().getName());
         }

@@ -3,6 +3,7 @@ package com.devcli.tool.provider;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolExecutionContext;
 import com.devcli.tool.ToolRegistry;
+import com.devcli.workspace.WriteGateResult;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.nio.file.Path;
@@ -19,6 +20,28 @@ public interface ToolProvider {
 
         Path resolveSafePath(String path);
 
+        /** Review the exact text before it leaves local file handling. */
+        default String reviewFileContent(String content) {
+            if (com.devcli.policy.SensitiveContentPolicy.inspect(content).sensitive()) {
+                throw new com.devcli.policy.PolicyException("敏感文件内容需要单次审批");
+            }
+            return content;
+        }
+
+        /**
+         * 写入类工具使用的路径解析：在项目根围栏之外再拒绝受保护的凭据、私钥与版本库元数据。
+         *
+         * <p>默认实现只做根围栏，保证既有 ToolContext 实现无需改动。</p>
+         */
+        default Path resolveSafeWritePath(String path) {
+            return resolveSafePath(path);
+        }
+
+        /** 委派 Worker 的写路径白名单；默认不额外限制。 */
+        default boolean isWritePathAllowed(String path) {
+            return true;
+        }
+
         int maxWriteFileBytes();
 
         String currentResourceLeaseStep();
@@ -27,13 +50,36 @@ public interface ToolProvider {
 
         boolean isWriteLeaseValid(String stepId, Path path);
 
+        /**
+         * 写入前的资源租约检查：租约已失效说明目标文件正被其他步骤写入。
+         *
+         * <p>write_file / edit_file / apply_patch 共用同一段检查，差异只在展示路径；
+         * 无步骤 id 的单 Agent 路径不参与租约，直接放行。</p>
+         */
+        default void acquireWriteLeaseChecked(String stepId, Path safePath, String displayPath) {
+            if (stepId == null || stepId.isBlank()) {
+                return;
+            }
+            acquireWriteLease(stepId, safePath);
+            if (!isWriteLeaseValid(stepId, safePath)) {
+                throw new com.devcli.policy.PolicyException("写入冲突: 租约已失效，文件 "
+                        + displayPath + " 可能正在被其他任务写入");
+            }
+        }
+
         void recordFileWrite(String displayPath, Path safePath, String before, String content, String stepId);
 
         /**
          * 记录一次文件读取，供过期写入屏障比对版本。stepId 为空表示单 Agent 路径，不参与屏障。
+         * content 为 null 表示分页读取，只登记磁盘整文件指纹，不把局部页面误作完整基线。
          * 默认空实现，保证既有 ToolContext 实现无需改动。
          */
         default void recordFileRead(Path safePath, String content, String stepId) {
+        }
+
+        /** 记录 search_code 返回的符号依赖，供写入前的确定性版本校验使用。 */
+        default void recordCodeEvidence(Path safePath, String chunkType, String symbolName,
+                                        String symbolVersion, String sourceContent) {
         }
 
         /**
@@ -44,6 +90,13 @@ public interface ToolProvider {
          */
         default String staleWriteReason(String stepId, Path safePath, String currentContent) {
             return null;
+        }
+
+        default WriteGateResult validateWrite(String stepId, Path safePath, String currentContent) {
+            String reason = staleWriteReason(stepId, safePath, currentContent);
+            return reason == null
+                    ? WriteGateResult.allowed()
+                    : WriteGateResult.stale(reason, List.of(safePath.toString()), "");
         }
 
         String projectPath();
@@ -63,6 +116,7 @@ public interface ToolProvider {
 
         ToolRegistry.MemorySaver memorySaveHandler();
 
+
         ToolRegistry.MemoryListHandler memoryListHandler();
 
         com.devcli.browser.BrowserConnector browserConnector();
@@ -70,6 +124,10 @@ public interface ToolProvider {
         com.devcli.skill.SkillRegistry skillRegistry();
 
         com.devcli.skill.SkillContextBuffer activeSkillContextBuffer();
+
+        default com.devcli.context.ContextProfile contextProfile() {
+            return com.devcli.context.ContextProfile.from(null);
+        }
 
         com.devcli.snapshot.SnapshotService snapshotService();
 

@@ -8,6 +8,8 @@ import java.util.LinkedHashMap;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 class LlmClientFactoryTest {
 
@@ -178,6 +180,50 @@ class LlmClientFactoryTest {
         assertEquals("anthropic", config.getDefaultProvider());
         assertEquals("anthropic", anthropicClient.getProviderName());
         assertEquals("claude-sonnet-4-20250514", anthropicClient.getModelName());
+    }
+
+    @Test
+    void teamReviewerUsesConfiguredIndependentProviderAndModel() {
+        String previousProvider = System.getProperty("devcli.team.reviewer.provider");
+        String previousModel = System.getProperty("devcli.team.reviewer.model");
+        try {
+            System.setProperty("devcli.team.reviewer.provider", "deepseek");
+            System.setProperty("devcli.team.reviewer.model", "deepseek-reviewer");
+            DevCliConfig config = new DevCliConfig();
+            config.getProviders().put("deepseek",
+                    new DevCliConfig.ProviderConfig("review-key", null, "deepseek-default"));
+            LlmClient primary = new GLMClient("primary-key");
+
+            LlmClient reviewer = LlmClientFactory.createTeamReviewer(config, primary);
+
+            assertNotSame(primary, reviewer);
+            assertInstanceOf(DeepSeekClient.class, reviewer);
+            assertEquals("deepseek-reviewer", reviewer.getModelName());
+        } finally {
+            restoreProperty("devcli.team.reviewer.provider", previousProvider);
+            restoreProperty("devcli.team.reviewer.model", previousModel);
+        }
+    }
+
+    @Test
+    void teamReviewerFallsBackToPrimaryWhenNotConfigured() {
+        String previousProvider = System.getProperty("devcli.team.reviewer.provider");
+        String previousModel = System.getProperty("devcli.team.reviewer.model");
+        try {
+            System.clearProperty("devcli.team.reviewer.provider");
+            System.clearProperty("devcli.team.reviewer.model");
+            LlmClient primary = new GLMClient("primary-key");
+
+            assertSame(primary, LlmClientFactory.createTeamReviewer(new DevCliConfig(), primary));
+        } finally {
+            restoreProperty("devcli.team.reviewer.provider", previousProvider);
+            restoreProperty("devcli.team.reviewer.model", previousModel);
+        }
+    }
+
+    private static void restoreProperty(String key, String value) {
+        if (value == null) System.clearProperty(key);
+        else System.setProperty(key, value);
     }
 
     private static String expectedStepChatUrl(String baseUrl) {

@@ -1,500 +1,638 @@
 package com.devcli.memory;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.devcli.llm.LlmClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
- * 长期记忆 - 跨对话持久化的关键信息。
+ * CodeBuddy 风格的长期记忆：全局/项目目录、主题 Markdown、有界索引与按需召回。
  *
- * <p>职责：
- * <ol>
- *   <li>持久化用户偏好、项目事实、关键决策等</li>
- *   <li>支持关键词检索（{@link #search}）和语义检索（通过 {@link #setVectorIndex} 钩子）</li>
- *   <li>store 时基于 content hash 去重（O(1) 查 set，不再 O(N) 全表扫）</li>
- *   <li>持久化通过 {@link LongTermMemoryStore} 抽象，默认 {@link SqliteLongTermMemoryStore}</li>
- * </ol>
- *
- * <p>v2 持久化改造（消除写盘放大）：
- * <ul>
- *   <li><b>v1（旧版）</b>：每次 store/delete/clear 都全量序列化 JSON 写整个文件，1k 条 entry 单次 ~50-200ms</li>
- *   <li><b>v2（当前）</b>：单次 SQLite UPSERT/DELETE，O(1) 写盘。共用 {@code memory_vectors.db}</li>
- *   <li><b>迁移</b>：构造时检测旧 {@code long_term_memory.json}，存在则读入 → 写库 → 重命名为 .bak 备份</li>
- * </ul>
+ * <p>Markdown 文件是唯一权威内容。过期、修订与类型都保存在 frontmatter；
+ * 过期记忆仍可审计，但不进入索引、候选或检索。
  */
 public class LongTermMemory implements Memory, AutoCloseable {
+
     private static final Logger log = LoggerFactory.getLogger(LongTermMemory.class);
-    private static final String STORAGE_DIR_PROPERTY = "devcli.memory.dir";
-    private static final String STORAGE_DIR_ENV = "DEVCLI_MEMORY_DIR";
-    private static final String LEGACY_JSON_FILE = "long_term_memory.json";
-    private static final String LEGACY_JSON_BACKUP = "long_term_memory.json.bak";
+    private static final int MAX_SLUG_LENGTH = 48;
+    private static final String FALLBACK_SLUG_PREFIX = "memory";
 
-    private final Map<String, MemoryEntry> entries = new ConcurrentHashMap<>();
-    /** content hash 集合：去重快速查（O(1) vs 旧版 O(N) 字符串全表比对）。 */
-    private final Set<Integer> contentHashes = ConcurrentHashMap.newKeySet();
-    private final AtomicInteger tokenCounter = new AtomicInteger(0);
-    private final LongTermMemoryStore store;
-    private final boolean persistentStore;
+    private final Path memoryRoot;
+    private final Clock clock;
+    private final LegacyMemoryImporter.ImportResult legacyImportResult;
+    private final Set<String> surfacedInSession = ConcurrentHashMap.newKeySet();
+    private volatile String activeProjectPath = "";
 
-    /** PR-C 语义检索钩子。 */
-    private java.util.function.Consumer<MemoryEntry> onStoreHook = entry -> {};
-    private java.util.function.Consumer<String> onDeleteHook = id -> {};
-    private Runnable onClearHook = () -> {};
+    public enum SaveStatus {
+        CREATED,
+        UPDATED,
+        UNCHANGED,
+        CONFLICT,
+        REJECTED
+    }
 
-    /** 默认构造：用 SQLite store 写到 {@link #resolveMemoryDir()}，启动时迁移旧 JSON。 */
+    public record SaveResult(SaveStatus status, String fileName, String message,
+                             TopicMemory memory) {
+        public SaveResult {
+            status = status == null ? SaveStatus.REJECTED : status;
+            fileName = fileName == null ? "" : fileName;
+            message = message == null ? "" : message;
+        }
+
+        public boolean stored() {
+            return status == SaveStatus.CREATED || status == SaveStatus.UPDATED
+                    || status == SaveStatus.UNCHANGED;
+        }
+    }
+
+    /** 同名主题在项目与全局作用域中表达不同事实。 */
+    public record ScopeConflict(String fileName, TopicMemory globalMemory,
+                                TopicMemory projectMemory) {
+    }
+
     public LongTermMemory() {
-        this(new SqliteLongTermMemoryStore(resolveMemoryDir()), resolveMemoryDir());
+        this(MemoryPaths.memoryRoot(), Clock.systemUTC());
     }
 
-    /**
-     * 兼容旧测试入口：传 storageDir 时仍按 SQLite 落到该目录，并在该目录下做 JSON 迁移。
-     * 不再写 JSON——仅启动时把 JSON 一次性导入 SQLite。
-     */
     public LongTermMemory(File storageDir) {
-        this(new SqliteLongTermMemoryStore(storageDir.toPath()), storageDir.toPath());
+        this(storageDir == null ? MemoryPaths.memoryRoot() : storageDir.toPath(),
+                Clock.systemUTC());
+    }
+
+    public LongTermMemory(Path memoryRoot) {
+        this(memoryRoot, Clock.systemUTC());
+    }
+
+    public LongTermMemory(Path memoryRoot, Clock clock) {
+        this.memoryRoot = (memoryRoot == null ? MemoryPaths.memoryRoot() : memoryRoot)
+                .toAbsolutePath().normalize();
+        this.clock = clock == null ? Clock.systemUTC() : clock;
+        ensureDir(this.memoryRoot);
+        this.legacyImportResult = LegacyMemoryImporter.importRecords(
+                this.memoryRoot, globalDir(), this.clock);
+        if (legacyImportResult.imported() > 0) rebuildIndex(globalDir());
+    }
+
+    public static Path resolveMemoryDir() {
+        return MemoryPaths.memoryRoot();
+    }
+
+    public void setActiveProjectPath(String projectPath) {
+        this.activeProjectPath = projectPath == null ? "" : projectPath.trim();
+    }
+
+    public String activeProjectPath() {
+        return activeProjectPath;
+    }
+
+    public Path globalDir() {
+        return MemoryPaths.globalMemoryDir(memoryRoot);
+    }
+
+    public Path projectDir() {
+        return MemoryPaths.projectMemoryDir(memoryRoot, activeProjectPath);
+    }
+
+    public List<Path> visibleDirs() {
+        List<Path> dirs = new ArrayList<>();
+        Path project = projectDir();
+        if (project != null) dirs.add(project);
+        dirs.add(globalDir());
+        return List.copyOf(dirs);
+    }
+
+    public MemoryScope defaultScope() {
+        return projectDir() == null ? MemoryScope.GLOBAL : MemoryScope.PROJECT;
+    }
+
+    public Path writeTargetDir() {
+        return defaultScope().dir(memoryRoot, activeProjectPath);
+    }
+
+    public String indexContext() {
+        rebuildVisibleIndexes();
+        StringBuilder builder = new StringBuilder();
+        for (Path dir : visibleDirs()) {
+            String index = MemoryIndex.read(dir);
+            if (index.isBlank()) continue;
+            if (builder.length() > 0) builder.append("\n\n");
+            builder.append("### ").append(scopeLabel(dir)).append("记忆（")
+                    .append(dir).append("）\n\n").append(index);
+        }
+        List<ScopeConflict> conflicts = detectScopeConflicts();
+        if (!conflicts.isEmpty()) {
+            if (builder.length() > 0) builder.append("\n\n");
+            builder.append("### 作用域冲突\n\n");
+            for (ScopeConflict conflict : conflicts) {
+                builder.append("- 项目记忆覆盖同名全局记忆：")
+                        .append(conflict.fileName())
+                        .append("；召回使用项目版本，两份原文仍保留用于审计。\n");
+            }
+        }
+        return builder.toString().strip();
     }
 
     /**
-     * 测试 / 自定义场景：直接传一个 store 实现 + 迁移目录（用于 in-memory store 测试）。
+     * 索引段落，按本轮分配的 token 预算裁剪。
+     *
+     * <p>{@link #indexContext()} 只受索引自身上限（200 行 / 25000 字节）约束，
+     * 那个上限可以远大于本轮记忆预算（默认 500–5000 tokens），因此注入前必须再过预算。
      */
-    public LongTermMemory(LongTermMemoryStore store, Path migrationDir) {
-        this.store = store;
-        this.persistentStore = store != null && store.isPersistent();
-        ensureDir(migrationDir);
-        migrateLegacyJsonIfNeeded(migrationDir);
-        loadFromStore();
+    public String indexContext(int maxTokens) {
+        return MemoryIndex.fitToTokens(indexContext(), maxTokens);
     }
 
-    @Override
-    public synchronized void store(MemoryEntry entry) {
-        // Bug #13 修复：整个方法加锁，确保去重检查和插入原子性
-        if (entry == null) return;
-        pruneExpired();
-        Instant expiresAt = entry.getExpiresAt() != null
-                ? entry.getExpiresAt()
-                : MemoryLifecyclePolicy.expiresAt(entry.getType(), Instant.now());
-        entry = entry.withLifecycle(entry.getRevision(), expiresAt, entry.getMetadata());
-        MemoryEntry previousById = entries.get(entry.getId());
-        if (previousById == null && findDuplicateContent(entry) != null) {
-            return;
+    /** 可召回候选：过期项被过滤，项目同名项覆盖全局项。 */
+    public List<TopicMemory> candidates() {
+        Map<String, TopicMemory> byName = new LinkedHashMap<>();
+        for (Path dir : visibleDirs()) {
+            for (TopicMemory memory : activeHeads(dir)) {
+                byName.putIfAbsent(memory.fileName(), memory);
+            }
         }
+        return List.copyOf(byName.values());
+    }
 
-        boolean persisted = store.upsert(entry);
-        if (!persisted && persistentStore) {
-            log.warn("LongTermMemory store rejected {}; entry was not added to memory", entry.getId());
-            return;
-        }
-        if (!persisted) {
-            log.warn("LongTermMemory store did not confirm persistence for {}; using in-memory fallback", entry.getId());
-        }
-
-        int hash = entry.getContent().hashCode();
-        entries.put(entry.getId(), entry);
-        tokenCounter.addAndGet(entry.getTokenCount() - (previousById == null ? 0 : previousById.getTokenCount()));
-        if (previousById != null) {
-            removeHashIfUnused(previousById.getContent().hashCode());
-        }
-        contentHashes.add(hash);
-        try {
-            onStoreHook.accept(entry);
-        } catch (Exception e) {
-            log.warn("LongTermMemory onStoreHook failed for {}: {}", entry.getId(), e.getMessage());
-        }
+    public List<TopicMemory> select(String query, LlmClient llmClient) {
+        if (!LongTermMemorySelector.enabled()) return List.of();
+        return LongTermMemorySelector.select(llmClient, query, candidates());
     }
 
     /**
-     * 带主题的写入：同 {@code subject} 的现存 active 事实先被标记为失效（{@code supersededBy}
-     * 指向新条），再写入新事实，实现"同主题新事实覆盖旧事实"的冲突消解。旧条软删除保留审计，
-     * 检索侧（{@link #search} / MemoryRetriever）按 active 过滤后不再召回。
+     * 渲染选中记忆的全文段落，附新鲜度标注。
      *
-     * <p>顺序关键——先 supersede 旧条再 {@link #store} 新条：否则当新旧 content 相同时，
-     * 新条会被 {@link #findDuplicateContent} 判为重复而跳过，导致该主题失去 active 条。
+     * <p>按整条取舍：放不下的记忆**整条跳过**，不切断正文——半句话的事实比没有事实更危险。
+     * 只有真正写进段落的条目才计入「本会话已注入」，没放下的下一轮还有机会。
      *
-     * <p>{@code entry.subject} 为空时退化为普通 {@link #store}（不参与主题归并）。
+     * @param maxTokens 本段可用的 token 预算
      */
-    public synchronized void storeWithSubject(MemoryEntry entry) {
-        if (entry == null) return;
-        pruneExpired();
-        List<MemoryEntry> existingEntries = new ArrayList<>(entries.values());
-        if (entry.getSubject().isBlank()
-                && MemoryConflictDetector.findEquivalent(entry, existingEntries).isPresent()) {
-            return;
+    public String renderSelected(List<TopicMemory> selected, int maxTokens) {
+        if (selected == null || selected.isEmpty() || maxTokens <= 0) return "";
+        StringBuilder builder = new StringBuilder();
+        int used = 0;
+        for (TopicMemory memory : selected) {
+            if (memory == null || memory.isExpired(clock.instant())) continue;
+            String key = memory.file().toAbsolutePath().normalize().toString();
+            if (surfacedInSession.contains(key)) continue;
+            String block = renderOne(memory);
+            int blockTokens = MemoryEntry.estimateTokens(block);
+            if (used + blockTokens > maxTokens) continue;
+            if (builder.length() > 0) builder.append("\n\n");
+            builder.append(block);
+            used += blockTokens;
+            surfacedInSession.add(key);
         }
-        Optional<MemoryConflictDetector.Conflict> conflict =
-                MemoryConflictDetector.detect(entry, existingEntries);
-        String subject = entry.getSubject();
-        if ((subject == null || subject.isBlank()) && conflict.isPresent()) {
-            subject = conflict.get().subject();
-        }
-        if (subject == null || subject.isBlank()) {
-            store(entry);
-            return;
-        }
-
-        List<MemoryEntry> supersededTargets = new ArrayList<>();
-        int nextRevision = 1;
-        for (MemoryEntry existing : entries.values()) {
-            String existingSubject = existing.getSubject().isBlank()
-                    ? MemoryConflictDetector.inferSubject(existing.getContent())
-                    : existing.getSubject();
-            if (subject.equals(existingSubject)) {
-                nextRevision = Math.max(nextRevision, existing.getRevision() + 1);
-            }
-            if (existing.isRecallable()
-                    && subject.equals(existingSubject)
-                    && !existing.getId().equals(entry.getId())) {
-                supersededTargets.add(existing);
-            }
-        }
-
-        Map<String, String> metadata = new HashMap<>(entry.getMetadata());
-        MemoryEvidence evidence = entry.getEvidence();
-        if (conflict.isPresent()) {
-            MemoryConflictDetector.Conflict value = conflict.get();
-            metadata.put("conflict_detected", "true");
-            metadata.put("conflict_with", value.existingId());
-            evidence = evidence.withConflict(value.existingId());
-        }
-        Instant expiresAt = entry.getExpiresAt() != null
-                ? entry.getExpiresAt()
-                : MemoryLifecyclePolicy.expiresAt(entry.getType(), Instant.now());
-        MemoryEntry managedEntry = entry.copy(
-                subject, true, "", nextRevision, expiresAt, metadata, evidence);
-
-        for (MemoryEntry old : supersededTargets) {
-            MemoryEntry inactive = asSuperseded(old, managedEntry.getId());
-            boolean persisted = store.upsert(inactive);
-            if (!persisted && persistentStore) {
-                log.warn("Failed to persist supersede of {} (subject={}); kept in-memory only",
-                        old.getId(), subject);
-            }
-            entries.put(inactive.getId(), inactive);
-        }
-        store(managedEntry);
+        return builder.toString().strip();
     }
 
-    public synchronized void storeManaged(MemoryEntry entry) {
-        if (entry == null) return;
-        List<MemoryEntry> existingEntries = new ArrayList<>(entries.values());
-        if (entry.getSubject().isBlank()
-                && MemoryConflictDetector.findEquivalent(entry, existingEntries).isPresent()) {
-            return;
+    private String renderOne(TopicMemory memory) {
+        StringBuilder builder = new StringBuilder();
+        builder.append("#### ").append(memory.name().isBlank() ? memory.fileName() : memory.name())
+                .append('\n');
+        String freshness = MemoryFreshness.freshnessText(
+                MemoryFreshness.ageDays(memory.updatedAt(), clock));
+        if (!freshness.isBlank()) builder.append("> ").append(freshness).append('\n');
+        builder.append("> 作用域：").append(scopeLabel(memory.file().getParent()))
+                .append("；修订：r").append(memory.revision()).append('\n');
+        builder.append("> 文件：").append(memory.file()).append('\n');
+        builder.append(memory.body().isBlank() ? "（正文为空）" : memory.body());
+        return builder.toString();
+    }
+
+    public int surfacedCount() {
+        return surfacedInSession.size();
+    }
+
+    /**
+     * 保存主题记忆。自动写入遇到同作用域不同内容时返回 CONFLICT，
+     * 只有用户显式写入才能覆盖并把修订号加一。
+     */
+    public synchronized SaveResult save(MemoryScope scope, String name, String description,
+                                        String type, String content, Instant expiresAt,
+                                        boolean explicit) {
+        if (content == null || content.isBlank()) {
+            return rejected("记忆内容为空");
         }
-        if (!entry.getSubject().isBlank()
-                || MemoryConflictDetector.detect(entry, existingEntries).isPresent()) {
-            storeWithSubject(entry);
+        if (scope == null) {
+            return rejected("记忆作用域为空");
+        }
+        if (!TopicMemory.isSupportedType(type)) {
+            return rejected("不支持的记忆类型: " + type);
+        }
+        Instant now = clock.instant();
+        if (expiresAt != null && !expiresAt.isAfter(now)) {
+            return rejected("有效期必须晚于当前时间");
+        }
+        Path dir = scope.dir(memoryRoot, activeProjectPath);
+        if (dir == null) {
+            return rejected("写入项目记忆前必须绑定项目路径");
+        }
+        Path file = dir.resolve(slug(name));
+        TopicMemory existing = TopicMemory.read(file);
+        TopicMemory next;
+        if (existing == null) {
+            next = TopicMemory.of(file, name, description, type, content, now,
+                    expiresAt, 1, now);
         } else {
-            store(entry);
+            next = TopicMemory.of(file, name, description, type, content, now,
+                    expiresAt, existing.revision() + 1, existing.createdAt());
+            if (samePersistentContent(existing, next)) {
+                return new SaveResult(SaveStatus.UNCHANGED, existing.fileName(),
+                        "同主题记忆已是相同内容", existing);
+            }
+            if (!explicit) {
+                return new SaveResult(SaveStatus.CONFLICT, existing.fileName(),
+                        "自动写入与现有记忆冲突，已保留原内容；需要用户显式保存才能更新",
+                        existing);
+            }
         }
-    }
-
-    /** 基于旧条派生一个被取代的失效副本：仅改 active=false 与 supersededBy，其余保持不变。 */
-    private static MemoryEntry asSuperseded(MemoryEntry old, String newId) {
-        return old.copy(old.getSubject(), false, newId, old.getRevision(),
-                old.getExpiresAt(), old.getMetadata());
-    }
-
-    @Override
-    public synchronized Optional<MemoryEntry> retrieve(String id) {
-        pruneExpired();
-        return Optional.ofNullable(entries.get(id));
-    }
-
-    @Override
-    public synchronized List<MemoryEntry> search(String query, int limit) {
-        pruneExpired();
-        Set<String> queryTokens = MemoryQueryTokenizer.tokenize(query);
-        return entries.values().stream()
-                .filter(MemoryEntry::isRecallable)
-                .filter(entry -> {
-                    if (MemoryQueryTokenizer.matches(entry.getContent(), queryTokens)) {
-                        return true;
-                    }
-                    return entry.getMetadata().values().stream()
-                            .anyMatch(value -> MemoryQueryTokenizer.matches(value, queryTokens));
-                })
-                .limit(limit)
-                .collect(Collectors.toList());
-    }
-
-    @Override
-    public synchronized List<MemoryEntry> getAll() {
-        pruneExpired();
-        return new ArrayList<>(entries.values());
-    }
-
-    public synchronized boolean updateReviewState(
-            String id, MemoryEvidence.ReviewState reviewState) {
-        if (id == null || id.isBlank() || reviewState == null) return false;
-        pruneExpired();
-        MemoryEntry existing = entries.get(id);
-        if (existing == null) return false;
-        MemoryEntry updated = existing.withEvidence(existing.getEvidence().withReviewState(reviewState));
-        boolean persisted = store.upsert(updated);
-        if (!persisted && persistentStore) {
-            log.warn("Failed to persist review state {} for {}", reviewState, id);
-            return false;
-        }
-        entries.put(id, updated);
-        return true;
-    }
-
-    @Override
-    public synchronized boolean delete(String id) {
-        MemoryEntry toRemove = entries.get(id);
-        if (toRemove == null) {
-            return false;
-        }
-        // Bug #20 修复：先删 SQLite，成功后再删内存
-        // store.delete() 返回 void，如果抛异常则表示失败
         try {
-            store.delete(id);
-        } catch (Exception e) {
-            if (persistentStore) {
-                log.warn("LongTermMemory delete failed in persistent store for {}: {}", id, e.getMessage());
+            writeAtomically(file, next.render());
+            TopicMemory stored = TopicMemory.read(file);
+            rebuildIndex(dir);
+            SaveStatus status = existing == null ? SaveStatus.CREATED : SaveStatus.UPDATED;
+            return new SaveResult(status, file.getFileName().toString(),
+                    status == SaveStatus.CREATED ? "已创建长期记忆" : "已更新长期记忆",
+                    stored == null ? next : stored);
+        } catch (IOException e) {
+            log.warn("写入长期记忆失败 {}: {}", file, e.getMessage());
+            return rejected("写入长期记忆失败: " + e.getMessage());
+        }
+    }
+
+    /** 兼容旧入口：按当前作用域显式保存为 reference。 */
+    public String save(String name, String description, String content) {
+        SaveResult result = save(defaultScope(), name, description,
+                defaultScope() == MemoryScope.PROJECT ? "project" : "reference",
+                content, null, true);
+        return result.stored() ? result.fileName() : "";
+    }
+
+    @Override
+    public boolean delete(String id) {
+        if (id == null || id.isBlank()) return false;
+        String target = id.trim();
+        if (!target.toLowerCase(Locale.ROOT).endsWith(".md")) target += ".md";
+        for (Path dir : visibleDirs()) {
+            Path file = dir.resolve(target);
+            if (!Files.isRegularFile(file)) continue;
+            try {
+                Files.delete(file);
+                surfacedInSession.remove(file.toAbsolutePath().normalize().toString());
+                rebuildIndex(dir);
+                return true;
+            } catch (IOException e) {
+                log.warn("删除长期记忆失败 {}: {}", file, e.getMessage());
                 return false;
             }
-            // 非持久化模式，忽略 store 错误
         }
-        // SQLite 删除成功或非持久化模式，删除内存
-        entries.remove(id);
-        tokenCounter.addAndGet(-toRemove.getTokenCount());
-        removeHashIfUnused(toRemove.getContent().hashCode());
-        try {
-            onDeleteHook.accept(id);
-        } catch (Exception e) {
-            log.warn("LongTermMemory onDeleteHook failed for {}: {}", id, e.getMessage());
-        }
-        return true;
-    }
-
-    private void pruneExpired() {
-        Instant now = Instant.now();
-        List<String> expiredIds = entries.values().stream()
-                .filter(entry -> entry.isExpired(now))
-                .map(MemoryEntry::getId)
-                .toList();
-        for (String id : expiredIds) {
-            if (!delete(id)) {
-                log.warn("Failed to prune expired memory {}", id);
-            }
-        }
-    }
-
-    private MemoryEntry findDuplicateContent(MemoryEntry entry) {
-        int hash = entry.getContent().hashCode();
-        if (!contentHashes.contains(hash)) {
-            return null;
-        }
-        for (MemoryEntry existing : entries.values()) {
-            // 仅比对可召回条目：被 supersede 或已拒绝的旧条不应阻止同内容重新写入
-            if (existing.isRecallable()
-                    && !existing.getId().equals(entry.getId())
-                    && existing.getContent().equals(entry.getContent())) {
-                return existing;
-            }
-        }
-        return null;
-    }
-
-    private void removeHashIfUnused(int hash) {
-        boolean stillUsed = entries.values().stream()
-                .anyMatch(e -> e.getContent().hashCode() == hash);
-        if (!stillUsed) {
-            contentHashes.remove(hash);
-        }
-    }
-
-    @Override
-    public synchronized void clear() {
-        entries.clear();
-        contentHashes.clear();
-        tokenCounter.set(0);
-        store.clear();
-        try {
-            onClearHook.run();
-        } catch (Exception e) {
-            log.warn("LongTermMemory onClearHook failed: {}", e.getMessage());
-        }
+        return false;
     }
 
     /**
-     * 注入向量索引钩子（PR-C）。Main 启动时把 EmbeddingClient + MemoryVectorStore 包成
-     * 三个 Consumer/Runnable 接进来，让 store/delete/clear 同步更新向量。
-     * 不调用此方法时三个钩子都是 no-op。
+     * 清空单个作用域目录，返回删除的文件数。
+     *
+     * <p>只动该作用域，不连带其他作用域——全局目录跨项目共享，
+     * 在项目会话里执行「清空长期记忆」不应该抹掉其他项目也能看到的全局记忆。
      */
-    public void setVectorIndex(java.util.function.Consumer<MemoryEntry> onStore,
-                                java.util.function.Consumer<String> onDelete,
-                                Runnable onClear) {
-        this.onStoreHook = onStore == null ? entry -> {} : onStore;
-        this.onDeleteHook = onDelete == null ? id -> {} : onDelete;
-        this.onClearHook = onClear == null ? () -> {} : onClear;
-    }
-
-    @Override
-    public synchronized int getTokenCount() {
-        pruneExpired();
-        return tokenCounter.get();
-    }
-
-    @Override
-    public synchronized int size() {
-        pruneExpired();
-        return entries.size();
-    }
-
-    /**
-     * 当前长期记忆是否能跨进程持久化。SQLite 初始化失败时底层 store 降级为 no-op，
-     * 此时返回 false——写入仅留在内存，进程退出即丢。调用方据此给出诚实提示，
-     * 不把降级写入伪装成已持久化。
-     */
-    public boolean isPersistent() {
-        return persistentStore;
-    }
-
-    /** 按类型筛选记忆 */
-    public synchronized List<MemoryEntry> getByType(MemoryEntry.MemoryType type) {
-        pruneExpired();
-        return entries.values().stream()
-                .filter(entry -> entry.getType() == type)
-                .collect(Collectors.toList());
-    }
-
-    /**
-     * 解析 DevCLI 记忆目录（共享给 StickyMemory / SqliteLongTermMemoryStore 等同生态组件，
-     * 保持目录约定一致）。
-     * 优先级：{@code -Ddevcli.memory.dir} > {@code DEVCLI_MEMORY_DIR} 环境变量 > {@code ~/.devcli/memory}
-     */
-    public static Path resolveMemoryDir() {
-        String configuredDir = System.getProperty(STORAGE_DIR_PROPERTY);
-        if (configuredDir == null || configuredDir.isBlank()) {
-            configuredDir = System.getenv(STORAGE_DIR_ENV);
-        }
-        if (configuredDir != null && !configuredDir.isBlank()) {
-            return Path.of(configuredDir);
-        }
-        return Path.of(System.getProperty("user.home"), ".devcli", "memory");
-    }
-
-    /**
-     * 启动时一次性迁移旧 JSON 到 SQLite。迁移完成后把 JSON 重命名为 .bak 保留备份，
-     * 失败 / 已无 JSON 时静默跳过，主路径不阻塞。
-     */
-    private void migrateLegacyJsonIfNeeded(Path memoryDir) {
-        Path legacyJson = memoryDir.resolve(LEGACY_JSON_FILE);
-        if (!Files.exists(legacyJson)) return;
-        log.info("Detected legacy long_term_memory.json; migrating to SQLite store");
-        try {
-            ObjectMapper mapper = new ObjectMapper();
-            @SuppressWarnings("unchecked")
-            List<Map<String, Object>> dataList = mapper.readValue(legacyJson.toFile(), List.class);
-            int migrated = 0;
-            for (Map<String, Object> data : dataList) {
-                MemoryEntry entry = parseLegacyEntry(data);
-                if (entry != null) {
-                    if (!store.upsert(entry)) {
-                        throw new IOException("SQLite store did not confirm migration for entry " + entry.getId());
-                    }
-                    migrated++;
+    public int clearScope(MemoryScope scope) {
+        if (scope == null) return 0;
+        Path dir = scope.dir(memoryRoot, activeProjectPath);
+        if (dir == null || !Files.isDirectory(dir)) return 0;
+        int removed = 0;
+        try (Stream<Path> stream = Files.list(dir)) {
+            for (Path file : stream.filter(Files::isRegularFile)
+                    .filter(path -> path.getFileName().toString().toLowerCase(Locale.ROOT)
+                            .endsWith(".md"))
+                    .toList()) {
+                try {
+                    Files.delete(file);
+                    surfacedInSession.remove(file.toAbsolutePath().normalize().toString());
+                    removed++;
+                } catch (IOException e) {
+                    log.warn("清空长期记忆时删除失败 {}: {}", file, e.getMessage());
                 }
             }
-            // 备份原 JSON（不删除——给用户一份后悔药）
-            Path backup = memoryDir.resolve(LEGACY_JSON_BACKUP);
-            Files.move(legacyJson, backup, StandardCopyOption.REPLACE_EXISTING);
-            log.info("Migrated {} entries from {} to SQLite; original JSON backed up as {}",
-                    migrated, legacyJson, backup.getFileName());
         } catch (IOException e) {
-            log.warn("Migration from legacy JSON failed; keeping JSON in place: {}", e.getMessage());
+            log.warn("清空长期记忆失败 {}: {}", dir, e.getMessage());
+        }
+        return removed;
+    }
+
+    /** 清空全部可见作用域（项目 + 全局）。 */
+    public int clearAndCount() {
+        int removed = clearScope(MemoryScope.GLOBAL);
+        if (projectDir() != null) {
+            removed += clearScope(MemoryScope.PROJECT);
+        }
+        return removed;
+    }
+
+    @Override
+    public void clear() {
+        clearAndCount();
+    }
+
+    @Override
+    public void store(MemoryEntry entry) {
+        if (entry == null) return;
+        MemoryScope scope;
+        if (entry.getScope().isBlank()) {
+            scope = defaultScope();
+        } else {
+            try {
+                scope = MemoryScope.of(entry.getScope());
+            } catch (IllegalArgumentException e) {
+                // 与显式写入路径同口径：未知作用域拒绝，不回落为默认作用域。
+                // 静默回落会把拼错的作用域变成一条归属错误、且用户完全看不见的记忆。
+                log.warn("拒绝写入未知作用域的记忆 {}: {}", entry.getScope(), e.getMessage());
+                return;
+            }
+        }
+        save(scope, entry.getName(), entry.getDescription(), entry.getMemoryType(),
+                entry.getContent(), entry.getExpiresAt().orElse(null), true);
+    }
+
+    @Override
+    public Optional<MemoryEntry> retrieve(String id) {
+        if (id == null || id.isBlank()) return Optional.empty();
+        String target = id.trim();
+        for (Path dir : visibleDirs()) {
+            Path direct = dir.resolve(target.toLowerCase(Locale.ROOT).endsWith(".md")
+                    ? target : target + ".md");
+            TopicMemory memory = TopicMemory.read(direct);
+            if (memory != null) return Optional.of(toEntry(memory, dir));
+            for (TopicMemory candidate : MemoryScanner.scanHeads(dir)) {
+                if (candidate.fileName().equals(target) || candidate.name().equals(target)) {
+                    TopicMemory full = TopicMemory.read(candidate.file());
+                    if (full != null) return Optional.of(toEntry(full, dir));
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
+    @Override
+    public List<MemoryEntry> search(String query, int limit) {
+        String needle = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
+        List<MemoryEntry> result = new ArrayList<>();
+        for (TopicMemory head : candidates()) {
+            if (needle.isEmpty()
+                    || head.name().toLowerCase(Locale.ROOT).contains(needle)
+                    || head.description().toLowerCase(Locale.ROOT).contains(needle)) {
+                TopicMemory full = TopicMemory.read(head.file());
+                if (full != null && !full.isExpired(clock.instant())) {
+                    result.add(toEntry(full, head.file().getParent()));
+                }
+            }
+            if (limit > 0 && result.size() >= limit) break;
+        }
+        return result;
+    }
+
+    /** 审计视图保留过期项和跨作用域同名项。 */
+    @Override
+    public List<MemoryEntry> getAll() {
+        List<MemoryEntry> result = new ArrayList<>();
+        for (Path dir : visibleDirs()) {
+            for (TopicMemory head : MemoryScanner.scanHeads(dir)) {
+                TopicMemory full = TopicMemory.read(head.file());
+                if (full != null) result.add(toEntry(full, dir));
+            }
+        }
+        result.sort(Comparator.comparing(MemoryEntry::getTimestamp).reversed());
+        return result;
+    }
+
+    @Override
+    public int getTokenCount() {
+        return getAll().stream().mapToInt(MemoryEntry::getTokenCount).sum();
+    }
+
+    @Override
+    public int size() {
+        return getAll().size();
+    }
+
+    public boolean isPersistent() {
+        Path dir = writeTargetDir();
+        try {
+            Files.createDirectories(dir);
+            return Files.isWritable(dir);
+        } catch (IOException e) {
+            return false;
         }
     }
 
-    private void loadFromStore() {
-        for (MemoryEntry entry : store.loadAll()) {
-            entries.put(entry.getId(), entry);
-            contentHashes.add(entry.getContent().hashCode());
-            tokenCounter.addAndGet(entry.getTokenCount());
+    public String getStatusSummary() {
+        int globalCount = MemoryScanner.scan(globalDir()).size();
+        Path project = projectDir();
+        int projectCount = project == null ? 0 : MemoryScanner.scan(project).size();
+        long expired = getAll().stream().filter(MemoryEntry::isExpired).count();
+        String migration = legacyImportResult.imported() > 0
+                ? " · 本次迁移旧记忆 " + legacyImportResult.imported() + " 条"
+                : legacyImportResult.failed() > 0
+                ? " · 旧记忆迁移失败 " + legacyImportResult.failed() + " 条"
+                : "";
+        return "长期记忆: %d 条（全局 %d / 项目 %d / 已过期 %d / 作用域冲突 %d）· 根目录 %s · 本会话已注入全文 %d 条%s"
+                .formatted(globalCount + projectCount, globalCount, projectCount, expired,
+                        detectScopeConflicts().size(), memoryRoot, surfacedInSession.size(), migration);
+    }
+
+    public Path rootDir() {
+        return memoryRoot;
+    }
+
+    /** 重建全局与已存在项目目录的索引，返回处理的作用域数。 */
+    public int rebuildIndexes() {
+        List<Path> dirs = allScopeDirs();
+        for (Path dir : dirs) rebuildIndex(dir);
+        return dirs.size();
+    }
+
+    public String maintenanceReport() {
+        List<MemoryEntry> entries = getAll();
+        long expired = entries.stream().filter(MemoryEntry::isExpired).count();
+        return "长期记忆检查：共 " + entries.size() + " 条，已过期 " + expired
+                + " 条，作用域冲突 " + detectScopeConflicts().size()
+                + " 条。执行 /memory organize apply 可按当前文件重建索引。";
+    }
+
+    public String exportMarkdown() {
+        StringBuilder out = new StringBuilder("# 长期记忆审计快照\n\n");
+        out.append("导出时间：").append(clock.instant()).append("\n\n");
+        for (MemoryEntry entry : getAll()) {
+            out.append("## ").append(entry.getName()).append("\n\n")
+                    .append("- 文件：").append(entry.getId()).append('\n')
+                    .append("- 作用域：").append(entry.getScope()).append('\n')
+                    .append("- 类型：").append(entry.getMemoryType()).append('\n')
+                    .append("- 修订：r").append(entry.getRevision()).append('\n')
+                    .append("- 状态：").append(entry.isExpired() ? "已过期" : "有效").append("\n\n")
+                    .append(entry.getContent()).append("\n\n");
         }
-        if (!entries.isEmpty()) {
-            log.info("Loaded {} long-term memory entries from store", entries.size());
+        return out.toString();
+    }
+
+    public List<ScopeConflict> detectScopeConflicts() {
+        Path project = projectDir();
+        if (project == null) return List.of();
+        Map<String, TopicMemory> globals = new LinkedHashMap<>();
+        for (TopicMemory head : activeHeads(globalDir())) {
+            TopicMemory full = TopicMemory.read(head.file());
+            if (full != null) globals.put(full.fileName(), full);
+        }
+        List<ScopeConflict> conflicts = new ArrayList<>();
+        for (TopicMemory head : activeHeads(project)) {
+            TopicMemory global = globals.get(head.fileName());
+            if (global == null) continue;
+            TopicMemory local = TopicMemory.read(head.file());
+            if (local != null && !samePersistentContent(global, local)) {
+                conflicts.add(new ScopeConflict(head.fileName(), global, local));
+            }
+        }
+        return List.copyOf(conflicts);
+    }
+
+    @Override
+    public void close() {
+        // Markdown 存储没有长连接资源。
+    }
+
+    private List<TopicMemory> activeHeads(Path dir) {
+        List<TopicMemory> memories = new ArrayList<>();
+        for (TopicMemory head : MemoryScanner.scanHeads(dir)) {
+            if (!head.isExpired(clock.instant())) memories.add(head);
+        }
+        memories.sort(Comparator.comparing(TopicMemory::updatedAt).reversed());
+        return memories;
+    }
+
+    private void rebuildVisibleIndexes() {
+        for (Path dir : visibleDirs()) rebuildIndex(dir);
+    }
+
+    private void rebuildIndex(Path dir) {
+        MemoryIndex.write(dir, activeHeads(dir));
+    }
+
+    private List<Path> allScopeDirs() {
+        LinkedHashSet<Path> dirs = new LinkedHashSet<>();
+        dirs.add(globalDir());
+        Path projectsRoot = memoryRoot.resolve(MemoryPaths.PROJECTS_DIR_NAME);
+        if (Files.isDirectory(projectsRoot)) {
+            try (Stream<Path> stream = Files.list(projectsRoot)) {
+                stream.filter(Files::isDirectory)
+                        .map(path -> path.resolve(MemoryPaths.PROJECT_MEMORY_DIR_NAME))
+                        .filter(Files::isDirectory)
+                        .forEach(dirs::add);
+            } catch (IOException e) {
+                log.warn("扫描项目记忆目录失败 {}: {}", projectsRoot, e.getMessage());
+            }
+        }
+        Path active = projectDir();
+        if (active != null && Files.isDirectory(active)) dirs.add(active);
+        return List.copyOf(dirs);
+    }
+
+    private MemoryEntry toEntry(TopicMemory memory, Path dir) {
+        Map<String, String> metadata = new LinkedHashMap<>();
+        metadata.put(MemoryEntry.META_NAME, memory.name());
+        metadata.put(MemoryEntry.META_DESCRIPTION, memory.description());
+        metadata.put(MemoryEntry.META_SCOPE, scopeLabel(dir));
+        metadata.put(MemoryEntry.META_MEMORY_TYPE, memory.type());
+        metadata.put(MemoryEntry.META_CREATED_AT, memory.createdAt().toString());
+        metadata.put(MemoryEntry.META_UPDATED_AT, memory.updatedAt().toString());
+        metadata.put(MemoryEntry.META_REVISION, Integer.toString(memory.revision()));
+        metadata.put(MemoryEntry.META_EXPIRED,
+                Boolean.toString(memory.isExpired(clock.instant())));
+        if (memory.expiresAt() != null) {
+            metadata.put(MemoryEntry.META_EXPIRES_AT, memory.expiresAt().toString());
+        }
+        return new MemoryEntry(memory.fileName(), memory.body(), MemoryEntry.MemoryType.FACT,
+                memory.updatedAt(), metadata, MemoryEntry.estimateTokens(memory.body()));
+    }
+
+    private String scopeLabel(Path dir) {
+        Path project = projectDir();
+        return project != null && project.equals(dir) ? "project" : "global";
+    }
+
+    private static boolean samePersistentContent(TopicMemory left, TopicMemory right) {
+        if (left == null || right == null) return false;
+        return left.name().equals(right.name())
+                && left.description().equals(right.description())
+                && left.type().equals(right.type())
+                && left.body().equals(right.body())
+                && java.util.Objects.equals(left.expiresAt(), right.expiresAt());
+    }
+
+    private static SaveResult rejected(String message) {
+        return new SaveResult(SaveStatus.REJECTED, "", message, null);
+    }
+
+    static String slug(String name) {
+        String base = name == null ? "" : name.trim().toLowerCase(Locale.ROOT);
+        String normalized = base.replaceAll("[^\\p{IsHan}a-z0-9]+", "-")
+                .replaceAll("-+", "-")
+                .replaceAll("^-+", "")
+                .replaceAll("-+$", "");
+        if (normalized.isEmpty()) normalized = FALLBACK_SLUG_PREFIX;
+        if (normalized.length() > MAX_SLUG_LENGTH) {
+            normalized = normalized.substring(0, MAX_SLUG_LENGTH);
+        }
+        return normalized + ".md";
+    }
+
+    private static void writeAtomically(Path file, String content) throws IOException {
+        Files.createDirectories(file.getParent());
+        Path temp = Files.createTempFile(file.getParent(), ".memory-topic-", ".tmp");
+        try {
+            Files.writeString(temp, content, StandardCharsets.UTF_8);
+            try {
+                Files.move(temp, file, StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING);
+            } catch (java.nio.file.AtomicMoveNotSupportedException ignored) {
+                Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(temp);
         }
     }
 
     private static void ensureDir(Path dir) {
-        if (dir == null) return;
         try {
             Files.createDirectories(dir);
         } catch (IOException e) {
-            log.warn("Failed to create memory dir {}: {}", dir, e.getMessage());
+            log.warn("创建记忆目录失败 {}: {}", dir, e.getMessage());
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private MemoryEntry parseLegacyEntry(Map<String, Object> map) {
-        try {
-            String id = (String) map.get("id");
-            String content = (String) map.get("content");
-            MemoryEntry.MemoryType type = MemoryEntry.MemoryType.valueOf((String) map.get("type"));
-            Instant timestamp = null;
-            Object timestampObj = map.get("timestamp");
-            if (timestampObj instanceof String timestampValue && !timestampValue.isBlank()) {
-                timestamp = Instant.parse(timestampValue);
-            }
-            Map<String, String> metadata = new HashMap<>();
-            Object metaObj = map.get("metadata");
-            if (metaObj instanceof Map) {
-                ((Map<String, Object>) metaObj).forEach((k, v) -> metadata.put(k, String.valueOf(v)));
-            }
-            int tokenCount = map.get("tokenCount") instanceof Number n
-                    ? n.intValue()
-                    : MemoryEntry.estimateTokens(content);
-            return new MemoryEntry(id, content, type, timestamp, metadata, tokenCount);
-        } catch (Exception e) {
-            log.warn("Skip corrupted legacy entry: {}", e.getMessage());
-            return null;
-        }
+    void resetSessionSurfaced() {
+        surfacedInSession.clear();
     }
 
-    /**
-     * 生成记忆状态摘要
-     */
-    public String getStatusSummary() {
-        Map<MemoryEntry.MemoryType, Long> typeCounts = entries.values().stream()
-                .collect(Collectors.groupingBy(MemoryEntry::getType, Collectors.counting()));
-
-        return String.format("长期记忆: %d条 / %d tokens (事实: %d, 摘要: %d, 工具结果: %d)",
-                entries.size(), tokenCounter.get(),
-                typeCounts.getOrDefault(MemoryEntry.MemoryType.FACT, 0L),
-                typeCounts.getOrDefault(MemoryEntry.MemoryType.SUMMARY, 0L),
-                typeCounts.getOrDefault(MemoryEntry.MemoryType.TOOL_RESULT, 0L));
-    }
-
-    /**
-     * 关闭底层 store。Main 长进程不需要主动调（JVM 退出时连接自然释放）；
-     * 主要给单元测试 / 短生命周期场景用，避免 SQLite 文件锁阻碍 @TempDir 清理。
-     */
-    @Override
-    public void close() {
-        try {
-            store.close();
-        } catch (Exception e) {
-            log.warn("LongTermMemory.close failed: {}", e.getMessage());
-        }
+    Set<String> candidateNames() {
+        Set<String> names = new LinkedHashSet<>();
+        candidates().forEach(memory -> names.add(memory.fileName()));
+        return names;
     }
 }

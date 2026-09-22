@@ -14,6 +14,13 @@ class ApprovalPolicyTest {
     }
 
     @Test
+    void editFileRequiresApproval() {
+        assertTrue(ApprovalPolicy.requiresApproval("edit_file"));
+        assertEquals("🟡 中危", ApprovalPolicy.getDangerLevel("edit_file"));
+        assertFalse(ApprovalPolicy.getRiskDescription("edit_file").isBlank());
+    }
+
+    @Test
     void executeCommandRequiresApproval() {
         assertTrue(ApprovalPolicy.requiresApproval("execute_command"));
     }
@@ -76,13 +83,24 @@ class ApprovalPolicyTest {
     }
 
     @Test
-    void getDangerousToolsContainsAllThree() {
+    void getDangerousToolsContainsAllDeclaredTools() {
         Set<String> tools = ApprovalPolicy.getDangerousTools();
         assertTrue(tools.contains("write_file"));
         assertTrue(tools.contains("execute_command"));
         assertTrue(tools.contains("create_project"));
         assertTrue(tools.contains("revert_turn"));
-        assertEquals(4, tools.size());
+        assertTrue(tools.contains("edit_file"));
+        assertTrue(tools.contains("apply_patch"), "apply_patch 可跨文件增删改，必须逐次确认");
+        assertTrue(tools.contains("web_fetch"), "web_fetch 需要出口授权，应列入需确认集合");
+        assertTrue(tools.contains("delete_files"));
+        assertEquals(8, tools.size());
+    }
+
+    @Test
+    void webFetchNeedsEgressAuthorizationButIsNotMarkedSafe() {
+        assertTrue(ApprovalPolicy.requiresApproval("web_fetch"));
+        assertEquals("🟡 需确认", ApprovalPolicy.getDangerLevel("web_fetch"));
+        assertTrue(ApprovalPolicy.getRiskDescription("web_fetch").contains("第三方"));
     }
 
     @Test
@@ -91,6 +109,7 @@ class ApprovalPolicyTest {
         assertFalse(ApprovalPolicy.getRiskDescription("execute_command").isBlank());
         assertFalse(ApprovalPolicy.getRiskDescription("create_project").isBlank());
         assertFalse(ApprovalPolicy.getRiskDescription("revert_turn").isBlank());
+        assertFalse(ApprovalPolicy.getRiskDescription("web_fetch").isBlank());
     }
 
     @Test
@@ -126,7 +145,7 @@ class ApprovalPolicyTest {
     @Test
     void mcpToolStaysOutsideOfBuiltinDangerousTools() {
         // mcp__ 前缀不应污染 DANGEROUS_TOOLS 集合本身（保证 set 含义清晰）
-        assertEquals(4, ApprovalPolicy.getDangerousTools().size());
+        assertEquals(8, ApprovalPolicy.getDangerousTools().size());
         assertFalse(ApprovalPolicy.getDangerousTools().contains("mcp__demo__tool"));
     }
 }

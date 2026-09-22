@@ -2,8 +2,8 @@ package com.devcli.hook;
 
 import com.devcli.hitl.ApprovalPolicy;
 import com.devcli.hitl.HitlToolRegistry;
-import com.devcli.runtime.event.RunEvent;
-import com.devcli.runtime.event.RunEventSink;
+import com.devcli.event.RunEvent;
+import com.devcli.event.RunEventSink;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -189,7 +189,7 @@ public final class HookDispatcher {
                 || !hitlRegistry.getHitlHandler().isEnabled()) {
             throw new IllegalStateException("副作用 Hook 需要启用 HITL");
         }
-        if (!ApprovalPolicy.requiresApproval(hook.tool())) {
+        if (!registry.requiresApproval(hook.tool())) {
             throw new IllegalStateException("副作用 Hook 工具没有逐次审批策略");
         }
     }

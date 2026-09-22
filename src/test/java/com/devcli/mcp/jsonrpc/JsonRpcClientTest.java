@@ -3,7 +3,7 @@ package com.devcli.mcp.jsonrpc;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.mcp.transport.McpTransport;
-import com.devcli.runtime.CancellationToken;
+import com.devcli.concurrent.CancellationToken;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;

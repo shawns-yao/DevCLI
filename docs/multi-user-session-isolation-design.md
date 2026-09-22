@@ -150,7 +150,7 @@ flowchart LR
 | queues | `(tenant_id, thread_id, branch_id, sequence)` |
 | projections | `(tenant_id, thread_id, branch_id, projection_version)` |
 | durable_tasks | `(tenant_id, task_id)` |
-| memory_facts | `(tenant_id, scope_type, scope_id, fact_id)` |
+| 长期记忆 | `memory_facts` 表已删除（2026-09-19 改为 Markdown 唯一权威，`records/**/*.md` + `counters.json`）；多租户隔离需改为按存储目录或 frontmatter 字段切分 |
 | rag_indexes | `(tenant_id, project_id, revision)` |
 | audit_events | `(tenant_id, audit_id)` |
 | usage_ledger | `(tenant_id, turn_id, usage_type)` |

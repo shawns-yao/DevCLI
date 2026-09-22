@@ -1,3 +1,0 @@
-mode,valid,checks_passed,checks_total,completion_rate,elapsed_ms,llm_calls,failed_llm_calls,reported_total_tokens,unexpected_java_sources,agent_retry_signals,notes
-single-agent,false,1,38,0.0263,365293,2,1,2975,0,0,"transport timeout; invalid paired run"
-planner-worker-reviewer,true,38,38,1.0000,630597,31,0,568279,0,4,"completed; comparison withheld because single Agent was invalid"

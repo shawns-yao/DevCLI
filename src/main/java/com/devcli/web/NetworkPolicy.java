@@ -35,7 +35,8 @@ public class NetworkPolicy {
         this(DEFAULT_WINDOW_MILLIS, DEFAULT_MAX_PER_WINDOW);
     }
 
-    NetworkPolicy(long windowMillis, int maxPerWindow) {
+    /** 按出口预算配置窗口与上限；调用方与测试都用它构造确定性限流。 */
+    public NetworkPolicy(long windowMillis, int maxPerWindow) {
         this(windowMillis, maxPerWindow, InetAddress::getAllByName);
     }
 

@@ -157,4 +157,34 @@ class StaleWriteBarrierIntegrationTest {
                 "单 Agent 路径不启用屏障，实际: " + write.text());
         assertEquals("v2", Files.readString(target));
     }
+
+    @Test
+    void blocksCallerWriteWhenAnotherStepChangesObservedJavaSignature(@TempDir Path projectRoot) throws IOException {
+        Path service = projectRoot.resolve("OrderService.java");
+        Path caller = projectRoot.resolve("OrderController.java");
+        Files.writeString(service, "class OrderService { String find(String id) { return id; } }");
+        Files.writeString(caller, "class OrderController { }");
+
+        ToolRegistry registry = new ToolRegistry();
+        registry.setProjectPath(projectRoot.toString());
+        registry.runWithResourceLease("step_1", () -> registry.executeToolOutput("read_file", readArgs(service)));
+
+        try {
+            ToolOutput changed = registry.runWithResourceLease("step_2", () ->
+                    registry.executeToolOutput("write_file", writeArgs(service,
+                            "class OrderService { String find(long id) { return Long.toString(id); } }")));
+            assertTrue(changed.isSuccess(), changed.text());
+        } finally {
+            registry.releaseResourceLeases("step_2");
+        }
+
+        ToolOutput stale = registry.runWithResourceLease("step_1", () ->
+                registry.executeToolOutput("write_file", writeArgs(caller,
+                        "class OrderController { String load(OrderService service) { return service.find(1L); } }")));
+
+        assertTrue(stale.text().contains("上下文已过期"), stale.text());
+        assertTrue(stale.text().contains("OrderService.find"), stale.text());
+        assertEquals("class OrderController { }", Files.readString(caller), "过期上下文不得落盘");
+        registry.releaseResourceLeases("step_1");
+    }
 }

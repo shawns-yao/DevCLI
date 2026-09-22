@@ -4,7 +4,10 @@ import com.devcli.llm.LlmClient;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -14,6 +17,115 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ConversationHistoryCompactorTest {
+
+    @Test
+    void microcompactLeavesShortResultsInlineWithoutCreatingArtifacts(@TempDir Path tempDir) throws IOException {
+        ConversationHistoryCompactor compactor = new ConversationHistoryCompactor(null);
+        compactor.setMicrocompactOutputRoot(tempDir);
+        List<LlmClient.Message> history = new ArrayList<>(List.of(
+                LlmClient.Message.user("Keep the original requirement"),
+                LlmClient.Message.assistant(null, null, List.of(new LlmClient.ToolCall("small-result",
+                        new LlmClient.ToolCall.Function("edit_file", "{}")))),
+                new LlmClient.Message("tool", "File updated successfully", null, null, "small-result")));
+        List<LlmClient.Message> original = List.copyOf(history);
+        String previous = System.getProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY);
+        try {
+            System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY, "0");
+            assertFalse(compactor.microcompactOversizeMessages(history));
+            assertEquals(original, history);
+            assertEquals(0, compactor.lastMicrocompactStats().clearedToolResults());
+            try (var files = Files.list(tempDir)) {
+                assertEquals(0, files.count(), "No recovery file is needed when cleanup saves no tokens");
+            }
+        } finally {
+            if (previous == null) System.clearProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY);
+            else System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY, previous);
+        }
+    }
+
+    @Test
+    void semanticCompactionRunsWhenTriggerWasCrossedBeforeEviction(@TempDir Path tempDir) {
+        StubCompactor compactor = new StubCompactor("SEMANTIC SUMMARY", 2, true);
+        compactor.setMicrocompactOutputRoot(tempDir);
+        List<LlmClient.Message> history = new ArrayList<>(List.of(
+                LlmClient.Message.system("SYSTEM"),
+                LlmClient.Message.user("Original requirement"),
+                LlmClient.Message.assistant(null, null, List.of(new LlmClient.ToolCall(
+                        "old-tool", new LlmClient.ToolCall.Function("read_file", "{\"path\":\"a\"}")))),
+                new LlmClient.Message("tool", "old result ".repeat(4_000), null, null, "old-tool"),
+                LlmClient.Message.user("Recent question"),
+                LlmClient.Message.assistant("Recent answer")));
+        String duplicateResult = history.get(3).content();
+        history.add(4, LlmClient.Message.assistant(null, null, List.of(new LlmClient.ToolCall(
+                "duplicate-tool", new LlmClient.ToolCall.Function("read_file", "{\"path\":\"a\"}")))));
+        history.add(5, new LlmClient.Message("tool", duplicateResult, null, null, "duplicate-tool"));
+        String previousKeep = System.getProperty(
+                ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY);
+        try {
+            System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY, "0");
+            int before = TokenBudget.estimateMessagesTokens(history);
+            List<LlmClient.Message> evicted = new ArrayList<>(history);
+            assertTrue(compactor.microcompactOversizeMessages(evicted));
+            int afterEviction = TokenBudget.estimateMessagesTokens(evicted);
+            int trigger = afterEviction + 1;
+            assertTrue(before >= trigger);
+            assertTrue(afterEviction < trigger);
+
+            assertTrue(compactor.compactIfNeeded(history, trigger));
+            assertEquals(1, compactor.summarizeCalls.get(),
+                    "越过阈值后即使确定性淘汰降到阈值以下，也必须执行语义压缩");
+        } finally {
+            if (previousKeep == null) {
+                System.clearProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY);
+            } else {
+                System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY, previousKeep);
+            }
+        }
+    }
+
+    @Test
+    void pendingTriggerSurvivesCompactorRecreation(@TempDir Path tempDir) {
+        Path state = tempDir.resolve("compaction-trigger.properties");
+        ConversationHistoryCompactor failing = new ConversationHistoryCompactor(null, 2, true) {
+            @Override
+            protected String summarize(List<LlmClient.Message> messages) throws IOException {
+                throw new IOException("summary unavailable");
+            }
+        };
+        failing.setCompactionTriggerStatePath(state);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.system("SYSTEM"));
+        for (int i = 0; i < 5; i++) {
+            history.add(LlmClient.Message.user("Q" + i + " " + longText(2_000)));
+            history.add(LlmClient.Message.assistant("A" + i + " " + longText(2_000)));
+        }
+
+        assertFalse(failing.compactIfNeeded(history, 100), "首次摘要失败时不应伪装成成功");
+        assertTrue(Files.isRegularFile(state), "未完成的触发必须持久化");
+
+        StubCompactor recovered = new StubCompactor("RECOVERED SUMMARY", 2, true);
+        recovered.setCompactionTriggerStatePath(state);
+        assertTrue(recovered.compactIfNeeded(history, Integer.MAX_VALUE),
+                "恢复时即使当前 history 低于阈值，也必须继续未完成的语义压缩");
+        assertEquals(1, recovered.summarizeCalls.get());
+        assertFalse(Files.exists(state), "语义压缩提交后应清理 pending 状态");
+    }
+
+    @Test
+    void malformedPendingTriggerFailsClosedIntoSemanticCompaction(@TempDir Path tempDir) throws IOException {
+        Path state = tempDir.resolve("corrupt-trigger.properties");
+        Files.writeString(state, "triggerTokens=not-a-number\n");
+        StubCompactor compactor = new StubCompactor("RECOVERED SUMMARY", 2, true);
+        compactor.setCompactionTriggerStatePath(state);
+        List<LlmClient.Message> history = new ArrayList<>();
+        history.add(LlmClient.Message.user("old requirement"));
+        history.add(LlmClient.Message.assistant("old decision"));
+        history.add(LlmClient.Message.user("new question"));
+        history.add(LlmClient.Message.assistant("new answer"));
+
+        assertTrue(compactor.compactIfNeeded(history, Integer.MAX_VALUE));
+        assertEquals(1, compactor.summarizeCalls.get());
+    }
 
     @Test
     void doesNothingWhenBelowTrigger() {
@@ -84,31 +196,25 @@ class ConversationHistoryCompactorTest {
     }
 
     @Test
-    void oversizedRecentMessageIsBoundedByTokenBudgetAndStored(@TempDir Path tempDir) throws IOException {
+    void oversizedRecentUserMessageIsPreservedForSemanticCompaction(@TempDir Path tempDir) {
         StubCompactor c = new StubCompactor("SUMMARY", 3_000, true);
         c.setMicrocompactOutputRoot(tempDir);
+        String currentRequest = "large current upload " + longText(20_000);
         List<LlmClient.Message> history = new ArrayList<>();
         history.add(LlmClient.Message.system("SYSTEM"));
         history.add(LlmClient.Message.user("old question " + longText(5_000)));
         history.add(LlmClient.Message.assistant("old answer " + longText(5_000)));
-        history.add(LlmClient.Message.user("large current upload " + longText(20_000)));
+        history.add(LlmClient.Message.user(currentRequest));
         history.add(LlmClient.Message.assistant("current answer"));
 
         assertTrue(c.compactIfNeeded(history, 100));
-        int tailStart = 3;
-        int tailTokens = TokenBudget.estimateMessagesTokens(
-                history.subList(tailStart, history.size()));
-        assertTrue(tailTokens <= 3_000,
-                "最新原文区不能因单条大消息突破 token 预算，实际=" + tailTokens);
-        assertTrue(history.get(tailStart).content().contains("storedPath="),
-                "被截断的普通消息必须保留可恢复落盘引用");
-        assertTrue(Files.walk(tempDir)
-                .anyMatch(path -> path.toString().contains("microcompact_message_outputs")
-                        && Files.isRegularFile(path)));
+        assertEquals(currentRequest, history.get(3).content(),
+                "规则式 microcompact 不得裁剪当前用户请求");
+        assertEquals(0, c.lastMicrocompactStats().clearedToolResults());
     }
 
     @Test
-    void performsPeriodicFullRecompactAfterIncrementalCompactions() {
+    void performsPeriodicLifecycleGcWithoutRecompressingOldSummary() {
         StubCompactor c = new StubCompactor("SUMMARY", 3_000, true);
         c.setFullRecompactInterval(2);
         List<LlmClient.Message> history = buildBigHistory();
@@ -119,9 +225,11 @@ class ConversationHistoryCompactorTest {
         assertEquals(1, c.incrementalCalls.get());
         appendRound(history, 20);
         assertTrue(c.compactIfNeeded(history, 100));
-        assertEquals(2, c.summarizeCalls.get(),
-                "第三次压缩应按间隔执行周期性全量摘要重建");
-        assertTrue(history.get(1).content().contains("mode=periodic-full"));
+        assertEquals(1, c.summarizeCalls.get(),
+                "周期治理不能把旧摘要当原始历史再次压缩");
+        assertEquals(2, c.incrementalCalls.get(),
+                "第三次压缩仍应基于旧摘要执行增量更新");
+        assertTrue(history.get(1).content().contains("mode=lifecycle-gc"));
     }
 
     @Test
@@ -153,8 +261,8 @@ class ConversationHistoryCompactorTest {
         history.add(LlmClient.Message.assistant(null, null, List.of(
                 new LlmClient.ToolCall("old-1", new LlmClient.ToolCall.Function("read_file", "{\"path\":\"a\"}")),
                 new LlmClient.ToolCall("old-2", new LlmClient.ToolCall.Function("list_dir", "{\"path\":\".\"}")))));
-        history.add(new LlmClient.Message("tool", "old result body 1", null, null, "old-1"));
-        history.add(new LlmClient.Message("tool", "old result body 2", null, null, "old-2"));
+        history.add(new LlmClient.Message("tool", "old result body 1".repeat(100), null, null, "old-1"));
+        history.add(new LlmClient.Message("tool", "old result body 1".repeat(100), null, null, "old-2"));
         history.add(LlmClient.Message.assistant("old done"));
         history.add(LlmClient.Message.user("RecentQ1"));
         history.add(LlmClient.Message.assistant(null, null, List.of(
@@ -163,17 +271,28 @@ class ConversationHistoryCompactorTest {
         history.add(LlmClient.Message.user("RecentQ2"));
         history.add(LlmClient.Message.assistant("recent answer"));
 
-        boolean changed = c.microcompactOversizeMessages(history);
+        String previousKeep = System.getProperty(
+                ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY);
+        boolean changed;
+        try {
+            System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY, "1");
+            changed = c.microcompactOversizeMessages(history);
+        } finally {
+            if (previousKeep == null) {
+                System.clearProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY);
+            } else {
+                System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY, previousKeep);
+            }
+        }
 
         assertTrue(changed);
-        assertTrue(history.get(3).content().contains("<microcompact_boundary>"), history.get(3).content());
-        assertTrue(history.get(3).content().contains("toolCallId=old-1"), history.get(3).content());
-        assertFalse(history.get(3).content().contains("old result body 1"), history.get(3).content());
+        assertEquals("old result body 1".repeat(100), history.get(3).content());
         assertTrue(history.get(4).content().contains("toolCallId=old-2"), history.get(4).content());
+        assertFalse(history.get(4).content().contains("old result body 1"), history.get(4).content());
         assertEquals("recent result body", history.get(8).content());
         assertTrue(Files.exists(tempDir.resolve(ConversationHistoryCompactor.MICROCOMPACT_OUTPUTS_DIR)
                 .resolve(ConversationHistoryCompactor.microcompactSessionId())
-                .resolve("old-1.txt")));
+                .resolve("old-2.txt")));
     }
 
     @Test
@@ -205,6 +324,10 @@ class ConversationHistoryCompactorTest {
         assertEquals("MOCK SUMMARY OF OLD CONTENT",
                 CompactBoundaryMetadata.stripBoundaryBlock(
                         summaryMessage.substring(ConversationHistoryCompactor.SUMMARY_MARKER.length()).trim()));
+        assertTrue(metadata.sourceHash().matches("[0-9a-f]{64}"));
+        assertEquals(1, metadata.sourceStart());
+        assertTrue(metadata.sourceEnd() > metadata.sourceStart());
+        assertTrue(metadata.projectionHash().matches("[0-9a-f]{64}"));
     }
 
     @Test
@@ -236,17 +359,17 @@ class ConversationHistoryCompactorTest {
     }
 
     @Test
-    void compactionReusesSessionMemoryPreSummaryWhenItCoversOldMessages() {
-        SessionMemory sessionMemory = new SessionMemory();
+    void compactionReusesSummaryCacheWhenItCoversOldMessages() {
+        CompactionSummaryCache summaryCache = new CompactionSummaryCache();
         StubCompactor c = new StubCompactor("SHOULD NOT BE USED", 3_000, true);
-        c.setSessionMemory(sessionMemory);
+        c.setCompactionSummaryCache(summaryCache);
         List<LlmClient.Message> history = new ArrayList<>();
         history.add(LlmClient.Message.system("SYSTEM_PROMPT"));
         for (int i = 0; i < 6; i++) {
             history.add(LlmClient.Message.user("Q" + i + ": " + longText(5_000)));
             history.add(LlmClient.Message.assistant("A" + i + ": " + longText(5_000)));
         }
-        sessionMemory.recordPreSummary(history.subList(1, 11), "SESSION PRE SUMMARY");
+        summaryCache.recordPreSummary(history.subList(1, 11), "SESSION PRE SUMMARY");
 
         boolean compacted = c.compactIfNeeded(history, 100);
 
@@ -260,17 +383,17 @@ class ConversationHistoryCompactorTest {
     }
 
     @Test
-    void extendsSessionMemoryPreSummaryWhenStrictTailMovesSplitBoundary() {
-        SessionMemory sessionMemory = new SessionMemory();
+    void extendsSummaryCacheWhenStrictTailMovesSplitBoundary() {
+        CompactionSummaryCache summaryCache = new CompactionSummaryCache();
         StubCompactor c = new StubCompactor("EXTENDED SUMMARY", 3_000, true);
-        c.setSessionMemory(sessionMemory);
+        c.setCompactionSummaryCache(summaryCache);
         List<LlmClient.Message> history = new ArrayList<>();
         history.add(LlmClient.Message.system("SYSTEM_PROMPT"));
         for (int i = 0; i < 6; i++) {
             history.add(LlmClient.Message.user("Q" + i + ": " + longText(5_000)));
             history.add(LlmClient.Message.assistant("A" + i + ": " + longText(5_000)));
         }
-        sessionMemory.recordPreSummary(history.subList(1, 9), "SESSION PREFIX SUMMARY");
+        summaryCache.recordPreSummary(history.subList(1, 9), "SESSION PREFIX SUMMARY");
 
         assertTrue(c.compactIfNeeded(history, 100));
         assertEquals(1, c.incrementalCalls.get(),
@@ -721,16 +844,17 @@ class ConversationHistoryCompactorTest {
     }
 
     // ─────────────────────────────────────────────────────────
-    // PTL retry 测试：摘要调用自身 OOM 时按 user 边界丢头部 round 重试
+    // PTL retry 收紧请求预算，不删除原始历史。
     // ─────────────────────────────────────────────────────────
 
     @Test
-    void ptlRetrySucceedsOnSecondAttemptAfterDroppingOldestRound() {
-        // 第 1 次摘要返回 prompt-too-long，第 2 次（消息变少后）成功
+    void ptlRetrySucceedsWithoutDroppingOldestRound() {
         AtomicInteger attempt = new AtomicInteger();
+        List<List<LlmClient.Message>> inputs = new ArrayList<>();
         ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 2_000, true) {
             @Override
             protected String summarize(List<LlmClient.Message> messages) throws IOException {
+                inputs.add(List.copyOf(messages));
                 int n = attempt.incrementAndGet();
                 if (n == 1) {
                     throw new IOException("prompt is too long: 250000 tokens exceeds maximum 200000");
@@ -742,6 +866,7 @@ class ConversationHistoryCompactorTest {
         boolean ok = c.compactIfNeeded(buildBigHistory(), 100);
         assertTrue(ok, "PTL retry 应该让第 2 次摘要成功");
         assertEquals(2, attempt.get(), "应当尝试 2 次：第 1 次 PTL，第 2 次成功");
+        assertEquals(inputs.get(0), inputs.get(1), "重试必须保留全部待摘要消息");
         assertEquals(0, c.getConsecutiveFailures(), "成功后失败计数应清零");
     }
 
@@ -781,26 +906,49 @@ class ConversationHistoryCompactorTest {
     }
 
     @Test
-    void ptlRetryDropsRoundsAtUserBoundary() {
-        // 验证 dropOldestRoundsByRatio 切割点对齐 user 边界
-        List<LlmClient.Message> messages = new ArrayList<>();
-        messages.add(LlmClient.Message.user("Q1"));
-        messages.add(LlmClient.Message.assistant("A1"));
-        messages.add(LlmClient.Message.user("Q2"));
-        messages.add(LlmClient.Message.assistant("A2"));
-        messages.add(LlmClient.Message.user("Q3"));
-        messages.add(LlmClient.Message.assistant("A3"));
-        messages.add(LlmClient.Message.user("Q4"));
-        messages.add(LlmClient.Message.assistant("A4"));
-        messages.add(LlmClient.Message.user("Q5"));
-        messages.add(LlmClient.Message.assistant("A5"));
+    void failedPtlRetryKeepsHistoryUnchanged() {
+        var compactor = new ConversationHistoryCompactor(null, 2_000, true) {
+            @Override protected String summarize(List<LlmClient.Message> messages) throws IOException {
+                throw new IOException("context length exceeded");
+            }
+        };
+        List<LlmClient.Message> history = buildBigHistory();
+        List<LlmClient.Message> original = List.copyOf(history);
+        assertFalse(compactor.compactIfNeeded(history, 100));
+        assertEquals(original, history);
+    }
 
-        // 5 个 round，drop 20% = ceil(1) = 1 round → 保留 4 个 round = 8 条消息
-        List<LlmClient.Message> trimmed = ConversationHistoryCompactor
-                .dropOldestRoundsByRatio(messages, 0.20);
-        assertEquals(8, trimmed.size());
-        assertEquals("user", trimmed.get(0).role(), "保留段必须以 user 起头");
-        assertEquals("Q2", trimmed.get(0).content());
+    @Test
+    void semanticSummaryReadsToolResultBeforeMicrocompact(@TempDir Path tempDir) {
+        AtomicInteger seen = new AtomicInteger();
+        ConversationHistoryCompactor compactor = new ConversationHistoryCompactor(null, 2_000, true) {
+            @Override
+            protected String summarize(List<LlmClient.Message> messages) {
+                assertTrue(messages.stream().anyMatch(message ->
+                                message.content() != null && message.content().contains("ORIGINAL_TOOL_PAYLOAD")),
+                        "语义摘要应读取 MicroCompact 前的原始工具结果");
+                seen.incrementAndGet();
+                return "SUMMARY";
+            }
+        };
+        compactor.setMicrocompactOutputRoot(tempDir);
+        List<LlmClient.Message> history = new ArrayList<>(List.of(
+                LlmClient.Message.system("system"),
+                LlmClient.Message.user("inspect"),
+                LlmClient.Message.assistant(null, null, List.of(
+                        new LlmClient.ToolCall("read-1", new LlmClient.ToolCall.Function(
+                                "read_file", "{\"path\":\"src/A.java\"}")))),
+                LlmClient.Message.tool("read-1", "ORIGINAL_TOOL_PAYLOAD ".repeat(4_000)),
+                LlmClient.Message.user("modify " + "m".repeat(9_000)),
+                LlmClient.Message.assistant(null, null, List.of(
+                        new LlmClient.ToolCall("write-1", new LlmClient.ToolCall.Function(
+                                "write_file", "{\"path\":\"src/A.java\"}")))),
+                LlmClient.Message.tool("write-1", "written"),
+                LlmClient.Message.assistant("done"),
+                LlmClient.Message.user("latest")));
+
+        assertTrue(compactor.compactIfNeeded(history, 1_000));
+        assertEquals(1, seen.get());
     }
 
     @Test
@@ -827,6 +975,138 @@ class ConversationHistoryCompactorTest {
                 new IOException("max_tokens must be greater than thinking.budget_tokens")));
     }
 
+    @Test
+    void usesSinglePassWhenHistoryFitsModelTokenWindow() throws IOException {
+        RecordingSummaryClient client = new RecordingSummaryClient(128_000);
+        ConversationHistoryCompactor compactor =
+                new ConversationHistoryCompactor(client, 2_000, true);
+
+        String summary = compactor.summarize(List.of(
+                LlmClient.Message.user("project history " + longText(80_000))));
+
+        assertEquals(RecordingSummaryClient.SUMMARY, summary);
+        assertEquals(1, client.calls.get(),
+                "超过旧 60K 字符阈值但仍位于模型 Token 窗口内时应单次摘要");
+    }
+
+    @Test
+    void disabledCompactionLeavesHistoryUntouchedAndSkipsSummaryModel() {
+        String key = ConversationHistoryCompactor.COMPACTION_ENABLED_PROPERTY;
+        String previous = System.getProperty(key);
+        AtomicInteger calls = new AtomicInteger();
+        ConversationHistoryCompactor compactor = new ConversationHistoryCompactor(null, 2_000, true) {
+            @Override protected String summarize(List<LlmClient.Message> messages) {
+                calls.incrementAndGet();
+                return RecordingSummaryClient.SUMMARY;
+            }
+        };
+        List<LlmClient.Message> history = buildBigHistory();
+        List<LlmClient.Message> original = List.copyOf(history);
+        try {
+            System.setProperty(key, "false");
+            assertFalse(compactor.compactIfNeeded(history, 100));
+            assertEquals(original, history);
+            assertEquals(0, calls.get());
+        } finally {
+            if (previous == null) System.clearProperty(key);
+            else System.setProperty(key, previous);
+        }
+    }
+
+    @Test
+    void metricsReportEveryDecisionEvenWhenRawModeDisablesCompaction() {
+        String enabledKey = ConversationHistoryCompactor.COMPACTION_ENABLED_PROPERTY;
+        String metricsKey = ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY;
+        String previousEnabled = System.getProperty(enabledKey);
+        String previousMetrics = System.getProperty(metricsKey);
+        PrintStream previousErr = System.err;
+        ByteArrayOutputStream captured = new ByteArrayOutputStream();
+        List<LlmClient.Message> history = List.of(
+                LlmClient.Message.system("system"),
+                LlmClient.Message.user("current task"));
+        try {
+            System.setProperty(enabledKey, "false");
+            System.setProperty(metricsKey, "true");
+            System.setErr(new PrintStream(captured, true, StandardCharsets.UTF_8));
+
+            assertFalse(new ConversationHistoryCompactor(null, 2_000, true)
+                    .compactIfNeeded(new ArrayList<>(history), 80_000));
+
+            String output = captured.toString(StandardCharsets.UTF_8);
+            assertTrue(output.contains("kind=decision enabled=false"), output);
+            assertTrue(output.contains("historyTokens="
+                    + TokenBudget.estimateMessagesTokens(history)), output);
+            assertTrue(output.contains("triggerTokens=80000"), output);
+        } finally {
+            System.setErr(previousErr);
+            restoreProperty(enabledKey, previousEnabled);
+            restoreProperty(metricsKey, previousMetrics);
+        }
+    }
+
+    @Test
+    void metricsReportSummaryCallTokenUsage() throws IOException {
+        String metricsKey = ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY;
+        String previousMetrics = System.getProperty(metricsKey);
+        PrintStream previousErr = System.err;
+        ByteArrayOutputStream captured = new ByteArrayOutputStream();
+        try {
+            System.setProperty(metricsKey, "true");
+            System.setErr(new PrintStream(captured, true, StandardCharsets.UTF_8));
+
+            new ConversationHistoryCompactor(new RecordingSummaryClient(128_000), 2_000, true)
+                    .summarize(List.of(LlmClient.Message.user("project history")));
+
+            assertTrue(captured.toString(StandardCharsets.UTF_8).contains(
+                    "kind=summary-call inputTokens=100 outputTokens=50 cachedInputTokens=0"));
+        } finally {
+            System.setErr(previousErr);
+            restoreProperty(metricsKey, previousMetrics);
+        }
+    }
+
+    @Test
+    void metricsReportCompactionBudgetsAndHistoryStages() {
+        String metricsKey = ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY;
+        String previousMetrics = System.getProperty(metricsKey);
+        PrintStream previousErr = System.err;
+        ByteArrayOutputStream captured = new ByteArrayOutputStream();
+        try {
+            System.setProperty(metricsKey, "true");
+            System.setErr(new PrintStream(captured, true, StandardCharsets.UTF_8));
+
+            StubCompactor compactor = new StubCompactor("STRUCTURED SUMMARY", 3_000, true);
+            List<LlmClient.Message> history = buildBigHistory();
+            assertTrue(compactor.compactIfNeeded(history, 5_000));
+
+            String output = captured.toString(StandardCharsets.UTF_8);
+            assertTrue(output.matches("(?s).*kind=history.*beforeTokens=\\d+.*afterTokens=\\d+.*"
+                    + "triggerTokens=5000.*tailBudgetTokens=3000.*summaryTokens=\\d+.*"
+                    + "retainedTailTokens=\\d+.*postCompactionHistoryTokens=\\d+.*"), output);
+        } finally {
+            System.setErr(previousErr);
+            if (previousMetrics == null) System.clearProperty(metricsKey);
+            else System.setProperty(metricsKey, previousMetrics);
+        }
+    }
+
+    @Test
+    void keepsMapReduceForHistoryThatExceedsModelTokenWindow() throws IOException {
+        RecordingSummaryClient client = new RecordingSummaryClient(8_000);
+        ConversationHistoryCompactor compactor =
+                new ConversationHistoryCompactor(client, 2_000, true);
+
+        compactor.summarize(List.of(
+                LlmClient.Message.user("project history " + longText(80_000))));
+
+        assertTrue(client.calls.get() > 1,
+                "超过摘要模型 Token 预算时仍必须分片并归并");
+        int requestBudget = com.devcli.context.ContextProfile.from(client).compressionTriggerTokens();
+        assertTrue(client.requests.stream()
+                        .allMatch(request -> TokenBudget.estimateMessagesTokens(request) <= requestBudget),
+                "Map-Reduce 的每个请求都必须位于摘要模型输入预算内");
+    }
+
     /** 构造一段足够大、可以 split 的 history。 */
     private static List<LlmClient.Message> buildBigHistory() {
         List<LlmClient.Message> history = new ArrayList<>();
@@ -841,6 +1121,11 @@ class ConversationHistoryCompactorTest {
     private static void appendRound(List<LlmClient.Message> history, int id) {
         history.add(LlmClient.Message.user("new question " + id + " " + longText(2_000)));
         history.add(LlmClient.Message.assistant("new answer " + id + " " + longText(2_000)));
+    }
+
+    private static void restoreProperty(String key, String value) {
+        if (value == null) System.clearProperty(key);
+        else System.setProperty(key, value);
     }
 
     /** 测试用 stub：summarize 返回固定字符串，避免真实 LLM 依赖。 */
@@ -872,6 +1157,63 @@ class ConversationHistoryCompactorTest {
                                               List<LlmClient.Message> newMessages) throws IOException {
             incrementalCalls.incrementAndGet();
             return mockSummary;
+        }
+    }
+
+    private static final class RecordingSummaryClient implements LlmClient {
+        private static final String SUMMARY = """
+                ## 主要请求与意图
+                - 保留项目历史
+                ## 关键技术概念
+                - 无
+                ## 文件和代码
+                - 无
+                ## 踩过的坑和修复
+                - 无
+                ## 问题解决过程
+                - 无
+                ## 逐条用户消息
+                - 用户提供项目历史
+                """;
+        private final int contextWindow;
+        private final AtomicInteger calls = new AtomicInteger();
+        private final List<List<Message>> requests = new ArrayList<>();
+
+        private RecordingSummaryClient(int contextWindow) {
+            this.contextWindow = contextWindow;
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools) {
+            calls.incrementAndGet();
+            requests.add(List.copyOf(messages));
+            return new ChatResponse("assistant", SUMMARY, null, 100, 50);
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools,
+                                 StreamListener listener) {
+            return chat(messages, tools);
+        }
+
+        @Override
+        public String getModelName() {
+            return "recording-summary";
+        }
+
+        @Override
+        public String getProviderName() {
+            return "test";
+        }
+
+        @Override
+        public int maxContextWindow() {
+            return contextWindow;
+        }
+
+        @Override
+        public int maxOutputTokens() {
+            return 2_048;
         }
     }
 }

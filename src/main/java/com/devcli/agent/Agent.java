@@ -7,7 +7,8 @@ import com.devcli.context.ContextProfile;
 import com.devcli.context.TokenUsageFormatter;
 import com.devcli.lsp.LspDiagnosticReport;
 import com.devcli.memory.ConversationHistoryCompactor;
-import com.devcli.memory.ExplicitMemoryHints;
+import com.devcli.memory.CompactionContext;
+import com.devcli.memory.CompactionResult;
 import com.devcli.memory.MemoryManager;
 import com.devcli.memory.TokenBudget;
 import com.devcli.prompt.PromptAssembler;
@@ -16,9 +17,9 @@ import com.devcli.prompt.PromptMode;
 import com.devcli.render.PlainRenderer;
 import com.devcli.render.Renderer;
 import com.devcli.render.StatusInfo;
-import com.devcli.runtime.CancellationContext;
-import com.devcli.runtime.event.RunEvent;
-import com.devcli.runtime.event.RunEventSink;
+import com.devcli.concurrent.CancellationContext;
+import com.devcli.event.RunEvent;
+import com.devcli.event.RunEventSink;
 import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.util.AnsiStyle;
@@ -54,19 +55,25 @@ public class Agent implements AutoCloseable {
     private final List<LlmClient.Message> conversationHistory;
     private final MemoryManager memoryManager;
     private final ConversationHistoryCompactor historyCompactor;
+    private final ContextReferenceGuard.ReferenceRegistry contextReferenceRegistry =
+            new ContextReferenceGuard.ReferenceRegistry();
     private Supplier<String> externalContextSupplier = () -> "";
-    private Supplier<String> stickyMemorySupplier = () -> "";
+    private Supplier<String> ruleContextSupplier = () -> "";
+    private Supplier<CompactionContext> compactionContextSupplier;
     private SkillRegistry skillRegistry;
     private SkillContextBuffer skillContextBuffer;
     private Renderer renderer;
     private RunEventSink runEventSink = RunEventSink.NO_OP;
     private final TraceRecorder traceRecorder = new TraceRecorder();
-    private Supplier<Boolean> hitlEnabledSupplier = () -> false;
+    private Supplier<String> permissionModeSupplier = () -> null;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
     private AgentTurnInbox turnInbox = new AgentTurnInbox();
-    private final AtomicReference<com.devcli.runtime.CancellationToken> activeCancellationToken =
+    private final AtomicReference<com.devcli.concurrent.CancellationToken> activeCancellationToken =
             new AtomicReference<>();
     private String currentSkillActivationText = "";
+    /** ReAct 的工作记忆跨用户轮次保留；显式清理后再复用同一会话标识重新开启。 */
+    private final String sessionTaskId = "react-run-"
+            + java.util.UUID.randomUUID().toString().substring(0, 8);
 
     public Agent(LlmClient llmClient) {
         this(llmClient, new ToolRegistry(), true);
@@ -77,11 +84,21 @@ public class Agent implements AutoCloseable {
     }
 
     Agent(LlmClient llmClient, ToolRegistry toolRegistry, boolean ownsToolRegistry) {
+        this(llmClient, toolRegistry, ownsToolRegistry, new MemoryManager(llmClient));
+    }
+
+    /** 允许嵌入方选择记忆存储，委派不会额外创建持久记忆实例。 */
+    public Agent(LlmClient llmClient, ToolRegistry toolRegistry, MemoryManager memoryManager) {
+        this(llmClient, toolRegistry, false, memoryManager);
+    }
+
+    private Agent(LlmClient llmClient, ToolRegistry toolRegistry, boolean ownsToolRegistry,
+                  MemoryManager memoryManager) {
         this.llmClient = llmClient;
         this.toolRegistry = toolRegistry;
         this.ownsToolRegistry = ownsToolRegistry;
         this.conversationHistory = new ArrayList<>();
-        this.memoryManager = new MemoryManager(llmClient);
+        this.memoryManager = java.util.Objects.requireNonNull(memoryManager, "memoryManager");
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
         AgentRuntimeSupport.configureCompactor(
                 historyCompactor,
@@ -98,6 +115,10 @@ public class Agent implements AutoCloseable {
         this.memoryManager.setLlmClient(llmClient);
         this.historyCompactor.setLlmClient(llmClient);
         this.toolRegistry.setContextProfile(memoryManager.getContextProfile());
+    }
+
+    public void setMemoryCuratorClient(LlmClient curatorClient) {
+        memoryManager.setMemoryCuratorClient(curatorClient);
     }
 
     /**
@@ -126,13 +147,15 @@ public class Agent implements AutoCloseable {
         this.externalContextSupplier = externalContextSupplier == null ? () -> "" : externalContextSupplier;
     }
 
-    /**
-     * 注入 Sticky Memory 渲染源（PR-B）：返回的 Markdown 整段会作为 system prompt 的
-     * "Sticky Memory" 段注入。Main 启动时构造 StickyMemory 后通过此 setter 接进来。
-     */
-    public void setStickyMemorySupplier(Supplier<String> stickyMemorySupplier) {
-        this.stickyMemorySupplier = stickyMemorySupplier == null ? () -> "" : stickyMemorySupplier;
+    /** 注入规则上下文渲染源；返回的 Markdown 整段会进入 system prompt。 */
+    public void setRuleContextSupplier(Supplier<String> ruleContextSupplier) {
+        this.ruleContextSupplier = ruleContextSupplier == null ? () -> "" : ruleContextSupplier;
+        memoryManager.setRuleContextSupplier(this.ruleContextSupplier);
     }
+
+    /** @deprecated 使用 {@link #setRuleContextSupplier(Supplier)}。 */
+    @Deprecated
+    public void setStickyMemorySupplier(Supplier<String> supplier) { setRuleContextSupplier(supplier); }
 
     public void setSkillRegistry(SkillRegistry skillRegistry) {
         this.skillRegistry = skillRegistry;
@@ -150,6 +173,31 @@ public class Agent implements AutoCloseable {
         this.runEventSink = runEventSink == null ? RunEventSink.NO_OP : runEventSink;
     }
 
+    /** 绑定 Runtime 事件游标，使压缩边界可在重启后定位并校验。 */
+    public void setCompactionSourceCursorSupplier(
+            java.util.function.Supplier<ConversationHistoryCompactor.CompactionSourceCursor> supplier) {
+        historyCompactor.setCompactionSourceCursorSupplier(supplier);
+    }
+
+    public void setCompactionContextSupplier(Supplier<CompactionContext> supplier) {
+        this.compactionContextSupplier = supplier;
+    }
+
+    private CompactionContext compactionContext(int triggerTokens) {
+        CompactionContext supplied = compactionContextSupplier == null
+                ? null : compactionContextSupplier.get();
+        if (supplied == null) {
+            supplied = AgentRuntimeSupport.buildCompactionContext(
+                    triggerTokens, memoryManager, toolRegistry, sessionTaskId);
+        }
+        return supplied.withTriggerTokens(triggerTokens);
+    }
+
+    public void setOriginalHistorySupplier(
+            java.util.function.Supplier<List<LlmClient.Message>> supplier) {
+        historyCompactor.setOriginalHistorySupplier(supplier);
+    }
+
     public void setTurnInbox(AgentTurnInbox turnInbox) {
         this.turnInbox = turnInbox == null ? new AgentTurnInbox() : turnInbox;
     }
@@ -159,7 +207,7 @@ public class Agent implements AutoCloseable {
     }
 
     public void abort() {
-        com.devcli.runtime.CancellationToken token = activeCancellationToken.get();
+        com.devcli.concurrent.CancellationToken token = activeCancellationToken.get();
         if (token != null) {
             token.cancel();
         }
@@ -170,11 +218,14 @@ public class Agent implements AutoCloseable {
     }
 
     /**
-     * 注入 HITL 启用状态的快照源，用于状态栏 / StatusInfo 显示。
-     * Main 启动后用 {@code reactAgent.setHitlEnabledSupplier(hitlHandler::isEnabled)} 接进来。
+     * 注入权限模式的快照源，用于状态栏 / StatusInfo 显示。
+     * Main 启动后用 {@code reactAgent.setPermissionModeSupplier(() -> hitlToolRegistry.currentPermissionMode().id())} 接进来。
+     *
+     * <p>取代原来的 HITL 开关快照：状态栏要显示的不再是「问不问」这一个布尔，而是当前模式
+     * （只读 / 自动放行编辑 / 直接放行等）。布尔表达不了模式差异，见 docs/adr/0006。</p>
      */
-    public void setHitlEnabledSupplier(Supplier<Boolean> supplier) {
-        this.hitlEnabledSupplier = supplier == null ? () -> false : supplier;
+    public void setPermissionModeSupplier(Supplier<String> supplier) {
+        this.permissionModeSupplier = supplier == null ? () -> null : supplier;
     }
 
     /**
@@ -199,11 +250,19 @@ public class Agent implements AutoCloseable {
      * 运行 Agent 循环，并允许受控执行入口约束首轮工具选择。
      */
     public String run(String userInput, LlmClient.ToolChoice initialToolChoice) {
-        com.devcli.runtime.CancellationToken inheritedToken = CancellationContext.current();
+        com.devcli.concurrent.CancellationToken inheritedToken = CancellationContext.current();
         activeCancellationToken.set(inheritedToken);
+        memoryManager.beginTask(sessionTaskId);
+        memoryManager.setActiveProjectScope(toolRegistry.getProjectPath());
+        String result = "";
         try {
-            return runInternal(userInput, initialToolChoice);
+            result = runInternal(userInput, initialToolChoice);
+            return result;
         } finally {
+            memoryManager.completeTask(sessionTaskId, userInput, result, toolRegistry.getProjectPath());
+            memoryManager.endTask(sessionTaskId);
+            historyCompactor.setSummaryCallGuard(null);
+            historyCompactor.setSummaryUsageConsumer(null);
             activeCancellationToken.compareAndSet(inheritedToken, null);
         }
     }
@@ -216,10 +275,9 @@ public class Agent implements AutoCloseable {
         currentSkillActivationText = userInput == null ? "" : userInput;
         toolRegistry.prefetchToolDefinitionsForInput(currentSkillActivationText);
         pruneHistoricalImagePayloads();
+        memoryManager.setActiveProjectScope(toolRegistry.getProjectPath());
         // 写入当前会话工作记忆；真实 messages 由 conversationHistory 维护。
         memoryManager.addUserMessage(userInput);
-        storeExplicitBrowserMemoryHint(userInput);
-
         // system prompt 只放会话级稳定内容，仅在真变化时替换，保住前缀缓存
         refreshSystemPromptIfChanged();
 
@@ -238,6 +296,7 @@ public class Agent implements AutoCloseable {
 
         long startNanos = System.nanoTime();
         AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
+        AgentRuntimeSupport.bindCompactionBudget(historyCompactor, budget, memoryManager);
         TraceContext traceContext = TraceContext.root("react");
         TurnExecutionMetrics metrics = new TurnExecutionMetrics();
         traceRecorder.record(traceContext, "run.start", java.util.Map.of(
@@ -248,8 +307,12 @@ public class Agent implements AutoCloseable {
 
         // 主退出条件 = LLM 自己决定（不再调用工具就返回）；
         // budget 仅在 token 用尽 / 检测到死循环 / 超出硬轮数时兜底。
-        return new AgentExecutionEngine<String>(
-                llmClient, budget, HookLifecycle.load(toolRegistry)).run(
+        LlmClient primaryClient = llmClient;
+        DelegationSession delegation = new DelegationSession(toolRegistry,
+                role -> com.devcli.llm.LlmClientFactory.createDelegatedAgent(primaryClient, role),
+                budget, conversationHistory.get(0).content(), runEventSink);
+        return toolRegistry.runWithDelegation(delegation, () -> new AgentExecutionEngine<String>(
+                llmClient, budget, HookLifecycle.load(toolRegistry), contextReferenceRegistry).run(
                 new AgentExecutionEngine.Delegate<>() {
                     @Override
                     public List<LlmClient.Message> history() {
@@ -258,10 +321,16 @@ public class Agent implements AutoCloseable {
 
                     @Override
                     public List<LlmClient.Tool> toolDefinitions(int iteration) {
-                        List<LlmClient.Tool> definitions = toolRegistry.getToolDefinitions();
-                        logRequestContext("react iteration=" + iteration, definitions);
+                        return toolSnapshot(iteration).definitions();
+                    }
+
+                    @Override
+                    public com.devcli.tool.ToolRegistry.ToolSnapshot toolSnapshot(int iteration) {
+                        com.devcli.tool.ToolRegistry.ToolSnapshot snapshot =
+                                toolRegistry.snapshotForCurrentAccess();
+                        logRequestContext("react iteration=" + iteration, snapshot.definitions());
                         streamRenderer.beginThinking();
-                        return definitions;
+                        return snapshot;
                     }
 
                     @Override
@@ -372,6 +441,13 @@ public class Agent implements AutoCloseable {
                     }
 
                     @Override
+                    public List<ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
+                                                                  int iteration,
+                                                                  com.devcli.tool.ToolRegistry.ToolSnapshot snapshot) {
+                        return executeToolCalls(toolCalls, iteration, snapshot);
+                    }
+
+                    @Override
                     public void afterToolResults(LlmClient.ChatResponse response,
                                                  List<ToolExecutionResult> toolResults,
                                                  int iteration,
@@ -385,11 +461,29 @@ public class Agent implements AutoCloseable {
                                     "timedOut", toolResult.timedOut(),
                                     "resultPreview", preview(toolResult.result(), 300)
                             ));
-                            memoryManager.addToolResult(
-                                    toolResult.name(), toolResult.argumentsJson(), toolResult.result(),
-                                    toolResult.sideChannels());
+                            memoryManager.addToolResult(toolResult);
                         }
                         appendImageToolMessages(toolResults);
+                    }
+
+                    @Override
+                    public String instructionAfterToolResults(
+                            LlmClient.ChatResponse response,
+                            List<ToolExecutionResult> toolResults,
+                            int iteration,
+                            AgentBudget currentBudget) {
+                        return memoryManager.drainCurrentStateConflictInstruction();
+                    }
+
+                    @Override
+                    public java.util.Map<String, String> refreshStaleContext() {
+                        return toolRegistry.refreshStaleContext(
+                                toolRegistry.currentResourceLeaseStep());
+                    }
+
+                    @Override
+                    public String contextScope() {
+                        return toolRegistry.currentResourceLeaseStep();
                     }
 
                     @Override
@@ -398,9 +492,9 @@ public class Agent implements AutoCloseable {
                         appendReasoning(reasoningTranscript, response.reasoningContent());
                         memoryManager.addAssistantMessage(response.content());
                         memoryManager.recordTokenUsage(
-                                currentBudget.totalInputTokens(),
-                                currentBudget.totalOutputTokens(),
-                                currentBudget.totalCachedInputTokens());
+                                response.inputTokens(),
+                                response.outputTokens(),
+                                response.cachedInputTokens());
                         pushStatus(currentBudget, startNanos, "idle");
                         log.info("ReAct run finished: inputTokens={}, outputTokens={}, reasoningChars={}, answerChars={}",
                                 currentBudget.totalInputTokens(),
@@ -436,14 +530,14 @@ public class Agent implements AutoCloseable {
                     @Override
                     public String budgetExceeded(AgentBudget.ExitReason reason,
                                                  AgentBudget currentBudget) {
-                        String description = currentBudget.describeExit(reason);
+                        FailureFeedback feedback = FailureFeedback.forBudget(reason, currentBudget);
                         log.warn("ReAct run exhausted budget: reason={}, iteration={}, tokens={}/{}",
                                 reason, currentBudget.iteration(),
                                 currentBudget.totalInputTokens() + currentBudget.totalOutputTokens(),
                                 currentBudget.tokenBudget());
                         streamRenderer.finish();
                         pushStatus(currentBudget, startNanos, "idle");
-                        return "❌ " + description;
+                        return "❌ " + feedback.render();
                     }
 
                     @Override
@@ -456,9 +550,10 @@ public class Agent implements AutoCloseable {
                     public String failed(IOException error, AgentBudget currentBudget) {
                         log.error("LLM call failed in ReAct loop", error);
                         streamRenderer.finish();
-                        return "❌ 调用 LLM 失败: " + error.getMessage();
+                        return "❌ " + FailureFeedback.fromReason(
+                                "调用 LLM 失败: " + error.getMessage()).render();
                     }
-                });
+                }));
     }
 
     private static final class TurnExecutionMetrics {
@@ -513,7 +608,7 @@ public class Agent implements AutoCloseable {
     private String buildSystemPrompt() {
         return promptAssembler.assemble(PromptMode.AGENT, PromptContext.builder()
                 .externalContext(buildExternalContext())
-                .stickyMemory(buildStickyMemory())
+                .ruleContext(buildRuleContext())
                 .build());
     }
 
@@ -524,7 +619,7 @@ public class Agent implements AutoCloseable {
     private String buildTurnContext(String memoryContext) {
         return promptAssembler.assembleTurnContext(PromptContext.builder()
                 .memoryContext(memoryContext)
-                .workingMemory(memoryManager.buildWorkingMemorySection())
+                .sessionMemory(memoryManager.buildSessionMemorySection())
                 .skillIndex(buildSkillIndex())
                 .build());
     }
@@ -536,12 +631,12 @@ public class Agent implements AutoCloseable {
         return turnContext + "\n\n" + content;
     }
 
-    private String buildStickyMemory() {
+    private String buildRuleContext() {
         try {
-            String sticky = stickyMemorySupplier.get();
-            return sticky == null ? "" : sticky.trim();
+            String rules = ruleContextSupplier.get();
+            return rules == null ? "" : rules.trim();
         } catch (Exception e) {
-            log.warn("Failed to render sticky memory", e);
+            log.warn("Failed to render rule context", e);
             return "";
         }
     }
@@ -557,7 +652,9 @@ public class Agent implements AutoCloseable {
             if (projectPath != null) {
                 historyCompactor.setMicrocompactOutputRoot(Path.of(projectPath));
             }
-            boolean compacted = historyCompactor.compactIfNeeded(conversationHistory, trigger);
+            CompactionResult compaction = historyCompactor.compactIfNeeded(
+                    conversationHistory, compactionContext(trigger));
+            boolean compacted = compaction.compacted();
             if (compacted) {
                 renderer().stream().println("📦 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
             }
@@ -619,14 +716,22 @@ public class Agent implements AutoCloseable {
     }
 
     private void maintainSessionPreSummaryAfterTurn(int turnToolCalls, int largestToolResultChars) {
-        MemoryManager.SessionPreSummaryMaintenanceResult result =
-                memoryManager.maintainSessionPreSummaryAfterTurn(
+        // 预摘要只用于为未来的语义压缩准备可复用缓存，不能阻塞主 Agent turn。
+        // Provider 连接可能因半关闭的 SSE 响应等待到 callTimeout；主链路应继续执行，
+        // 真正达到阈值时由 ConversationHistoryCompactor 自己负责有界重试/降级。
+        java.util.concurrent.CompletableFuture<MemoryManager.SessionPreSummaryMaintenanceResult> future =
+                memoryManager.maintainSessionPreSummaryAfterTurnAsync(
                         conversationHistory,
                         turnToolCalls,
                         largestToolResultChars);
-        if (result == MemoryManager.SessionPreSummaryMaintenanceResult.MAINTAINED) {
-            log.debug("session pre-summary refreshed after ReAct turn");
-        }
+        future
+                .whenComplete((result, error) -> {
+                    if (error != null) {
+                        log.debug("session pre-summary maintenance finished asynchronously with error", error);
+                    } else if (result == MemoryManager.SessionPreSummaryMaintenanceResult.MAINTAINED) {
+                        log.debug("session pre-summary refreshed after ReAct turn");
+                    }
+                });
     }
 
     private String buildExternalContext() {
@@ -651,7 +756,8 @@ public class Agent implements AutoCloseable {
 
     public boolean compactHistoryForPersistence(int triggerTokens) {
         if (triggerTokens <= 0) return false;
-        return historyCompactor.compactIfNeeded(conversationHistory, triggerTokens);
+        return historyCompactor.compactIfNeeded(
+                conversationHistory, compactionContext(triggerTokens)).compacted();
     }
 
     /**
@@ -675,17 +781,6 @@ public class Agent implements AutoCloseable {
             if (ownsToolRegistry && toolRegistry != null) {
                 toolRegistry.close();
             }
-        }
-    }
-
-    private void storeExplicitBrowserMemoryHint(String userInput) {
-        List<String> recentTexts = conversationHistory.stream()
-                .map(LlmClient.Message::content)
-                .filter(content -> content != null && !content.isBlank())
-                .toList();
-        String fact = ExplicitMemoryHints.browserLoginFact(userInput, recentTexts);
-        if (fact != null && !fact.isBlank()) {
-            memoryManager.storeFactWithPolicy(fact, true);
         }
     }
 
@@ -871,7 +966,7 @@ public class Agent implements AutoCloseable {
             long totalTokens = budget == null ? 0L
                     : (long) (budget.totalInputTokens() + budget.totalOutputTokens());
             long contextWindow = llmClient == null ? 0L : llmClient.maxContextWindow();
-            boolean hitl = Boolean.TRUE.equals(hitlEnabledSupplier.get());
+            String permissionMode = permissionModeSupplier.get();
             long elapsed = (System.nanoTime() - startNanos) / 1_000_000L;
             String cost = budget == null ? null : TokenUsageFormatter.estimatedCostCny(
                     llmClient,
@@ -885,7 +980,7 @@ public class Agent implements AutoCloseable {
                     budget == null ? 0L : budget.totalOutputTokens(),
                     budget == null ? 0L : budget.totalCachedInputTokens(),
                     cost,
-                    hitl,
+                    permissionMode,
                     elapsed,
                     phase == null || phase.isBlank()
                             ? (totalTokens > 0 || elapsed > 0 ? "running" : "idle")
@@ -906,6 +1001,13 @@ public class Agent implements AutoCloseable {
     }
 
     private List<ToolExecutionResult> executeToolCalls(List<LlmClient.ToolCall> toolCalls, int iteration) {
+        return executeToolCalls(toolCalls, iteration, null);
+    }
+
+    private List<ToolExecutionResult> executeToolCalls(
+            List<LlmClient.ToolCall> toolCalls,
+            int iteration,
+            com.devcli.tool.ToolRegistry.ToolSnapshot snapshot) {
         List<ToolInvocation> invocations = new ArrayList<>();
         for (LlmClient.ToolCall toolCall : toolCalls) {
             String toolName = toolCall.function().name();
@@ -918,7 +1020,7 @@ public class Agent implements AutoCloseable {
         if (invocations.size() > 1) {
             log.info("Executing {} tool calls in parallel (iteration={})", invocations.size(), iteration);
         }
-        List<ToolExecutionResult> results = toolRegistry.executeTools(invocations);
+        List<ToolExecutionResult> results = toolRegistry.executeTools(invocations, snapshot);
         for (ToolExecutionResult result : results) {
             log.debug("Tool result preview [{}]: {}", result.name(), preview(result.result(), 300));
             emitToolResultSummary(result);

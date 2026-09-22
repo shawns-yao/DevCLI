@@ -44,6 +44,7 @@ final class SkillCommandHandler {
                 .append("提示：\n")
                 .append("  /skill show <name> 看完整 SKILL.md\n")
                 .append("  /skill on/off <name> 切换启用状态\n")
+                .append("  /skill trust/untrust project 管理项目 Skill 目录信任\n")
                 .append("  /skill reload 重新扫描");
         return sb.toString();
     }
@@ -97,6 +98,23 @@ final class SkillCommandHandler {
         }
         stateStore.disable(name);
         return "⏸️ 已禁用 skill: " + name + "（已写入 ~/.devcli/skills.json，下一轮 LLM 调用生效）";
+    }
+
+    static String trustProject(SkillRegistry registry) {
+        if (registry.projectSkillsDirectory() == null) {
+            return "❌ 当前未配置项目 Skill 目录";
+        }
+        registry.trustProjectDirectory();
+        return "✅ 已信任项目 Skill 目录: " + registry.projectSkillsDirectory().toAbsolutePath().normalize()
+                + "（仓库指令仍按低信任参考资料隔离）";
+    }
+
+    static String untrustProject(SkillRegistry registry) {
+        if (registry.projectSkillsDirectory() == null) {
+            return "❌ 当前未配置项目 Skill 目录";
+        }
+        registry.untrustProjectDirectory();
+        return "✅ 已取消信任项目 Skill 目录: " + registry.projectSkillsDirectory().toAbsolutePath().normalize();
     }
 
     private static String abbreviate(String s, int max) {

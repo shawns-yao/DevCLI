@@ -5,11 +5,11 @@ import com.devcli.hook.HookLifecycle;
 import com.devcli.context.TokenUsageFormatter;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.SamplingRequestCoordinator;
-import com.devcli.runtime.CancellationContext;
-import com.devcli.runtime.RunContext;
-import com.devcli.runtime.event.RunEvent;
-import com.devcli.runtime.event.RunEventSink;
-import com.devcli.runtime.event.RunEventStreamListener;
+import com.devcli.concurrent.CancellationContext;
+import com.devcli.concurrent.RunContext;
+import com.devcli.event.RunEvent;
+import com.devcli.event.RunEventSink;
+import com.devcli.event.RunEventStreamListener;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.tool.ToolPresentation;
 
@@ -30,6 +30,15 @@ final class AgentExecutionEngine<R> {
         List<LlmClient.Message> history();
 
         List<LlmClient.Tool> toolDefinitions(int iteration);
+
+        /** 当前轮模型可见定义与执行绑定的不可变快照；旧委托可返回 null 保持兼容。 */
+        default ToolRegistry.ToolSnapshot toolSnapshot(int iteration) {
+            return null;
+        }
+
+        default boolean allowsToolRouting() {
+            return true;
+        }
 
         LlmClient.StreamListener streamListener();
 
@@ -87,10 +96,36 @@ final class AgentExecutionEngine<R> {
         List<ToolRegistry.ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
                                                             int iteration);
 
+        /** 使用与模型请求相同的工具快照执行当前轮调用。 */
+        default List<ToolRegistry.ToolExecutionResult> executeTools(
+                List<LlmClient.ToolCall> toolCalls,
+                int iteration,
+                ToolRegistry.ToolSnapshot snapshot) {
+            return executeTools(toolCalls, iteration);
+        }
+
         default void afterToolResults(LlmClient.ChatResponse response,
                                       List<ToolRegistry.ToolExecutionResult> toolResults,
                                       int iteration,
                                       AgentBudget budget) {
+        }
+
+        /** 返回工具证据触发的确定性内部纠偏指令；空串表示无需追加。 */
+        default String instructionAfterToolResults(
+                LlmClient.ChatResponse response,
+                List<ToolRegistry.ToolExecutionResult> toolResults,
+                int iteration,
+                AgentBudget budget) {
+            return "";
+        }
+
+        /** 自动刷新过期上下文；key 为项目相对路径，value 为当前真实内容。 */
+        default Map<String, String> refreshStaleContext() {
+            return Map.of();
+        }
+
+        default String contextScope() {
+            return "";
         }
 
         default Optional<R> completedAfterToolResults(
@@ -117,6 +152,7 @@ final class AgentExecutionEngine<R> {
     private final HookLifecycle hookLifecycle;
     private final SamplingRequestCoordinator samplingRequests;
     private final RepeatToolAdvisor repeatToolAdvisor;
+    private final ContextReferenceGuard.ReferenceRegistry contextReferenceRegistry;
     private final String engineId = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
 
     AgentExecutionEngine(LlmClient llmClient, AgentBudget budget) {
@@ -129,14 +165,32 @@ final class AgentExecutionEngine<R> {
 
     AgentExecutionEngine(LlmClient llmClient, AgentBudget budget, HookLifecycle hookLifecycle,
                          SamplingRequestCoordinator samplingRequests) {
+        this(llmClient, budget, hookLifecycle, samplingRequests,
+                new ContextReferenceGuard.ReferenceRegistry());
+    }
+
+    AgentExecutionEngine(LlmClient llmClient, AgentBudget budget, HookLifecycle hookLifecycle,
+                         ContextReferenceGuard.ReferenceRegistry contextReferenceRegistry) {
+        this(llmClient, budget, hookLifecycle, SamplingRequestCoordinator.shared(), contextReferenceRegistry);
+    }
+
+    AgentExecutionEngine(LlmClient llmClient, AgentBudget budget, HookLifecycle hookLifecycle,
+                         SamplingRequestCoordinator samplingRequests,
+                         ContextReferenceGuard.ReferenceRegistry contextReferenceRegistry) {
         this.llmClient = Objects.requireNonNull(llmClient, "llmClient");
         this.budget = Objects.requireNonNull(budget, "budget");
         this.hookLifecycle = hookLifecycle;
         this.samplingRequests = Objects.requireNonNull(samplingRequests, "samplingRequests");
+        this.contextReferenceRegistry = Objects.requireNonNullElseGet(
+                contextReferenceRegistry, ContextReferenceGuard.ReferenceRegistry::new);
         this.repeatToolAdvisor = RepeatToolAdvisor.fromSystemProperties();
     }
 
     R run(Delegate<R> delegate) {
+        return ToolRegistry.runWithToolTask(UUID.randomUUID().toString(), () -> runInToolTask(delegate));
+    }
+
+    private R runInToolTask(Delegate<R> delegate) {
         Objects.requireNonNull(delegate, "delegate");
         if (hookLifecycle == null || hookLifecycle.isEmpty()) {
             return runLoop(delegate);
@@ -177,6 +231,9 @@ final class AgentExecutionEngine<R> {
     }
 
     private R runLoop(Delegate<R> delegate) {
+        ToolCallGovernance toolGovernance = new ToolCallGovernance();
+        ContextReferenceGuard contextReferenceGuard = ContextReferenceGuard.fromHistory(
+                delegate.history(), contextReferenceRegistry);
         while (true) {
             RunEventSink eventSink = RunEventSink.composite(
                     delegate.eventSink(),
@@ -187,8 +244,11 @@ final class AgentExecutionEngine<R> {
                 return delegate.cancelled(budget);
             }
             if (budget.iteration() >= delegate.maxIterations()) {
+                FailureFeedback feedback = FailureFeedback.forBudget(
+                        AgentBudget.ExitReason.HARD_ITERATION_LIMIT, budget);
                 emitState(eventSink, RunEvent.ExecutionState.ITERATION_LIMIT_REACHED,
-                        budget.iteration(), "达到当前执行入口的迭代上限");
+                        budget.iteration(), feedback.toRunEvent().reason());
+                eventSink.emit(feedback.toRunEvent());
                 return delegate.iterationLimitReached(budget);
             }
             AgentBudget.ExitReason exitReason = budget.check();
@@ -197,30 +257,55 @@ final class AgentExecutionEngine<R> {
                 emitState(eventSink, RunEvent.ExecutionState.BUDGET_EXCEEDED,
                         budget.iteration(), reason);
                 emitCircuitBreaker(eventSink, exitReason, reason);
+                eventSink.emit(FailureFeedback.forBudget(exitReason, budget).toRunEvent());
                 return delegate.budgetExceeded(exitReason, budget);
             }
 
-            int iteration = budget.beginIteration();
+            int iteration = budget.tryBeginIteration();
+            if (iteration == 0) continue;
             if (hookLifecycle != null) {
                 hookLifecycle.startTurn(iteration);
             }
             delegate.beforeIteration(iteration, budget);
+            // 压缩或并行子任务可能在准备期间耗尽 Token；已预留的轮数不重复检查。
+            if (delegate.isCancelled()
+                    || (long) budget.totalInputTokens() + budget.totalOutputTokens() >= budget.tokenBudget()) {
+                continue;
+            }
 
+            RunEventStreamListener streamListener = new RunEventStreamListener(eventSink);
             try {
                 emitState(eventSink, RunEvent.ExecutionState.THINKING,
                         iteration, "正在请求模型生成下一步动作");
                 LlmClient.ChatResponse response;
+                ToolRegistry.ToolSnapshot toolSnapshot;
                 try (SamplingRequestCoordinator.RequestScope ignored =
                              samplingRequests.begin(samplingRequestId(iteration))) {
                     eventSink.emit(RunEvent.ModelContext.from(
                             iteration, List.copyOf(delegate.history())));
+                    LlmClient.ToolChoice requestedToolChoice = delegate.toolChoice(iteration);
+                    toolSnapshot = delegate.toolSnapshot(iteration);
+                    List<LlmClient.Tool> originalDefinitions = toolSnapshot == null
+                            ? delegate.toolDefinitions(iteration)
+                            : toolSnapshot.definitions();
+                    List<LlmClient.Tool> toolDefinitions = originalDefinitions;
+                    requestedToolChoice = contextReferenceGuard.toolChoice(requestedToolChoice);
+                    if (delegate.allowsToolRouting()) {
+                        toolDefinitions = toolGovernance.route(toolDefinitions, delegate.history(), requestedToolChoice);
+                    }
+                    // 只在路由真的改动了定义时才重建快照，保持「同一份定义同时用于模型与执行」的身份契约，
+                    // 避免每轮无条件新建快照破坏前缀缓存与身份断言。
+                    if (toolSnapshot != null && toolDefinitions != originalDefinitions) {
+                        toolSnapshot = toolSnapshot.withDefinitions(toolDefinitions);
+                    }
                     response = llmClient.chat(
                             delegate.history(),
-                            delegate.toolDefinitions(iteration),
-                            new RunEventStreamListener(eventSink),
-                            delegate.toolChoice(iteration));
+                            toolDefinitions,
+                            streamListener,
+                            requestedToolChoice);
                 }
                 if (delegate.isCancelled()) {
+                    salvagePartialAssistant(delegate, eventSink, streamListener, response);
                     emitState(eventSink, RunEvent.ExecutionState.CANCELLED,
                             iteration, "模型响应后检测到运行取消");
                     return delegate.cancelled(budget);
@@ -265,12 +350,20 @@ final class AgentExecutionEngine<R> {
 
                     emitState(eventSink, RunEvent.ExecutionState.TOOL_EXECUTING,
                             iteration, response.toolCalls().size() + " 个工具调用开始执行");
-                    List<ToolRegistry.ToolExecutionResult> returnedResults = delegate.executeTools(
-                            response.toolCalls(), iteration);
+                    boolean admitted = budget.reserveToolCalls(response.toolCalls());
+                    List<ToolRegistry.ToolExecutionResult> returnedResults = admitted
+                            ? delegate.executeTools(response.toolCalls(), iteration, toolSnapshot)
+                            : response.toolCalls().stream().map(call -> new ToolRegistry.ToolExecutionResult(
+                                    call.id(), call.function().name(), call.function().arguments(),
+                                    budget.describeExit(AgentBudget.ExitReason.TOOL_CALL_LIMIT), 0,
+                                    com.devcli.tool.ToolStatus.REJECTED,
+                                    com.devcli.tool.ToolErrorCode.TOOL_BUDGET_EXCEEDED, false, List.of())).toList();
                     ToolResultReconciler.Reconciliation reconciliation =
                             ToolResultReconciler.reconcile(
                                     response.toolCalls(), returnedResults, delegate::toolPresentation);
-                    List<ToolRegistry.ToolExecutionResult> toolResults = reconciliation.results();
+                    List<ToolRegistry.ToolExecutionResult> toolResults = ToolResultWindow.fit(
+                            reconciliation.results(), ToolResultWindow.available(llmClient, delegate.history(),
+                                    toolSnapshot == null ? delegate.toolDefinitions(iteration) : toolSnapshot.definitions()));
                     emitPairingIssues(eventSink, reconciliation.issues());
                     emitState(eventSink, RunEvent.ExecutionState.TOOL_RESULTS_PAIRED,
                             iteration, toolResults.size() + " 个工具结果已按原调用顺序对账");
@@ -282,12 +375,32 @@ final class AgentExecutionEngine<R> {
                         eventSink.emit(RunEvent.ModelMessage.from(toolMessage));
                     }
                     eventSink.emit(RunEvent.ToolResults.from(toolResults));
+                    budget.recordToolCycle(toolGovernance.observe(toolResults, toolSnapshot));
                     if (hookLifecycle != null) {
                         hookLifecycle.toolResultsReceived(iteration, toolResults);
                     }
                     delegate.afterToolResults(response, toolResults, iteration, budget);
-                    Optional<R> completed = delegate.completedAfterToolResults(
-                            response, toolResults, iteration, budget);
+                    String refreshInstruction = refreshStaleContext(
+                            delegate, eventSink, toolResults, iteration);
+                    String toolResultInstruction = combineRetryInstructions(refreshInstruction,
+                            delegate.instructionAfterToolResults(
+                                    response, toolResults, iteration, budget));
+                    if (toolResultInstruction != null && !toolResultInstruction.isBlank()) {
+                        LlmClient.Message instructionMessage =
+                                LlmClient.Message.internalUser(toolResultInstruction.trim());
+                        delegate.history().add(instructionMessage);
+                        eventSink.emit(RunEvent.ModelMessage.from(instructionMessage));
+                    }
+                    contextReferenceGuard.observe(toolResults);
+                    String referenceFailure = contextReferenceGuard.terminalFailure();
+                    if (!referenceFailure.isBlank()) {
+                        emitState(eventSink, RunEvent.ExecutionState.FAILED, iteration, referenceFailure);
+                        eventSink.emit(FailureFeedback.fromReason(referenceFailure).toRunEvent());
+                        return delegate.failed(new IOException(referenceFailure), budget);
+                    }
+                    Optional<R> completed = admitted && contextReferenceGuard.isSatisfied()
+                            ? delegate.completedAfterToolResults(response, toolResults, iteration, budget)
+                            : Optional.empty();
                     if (completed.isPresent()) {
                         emitState(eventSink, RunEvent.ExecutionState.COMPLETED,
                                 iteration, "工具结果满足当前执行入口的完成条件");
@@ -299,8 +412,9 @@ final class AgentExecutionEngine<R> {
                     continue;
                 }
 
-                String retryInstruction = delegate.retryInstructionAfterResponseWithoutTools(
-                        response, iteration, budget);
+                String retryInstruction = combineRetryInstructions(
+                        contextReferenceGuard.retryInstruction(),
+                        delegate.retryInstructionAfterResponseWithoutTools(response, iteration, budget));
                 if (retryInstruction != null && !retryInstruction.isBlank()) {
                     LlmClient.Message assistantMessage = LlmClient.Message.assistant(
                             response.reasoningContent(), response.content());
@@ -328,11 +442,92 @@ final class AgentExecutionEngine<R> {
                         iteration, "模型返回最终答复");
                 return delegate.completed(response, budget);
             } catch (IOException e) {
+                salvagePartialAssistant(delegate, eventSink, streamListener, null);
                 emitState(eventSink, RunEvent.ExecutionState.FAILED,
                         iteration, e.getMessage());
+                eventSink.emit(FailureFeedback.fromReason(e.getMessage()).toRunEvent());
                 return delegate.failed(e, budget);
             }
         }
+    }
+
+    /**
+     * 中断挽救：把已经流出的 reasoning / content 写回历史。
+     *
+     * 不这么做，内容只在终端显示过、历史里不存在：下一轮重放或压缩后，用户会看到
+     * 「刚才明明回答了一半，现在没了」。只补文本、不补工具调用——取消后不会再执行
+     * 工具，留下没有配对结果的 tool_call 会让下一次请求违反消息协议。
+     */
+    private static <R> void salvagePartialAssistant(Delegate<R> delegate,
+                                                    RunEventSink eventSink,
+                                                    RunEventStreamListener streamListener,
+                                                    LlmClient.ChatResponse response) {
+        LlmClient.Message salvaged = streamListener.salvagedAssistantMessage();
+        if (salvaged == null && response != null) {
+            // 非流式响应下 listener 收不到 delta，退回完整响应文本。
+            String visible = response.content();
+            String think = response.reasoningContent();
+            boolean hasVisible = visible != null && !visible.isBlank();
+            boolean hasThink = think != null && !think.isBlank();
+            if (hasVisible || hasThink) {
+                salvaged = LlmClient.Message.assistant(hasThink ? think : "", hasVisible ? visible : "");
+            }
+        }
+        if (salvaged == null) {
+            return;
+        }
+        delegate.history().add(salvaged);
+        eventSink.emit(RunEvent.ModelMessage.from(salvaged));
+    }
+
+    private static String combineRetryInstructions(String first, String second) {
+        String left = first == null ? "" : first.trim();
+        String right = second == null ? "" : second.trim();
+        if (left.isEmpty()) {
+            return right;
+        }
+        if (right.isEmpty()) {
+            return left;
+        }
+        return left + "\n\n" + right;
+    }
+
+    private static <R> String refreshStaleContext(Delegate<R> delegate,
+                                                   RunEventSink eventSink,
+                                                   List<ToolRegistry.ToolExecutionResult> results,
+                                                   int iteration) {
+        boolean stale = results != null && results.stream().anyMatch(result ->
+                result != null && result.errorCode() == com.devcli.tool.ToolErrorCode.STALE_CONTEXT);
+        if (!stale) return "";
+        String scope = delegate.contextScope();
+        emitState(eventSink, RunEvent.ExecutionState.STALE_CONTEXT, iteration,
+                "检测到写入依赖的上下文版本已失效");
+        eventSink.emit(new RunEvent.ContextRefresh(scope,
+                RunEvent.ContextRefreshState.STALE_CONTEXT, List.of(), "写闸门拒绝过期上下文"));
+        emitState(eventSink, RunEvent.ExecutionState.REFRESHING_CONTEXT, iteration,
+                "正在读取受影响资源的当前版本");
+        eventSink.emit(new RunEvent.ContextRefresh(scope,
+                RunEvent.ContextRefreshState.REFRESHING_CONTEXT, List.of(), "开始确定性刷新"));
+        Map<String, String> refreshed = delegate.refreshStaleContext();
+        if (refreshed == null || refreshed.isEmpty()) {
+            emitState(eventSink, RunEvent.ExecutionState.FAILED_RETRYABLE, iteration,
+                    "上下文刷新未取得受影响资源");
+            eventSink.emit(new RunEvent.ContextRefresh(scope,
+                    RunEvent.ContextRefreshState.FAILED_RETRYABLE, List.of(), "没有可刷新的资源"));
+            return "上下文版本已失效，但自动刷新未取得资源。请重新调用 read_file 后再写入。";
+        }
+        List<String> resources = refreshed.keySet().stream().sorted().toList();
+        eventSink.emit(new RunEvent.ContextRefresh(scope,
+                RunEvent.ContextRefreshState.RUNNING, resources, "刷新完成，恢复执行"));
+        StringBuilder instruction = new StringBuilder(
+                "以下依赖资源已由执行管线自动刷新。必须丢弃基于旧版本生成的修改，"
+                        + "根据这些当前内容重新生成，再调用写入工具：\n");
+        for (String resource : resources) {
+            instruction.append("\n<refreshed_file path=\"").append(resource).append("\">\n")
+                    .append(refreshed.get(resource))
+                    .append("\n</refreshed_file>\n");
+        }
+        return instruction.toString();
     }
 
     private String samplingRequestId(int iteration) {
@@ -398,7 +593,10 @@ final class AgentExecutionEngine<R> {
                                     AgentBudget.ExitReason exitReason,
                                     String reason) {
         if (exitReason != AgentBudget.ExitReason.STAGNATION_DETECTED
-                && exitReason != AgentBudget.ExitReason.REPEATED_TOOL_ERROR) {
+                && exitReason != AgentBudget.ExitReason.REPEATED_TOOL_ERROR
+                && exitReason != AgentBudget.ExitReason.TOOL_CYCLE_DETECTED
+                && exitReason != AgentBudget.ExitReason.CONSECUTIVE_TOOL_FAILURES
+                && exitReason != AgentBudget.ExitReason.TOOL_CALL_LIMIT) {
             return;
         }
         eventSink.emit(new RunEvent.CustomMessage(

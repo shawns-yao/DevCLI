@@ -109,22 +109,10 @@ class ResourceLeaseManagerTest {
         String step1 = "step-1";
         String step2 = "step-2";
 
+        var clock = new java.util.concurrent.atomic.AtomicLong();
+        manager = new ResourceLeaseManager(30_000, 600_000, clock::get);
         manager.acquireWrite(step1, file);
-
-        // 模拟租约超时：通过反射修改内部时间戳
-        var field = ResourceLeaseManager.class.getDeclaredField("writeOwners");
-        field.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        var writeOwners = (java.util.Map<Path, Object>) field.get(manager);
-
-        var leaseEntryClass = Class.forName("com.devcli.tool.ResourceLeaseManager$LeaseEntry");
-        var constructor = leaseEntryClass.getDeclaredConstructor(String.class, long.class);
-        constructor.setAccessible(true);
-
-        // 31 秒前（超过 30 秒超时阈值）
-        long expiredTime = System.currentTimeMillis() - 31_000;
-        var expiredEntry = constructor.newInstance(step1, expiredTime);
-        writeOwners.put(file.toAbsolutePath().normalize(), expiredEntry);
+        clock.set(31_000);
 
         // step-2 应该能够获取租约（step-1 已超时）
         assertDoesNotThrow(() -> manager.acquireWrite(step2, file), "超时后其他步骤应该能获取租约");
@@ -138,24 +126,61 @@ class ResourceLeaseManagerTest {
         Path file = tempDir.resolve("User.java");
         String stepId = "step-1";
 
+        var clock = new java.util.concurrent.atomic.AtomicLong();
+        manager = new ResourceLeaseManager(30_000, 600_000, clock::get);
         manager.acquireWrite(stepId, file);
         assertTrue(manager.isLeaseValid(stepId, file));
 
-        // 模拟超时
-        var field = ResourceLeaseManager.class.getDeclaredField("writeOwners");
-        field.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        var writeOwners = (java.util.Map<Path, Object>) field.get(manager);
-
-        var leaseEntryClass = Class.forName("com.devcli.tool.ResourceLeaseManager$LeaseEntry");
-        var constructor = leaseEntryClass.getDeclaredConstructor(String.class, long.class);
-        constructor.setAccessible(true);
-
-        long expiredTime = System.currentTimeMillis() - 31_000;
-        var expiredEntry = constructor.newInstance(stepId, expiredTime);
-        writeOwners.put(file.toAbsolutePath().normalize(), expiredEntry);
+        clock.set(31_000);
 
         // 租约应该失效
         assertFalse(manager.isLeaseValid(stepId, file), "超时的租约应该失效");
+    }
+
+    @Test
+    void renewalCannotExtendAbsoluteLifetime(@TempDir Path dir) {
+        var clock = new java.util.concurrent.atomic.AtomicLong();
+        manager = new ResourceLeaseManager(30, 100, clock::get);
+        Path file = dir.resolve("file.txt");
+        manager.acquireWrite("a", file);
+        for (long time = 20; time < 100; time += 20) {
+            clock.set(time);
+            manager.acquireWrite("a", file);
+            assertTrue(manager.isLeaseValid("a", file));
+        }
+        clock.set(100);
+        assertFalse(manager.isLeaseValid("a", file));
+        assertThrows(ResourceLeaseException.class, () -> manager.acquireWrite("a", file));
+        manager.acquireWrite("b", file);
+        assertThrows(ResourceLeaseException.class, () -> manager.acquireWrite("a", file));
+    }
+
+    @Test
+    void absoluteExpiryAllowsPreemptionAndReportsTotalLifetime(@TempDir Path dir) {
+        var clock = new java.util.concurrent.atomic.AtomicLong();
+        var held = new java.util.concurrent.atomic.AtomicLong();
+        manager = new ResourceLeaseManager(200, 100, clock::get);
+        manager.setPreemptionListener((path, old, next, duration) -> held.set(duration));
+        Path file = dir.resolve("file.txt");
+        manager.acquireWrite("a", file);
+        clock.set(90);
+        manager.acquireWrite("a", file);
+        clock.set(100);
+        manager.acquireWrite("b", file);
+        assertEquals(100, held.get());
+        assertTrue(manager.isLeaseValid("b", file));
+    }
+
+    @Test
+    void cleanupHonorsAbsoluteDeadlineAfterRenewal(@TempDir Path dir) {
+        var clock = new java.util.concurrent.atomic.AtomicLong();
+        manager = new ResourceLeaseManager(200, 100, clock::get);
+        manager.acquireWrite("a", dir.resolve("file.txt"));
+        clock.set(90);
+        manager.acquireWrite("a", dir.resolve("file.txt"));
+        assertEquals(0, manager.pruneExpiredLeases());
+        clock.set(100);
+        assertEquals(1, manager.pruneExpiredLeases());
+        assertEquals(0, manager.leaseCount());
     }
 }

@@ -1,6 +1,7 @@
 package com.devcli.tool;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -24,11 +25,18 @@ class ToolResultSizeManagerTest {
     @BeforeEach
     void resetBudgetBetweenTests() {
         ToolResultSizeManager.resetTurnBudget();
+        System.setProperty("devcli.tool.results.root",
+                tempDir.resolve("runtime-tool-results").toString());
+    }
+
+    @AfterEach
+    void clearResultRoot() {
+        System.clearProperty("devcli.tool.results.root");
     }
 
     @Test
     void smallResultPassesThroughUnchanged() {
-        // ≤ 5K 字符直接原样返回
+        // ≤ 20K 字符直接原样返回
         String small = "x".repeat(1_000);
         String out = ToolResultSizeManager.process(
                 "execute_command", "call_1", tempDir.toString(), false, small);
@@ -37,54 +45,85 @@ class ToolResultSizeManagerTest {
 
     @Test
     void mediumResultIsTruncatedToInlineThreshold() {
-        // 5K~50K 区间：尾部截断到 5K，附带剩余字符提示
-        String medium = "y".repeat(20_000);
+        // 20K~100K 区间：尾部截断到 20K，附带剩余字符提示
+        String medium = "y".repeat(30_000);
         String out = ToolResultSizeManager.process(
                 "execute_command", "call_2", tempDir.toString(), false, medium);
         assertTrue(out.length() < medium.length(), "应该被截断");
-        assertTrue(out.startsWith("y".repeat(5_000)), "保留段应当是头部 5K 字符");
+        assertTrue(out.startsWith("y".repeat(20_000)), "保留段应当是头部 20K 字符");
         assertTrue(out.contains("已截断"), "应有截断提示");
-        assertTrue(out.contains("15000 字符"), "提示应说明丢了多少字符");
-        assertTrue(out.contains("共 20000 字符"), "提示应说明总字符数");
+        assertTrue(out.contains("10000 字符"), "提示应说明丢了多少字符");
+        assertTrue(out.contains("共 30000 字符"), "提示应说明总字符数");
+        assertTrue(out.contains("result_ref"), "中等结果必须提供可恢复引用");
+        assertTrue(out.contains("next_cursor"), "中等结果必须提供继续读取游标");
+        assertTrue(hasStoredTextArtifact(), "中等结果完整原文必须落到运行时结果目录");
+    }
+
+    @Test
+    void mediumResultKeepsHeadAndTailForDiagnosticContext() {
+        String medium = "HEAD\n" + "middle\n".repeat(3_000) + "TAIL\n";
+
+        String out = ToolResultSizeManager.process(
+                "execute_command", "call_head_tail", tempDir.toString(), false, medium);
+
+        assertTrue(out.startsWith("HEAD\n"), "预览必须保留结果头部");
+        assertTrue(out.contains("TAIL\n"), "预览必须保留结果尾部，便于定位最终错误");
     }
 
     @Test
     void largeResultIsPersistedAndPreviewed() throws IOException {
-        // > 50K 完整落盘，messages 只放预览 + 路径
-        String large = "z".repeat(80_000);
+        // > 100K 完整落盘，messages 只放预览 + 路径
+        String large = "z".repeat(120_000);
         String out = ToolResultSizeManager.process(
                 "execute_command", "call_huge_42", tempDir.toString(), false, large);
 
         // 预览部分
-        assertTrue(out.startsWith("z".repeat(1_500)), "预览应为前 1500 字符");
-        assertTrue(out.contains("[工具输出过大已落盘 80000 字符"), "应有落盘提示");
-        assertTrue(out.contains("read_file"), "应提示用 read_file 读取完整内容");
+        assertTrue(out.startsWith("z".repeat(5_000)), "预览应为前 5000 字符");
+        assertTrue(out.contains("[工具输出过大已落盘 120000 字符"), "应有落盘提示");
+        assertTrue(out.contains("read_tool_result"), "应提示用专用工具读取完整内容");
 
         // 验证文件真的写到磁盘
-        Path outDir = tempDir.resolve(ToolResultSizeManager.OUTPUTS_DIR)
-                .resolve(ToolResultSizeManager.currentSessionId());
-        assertTrue(Files.isDirectory(outDir), "落盘目录应存在");
-        Path file = outDir.resolve("call_huge_42.txt");
-        assertTrue(Files.isRegularFile(file), "落盘文件应存在");
+        Path file = firstStoredTextArtifact();
         assertEquals(large, Files.readString(file), "落盘内容应为完整原文");
     }
 
     @Test
-    void readFileToolBypassesSizeManagement() {
-        // read_file 在白名单里：再大也不应被截断（避免 read→file→read 死循环）
-        String huge = "a".repeat(100_000);
-        String out = ToolResultSizeManager.process(
-                "read_file", "call_3", tempDir.toString(), false, huge);
-        assertEquals(huge, out, "read_file 结果不应被治理");
+    void exactDuplicateLargeResultReusesEarlierArtifact() {
+        String large = "duplicate-output-".repeat(5_000);
+        String first = ToolResultSizeManager.process(
+                "execute_command", "call_first", tempDir.toString(), false, large);
+        String second = ToolResultSizeManager.process(
+                "execute_command", "call_second", tempDir.toString(), false, large);
+
+        assertTrue(first.contains("result_ref"), first);
+        assertTrue(second.contains("重复工具结果已折叠"), second);
+        assertTrue(second.contains("复用前一次结果"), second);
+        assertTrue(second.contains("result_ref="), second);
+        assertTrue(second.length() < first.length(), "重复结果应只保留引用");
     }
 
     @Test
-    void listDirToolBypassesSizeManagement() {
-        // list_dir 也在白名单：目录树短结构化输出不应被截断
-        String dirTree = "drwx ".repeat(1_500); // ~7.5K，正常情况会被截断
+    void readFileToolUsesRecoverableSizeManagement() {
+        String huge = "a".repeat(100_000);
+        String out = ToolResultSizeManager.process(
+                "read_file", "call_3", tempDir.toString(), false, huge);
+        assertNotEquals(huge, out, "read_file 不得绕过尺寸治理");
+        assertTrue(out.contains("result_ref"), out);
+        assertTrue(out.contains("read_tool_result"), out);
+    }
+
+    @Test
+    void listDirToolUsesSizeManagementWhenLarge() {
+        String dirTree = "drwx ".repeat(200);
         String out = ToolResultSizeManager.process(
                 "list_dir", "call_4", tempDir.toString(), false, dirTree);
-        assertEquals(dirTree, out, "list_dir 结果不应被治理");
+        assertEquals(dirTree, out, "短目录结果仍应原样返回");
+
+        String largeTree = "drwx ".repeat(5_000);
+        String managed = ToolResultSizeManager.process(
+                "list_dir", "call_4-large", tempDir.toString(), false, largeTree);
+        assertNotEquals(largeTree, managed, "大目录结果不得绕过尺寸治理");
+        assertTrue(managed.contains("result_ref"), managed);
     }
 
     @Test
@@ -99,7 +138,7 @@ class ToolResultSizeManagerTest {
     @Test
     void mcpToolsAreManagedByDefault() {
         // MCP 动态工具（mcp__server__tool）默认进入尺寸治理
-        String big = "m".repeat(70_000);
+        String big = "m".repeat(120_000);
         String out = ToolResultSizeManager.process(
                 "mcp__github__list_issues", "call_6", tempDir.toString(), false, big);
         assertNotEquals(big, out, "MCP 工具默认应被治理");
@@ -108,7 +147,7 @@ class ToolResultSizeManagerTest {
 
     @Test
     void mediumMcpResultIncludesCollapseClassification() {
-        String medium = "m".repeat(20_000);
+        String medium = "m".repeat(30_000);
         String out = ToolResultSizeManager.process(
                 "mcp__github__list_issues", "call_mcp_medium", tempDir.toString(), false, medium);
 
@@ -117,7 +156,7 @@ class ToolResultSizeManagerTest {
 
     @Test
     void largeMcpResultIncludesCollapseClassification() {
-        String large = "m".repeat(70_000);
+        String large = "m".repeat(120_000);
         String out = ToolResultSizeManager.process(
                 "mcp__github__list_issues", "call_mcp_large", tempDir.toString(), false, large);
 
@@ -126,22 +165,22 @@ class ToolResultSizeManagerTest {
 
     @Test
     void exactlyAtInlineThresholdPassesThrough() {
-        // 5000 字符正好等于 INLINE_THRESHOLD_CHARS：边界 case，不截断
+        // 正好等于 INLINE_THRESHOLD_CHARS：边界 case，不截断
         String boundary = "c".repeat(ToolResultSizeManager.INLINE_THRESHOLD_CHARS);
         String out = ToolResultSizeManager.process(
                 "execute_command", "call_7", tempDir.toString(), false, boundary);
-        assertEquals(boundary, out, "正好 5000 字符应原样返回");
+        assertEquals(boundary, out, "正好等于放行阈值应原样返回");
     }
 
     @Test
     void exactlyAtPersistThresholdIsTruncatedNotPersisted() {
-        // 50000 字符正好等于 PERSIST_THRESHOLD_CHARS：边界 case，走截断（≤ 阈值）
+        // 正好等于 PERSIST_THRESHOLD_CHARS：边界 case，走截断（≤ 阈值）
         String boundary = "d".repeat(ToolResultSizeManager.PERSIST_THRESHOLD_CHARS);
         String out = ToolResultSizeManager.process(
                 "execute_command", "call_8", tempDir.toString(), false, boundary);
         assertTrue(out.length() < boundary.length(), "应被截断");
-        assertTrue(out.contains("已截断 45000 字符"), "应保留 5K，截断 45K");
-        assertFalse(out.contains("[工具输出过大已落盘"), "正好 50K 应走截断不走落盘");
+        assertTrue(out.contains("已截断 80000 字符"), "应保留 20K，截断 80K");
+        assertFalse(out.contains("[工具输出过大已落盘"), "正好等于落盘阈值应走截断不走落盘");
     }
 
     @Test
@@ -152,12 +191,7 @@ class ToolResultSizeManagerTest {
         ToolResultSizeManager.process(
                 "execute_command", unsafeId, tempDir.toString(), false, big);
 
-        Path outDir = tempDir.resolve(ToolResultSizeManager.OUTPUTS_DIR)
-                .resolve(ToolResultSizeManager.currentSessionId());
-        // 不应在 outDir 之外创建目录
-        assertTrue(Files.list(outDir)
-                .anyMatch(p -> p.getFileName().toString().endsWith(".txt")),
-                "落盘文件应在合法目录下");
+        assertTrue(hasStoredTextArtifact(), "落盘文件应在受控运行时目录下");
     }
 
     @Test
@@ -165,6 +199,7 @@ class ToolResultSizeManagerTest {
         // 落盘失败必须降级为截断文本，绝不把成功结果变成错误（参考 dsh spill-policy 语义）
         Path occupied = tempDir.resolve("occupied.txt");
         Files.writeString(occupied, "occupied");
+        System.setProperty("devcli.tool.results.root", occupied.toString());
         String large = "h".repeat(60_000);
         String out = ToolResultSizeManager.process(
                 "execute_command", "call_fail_persist", occupied.toString(), false, large);
@@ -192,19 +227,24 @@ class ToolResultSizeManagerTest {
 
     @Test
     void truncationProducesGreppableHint() {
-        // 截断提示应建议 LLM 用 search_code/grep 进一步过滤
-        String medium = "g".repeat(15_000);
+        // 截断提示应提供精确恢复工具，而不是要求重新执行原工具
+        String medium = "g".repeat(30_000);
         String out = ToolResultSizeManager.process(
                 "execute_command", "call_11", tempDir.toString(), false, medium);
-        assertTrue(out.contains("search_code") || out.contains("grep"),
-                "截断提示应教 LLM 怎么避免再次撞阈值");
+        assertTrue(out.contains("read_tool_result"),
+                "截断提示应提供精确恢复路径");
     }
 
     @Test
     void aggregateBudgetIsSharedWithParallelToolThreads() throws Exception {
-        String medium = "p".repeat(20_000);
-        for (int i = 0; i < 4; i++) {
-            ToolResultSizeManager.process("execute_command", "call_parent_" + i, tempDir.toString(), false, medium);
+        String medium = "p".repeat(30_000);
+        // 按常量推导需要几轮才能把同轮聚合预算顶过 AGGREGATE_LIMIT_CHARS，
+        // 不写死轮数，避免阈值调整后断言靠提示文本的字符数巧合成立。
+        int rounds = ToolResultSizeManager.AGGREGATE_LIMIT_CHARS
+                / ToolResultSizeManager.TRUNCATE_TARGET_CHARS + 1;
+        for (int i = 0; i < rounds; i++) {
+            ToolResultSizeManager.process("execute_command", "call_parent_" + i, tempDir.toString(), false,
+                    medium + i);
         }
         assertTrue(ToolResultSizeManager.turnUsedBudget() > ToolResultSizeManager.AGGREGATE_LIMIT_CHARS);
 
@@ -214,7 +254,26 @@ class ToolResultSizeManagerTest {
         thread.start();
 
         String out = task.get(5, TimeUnit.SECONDS);
-        assertTrue(out.startsWith("p".repeat(2_500)), "并行工具线程应继承同轮聚合预算");
-        assertTrue(out.contains("已截断 17500 字符"), "聚合超限后应降低单项截断长度");
+        assertTrue(out.startsWith("p".repeat(10_000)), "并行工具线程应继承同轮聚合预算");
+        assertTrue(out.contains("已截断 20000 字符"), "聚合超限后应降低单项截断长度");
+    }
+
+    private boolean hasStoredTextArtifact() {
+        try {
+            return Files.walk(tempDir.resolve("runtime-tool-results"))
+                    .anyMatch(path -> Files.isRegularFile(path)
+                            && path.getFileName().toString().endsWith(".txt"));
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private Path firstStoredTextArtifact() throws IOException {
+        try (var paths = Files.walk(tempDir.resolve("runtime-tool-results"))) {
+            return paths.filter(path -> Files.isRegularFile(path)
+                            && path.getFileName().toString().endsWith(".txt"))
+                    .findFirst()
+                    .orElseThrow();
+        }
     }
 }

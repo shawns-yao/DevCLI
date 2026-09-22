@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.devcli.mcp.transport.McpTransport;
-import com.devcli.runtime.CancellationToken;
+import com.devcli.concurrent.CancellationToken;
 
 import java.io.IOException;
 import java.util.List;

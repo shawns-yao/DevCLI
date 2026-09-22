@@ -32,6 +32,8 @@ public final class SkillContextBuffer {
     private final Map<String, List<String>> activeAllowedToolsBySkill = new LinkedHashMap<>();
     private final Map<String, Skill.Context> activeContextBySkill = new LinkedHashMap<>();
     private final Map<String, String> activeBodyBySkill = new LinkedHashMap<>();
+    private final LinkedHashSet<String> pinnedSkillNames = new LinkedHashSet<>();
+    private long evictionCount;
 
     public synchronized void push(String skillName, String body) {
         push(skillName, body, List.of());
@@ -42,6 +44,11 @@ public final class SkillContextBuffer {
     }
 
     public synchronized void push(String skillName, String body, List<String> allowedTools, Skill.Context context) {
+        push(skillName, body, allowedTools, context, false);
+    }
+
+    public synchronized void push(String skillName, String body, List<String> allowedTools,
+                                  Skill.Context context, boolean pinned) {
         if (skillName == null || skillName.isBlank() || body == null) {
             return;
         }
@@ -51,26 +58,19 @@ public final class SkillContextBuffer {
         activeSkillNames.add(skillName);
         activeContextBySkill.put(skillName, context == null ? Skill.Context.INLINE : context);
         activeBodyBySkill.put(skillName, body);
+        if (pinned) {
+            pinnedSkillNames.add(skillName);
+        } else {
+            pinnedSkillNames.remove(skillName);
+        }
         List<String> normalizedAllowedTools = normalizeAllowedTools(allowedTools);
         if (normalizedAllowedTools.isEmpty()) {
             activeAllowedToolsBySkill.remove(skillName);
         } else {
             activeAllowedToolsBySkill.put(skillName, normalizedAllowedTools);
         }
-        while (entries.size() > MAX_SKILLS) {
-            String oldest = entries.keySet().iterator().next();
-            entries.remove(oldest);
-            activeAllowedToolsBySkill.remove(oldest);
-            activeContextBySkill.remove(oldest);
-            activeBodyBySkill.remove(oldest);
-            activeSkillNames.remove(oldest);
-        }
         while (activeSkillNames.size() > MAX_SKILLS) {
-            String oldest = activeSkillNames.iterator().next();
-            activeSkillNames.remove(oldest);
-            activeAllowedToolsBySkill.remove(oldest);
-            activeContextBySkill.remove(oldest);
-            activeBodyBySkill.remove(oldest);
+            evictOldestPreferUnpinned();
         }
         while (activeAllowedToolsBySkill.size() > MAX_SKILLS) {
             String oldest = activeAllowedToolsBySkill.keySet().iterator().next();
@@ -134,6 +134,10 @@ public final class SkillContextBuffer {
         return List.copyOf(activeSkillNames);
     }
 
+    public synchronized long evictionCount() {
+        return evictionCount;
+    }
+
     public synchronized String renderPostCompactRestoreSection() {
         if (activeSkillNames.isEmpty()) {
             return "";
@@ -164,6 +168,7 @@ public final class SkillContextBuffer {
         activeAllowedToolsBySkill.clear();
         activeContextBySkill.clear();
         activeBodyBySkill.clear();
+        pinnedSkillNames.clear();
     }
 
     public synchronized SkillContextBuffer copy() {
@@ -173,7 +178,22 @@ public final class SkillContextBuffer {
         copy.activeAllowedToolsBySkill.putAll(this.activeAllowedToolsBySkill);
         copy.activeContextBySkill.putAll(this.activeContextBySkill);
         copy.activeBodyBySkill.putAll(this.activeBodyBySkill);
+        copy.pinnedSkillNames.addAll(this.pinnedSkillNames);
         return copy;
+    }
+
+    private void evictOldestPreferUnpinned() {
+        String victim = activeSkillNames.stream()
+                .filter(name -> !pinnedSkillNames.contains(name))
+                .findFirst()
+                .orElseGet(() -> activeSkillNames.iterator().next());
+        entries.remove(victim);
+        activeSkillNames.remove(victim);
+        activeAllowedToolsBySkill.remove(victim);
+        activeContextBySkill.remove(victim);
+        activeBodyBySkill.remove(victim);
+        pinnedSkillNames.remove(victim);
+        evictionCount++;
     }
 
     private static List<String> normalizeAllowedTools(List<String> allowedTools) {

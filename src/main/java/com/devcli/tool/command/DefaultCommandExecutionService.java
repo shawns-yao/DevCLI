@@ -1,56 +1,125 @@
 package com.devcli.tool.command;
 
-import com.devcli.runtime.CancellationToken;
+import com.devcli.concurrent.CancellationToken;
 
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.UUID;
 
 public final class DefaultCommandExecutionService implements CommandExecutionService {
+    public static final String SANDBOX_MODE_PROPERTY = "devcli.command.sandbox.mode";
+    public static final String SANDBOX_MODE_ENV = "DEVCLI_COMMAND_SANDBOX_MODE";
     public static final String SANDBOX_IMAGE_PROPERTY = "devcli.command.sandbox.image";
     public static final String SANDBOX_IMAGE_ENV = "DEVCLI_COMMAND_SANDBOX_IMAGE";
     public static final String DOCKER_BINARY_PROPERTY = "devcli.command.sandbox.docker.binary";
     public static final String DOCKER_BINARY_ENV = "DEVCLI_COMMAND_SANDBOX_DOCKER_BINARY";
+    public static final String SANDBOX_USER_PROPERTY = "devcli.command.sandbox.user";
+    public static final String SANDBOX_USER_ENV = "DEVCLI_COMMAND_SANDBOX_USER";
+    public static final String SANDBOX_MAVEN_REPOSITORY_PROPERTY =
+            "devcli.command.sandbox.maven.repository";
+    public static final String SANDBOX_MAVEN_REPOSITORY_ENV =
+            "DEVCLI_COMMAND_SANDBOX_MAVEN_REPOSITORY";
     private static final String DEFAULT_SANDBOX_IMAGE = "maven:3.9.9-eclipse-temurin-17";
     private static final int MAX_COMMAND_OUTPUT_CHARS = 8_000;
 
     private final Backend hostBackend;
     private final Backend sandboxBackend;
+    private final SandboxMode sandboxMode;
+    private final String mavenRepository;
 
     public DefaultCommandExecutionService() {
-        this(new HostBackend(), new DockerBackend(Config.resolve(
-                System.getProperties(), System.getenv())));
+        this(Config.resolve(System.getProperties(), System.getenv()));
+    }
+
+    private DefaultCommandExecutionService(Config config) {
+        this(new HostBackend(), new DockerBackend(config), config);
     }
 
     DefaultCommandExecutionService(Backend hostBackend, Backend sandboxBackend) {
+        this(hostBackend, sandboxBackend, SandboxMode.DOCKER);
+    }
+
+    DefaultCommandExecutionService(Backend hostBackend, Backend sandboxBackend,
+                                   SandboxMode sandboxMode) {
+        this(hostBackend, sandboxBackend, sandboxMode, "");
+    }
+
+    DefaultCommandExecutionService(Backend hostBackend, Backend sandboxBackend,
+                                   Config config) {
+        this(hostBackend, sandboxBackend, config == null ? SandboxMode.DOCKER : config.mode(),
+                config == null ? "" : config.mavenRepository());
+    }
+
+    private DefaultCommandExecutionService(Backend hostBackend, Backend sandboxBackend,
+                                           SandboxMode sandboxMode, String mavenRepository) {
         this.hostBackend = hostBackend;
         this.sandboxBackend = sandboxBackend;
+        this.sandboxMode = sandboxMode == null ? SandboxMode.DOCKER : sandboxMode;
+        this.mavenRepository = mavenRepository == null ? "" : mavenRepository;
+    }
+
+    @Override
+    public boolean executesOnHost(boolean sandboxRequired) {
+        return !sandboxRequired || sandboxMode != SandboxMode.DOCKER;
+    }
+
+    @Override
+    public void validateRequest(Request request) {
+        if (request.sandboxRequired() && executesOnHost(true)) {
+            try {
+                HostWarnCommandPolicy.validateAndNormalize(request.command());
+            } catch (IllegalArgumentException denied) {
+                throw new com.devcli.policy.PolicyException(denied.getMessage());
+            }
+        }
     }
 
     @Override
     public Result execute(Request request) {
-        return (request.sandboxRequired() ? sandboxBackend : hostBackend).execute(request);
+        if (!request.sandboxRequired() || sandboxMode == SandboxMode.DOCKER) {
+            return (request.sandboxRequired() ? sandboxBackend : hostBackend).execute(request);
+        }
+        String hostCommand = HostWarnCommandPolicy.validateAndNormalize(request.command());
+        hostCommand = withMavenRepository(hostCommand, mavenRepository);
+        Request hostRequest = new Request(hostCommand, request.projectRoot(), request.timeoutSeconds(),
+                true, request.executionContext());
+        Result result = hostBackend.execute(hostRequest);
+        return new Result(result.exitCode(),
+                "⚠️ 主机模式 HOST_RESTRICTED（兼容 HOST_WARN）：仅限制命令，不提供操作系统隔离。"
+                        + "项目 Maven 插件、构建脚本和 javac 注解处理器仍可执行任意主机代码；"
+                        + "仅用于可信项目，不可信项目必须使用 Docker。\n"
+                        + result.output(),
+                result.timedOut(), result.cancelled(), result.artifact(), result.outputIncomplete());
     }
 
     static List<String> dockerCommand(Request request, Config config) {
+        return dockerCommand(request, config, newContainerName());
+    }
+
+    static List<String> dockerCommand(Request request, Config config, String containerName) {
         String mount = "type=bind,src=" + request.projectRoot()
                 + ",dst=/workspace";
         List<String> command = new ArrayList<>();
         command.add(config.dockerBinary());
         command.addAll(List.of(
                 "run", "--rm",
+                "--name", containerName,
                 "--pull", "never",
                 "--network", "none",
                 "--cap-drop", "ALL",
@@ -63,10 +132,49 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
                 "--tmpfs", "/root:rw,noexec,nosuid,nodev,size=256m",
                 "--mount", mount,
                 "--workdir", "/workspace",
-                config.image(),
-                "sh", "-lc", request.command()
-        ));
+                config.image(), "sh", "-lc", request.command()));
+        if (!config.mavenRepository().isBlank() && isMavenCommand(request.command())) {
+            int workdirIndex = command.indexOf("--workdir");
+            command.addAll(workdirIndex, List.of(
+                    "--mount", "type=bind,src=" + config.mavenRepository()
+                            + ",dst=/maven-repository,readonly",
+                    "--env", "MAVEN_OPTS=-Dmaven.repo.local=/maven-repository"));
+        }
+        if (config.user() != null && !config.user().isBlank()) {
+            command.add(2, config.user());
+            command.add(2, "--user");
+        }
         return command;
+    }
+
+    static List<String> dockerCleanupCommand(Config config, String containerName) {
+        return List.of(config.dockerBinary(), "rm", "-f", containerName);
+    }
+
+    private static String newContainerName() {
+        return "devcli-run-" + UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private static String withMavenRepository(String command, String repository) {
+        if (repository == null || repository.isBlank() || !isMavenCommand(command)) {
+            return command;
+        }
+        String trimmed = command == null ? "" : command.trim();
+        int separator = trimmed.indexOf(' ');
+        String executable = separator < 0 ? trimmed : trimmed.substring(0, separator);
+        String remainder = separator < 0 ? "" : trimmed.substring(separator);
+        return executable + " -Dmaven.repo.local=\"" + repository + "\"" + remainder;
+    }
+
+    private static boolean isMavenCommand(String command) {
+        String trimmed = command == null ? "" : command.trim();
+        int separator = trimmed.indexOf(' ');
+        String executable = separator < 0 ? trimmed : trimmed.substring(0, separator);
+        String normalizedExecutable = executable.replace('\\', '/');
+        int slash = normalizedExecutable.lastIndexOf('/');
+        String name = (slash < 0 ? normalizedExecutable
+                : normalizedExecutable.substring(slash + 1)).toLowerCase(Locale.ROOT);
+        return Set.of("mvn", "mvn.cmd", "mvnw", "mvnw.cmd").contains(name);
     }
 
     interface Backend {
@@ -76,7 +184,8 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
     private static final class HostBackend implements Backend {
         @Override
         public Result execute(Request request) {
-            return runProcess(hostShellCommand(request.command()), request, false);
+            return runProcess(hostShellCommand(
+                    request.command(), isWindows(), request.sandboxRequired()), request, false);
         }
     }
 
@@ -89,17 +198,25 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
 
         @Override
         public Result execute(Request request) {
-            return runProcess(dockerCommand(request, config), request, true);
+            String containerName = newContainerName();
+            return runProcess(dockerCommand(request, config, containerName), request, true,
+                    () -> removeDockerContainer(config, containerName));
         }
     }
 
     private static Result runProcess(List<String> command, Request request, boolean sandbox) {
+        return runProcess(command, request, sandbox, () -> { });
+    }
+
+    private static Result runProcess(List<String> command, Request request, boolean sandbox,
+                                     Runnable externalCleanup) {
         ExecutorService outputReader = Executors.newSingleThreadExecutor(task -> {
             Thread thread = new Thread(task, "devcli-command-output");
             thread.setDaemon(true);
             return thread;
         });
         Process process = null;
+        Runnable termination = () -> { };
         CancellationToken.Registration cancellationRegistration =
                 CancellationToken.Registration.NO_OP;
         try {
@@ -109,42 +226,44 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
             builder.redirectErrorStream(true);
             process = builder.start();
             Process running = process;
+            termination = termination(running, externalCleanup);
             cancellationRegistration = request.executionContext().cancellationToken()
                     .onCancel(ignored -> signalProcessTree(running));
-            Future<String> output = outputReader.submit(() -> readOutput(running));
+            Future<CapturedOutput> output = outputReader.submit(() -> readOutput(running));
             if (!process.waitFor(request.timeoutSeconds(), TimeUnit.SECONDS)) {
-                terminateProcessTree(process);
+                termination.run();
                 output.cancel(true);
                 return Result.timedOut("命令执行超时（" + request.timeoutSeconds()
                         + "秒），已强制终止");
             }
             if (request.executionContext().cancellation().isPresent()) {
-                terminateProcessTree(process);
+                termination.run();
                 output.cancel(true);
                 return cancellationResult(request);
             }
-            String text = output.get(3, TimeUnit.SECONDS);
+            CapturedOutput captured = output.get(3, TimeUnit.SECONDS);
+            String text = captured.text();
             int exitCode = process.exitValue();
             if (sandbox && exitCode == 125) {
                 throw new IllegalStateException("Docker 命令沙箱启动失败: " + text);
             }
-            return Result.completed(exitCode, text);
+            return new Result(exitCode, text, false, false, captured.artifact(), captured.incomplete());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             if (process != null) {
-                terminateProcessTree(process);
+                termination.run();
             }
             return request.executionContext().cancellation().isPresent()
                     ? cancellationResult(request)
                     : Result.cancelled("用户取消了此次工具调用");
         } catch (CancellationException e) {
             if (process != null) {
-                terminateProcessTree(process);
+                termination.run();
             }
             return cancellationResult(request);
         } catch (IOException e) {
             if (process != null) {
-                terminateProcessTree(process);
+                termination.run();
             }
             if (sandbox) {
                 throw new IllegalStateException(
@@ -153,7 +272,7 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
             throw new IllegalStateException("命令进程启动失败: " + e.getMessage(), e);
         } catch (Exception e) {
             if (process != null) {
-                terminateProcessTree(process);
+                termination.run();
             }
             if (e instanceof RuntimeException runtimeException) {
                 throw runtimeException;
@@ -181,8 +300,12 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
                 : cancellation.message());
     }
 
-    private static List<String> hostShellCommand(String command) {
-        if (isWindows()) {
+    static List<String> hostShellCommand(String command, boolean windows,
+                                         boolean validatedHostWarnCommand) {
+        if (windows && validatedHostWarnCommand) {
+            return List.of("cmd.exe", "/d", "/s", "/c", command);
+        }
+        if (windows) {
             String utf8Command = "[Console]::InputEncoding = [Text.UTF8Encoding]::new($false); "
                     + "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); "
                     + command;
@@ -196,27 +319,44 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
         return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
     }
 
-    private static String readOutput(Process process) throws IOException {
-        StringBuilder output = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                process.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                int remaining = MAX_COMMAND_OUTPUT_CHARS - output.length();
-                if (remaining <= 0) {
+    private record CapturedOutput(String text, com.devcli.tool.ToolResultArtifact artifact, boolean incomplete) {}
+
+    private static CapturedOutput readOutput(Process process) throws IOException {
+        StringBuilder head = new StringBuilder();
+        StringBuilder tail = new StringBuilder();
+        boolean incomplete = false;
+        try (var stored = com.devcli.tool.ToolResultArtifactStore.openWriter("command");
+             var reader = new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8)) {
+            char[] buffer = new char[4096];
+            int count;
+            long chars = 0;
+            while ((count = reader.read(buffer)) >= 0) {
+                if (Thread.currentThread().isInterrupted()) throw new IOException("命令输出读取已取消");
+                String chunk = new String(buffer, 0, count);
+                if (!stored.append(chunk)) {
+                    incomplete = true;
+                    signalProcessTree(process);
                     break;
                 }
-                if (line.length() > remaining) {
-                    output.append(line, 0, remaining);
-                    break;
-                }
-                output.append(line).append('\n');
+                chars += count;
+                int remaining = MAX_COMMAND_OUTPUT_CHARS - head.length();
+                if (remaining > 0) head.append(chunk, 0, Math.min(remaining, chunk.length()));
+                tail.append(chunk);
+                if (tail.length() > 1000) tail.delete(0, tail.length() - 1000);
             }
+            var artifact = stored.finish();
+            String text = chars <= MAX_COMMAND_OUTPUT_CHARS ? head.toString()
+                    : head.substring(0, 1500) + "\n[中间日志已落盘]\n" + tail;
+            text += "\n[result_ref=" + artifact.ref() + ", offset=0, output_complete=" + !incomplete + "]";
+            if (incomplete) text += "\n[输出超过存储配额，已终止命令；引用仅包含已接收部分，结果不完整]";
+            return new CapturedOutput(text, new com.devcli.tool.ToolResultArtifact(
+                    "PERSISTED_PREVIEW", artifact.chars(), artifact.bytes(),
+                    (int) Math.min(chars, MAX_COMMAND_OUTPUT_CHARS), artifact.ref(), "0", artifact.sha256()), incomplete);
+        } catch (IOException failure) {
+            signalProcessTree(process);
+            return new CapturedOutput(head + "\n[命令输出存储失败，已终止命令；原文不可恢复，结果不完整]",
+                    null, true);
         }
-        if (output.length() >= MAX_COMMAND_OUTPUT_CHARS) {
-            output.append("\n... (输出已截断)");
-        }
-        return output.toString().trim();
     }
 
     private static void terminateProcessTree(Process process) {
@@ -224,9 +364,15 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
         List<ProcessHandle> descendants = process.toHandle().descendants().toList();
         signalProcessTree(process, descendants);
         try {
-            process.onExit().join();
+            try {
+                process.waitFor(3, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                restoreInterrupt = true;
+            }
             for (ProcessHandle descendant : descendants) {
-                descendant.onExit().join();
+                if (descendant.isAlive()) {
+                    descendant.destroyForcibly();
+                }
             }
         } finally {
             if (restoreInterrupt) {
@@ -254,12 +400,10 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
     private static void awaitOutputReader(ExecutorService outputReader) {
         boolean restoreInterrupt = Thread.interrupted();
         try {
-            while (!outputReader.isTerminated()) {
-                try {
-                    outputReader.awaitTermination(1, TimeUnit.DAYS);
-                } catch (InterruptedException e) {
-                    restoreInterrupt = true;
-                }
+            try {
+                outputReader.awaitTermination(3, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                restoreInterrupt = true;
             }
         } finally {
             if (restoreInterrupt) {
@@ -268,7 +412,61 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
         }
     }
 
-    record Config(String dockerBinary, String image) {
+    private static Runnable termination(Process process, Runnable externalCleanup) {
+        AtomicBoolean invoked = new AtomicBoolean();
+        return () -> {
+            if (!invoked.compareAndSet(false, true)) {
+                return;
+            }
+            try {
+                terminateProcessTree(process);
+            } finally {
+                externalCleanup.run();
+            }
+        };
+    }
+
+    private static void removeDockerContainer(Config config, String containerName) {
+        Process cleanup = null;
+        try {
+            cleanup = new ProcessBuilder(dockerCleanupCommand(config, containerName))
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+            if (!cleanup.waitFor(5, TimeUnit.SECONDS)) {
+                cleanup.destroyForcibly();
+            }
+        } catch (IOException e) {
+            // Docker 客户端仍会在 finally 中终止；容器运行时不可用时无法继续清理。
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            if (cleanup != null) {
+                cleanup.destroyForcibly();
+            }
+        }
+    }
+
+    public enum SandboxMode {
+        DOCKER,
+        HOST_RESTRICTED,
+        HOST_WARN;
+
+        static SandboxMode parse(String value) {
+            if (value == null || value.isBlank()) {
+                return DOCKER;
+            }
+            return switch (value.trim().toUpperCase(Locale.ROOT).replace('-', '_')) {
+                case "DOCKER" -> DOCKER;
+                case "HOST_WARN" -> HOST_WARN;
+                case "HOST_RESTRICTED" -> HOST_RESTRICTED;
+                default -> throw new IllegalArgumentException(
+                        "sandbox mode must be DOCKER|HOST_WARN|HOST_RESTRICTED: " + value);
+            };
+        }
+    }
+
+    record Config(String dockerBinary, String image, SandboxMode mode, String user,
+                  String mavenRepository) {
         Config {
             if (dockerBinary == null || dockerBinary.isBlank()) {
                 throw new IllegalArgumentException("docker binary is required");
@@ -276,6 +474,9 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
             if (image == null || image.isBlank()) {
                 throw new IllegalArgumentException("sandbox image is required");
             }
+            mode = mode == null ? SandboxMode.DOCKER : mode;
+            user = user == null ? "" : user.trim();
+            mavenRepository = normalizeMavenRepository(mavenRepository);
         }
 
         static Config resolve(Properties properties, Map<String, String> environment) {
@@ -283,7 +484,34 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
                     firstNonBlank(properties.getProperty(DOCKER_BINARY_PROPERTY),
                             environment.get(DOCKER_BINARY_ENV), "docker"),
                     firstNonBlank(properties.getProperty(SANDBOX_IMAGE_PROPERTY),
-                            environment.get(SANDBOX_IMAGE_ENV), DEFAULT_SANDBOX_IMAGE));
+                            environment.get(SANDBOX_IMAGE_ENV), DEFAULT_SANDBOX_IMAGE),
+                    SandboxMode.parse(firstNonBlank(
+                            properties.getProperty(SANDBOX_MODE_PROPERTY),
+                            environment.get(SANDBOX_MODE_ENV), "DOCKER")),
+                    firstNonBlank(properties.getProperty(SANDBOX_USER_PROPERTY),
+                            environment.get(SANDBOX_USER_ENV), ""),
+                    firstNonBlank(properties.getProperty(SANDBOX_MAVEN_REPOSITORY_PROPERTY),
+                            environment.get(SANDBOX_MAVEN_REPOSITORY_ENV), ""));
+        }
+
+        private static String normalizeMavenRepository(String value) {
+            if (value == null || value.isBlank()) {
+                return "";
+            }
+            if (value.contains("\"") || value.contains("\r") || value.contains("\n")) {
+                throw new IllegalArgumentException("sandbox Maven repository path is invalid");
+            }
+            Path path = Path.of(value.trim());
+            if (!path.isAbsolute()) {
+                throw new IllegalArgumentException(
+                        "sandbox Maven repository path must be absolute: " + value);
+            }
+            Path normalized = path.normalize();
+            if (!Files.isDirectory(normalized)) {
+                throw new IllegalArgumentException(
+                        "sandbox Maven repository path must be an existing directory: " + value);
+            }
+            return normalized.toString();
         }
 
         private static String firstNonBlank(String first, String second, String fallback) {

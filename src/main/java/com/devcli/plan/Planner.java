@@ -110,7 +110,11 @@ public class Planner {
         }
         JsonNode tasksNode = root.path("tasks");
         if (!tasksNode.isArray() || tasksNode.isEmpty()) {
-            throw new IOException("计划必须包含至少一个任务");
+            // 兼容编排层与提示词中常见的 steps 命名，避免模型输出 steps 而计划层只认 tasks 导致空计划
+            tasksNode = root.path("steps");
+        }
+        if (!tasksNode.isArray() || tasksNode.isEmpty()) {
+            throw new IOException("计划必须包含至少一个任务(tasks/steps)");
         }
         if (tasksNode.size() > MAX_PLAN_TASKS) {
             throw new IOException("计划任务数超过上限 " + MAX_PLAN_TASKS);

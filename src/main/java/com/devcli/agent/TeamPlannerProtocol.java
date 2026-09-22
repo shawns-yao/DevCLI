@@ -25,6 +25,8 @@ final class TeamPlannerProtocol {
 
     static final int DEFAULT_REPAIR_ATTEMPTS = 2;
     static final int MAX_REPAIR_ATTEMPTS = 3;
+    private static final Set<String> DECLARED_STEP_TYPES = Set.of(
+            "FILE_READ", "FILE_WRITE", "COMMAND", "ANALYSIS", "VERIFICATION", "INTEGRATION");
 
     private TeamPlannerProtocol() {
     }
@@ -108,6 +110,27 @@ final class TeamPlannerProtocol {
         return null;
     }
 
+    static String validateDeclaredStep(String type, String description) {
+        String normalizedType = Objects.toString(type, "").trim().toUpperCase(Locale.ROOT);
+        if (!DECLARED_STEP_TYPES.contains(normalizedType)) {
+            return "计划步骤类型无效: " + (normalizedType.isBlank() ? "<empty>" : normalizedType);
+        }
+        if ("FILE_WRITE".equals(normalizedType)) {
+            String normalizedDescription = Objects.toString(description, "").toLowerCase(Locale.ROOT);
+            boolean discovery = containsAny(normalizedDescription,
+                    "检查", "确认", "查看", "读取", "列出", "扫描",
+                    "inspect", "check", "read", "list", "scan");
+            boolean mutation = containsAny(normalizedDescription,
+                    "并实现", "后实现", "完成实现", "实现并", "实现核心", "实现功能",
+                    "创建", "编写", "修改", "修复", "生成", "新增", "添加", "重构", "替换", "删除", "写入",
+                    "implement", "create", "write", "modify", "fix", "generate", "add", "refactor", "replace", "delete");
+            if (discovery && !mutation) {
+                return "FILE_WRITE 步骤只描述读取或检查，没有项目修改交付动作";
+            }
+        }
+        return null;
+    }
+
     static String buildRepairPrompt(String userInput, String invalidOutput,
                                     String validationIssue, int attempt) {
         return """
@@ -140,7 +163,7 @@ final class TeamPlannerProtocol {
                 previewOutput(invalidOutput));
     }
 
-    private static String extractBalancedJsonObject(String source, int start) {
+    static String extractBalancedJsonObject(String source, int start) {
         int depth = 0;
         boolean inString = false;
         boolean escaped = false;

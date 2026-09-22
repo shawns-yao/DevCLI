@@ -10,6 +10,25 @@ class McpSchemaValidatorTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Test
+    void nullableStringAcceptsNullAndStringButRejectsObject() throws Exception {
+        var schema = MAPPER.readTree("""
+                {"type":"object","required":["query"],"properties":{
+                  "query":{"type":"string"},
+                  "date":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null}
+                }}
+                """);
+        for (String args : new String[]{"{\"query\":\"meeting\",\"date\":null}",
+                "{\"query\":\"meeting\",\"date\":\"2024-05-20\"}", "{\"query\":\"meeting\"}"}) {
+            var result = McpSchemaValidator.validate(schema, MAPPER.readTree(args));
+            assertTrue(result.valid(), result.message());
+        }
+        assertFalse(McpSchemaValidator.validate(schema,
+                MAPPER.readTree("{\"query\":\"meeting\",\"date\":{}}" )).valid());
+        assertFalse(McpSchemaValidator.validate(schema,
+                MAPPER.readTree("{\"query\":\"meeting\",\"date\":42}" )).valid());
+    }
+
+    @Test
     void acceptsValidRequiredArguments() throws Exception {
         McpSchemaValidator.ValidationResult result = McpSchemaValidator.validate(
                 MAPPER.readTree("""

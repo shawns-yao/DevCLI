@@ -1,783 +1,298 @@
 # DevCLI
 
-[![CI](https://github.com/shawns-yao/DevCLI/actions/workflows/ci.yml/badge.svg)](https://github.com/shawns-yao/DevCLI/actions/workflows/ci.yml)
+## 文件删除审批
 
-![DevCLI startup demo](images/Snipaste_2026-05-20_16-57-44.png)
+`delete_files` 使用 `paths` 数组明确列出项目相对文件路径，不递归、不展开通配符，并保留目录。每次最多 500 个文件、合计 20MB、单文件 5MB。删除前展示目标、数量、递归范围及恢复限制；审批后文件变化则整批拒绝，应用失败尝试回滚。成功删除不进入回收站，恢复依赖已有快照或备份。
 
-DevCLI 是一个面向 Java 后端开发者的终端 Agent CLI。它可以在命令行中通过自然语言驱动代码阅读、生成、调试、重构、命令执行和仓库检索。
+删除文件达到默认 50 个的阈值必须单次确认；低于阈值仅在任务路径授权覆盖时免确认，`dontAsk` 模式下收口为拒绝。配置 `DEVCLI_DELETE_APPROVAL_THRESHOLD` 或 `-Ddevcli.delete.approval.threshold` 可调整为 1–500。检测到 Shell 删除时不复用构建测试授权或全部批准，并提示无法可靠统计目标。检测不是完整 Shell 解析；既有 `apply_patch` 仍走原审批，数量阈值只针对单次 `delete_files`，不跨调用累计。敏感路径保护不因关闭 HITL 而失效。
 
-ReAct 主循环、Plan 多 Agent 编排、MCP 协议客户端、上下文压缩、RAG 检索与终端渲染全部自行实现，不依赖 Spring AI、LangChain4j 等 Agent 框架。
+DevCLI 是面向代码仓库的 Java Agent CLI。它将大语言模型、工具、代码检索、任务记忆、隔离工作区、人工审批和运行恢复组织成一个本地开发运行时。
 
-## Project Snapshot
-
-| 项 | 数值 |
-| --- | --- |
-| 主源码 | 308 个文件 / 51,683 行，26 个顶层模块 |
-| 测试 | 232 个文件 / 34,510 行，1344 个用例全部通过 |
-| 语言与构建 | Java 17 + Maven，产出单一可执行 jar |
-| 迭代 | 230 次提交（2026-04 起） |
-
-三项量化结果：
-
-- **上下文成本**：修正 system prompt 易变段导致的前缀缓存失效后，13 轮迭代会话的可复用前缀占比由 29.4% 提升到 87.3%，未命中输入下降约 5.5 倍（基于内置 token 估算器的结构性测算，非计费账单）。
-- **检索质量**：CodeSearchNet Java 公开集 50 条样本上 Recall@5 1.0000、MRR@5 0.9900、nDCG@5 0.9926。
-- **协作模式对照**：单 Agent 与 Planner/Worker/Reviewer 的优劣随任务可拆分性反转。不可拆分的短 CLI 任务上单 Agent 通过 3/5、协作模式 1/5；可拆分的订单履约 Saga 多模块场景上协作模式通过 30/30、单 Agent 27/30，代价是 3.76 倍耗时。
-
-评测使用固定版本公开数据集与受控任务，公开集与项目内任务分开报告。部分场景样本量较小，只用于验证链路与方法，不外推为榜单成绩；完整方法、命令与适用边界见 [Benchmark Evaluation](#benchmark-evaluation)。
-
-安装与启动见 [Install](#install) 与 [Startup](#startup)。
-
-## Implementation Status
-
-**已实现**
-
-- ReAct 主循环与统一 `/plan` 编排入口；Plan 固定使用 Planner、Worker、Reviewer 协作链路，串行或并行由 DAG 依赖与资源冲突决定。
-- RAG（检索增强生成）：JavaParser 切分、SQLite 向量存储、关键词召回、代码关系图谱、RRF（倒数排名融合）与 CrossEncoderReranker（交叉编码器重排）。
-- 四层记忆（对话历史 / 工作记忆 / 长期记忆 / 强约束记忆）与两层上下文压缩（microcompact 落盘引用 + Map-Reduce 与增量九段摘要），含语义守卫、prompt-too-long 重试与失败熔断。
-- MCP（Model Context Protocol）：手写 JSON-RPC 2.0 客户端，支持 stdio 与 Streamable HTTP，动态注册工具与 resources。
-- Skill：jar 内置、用户级与项目级三层加载，`load_skill` 按需展开，allowedTools 白名单约束后续工具调用。
-- 安全模型：HITL（人工审批）、路径围栏、命令快速拒绝与 JSONL 审计链。
-- 隔离工作区与 PatchSet（补丁集）、文件级资源租约、跨步骤过期写入屏障、工具证据出处标记。
-- Prompt 分层组装（jar 内置 / 用户级 / 项目级覆盖），system prompt 只承载会话级稳定内容以保证前缀缓存命中。
-- 多模型运行时切换（Anthropic / OpenAI 兼容 / GLM / DeepSeek / StepFun / Kimi）。
-- 联网与浏览器：`web_search`、`web_fetch` 正文提取，以及经 Chrome DevTools MCP 的浏览器操作与调试实例登录态复用。
-- 两种终端渲染器：inline 流式（默认）与 plain；旧 lanterna/tui 配置在兼容期映射到 inline。
-
-**部分实现（MVP）**
-
-- LSP（语言服务器协议）诊断注入：仅实现协议子集，编辑后回灌编译诊断。
-- Git Side-History 快照与回滚：turn 粒度快照与 `/restore`，尚未覆盖全部编辑入口。
-- 后台任务与 Runtime API：共用 SQLite RunStore 与本地 HTTP/SSE 端点，仅监听回环地址。
-- 图片输入：本地路径、file URL 与剪贴板图片。
-- SWE-bench Lite：已产出官方格式 predictions JSONL，官方 harness 尚未跑出有效 resolved 结果。
-
-**未实现**
-
-- 符号级 Worker 上下文清单：当前过期写入屏障为文件级，拦不住「改方法签名 + 另一文件改调用方」的语义冲突。
-- 上下文失效事件主动推送：当前为写入时惰性检测，不中断运行中的 Worker。
-- per-Worker worktree（工作树）物理隔离。
-- Reviewer 独立检索策略：与 Worker 共用同一套召回。
-- MCP OAuth 授权与 `sampling/createMessage`。
-
-## Feature Overview
-
-DevCLI 的目标不是做一个普通聊天壳，而是把“模型、工具、代码仓库、记忆、审批、终端交互”串成一个本地开发工作流。顶层控制流只有默认 ReAct 与显式 Plan 两类；系统不根据任务内容静默切换：
-
-- `ReAct`：默认模式。模型边思考边选择工具，工具结果会回灌到下一轮推理，适合阅读代码、定位问题、执行命令、做小范围修改。
-- `Plan`：通过 `/plan` 进入。Planner 生成 DAG 和可验证验收标准，计划 Reviewer 先检查语义闭环，Worker 在隔离工作区执行节点，Pre-Review 做硬验证，产物 Reviewer 根据真实证据验收；只有审查通过且 PatchSet 无冲突时才修改主项目。节点串行或并行由 DAG 就绪状态和资源冲突分波决定，不再由用户选择配置。`/plan --team` 与 `/team` 仅保留解析兼容，不出现在帮助和补全中。
-
-围绕这些路径，DevCLI 提供以下能力：
-
-- `ToolRegistry（工具注册表）`：统一管理内置工具、MCP 动态工具和 resource 读取工具；工具调用通过分阶段中间件执行取消检查、存在性检查、Skill 权限、JSON Schema 参数校验、HITL、策略、审计和结果尺寸治理。内置 Provider 直接返回带状态、错误码和重试语义的结构化结果，命令非零退出、参数错误、策略拒绝、超时和取消不再依赖文本识别。
-- `RAG（检索增强生成）`：用 JavaParser 切分 Java 代码，结合 SQLite 向量存储、关键词召回、代码关系图谱、RRF（倒数排名融合）、symbol-aware boost（符号感知加权）和 CrossEncoderReranker（交叉编码器重排），把相关类、方法、调用链注入模型上下文。
-- `Memory（记忆）`：区分对话历史、工作记忆、长期记忆和强约束记忆。长期记忆写入前经过规则化写入策略，避免把临时闲聊、敏感信息或低复用事实写入持久层。
-- `Prompt（提示词分层）`：base、personality、mode、approval、project_context、skills、context_mgmt、handoff 分层组装，支持 jar 内置、用户级和项目级覆盖。
-- `Skill（技能）`：`load_skill` 按需加载完整指引；已加载 Skill 的允许工具白名单会限制后续工具调用，压缩后恢复保留 context、allowedTools 和内容摘要。
-- `MCP（Model Context Protocol）`：支持 stdio / streamable HTTP MCP server，动态加载工具和 resources，并把 MCP server 状态、日志、重启能力暴露给 CLI。
-- `HITL（Human-in-the-Loop）`：危险工具和敏感页面操作进入人工审批；审批前先过策略层，策略拒绝的操作不能靠用户批准绕过。
-- `Snapshot（快照）`：通过 Side-Git 在 turn 前后保存快照，支持回滚最近一轮变更，并按 `devcli.snapshot.max` 自动裁剪旧快照，降低 Agent 自动改文件的风险。
-- `Renderer（渲染器）`：默认 inline 模式提供底部状态栏、行内 thinking、工具块和 diff；plain 用于无 ANSI、重定向和自动化环境。
-- `Runtime API + RunStore`：本地 HTTP API 暴露 threads / branches / turns / events；CLI turn、Runtime turn 和后台任务共用 `runtime.db` 中的 Run 生命周期。同一 thread 的 turn 按提交顺序串行执行，不同 thread 可并行。
-- `Session Tree（会话树）`：CLI 的 `/session` 与 Runtime branch 共用持久事件树；切换分支只重建模型上下文，不恢复或修改工作区文件。`/branch` 是兼容别名。
-- `RunContext（运行上下文）`：每次交互、后台任务或无头 turn 绑定独立项目路径、取消令牌和资源生命周期；预先创建的线程不会读取其他任务的取消状态，无头 Agent 结束后会关闭本次创建的工具与记忆资源。
-- `AgentExecutionEngine（执行引擎）`：ReAct、Plan task 和 SubAgent 共用同一套取消、预算、LLM 调用、工具消息回灌和异常控制流程；每次模型采样具有稳定请求标识和独立取消边界，重复请求会替换并取消旧请求。
-- `ExecutionGraph（执行图）`：Plan 与 Multi-Agent 共用依赖就绪判断、最终集成调度、缺失依赖和环检测，避免两条编排路径各自实现 DAG 规则。
-- `OrchestrationProfile + OrchestrationWaveExecutor（编排配置与波次执行器）`：公开 Plan 固定启用 Worker、Reviewer 和 checkpoint；波次执行器按 DAG 与资源冲突使用有界线程池，并统一异常归属、独立输出缓冲与稳定顺序归并。STANDARD 仅保留为内部兼容实现，不再进入 CLI 路由。
-- `ExecutionArtifact（执行产物）`：Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用状态、输出、摘要、修改资源、错误、尝试次数与时间戳；checkpoint 协议版本 7 额外保存验收方式、验证器和适用节点，并保存 PatchSet 写前日志、稳定子代理身份、步骤分配、消息游标、最小恢复摘要和已消耗的在位重做额度，拒绝未来版本。
-- `Workspace + PatchSet（隔离工作区与补丁集）`：副作用任务通过可替换后端物化隔离目录；Git 仓库默认使用原生 worktree 并叠加当前脏文件、删除文件、未跟踪及被忽略文件，非 Git 目录优先使用文件系统级写时复制，不支持时回退有界复制；PatchSet 逐文件流式哈希，只把变更文件内容载入内存；JVM 公平锁与跨进程文件锁共同串行化补丁预检、应用和 checkpoint 终态。
-- `Image Input`：支持 `@image:` 本地路径、file URL 和剪贴板图片，图片会做尺寸、格式和大小处理后进入模型输入。
-
-## Architecture
-
-主执行链路：
+## 总体架构
 
 ```text
-Main
-├── Agent                  # 默认 ReAct
-└── AgentOrchestrator      # /plan；Planner / Worker / Reviewer
-    ├── ExecutionGraph             # DAG 校验与就绪节点
-    ├── MultiAgentBatchExecutor    # Worker 分配、资源分波与公平锁
-    └── OrchestrationWaveExecutor # 有界并发与稳定输出归并
+CLI / Runtime API / Headless
+            │
+            ▼
+       RunCoordinator
+            │
+            ├── Agent                     默认 ReAct 主 Agent
+            │    └── DelegationSession    按需委派的独立子 Agent
+            │
+            └── AgentOrchestrator         显式 /plan 编排
+                 ├── PlanCoordinator
+                 ├── StepExecutionCoordinator
+                 ├── ReviewCoordinator
+                 └── CheckpointCoordinator
 
-各路径共享：
-├── ToolRegistry           # 内置工具 + MCP 工具 + resources
-├── MemoryManager          # WorkingMemory + LongTermMemory + StickyMemory
-├── SnapshotService        # turn 前后快照
-├── PromptAssembler        # 分层 prompt 组装
-├── Renderer               # inline / plain / lanterna
-└── McpServerManager       # MCP server 生命周期
+共享运行时
+├── AgentExecutionEngine      Agent / Turn / Tool 统一控制流
+├── ToolRegistry              内置工具、MCP 工具和执行管线
+├── PromptAssembler           分层提示词和上下文装配
+├── MemoryManager             会话、任务和长期记忆协调
+├── CodeRetriever             代码 RAG 检索
+├── WorkspaceExecutionSession 隔离工作区和 PatchSet
+├── McpServerManager          MCP 连接与动态工具生命周期
+├── SnapshotService           Side-Git 快照与回滚
+├── RunStore / TraceRecorder  运行事件与追踪
+└── Renderer                  inline / plain 终端输出
 ```
 
-关键边界：
+![运行界面](images/Snipaste_2026-05-20_16-57-44.png)
 
-- 所有内置 LLM Provider 使用统一 `LlmException` 错误模型，区分认证、限流、过载、超时、网络、参数、上下文超限、内容过滤、服务端、响应格式和主动取消。限流、过载、超时、网络和 5xx 按指数退避与 jitter 有界重试；已取消请求和已经输出流式内容的请求不重试，避免重复正文或工具调用。SubAgent 会把标准错误码和 `retryable` 标记保留到编排层，瞬时故障判断不依赖具体网络错误文案。
-- `ConversationHistoryCompactor（对话历史压缩器）` 是治理 LLM messages 窗口的唯一压缩点；压缩分两层：第 0 层 `microcompact` 先处理单条超大消息，普通 user/assistant 消息和旧 `tool_result` 都会保留头尾并落盘为可恢复的 `<microcompact_boundary>` 引用（工具结果按 `toolCallId` 成批处理，不调 LLM、不删消息、保 tool_call 配对），扛不住再走 LLM 摘要（Map-Reduce / 增量）。原文尾部按 token 预算从最新 user 边界反向填充；若边界所在单条消息仍使尾部超预算，则继续前移安全边界，最后才对无法再切分的单条消息做可恢复截断。摘要提交到 history 前会经过运行时语义守卫，抽取必须、禁止、默认值、命令、版本和配置赋值等关键约束；同一结构化声明只保留最新值，否定约束必须在同一语义分段中保留否定极性；默认每 5 次成功压缩执行一次摘要重建，避免增量误差无限累积；摘要缺失时直接从原始消息恢复，不再等后续任务失败后发现。压缩阈值还会扣除当前工具定义和输出预留，避免只统计 history 却使完整请求超出模型窗口。
-- `WorkingMemory（工作记忆）` 只保存当前会话派生状态，不承担压缩职责。`RagEvidenceMemory（RAG 证据记忆）` 会记录检索证据的 `IndexEpoch（索引版本）`、`SymbolVersion（符号版本）` 和 `ClasspathEpoch（类路径版本）`；`search_code` 通过工具结果强类型旁路载荷传递证据，展示文本只面向模型和终端。旧 JSON 载荷与旧展示文本仅用于历史兼容。
-- `LongTermMemory（长期记忆）` 只保存跨会话稳定事实，默认不把临时任务请求写入长期层。每条记忆统一记录 schemaVersion、主题内 revision、expiresAt 和结构化 MemoryEvidence；证据包含置信度、来源引用、写入原因、审核状态和冲突条目。显式写入默认已审核，策略自动写入默认未审核；已拒绝记忆保留审计但不参与关键词、语义召回或 prompt 注入。新写入事实按类型应用 TTL，检索时自动清理过期项。同主题内容变化、配置赋值、默认值、当前值和正反使用声明发生冲突时自动记录 conflictsWith，旧事实进入 superseded 状态；相同主题同值的可确定改写不会重复保存。长期记忆注入时会抑制与 WorkingMemory 临时事实语义重复的条目。
-- `PathGuard（路径围栏）` 负责限制文件访问不逃逸项目根。
-- `ToolEffect + ToolAccessScope（工具副作用能力）` 由执行管线强制：非隔离分析任务只获得只读能力，隔离任务才允许项目写入和主机命令；MCP 缺失只读注解或声明 destructive/openWorld 时按外部副作用处理。工具参数先转换为稳定语义指纹，字段顺序、查询大小写、Unicode 等价字符和冗余空白不再绕过停滞检测；正则 pattern 保持大小写敏感，避免错误缓存命中；成功的只读结果会短期缓存，任何副作用执行都会清空缓存。
-- `ResourceLeaseManager（资源租约管理器）` 在 `/plan` 并行执行时拦截 `write_file`，同一文件只能被一个运行中步骤写入；并行工具线程会继承步骤租约归属，任务结束后释放租约。`ToolRegistry` 托管共享后台清理器，project fork 复用同一线程，最后一个注册表关闭后停止；周期可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
-- `PatchSet（补丁集）` 是隔离结果进入主项目的唯一文件回写边界：JVM 公平锁和 `~/.devcli/locks/project-commit/` 下的跨进程文件锁覆盖预检、应用和 checkpoint 终态；构建阶段流式计算哈希，未变化文件不读取完整内容。协议版本 7 在应用前保存目标哈希与原文件备份，并保存验收元数据及适用节点、原步骤对应 Worker/Reviewer 身份、在位重做次数和失败现场；恢复时按最终哈希提升完成、继续待执行或自动回滚，同时保持原步骤分配和原重做额度。Reviewer 拒绝、任务失败、用户取消、前置哈希冲突、非普通文件覆盖或路径/链接逃逸都会阻止整批应用。
-- `CommandGuard（命令防线）` 是危险命令快速拒绝层，不替代 HITL 和路径策略。
-- `HitlToolRegistry（审批工具注册表）` 位于真实工具执行前，保证危险操作先经过审批和策略判定。
+## 请求与执行模式
 
-## Requirements
+### 默认 ReAct
 
-- Java 17+
-- Maven 3.8+
-- Node.js / npm，只有使用默认 Chrome DevTools MCP 时需要
-- 至少一个 LLM API Key；默认 provider 是 Anthropic Messages 原生接口：
-  - `ANTHROPIC_AUTH_TOKEN`（Claude / Anthropic Messages 兼容端点，可配 `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` / `ANTHROPIC_MAX_TOKENS`）
-  - `OPENAI_API_KEY`（OpenAI 官方或兼容端点，可配 `OPENAI_BASE_URL` / `OPENAI_MODEL`）
-  - `GLM_API_KEY`
-  - `DEEPSEEK_API_KEY`
-  - `STEP_API_KEY`
-  - `KIMI_API_KEY` 或 `MOONSHOT_API_KEY`
+主 Agent 负责理解需求、选择工具、推进循环和最终验收。任务需要调查、拆解、独立实现或独立复核时，主 Agent 通过 `delegate_task` 按需调用子 Agent。
 
-Embedding（向量检索）默认使用 Ollama：
+默认路径不强制生成 DAG。简单任务保持单 Agent 的低延迟；复杂任务通过委派增加隔离和独立视角。
 
-- Ollama 本地服务：`http://localhost:11434`
-- 默认模型：`nomic-embed-text:latest`
+### 显式 `/plan`
 
-如果不使用本地 Ollama，可以在 `.env` 中配置远程 embedding provider。
-`/index` 建立 RAG 索引时会按文件批量生成 chunk embedding；批量请求失败或返回数量异常时，会逐条降级处理并保留成功 chunk，避免单个批次故障导致整文件索引丢失。
-
-RAG 检索默认使用 keyword + semantic + bounded graph 的 RRF（倒数排名融合），再叠加 symbol-aware boost（符号感知加权），最后调用
-Cross-Encoder（交叉编码器）做二阶段 rerank。默认 rerank endpoint 是本地 Docker
-暴露的 `http://localhost:8000/v1/rerank`；不可用时会自动降级回 RRF 结果。
-
-## Install
-
-克隆仓库：
-
-```bash
-git clone https://github.com/shawns-yao/DevCLI.git
-cd DevCLI
-```
-
-复制配置文件：
-
-```bash
-cp .env.example .env
-```
-
-编辑 `.env`，默认填写 Anthropic Messages 配置：
-
-```bash
-ANTHROPIC_AUTH_TOKEN=your_api_key_here
-ANTHROPIC_BASE_URL=https://api.anthropic.com
-ANTHROPIC_MODEL=claude-sonnet-4-20250514
-ANTHROPIC_MAX_TOKENS=8192
-```
-
-也可以改填 `OPENAI_API_KEY`、`GLM_API_KEY`、`DEEPSEEK_API_KEY`、`STEP_API_KEY` 或 `KIMI_API_KEY`，运行时用 `/model` 切换 provider。
-
-如果使用默认本地 embedding：
-
-```bash
-ollama pull nomic-embed-text:latest
-ollama serve
-```
-
-构建 jar：
-
-```bash
-mvn clean package
-```
-
-运行命令：
-
-```bash
-java -jar target/devcli-1.0-SNAPSHOT.jar
-```
-
-也可以直接用 Maven 启动：
-
-```bash
-mvn clean compile exec:java -Dexec.mainClass="com.devcli.cli.Main"
-```
-
-## Startup
-
-启动后会进入交互式终端。README 中展示的品牌输出使用 DevCLI：
+`/plan` 是面向长流程的重型编排模式，适用于并行 DAG、检查点恢复、强验收和审计场景：
 
 ```text
-██████╗  ███████╗██╗   ██╗
-██╔══██╗ ██╔════╝██║   ██║
-██║  ██║ █████╗  ██║   ██║    DevCLI
-██║  ██║ ██╔══╝  ╚██╗ ██╔╝    ReAct · Plan · Team · MCP · RAG
-██████╔╝ ███████╗ ╚████╔╝
-╚═════╝  ╚══════╝  ╚═══╝
-
-Tips for getting started:
-1. Type / for commands and Tab completion
-2. Ask coding questions, edit code or run commands
-3. Attach context with @path or @image:
-
-* 你好
-
-> 你好
-DevCLI: 你好，我在。可以直接描述要阅读、修改或运行的任务。
+Planner
+  → ExecutionGraph / AcceptanceCriteria
+  → Worker 隔离执行
+  → PreReviewVerifier 确定性检查
+  → Reviewer 语义建议（非阻塞）
+  → PatchSet 版本校验与归并
+  → Final integration
 ```
 
-## Configuration
+普通交互任务不自动切换到 `/plan`。
 
-### LLM
-
-DevCLI 会从 `.env` 或系统环境变量读取模型配置。
-
-常用配置：
-
-```bash
-ANTHROPIC_AUTH_TOKEN=your_api_key_here
-ANTHROPIC_BASE_URL=https://api.anthropic.com
-ANTHROPIC_MODEL=claude-sonnet-4-20250514
-ANTHROPIC_MAX_TOKENS=8192
-
-OPENAI_API_KEY=your_api_key_here
-OPENAI_MODEL=gpt-4o
-OPENAI_BASE_URL=https://api.openai.com/v1
-# 中转站如要求渠道/分组，可选配
-OPENAI_CHANNEL=Other
-OPENAI_GROUP=Other
-
-GLM_API_KEY=your_api_key_here
-GLM_MODEL=glm-5.1
-
-DEEPSEEK_API_KEY=your_api_key_here
-DEEPSEEK_MODEL=deepseek-v4-flash
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-
-STEP_API_KEY=your_api_key_here
-STEP_MODEL=step-3.5-flash
-
-KIMI_API_KEY=your_api_key_here
-KIMI_MODEL=kimi-k2.6
-```
-
-未显式切换时默认使用 `anthropic` provider；运行时可用 `/model` 切换已配置的 provider。
-
-统一重试默认最多 3 次，初始退避 500ms、上限 8s、jitter 0.2，可通过 `DEVCLI_LLM_RETRY_MAX_ATTEMPTS`、`DEVCLI_LLM_RETRY_INITIAL_DELAY_MS`、`DEVCLI_LLM_RETRY_MAX_DELAY_MS`、`DEVCLI_LLM_RETRY_JITTER_RATIO` 调整。
-
-长期记忆 TTL 可通过 `DEVCLI_MEMORY_TTL_DAYS` 设置统一值，或使用 `DEVCLI_MEMORY_TTL_FACT_DAYS`、`DEVCLI_MEMORY_TTL_FEEDBACK_DAYS`、`DEVCLI_MEMORY_TTL_SUMMARY_DAYS` 按类型覆盖。只读工具缓存默认 128 条、30 秒，可通过 `DEVCLI_TOOL_RESULT_CACHE_MAX_ENTRIES` 和 `DEVCLI_TOOL_RESULT_CACHE_TTL_SECONDS` 调整。
-
-### Embedding
-
-默认：
-
-```bash
-EMBEDDING_PROVIDER=ollama
-EMBEDDING_MODEL=nomic-embed-text:latest
-EMBEDDING_BASE_URL=http://localhost:11434
-```
-
-如果使用远程 embedding 服务：
-
-```bash
-EMBEDDING_PROVIDER=openai
-EMBEDDING_MODEL=text-embedding-3-small
-EMBEDDING_BASE_URL=https://api.openai.com/v1
-EMBEDDING_API_KEY=your_api_key_here
-```
-
-### Rerank
-
-默认：
-
-```bash
-RERANK_ENABLED=true
-RERANK_PROVIDER=openai
-RERANK_MODEL=BAAI/bge-reranker-v2-m3
-RERANK_BASE_URL=http://localhost:8000/v1
-```
-
-如果本地 Docker rerank 服务不可用，检索会降级到 RRF 结果，不中断 Agent。
-
-### Web Search
-
-支持 `zhipu`、`serpapi`、`searxng`：
-
-```bash
-SEARCH_PROVIDER=zhipu
-ZHIPU_SEARCH_ENGINE=search_std
-
-# 或
-SERPAPI_KEY=your_serpapi_key_here
-
-# 或
-SEARXNG_URL=http://localhost:8888
-```
-
-### MCP
-
-MCP 配置文件：
-
-- 用户级：`~/.devcli/mcp.json`
-- 项目级：`.devcli/mcp.json`
-
-MCP server 的 `readOnly` 注解默认不可信。每个 server 可通过 `trustReadOnlyAnnotations: true` 显式信任服务端注解，或用 `readOnlyTools` 配置本地只读工具允许列表；`deniedTools` 中的工具不会注册。`destructive` 或 `openWorld` 工具始终不能降级为只读，本地允许列表配置错误会扩大能力边界。
-
-DevCLI 在默认配置缺失时会创建 Chrome DevTools MCP 示例配置：
-
-```json
-{
-  "mcpServers": {
-    "chrome-devtools": {
-      "command": "npx",
-      "args": ["-y", "chrome-devtools-mcp@latest", "--isolated=true"]
-    }
-  }
-}
-```
-
-手动配置远程 MCP server 示例：
-
-```json
-{
-  "mcpServers": {
-    "remote": {
-      "url": "https://example.com/mcp",
-      "headers": {
-        "Authorization": "Bearer ${REMOTE_TOKEN}"
-      }
-    }
-  }
-}
-```
-
-### Renderer
-
-默认使用 inline 流式终端界面：
-
-```bash
-DEVCLI_RENDERER=inline
-```
-
-可选值：
-
-- `inline`：默认，底部状态栏、行内工具块、行内 diff。
-- `lanterna`：三栏全屏 TUI。
-- `plain`：纯文本输出。
-
-如果终端不支持底部状态栏：
-
-```bash
-DEVCLI_NO_STATUSBAR=true
-```
-
-### Runtime API
-
-DevCLI 可以以本地 Runtime API 方式启动：
-
-```bash
-DEVCLI_RUNTIME_API_KEY=your_local_api_key \
-java -jar target/devcli-1.0-SNAPSHOT.jar serve --http --port 8080
-```
-
-请求头：
+## 多 Agent 边界
 
 ```text
-Authorization: Bearer your_local_api_key
+主 Agent：理解需求、分配工作、整合结果、最终验收
+explorer：只读调查和证据收集
+planner：只读拆解和验收设计
+worker：隔离工作区中的代码修改
+reviewer：只读、独立、基于证据的复核
 ```
 
-Runtime API 默认仅绑定 `127.0.0.1`。HTTP 请求线程和 Agent 执行线程隔离；Agent 执行池默认 `2` 个线程、队列 `64`，可通过
-`-Ddevcli.runtime.api.turn.threads` / `-Ddevcli.runtime.api.turn.queue` 调整。队列满时返回 `429 {"error":"runtime_busy"}`。长 thread 默认在历史达到 32,000 token 后持久化压缩检查点，可通过 `DEVCLI_RUNTIME_CHECKPOINT_TRIGGER_TOKENS` 或 `-Ddevcli.runtime.checkpoint.trigger.tokens` 调整，最小值为 4,000。
+子 Agent 只继承冻结的系统规则、角色提示词、显式任务和必要背景，不复制父会话、兄弟消息或长期记忆。每个子任务拥有独立的上下文历史、压缩器、Skill 副本、工具范围、资源租约、取消令牌和 `RunContext`。
 
-## Usage
+委派报告由程序保存并通过 `report_id` / `upstream_report_id` 原文传递，避免模型二次转述造成证据损失。Worker 报告包含修改资源、前后哈希、工具证据和副作用失败状态。
 
-启动后直接输入自然语言任务：
+主 Agent 可在 `context` / `constraints` 中显式提供选定记忆。失败子任务仍返回有界工具观察、失败尝试和未解决问题，知识发现与补丁提交状态分开；清理失败不等于已提交修改被撤销。报告最多 64 条，优先保留未解决问题、已提交产物和证据，同级按最近使用淘汰；已经选作子任务输入的报告使用固定快照，不受后续淘汰影响。该策略尚不包含依赖图保留或报告向工作记忆的独立结构化晋升。
 
-```text
-* 帮我阅读这个项目的启动入口，并说明主要执行流程
-```
+## 工具执行管线
 
-让 Agent 修改代码：
+所有工具经过统一管线：
 
 ```text
-* 修复 UserService 中空指针问题，并补充对应单元测试
-```
-
-附加本地文件或目录上下文：
-
-```text
-* 阅读 @src/main/java/com/example/UserService.java，找出潜在 bug
-* 根据 @docs/api.md 更新 Controller 参数校验
-```
-
-附加图片：
-
-```text
-* 分析 @image:/absolute/path/screenshot.png 里的报错
-```
-
-进入 Plan：
-
-```text
-/plan 重构订单模块，把校验逻辑从 Controller 下沉到 Service，并补充测试
-```
-
-Plan 使用 Multi-Agent 链路：Planner 拆 DAG 并提取 `acceptance_criteria`。每条标准必须声明 `test_signal`、`verification_method=TOOL|HUMAN`、`verifier` 和 `applies_to`；适用范围只能引用有效节点或 `FINAL`。普通节点只接收直接相关标准，Final integration 重新检查全部标准。计划先经过确定性结构与可执行性预检，再由独立、无工具上下文的 Reviewer 对照原始目标检查需求、节点和验收标准的覆盖关系；语义拒绝会带结构化问题退回 Planner 有界修复，Reviewer 协议错误则失败关闭。机器评审通过后才展示给用户，可选择执行、补充后重规划或取消；非交互环境遇到人工标准时失败关闭。Worker 在步骤级隔离工作区实现，`PreReviewVerifier` 在同一隔离目录执行硬检查。Reviewer 再以独立产物评审上下文读取真实隔离产物，使用 `criteria_results` 逐条核对；TOOL 标准的声明验证器必须在本轮真实成功工具调用中出现，人工标准只能保持待确认。审查通过后生成 PatchSet，只有全量冲突预检通过才写回主项目。未完成 checkpoint 恢复前会重新执行计划语义评审。
-
-Planner 输出允许在 JSON 前后出现少量说明，编排器会提取首个完整计划对象；无法解析、DAG 无效或出现“检查空工作区后再实现”这类阻塞性纯检查步骤时，会清空 Planner 历史并携带失败原因请求结构化修复。默认最多修复 2 次，可通过 `DEVCLI_TEAM_PLANNER_REPAIR_MAX_ATTEMPTS` 或 `-Ddevcli.team.planner.repair.max.attempts` 调整，取值范围 `[0, 3]`。空工作区属于合法输入，必要检查必须并入实现步骤并采用“若不存在则创建”的语义。Worker 最终文本为空时不再直接判失败：本轮存在 `SUCCESS` 工具证据则生成结构化执行摘要进入 Reviewer；没有成功证据时先执行一次强制协议修复，明确要求代码任务调用 `write_file` 并做最小验证、分析任务调用读取工具取得真实证据；该次 LLM 请求同时按步骤类型强制具体工具：文件写入与集成步骤选择 `write_file`，命令步骤选择 `execute_command`，其他步骤选择 `list_dir`；Anthropic Messages 映射为命名 `tool_choice`，OpenAI-compatible 映射为命名 function choice。FILE_WRITE / INTEGRATION 步骤出现成功 `write_file` 批次后直接以结构化证据结束当前 Worker 执行；强制修复中的指定工具也采用同一规则，不再请求模型生成收尾文本。Provider 忽略命名工具选择时，执行引擎追加一次严格 JSON 工具信封请求；只接受完整 JSON、目标工具名和对象参数，随后仍通过工具参数校验与权限管线执行，不解析 reasoning、Markdown 或代码围栏。工具失败时继续进入下一轮纠正，最终仍没有成功工具证据才判失败。
-
-并行 Worker 数量默认 `2`，可通过 `DEVCLI_TEAM_WORKERS` 环境变量或 `-Ddevcli.team.workers` 系统属性调整（取值夹在 `[1, 8]`，非法值回退默认）。同一依赖批次内相互独立的步骤由 `MultiAgentBatchExecutor` 按 Worker 池大小并行执行；涉及相同写资源的步骤先分入不同执行波次，同一 Worker 通过公平锁避免历史竞争。`OrchestrationWaveExecutor` 统一使用有界线程池、异常归属、独立输出缓冲和稳定顺序归并。每个 Plan 执行波次会记录 `peakConcurrency`、墙钟耗时、步骤累计耗时和 `parallelismFactor` 到 trace，便于用真实任务计算并行利用率和加速效果。同批次使用冻结的 ForkContext，批次内步骤不会读取其他并行步骤中途产生的上下文；确有数据依赖的步骤必须通过 DAG dependency 进入后续波次。任务文本、流式状态、修改文件、摘要与错误统一封装为 `PlanTaskExecutionResult`。Reviewer 默认最多执行 2 轮，通常对应“读取证据 + 输出 JSON 审查”，可通过 `DEVCLI_TEAM_REVIEWER_MAX_ITERATIONS` 或 `-Ddevcli.team.reviewer.max.iterations` 调整到 `[1, 8]`；达到上限视为可恢复 Reviewer 故障，普通步骤仍要求 Pre-Review 硬检查实际通过才可降级。
-
-隔离工作区默认开启，可通过 `DEVCLI_WORKSPACE_ISOLATION_ENABLED=false` 或 `-Ddevcli.workspace.isolation.enabled=false` 临时关闭；默认目录为项目下的 `Temp/devcli-workspaces`，可用 `-Ddevcli.workspace.dir=/path/to/workspaces` 覆盖。物化后端默认 `auto`：项目根是 Git 仓库时使用原生 worktree，共享 Git 对象并叠加当前工作区状态；非 Git 目录优先使用文件系统级写时复制。Linux 使用强制 reflink，现代 Windows 只在 ReFS 上启用系统块克隆；能力探测失败、克隆失败或内容校验不一致时清理部分结果并回退复制。可通过 `DEVCLI_WORKSPACE_BACKEND=git|cow|copy|auto` 显式选择。worktree 物化后会删除排除目录和符号链接，关闭时通过 Git 注销，崩溃残留元数据在后续创建前 prune。创建前会清理超过 24 小时且没有活动文件租约的孤儿目录，TTL 可用 `DEVCLI_WORKSPACE_ORPHAN_TTL_HOURS` 或 `-Ddevcli.workspace.orphan.ttl.hours` 调整。复制等待默认最多 300 秒，可用 `DEVCLI_WORKSPACE_COPY_TIMEOUT_SECONDS` 调整；超时或中断会取消复制线程，不再无限等待。隔离任务的 `execute_command` 和 Pre-Review 强制进入 Docker，使用无网络、只读根文件系统、能力清空和资源上限；Docker 不可用时明确失败，不回退主机。默认镜像为 `maven:3.9.9-eclipse-temurin-17`，必须提前拉取，可通过 `DEVCLI_COMMAND_SANDBOX_IMAGE` 覆盖；其他技术栈应配置包含所需工具的镜像。写时复制后端设计见 `docs/filesystem-cow-workspace-design.md`。
-
-失败恢复采用「在位重做」而非平行重规划：失败步骤保持原 id/依赖在 DAG 原位换思路重做（默认 1 次，带上次失败反馈），恢复始终长在原 DAG 上、通过依赖关系看到已完成成果。Reviewer 重试和 redo 用尽后保持失败终态，最终结果显式列出失败步骤、两类额度、最后原因、checkpoint ID 和人工处理选项，不自动改写整张图。协议版本 7 固化验收方式、验证器和适用节点，并恢复原 Worker 绑定、消息游标、摘要、重做次数和失败现场。旧协议缺失适用节点时迁移为 `FINAL`；缺失验证方式时迁移为人工验收。保存失败、回滚不完整、身份拓扑损坏或未来协议版本都会停止 resume。
-
-常见任务写法：
-
-```text
-* 找出登录接口的完整调用链，并指出鉴权在哪里发生
-* 检查最近一次改动有没有引入空指针、路径逃逸或命令执行风险
-* 根据 @README.md 和 @src/main/java/com/devcli/cli/Main.java 更新启动说明
-* 运行相关测试，失败时定位根因并修复
-* 分析 @image:C:/tmp/error.png 中的报错截图，并给出修复路径
-```
-
-如果输入以 `/` 开头，CLI 会优先按命令解析；未识别命令会在 CLI 层报错，不回退给 Agent 当自然语言执行。
-
-## Commands
-
-常用命令：
-
-| Command | Description |
-|---------|-------------|
-| `/help` | 查看帮助 |
-| `/model` | 查看或切换模型 |
-| `/plan` | 使用 Planner、Worker、Reviewer 编排执行任务 |
-| `/plan resume [id]` | 从 checkpoint 恢复中断的 Plan 任务 |
-| `/index` | 为当前仓库建立 RAG 索引 |
-| `/search <query>` | 检索代码库 |
-| `/graph <class>` | 查看代码关系图谱 |
-| `/memory` | 查看记忆状态 |
-| `/memory organize` | 生成长期记忆整理计划，不修改记忆 |
-| `/memory organize apply` | 应用程序判定为低风险的整理项 |
-| `/memory clear` | 清空长期记忆 |
-| `/save <fact>` | 保存长期事实 |
-| `/save --pin <fact>` | 保存强约束事实，每轮全量注入 |
-| `/mcp` | 查看 MCP server 状态 |
-| `/mcp restart <name>` | 重启 MCP server |
-| `/mcp logs <name>` | 查看 MCP server stderr 日志 |
-| `/hitl on` | 开启人工审批 |
-| `/hitl off` | 关闭人工审批 |
-| `/policy` | 查看策略层状态 |
-| `/audit [N]` | 查看最近 N 条审计日志 |
-| `/snapshot` | 查看 Side-Git 快照状态 |
-| `/browser connect` | 连接可复用 Chrome 会话 |
-| `/session status` | 查看当前持久会话与分支 |
-| `/session tree` | 查看持久会话树 |
-| `/session fork <name> [eventId]` | 从当前或指定事件创建分支 |
-| `/session use <branch>` | 切换持久分支，只切换模型上下文 |
-| `/clear` | 创建无继承历史的新根分支，旧历史保留 |
-| `/exit` | 退出 |
-
-命令补全：
-
-- `/model` 支持 provider 补全。
-- `/mcp` 支持 server 名称和子命令补全。
-- `/skill` 支持 skill 名称和子命令补全。
-- `@path` 支持本地文件、目录和 MCP resource mention 补全。
-- `@image:` 支持本地图片路径补全。
-
-## Built-in Tools
-
-内置工具：
-
-| Tool | Description |
-|------|-------------|
-| `read_file` | 读取文件 |
-| `write_file` | 写入文件 |
-| `list_dir` | 列出目录 |
-| `execute_command` | 执行短时 shell 命令 |
-| `create_project` | 创建基础项目结构 |
-| `search_code` | 检索代码库 |
-| `grep_code` | 实时精确搜索当前工作区文本 |
-| `web_search` | 搜索互联网 |
-| `web_fetch` | 抓取已知 URL 并提取正文 |
-| `save_memory` | 保存长期记忆 |
-| `list_memory` | 只读列出长期记忆 |
-| `revert_turn` | 回滚最近 turn 的改动 |
-| `mcp__{server}__{tool}` | MCP server 动态工具 |
-| `mcp__{server}__read_resource` | 读取 MCP resource |
-
-同一轮模型返回多个工具调用时，DevCLI 会并行执行可并行的工具，并按原始顺序把结果回灌给模型。
-
-工具调用可靠性：工具定义以 JSON Schema 约束参数类型、必填项、枚举值和未知字段；`ToolRegistry` 在真实执行前通过 `json-schema-validator` + 本地兜底校验内置工具与 MCP 工具参数，非法 JSON、类型错误、空必填、非法枚举、pattern/minimum 等 schema 约束失败会以 `工具参数校验失败` 回传给模型修正。默认工具定义只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具注册、卸载或替换后自动失效重建，命中的 MCP 工具会激活到后续工具定义。未知工具调用会返回 `search_tools` 引导和 query 示例，便于模型在工具集合变化或 MCP 工具未命中时重新检索可用工具。危险工具仍走 HITL 审批、策略拦截和 AuditLog；工具错误会回灌给模型继续纠偏，最终答复必须基于工具证据。
-
-工具边界：
-
-- `read_file` / `write_file` 必须通过路径策略校验。
-- `execute_command` 面向短时命令，不适合托管长期后台服务。
-- `grep_code` 是实时精确文本搜索，适合类名、方法名、配置键、错误文本和固定字符串片段；`search_code` 保持 keyword + semantic + bounded graph 混合检索，适合自然语言理解、调用链和概念查询。
-- `web_fetch` 适合已知 URL；遇到 SPA 或防爬限制时再切浏览器/MCP。
-- `create_project` 只创建基础模板，不替代完整脚手架。
-- MCP 工具名统一暴露为 `mcp__{server}__{tool}`，resource 读取暴露为虚拟工具；带 destructive/openWorld annotations 的 MCP 工具会强制逐次 HITL 审批，不复用全部放行缓存。
-- MCP 工具结果进入尺寸治理后会附带折叠分类；中等输出标记 `INLINE_TRUNCATED`，超大输出落盘预览标记 `PERSISTED_PREVIEW`。
-
-## Memory
-
-DevCLI 的上下文分为四层：
-
-- `ConversationHistory（对话历史）`：真实 LLM messages，由压缩器治理窗口。
-- `WorkingMemory（工作记忆）`：当前会话工具证据、任务状态和临时事实，不跨会话持久化。用户显式要求“别管记忆”“忽略记忆”等时，本会话不注入长期记忆、通用 WorkingMemory 和角色裁剪后的 WorkingMemory。其中 `TaskLedger（任务账本）` 结构化记录计划执行进度，不进对话历史、压缩不触碰它；当前由 `/plan` 维护。Plan 与 Multi-Agent 的任务终态统一落在 `ExecutionArtifact`，只有主项目成功应用的 PatchSet 修改资源才写入运行态、checkpoint 和 WorkingMemory；checkpoint 版本 2 的 `RecoveryState` 负责跨进程恢复，旧 completed/failed 结构会先归一化。压缩后恢复上下文会按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 和 MCP 工具状态分节注入，并做预算控制与行级去重；microcompact 工具引用会按 storedPath / toolCallId 去重；Multi-Agent 会按 Planner / Worker / Reviewer 裁剪恢复内容，避免恢复段重复携带完整工具输出。压缩边界会同时记录全局 RAG 索引版本和当前会话 RAG 证据版本。
-- `SessionMemory（会话预摘要）`：当前进程内缓存压缩前置摘要，覆盖同一消息指纹且未过期时可被压缩器复用；已有摘要覆盖当前历史前缀时，维护请求只携带旧摘要和新增消息，前缀变化后才回退全量摘要；维护指标记录模式、覆盖和增量消息数、输入估算、摘要长度及失败计数；默认 30 分钟过期。Plan / Multi-Agent turn 结束后会后台维护预摘要，避免主流程等待摘要 LLM 调用。
-- `LongTermMemory（长期记忆）`：跨会话稳定事实，SQLite 持久化，支持检索注入；统一意图分类器识别保存、删除、忽略、目录查看和历史依赖；检索结果保留语义分数、关键词分数和合并分数，并按最低分数、第一名分差和最大数量限制注入。写入前经过 `LongTermMemoryPolicy` 规则化分流；与 WorkingMemory 临时事实语义重复的长期记忆不会重复注入 prompt；普通请求不再附带长期记忆目录快照，只有明确查看、列出或审计记忆时才注入目录。
-- RAG 检索默认把 keyword / semantic / graph、RRF、rerank、最终选择和降级状态写入本机 JSONL 审计记录，不保存代码正文。普通 CLI 会话归档默认关闭；启用后 ReAct 保存脱敏模型消息，Plan / Team 保存顶层输入输出，不保存图片正文与 reasoning，并按保留期限自动清理。
-- `StickyMemory（强约束记忆）`：通过 `/save --pin` 保存，每轮全量注入 system prompt。
-
-保存长期事实：
-
-```text
-/save 这个项目使用 Java 17
-```
-
-保存强约束：
-
-```text
-/save --pin 默认用简体中文回答
-```
-
-长期记忆写入策略：
-
-- 用户明确说“记住”“保存”“以后记得”或英文 “remember / save this preference / for future sessions” 时，低敏稳定事实优先保存；如果显式保存内容仍然包含“今天/这次/临时/朋友孩子高考”这类低复用信号，策略返回确认态。
-- 个人偏好、项目约定、常用路径、长期身份属性通过 `reason_code` 记录可解释写入原因，不再依赖未校准的小数打分。
-- 个人属性类键值事实（如“我是医生”）可自动进入长期记忆；模糊的新个人状态事实（如“我刚刚搬到北京”）需要确认。
-- 当信息涉及 token、密码、手机号、地址等敏感内容时，默认要求确认或跳过。
-- “今天临时这样做”“这次先用某个文件名”等低复用信息只留在 WorkingMemory。
-- 多次在短期上下文重复出现的稳定事实，会提高进入长期记忆的优先级。
-- 命中主题键（如 JSON 库选型）的新事实写入时，同主题旧事实自动失效、检索不再召回，避免被推翻的旧设定继续误导模型；抽不到主题则退回追加不覆盖。
-
-## RAG
-
-初始化代码索引：
-
-```text
-/index
-```
-
-检索代码：
-
-```text
-/search 订单创建流程在哪里
-```
-
-查看代码关系：
-
-```text
-/graph OrderService
-```
-
-`search_code` 支持以下模式：
-
-- `auto`
-- `general`
-- `call_chain`
-- `definition`
-- `error_trace`
-- `config`
-
-调用链场景可设置 `graph_depth`，范围 `0-3`。
-
-RAG 索引内容：
-
-- Java 类、方法、字段、注解、import 和包名。
-- 方法体文本和关键上下文片段。
-- 调用关系、实现关系、继承关系和依赖关系。
-- 文件路径、起止行号、chunk 名称、语义向量、`IndexEpoch（索引版本）`、`SymbolVersion（符号版本）` 和 `ClasspathEpoch（类路径版本）`。
-
-索引阶段会按文件批量生成 chunk embedding；批量请求失败或返回数量异常时，自动逐条降级处理并跳过单个失败 chunk。
-
-`search_code` 的 keyword 通道保持 SQLite 索引实现，继续参与 RRF 融合和失效事实管理；`grep_code` 是独立的实时精确检索工具，不替代 `search_code`。
-
-RAG 检索流程：
-
-1. 根据 query 选择 `auto/general/call_chain/definition/error_trace/config` 模式。
-2. 语义向量召回候选代码块。
-3. 关键词和路径信号补充召回。
-4. 需要调用链时扩展代码关系图谱。
-5. 使用 RRF（倒数排名融合）合并多路结果，并叠加 symbol-aware boost（符号感知加权）。
-6. 默认调用 CrossEncoderReranker（交叉编码器重排）做二阶段排序；服务不可用时保留 RRF 结果。
-
-如果 embedding 服务不可用，DevCLI 会把语义召回降级为空、保留关键词和结构化检索路径继续融合，
-不让整条检索失败；并在 `search_code` 结果开头显式标注"语义检索服务不可用，本次已降级"，
-不把降级结果伪装成完整 RAG。
-
-## MCP
-
-MCP server 启动后会动态刷新工具和 resources：
-
-- `stdio` server 通过本地命令启动；Windows 会按 `PATH` / `PATHEXT` 解析 `npx.cmd` 等命令包装器。
-- `streamable_http` server 通过远程 HTTP 地址连接。
-- server 启动默认不阻塞首屏超过配置的等待时间；超时 server 会保持 `STARTING` 并在后台继续初始化。
-- MCP 工具快照按 server 记录工具数量、schema 指纹和生命周期版本；server 启动成功或 tools/list_changed 刷新会推进生命周期版本。
-- MCP 连接事件在进程内记录 STARTING / READY / ERROR / DISABLED / RECONNECTING / TOOLS_CHANGED，便于 CLI 和 Runtime 后续消费。
-- MCP 工具发现缓存会保留 server、生命周期版本、工具数量、工具名、schema 指纹和发现时间；server 禁用后仍保留上一轮发现元数据。
-- MCP server 启动失败后会后台自动重连，默认最多 3 次；可用 `DEVCLI_MCP_RECONNECT_MAX_ATTEMPTS`、`DEVCLI_MCP_RECONNECT_INITIAL_DELAY_MILLIS`、`DEVCLI_MCP_RECONNECT_MAX_DELAY_MILLIS` 调整。
-- MCP `tools/call` 会自动携带 `_meta.progressToken`；server 返回同 token 的 `notifications/progress` 时，DevCLI 会把最近进度摘要追加到工具结果。
-- MCP 工具输出被截断或落盘预览时会在返回给模型的文本中标记折叠分类，便于后续工具搜索和错误引导识别结果形态。
-- `/mcp` 可以查看状态，`/mcp logs <name>` 可以查看 stderr，`/mcp restart <name>` 可以重启指定 server。
-
-MCP 安全边界：
-
-- 动态工具同样进入 JSON Schema 参数校验。
-- 敏感工具进入 HITL 审批。
-- 策略层拒绝优先级高于用户批准。
-- MCP resource mention 展开前会经过资源缓存和读取工具。
-
-## Runtime API
-
-Runtime API 适合把 DevCLI 接入本地脚本、编辑器插件或自动化系统。核心端点包括：
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/v1/threads` | `POST` | 创建 thread |
-| `/v1/threads/{id}/turns` | `POST` | 提交一轮 Agent 输入，异步执行 |
-| `/v1/threads/{id}/events` | `GET` | 以 SSE 格式回放事件 |
-| `/v1/threads/{id}/branches` | `GET/POST` | 列出或创建持久事件分支 |
-| `/v1/threads/{id}/branches/{branchId}/activate` | `POST` | 切换活动分支 |
-
-事件类型：
-
-- `turn.started`
-- `reasoning.delta`
-- `message.delta`
-- `tool.calls`
-- `tool.results`
-- `turn.completed`
-- `turn.failed`
-- `turn.rejected`
-- `thread.checkpoint.created`
-- `thread.checkpoint.failed`
-
-模型流、工具调用、工具结果和 turn 生命周期统一使用强类型 `RunEvent`。CLI Renderer 通过适配器消费同一事件流，Runtime API 将事件投影为带 `schema_version: 2` 的稳定 JSON 后写入 SSE；远程客户端不需要解析终端文本。工具参数在协议中保持 JSON 对象，工具结果包含结构化状态、错误码、重试标记、耗时、展示意图和图片数量，不包含图片正文。
-
-默认只绑定本机地址 `127.0.0.1`，并要求 API Key。HTTP 请求线程与 Agent turn 执行线程隔离，turn 队列满时返回 `429 runtime_busy`。
-
-同一 thread 的多个 turn 由 `RuntimeSessionTurnRunner` 复用会话运行时；进程恢复时从 SQLite 读取最新压缩检查点，并完整重放检查点之后的已完成 turn。没有检查点时重放全部已完成 turn。检查点保存压缩消息窗口与恢复元数据；事件日志仍是事实来源，失败或被拒的 turn 不进入模型上下文。
-
-## Hooks
-
-DevCLI 支持 `agent`、`turn`、`message` 和 `tool execution` 四层生命周期 Hook：
-
-- `agent_start` / `agent_end`
-- `turn_start` / `turn_end`
-- `message_start` / `message_end`
-- `tool_execution_start` / `tool_execution_end`
-
-Hook 配置按 id 合并，项目级覆盖用户级：
-
-1. `~/.devcli/hooks.json`
-2. `<project>/.devcli/hooks.json`
-
-也可以通过 `DEVCLI_HOOKS_FILE` 或 `-Ddevcli.hooks.file` 指定单一配置文件。配置使用 `schemaVersion: 1`，模板位于 `Config/hooks.example.json`。
-
-Hook 不直接执行任意 shell 或 HTTP 请求，而是调用已注册工具，因此继续经过 ToolEffect、能力范围、参数校验、HITL、策略和审计管线。READ_ONLY / LOCAL_CONTEXT Hook 会被强制收窄到只读能力；其他副作用必须同时配置 `allowSideEffects: true`、启用 HITL，并且目标工具具有逐次审批策略，否则拒绝执行。
-
-Hook 在对应生命周期点同步、按配置顺序执行，确保事件顺序可复现；工具自身的超时和取消机制继续生效。`failureMode: warn` 只记录警告，不改变 Agent 终态；`failureMode: required` 会通过统一 Agent 失败出口终止当前执行。参数字符串支持 `${event}`、`${project}`、`${run_id}`、`${iteration}`、`${tool_name}`、`${tool_call_id}` 和 `${status}` 占位符。
-
-## Safety
-
-DevCLI 是本地 Agent CLI，不提供容器或虚拟机级沙箱。安全机制包括：
-
-- HITL（人工审批）
-- PathGuard（路径围栏）
-- CommandGuard（危险命令快速拒绝）
-- AuditLog（审计日志）
-- Side-Git snapshot（回滚快照）
-
-开启 HITL：
-
-```text
-/hitl on
-```
-
-查看审计：
-
-```text
-/audit 20
-```
-
-安全执行顺序：
-
-```text
-LLM tool call
+取消检查
+→ 工具存在性
+→ 能力范围
+→ Skill 权限
 → JSON Schema 参数校验
-→ HitlToolRegistry
-→ ToolRegistry
-→ PathGuard / CommandGuard
-→ AuditLog
-→ 实际工具执行
+→ HITL 审批
+→ 审计记录
+→ 策略判定
+→ 结果尺寸治理
 ```
 
-这意味着：
-
-- 参数不合法时不会进入审批，更不会执行。
-- 用户不能批准策略层已经拒绝的操作。
-- 文件写入和命令执行会留下审计记录。
-- Side-Git snapshot 可用于回滚最近 turn 的文件改动，并按保留上限自动裁剪旧快照；累计裁剪达到阈值或超过最小间隔后，会在时间上限内回收不可达松散对象。
-
-## Renderer And Interaction
-
-默认 inline renderer 面向日常终端使用：
-
-- 启动首屏展示模型、MCP、Skill、ReAct 状态和 getting-started tips。
-- 输入行支持 slash 命令、`@path`、`@image:`、敏感词和危险 shell 片段高亮；`/help` 直接显示完整命令列表。
-- ReAct 执行期间可继续输入后续任务：普通文本进入容量为 8 的会话内 FIFO 队列，`/now <任务>` 取消当前轮次并优先执行新任务，空闲时直接执行；`/cancel` 只取消当前轮次。取消后最多等待执行线程退出 5 秒，未退出时停止接收新任务，避免两个轮次并发修改会话状态；任务结束时未提交的输入会保留为下一次编辑草稿。Plan、Multi-Agent 或启用 HITL 时继续保持单一终端输入所有权。
-- 底部状态栏显示当前 phase、模型、上下文百分比、token、cost、elapsed、cwd。终端误判为 dumb 时可用 `DEVCLI_TERMINAL_FORCE_ANSI=true` 强制启用。
-- 重定向输入默认使用 UTF-8，旧式 Windows 控制台可通过 `DEVCLI_TERMINAL_ENCODING=GBK` 覆盖。
-- plain 与 inline 审批都复用主 LineReader，避免审批输入与主提示符争抢标准输入。
-- LLM reasoning 会进入 live thinking 区，正文输出前会收敛为完整引用块。
-- 工具调用以紧凑块展示，文件写入会展示 diff。
-
-plain renderer 适合 CI、日志或不支持 ANSI 的终端。Lanterna 不再有生产启动入口；旧配置会输出迁移提示并使用 inline。
-
-## Benchmark Evaluation
-
-项目提供 RAG、Agent、Memory 和 Context Compression / Long Context 四类量化评测。公开集合已接入 CodeSearchNet Java、SWE-bench Lite、LongMemEval Oracle Cleaned、LongBench v1 和 RULER v1；固定版本、SHA-256、许可、原始文件边界和官方 harness 记录在 `Config/public-benchmarks.json` 与数据清单中。项目内受控任务继续独立报告，禁止与公开集合结果混算。受控 Agent benchmark 不暴露 `execute_command`，统一由隐藏验证器在 Agent 运行后编译并执行行为检查；另有订单履约 Saga 协作场景，以六个模块和 30 项隐藏检查比较单 Agent 与 Planner/Worker/Reviewer 的拆解、集成、补偿、幂等和并发能力。SWE-bench 则输出官方 predictions JSONL，并由 Linux Docker 中的官方 harness 执行真实测试。
-
-评测原始报告默认写入 `target/benchmark-reports/` 和 `target/agent-benchmark/`。聚合器会生成可提交的 JSON、CSV 与数据清单到 `Data/processed/` 和 `Data/manifest/`。完整方法、命令、基线结果和适用边界见 `docs/benchmark-evaluation.md`。
-
-2026-07-13 的 50 条 CodeSearchNet Java 样本结果：Recall@5 1.0000、MRR@5 0.9900、nDCG@5 0.9926；Memory 写入准确率 96.0%、Recall@5 91.7%；2026-08-10 的压缩基线在 256k 上下文窗口达到 80% 阈值后连续完成 5 轮自动压缩，30 条固定事实自动问答保真率 93.3%（28/30，尚未人工复核；2026-08-11 优化后复跑因端点空响应跳过，尚未重新验证）。2026-07-16 公开集合首轮链路验证中，LongMemEval Oracle Cleaned 3 条 normalized answer hit 为 66.7%（代理指标），LongBench v1 6 条官方子集平均为 66.7%，RULER v1 4K NIAH 3 条为 100%；这些小样本不能外推为完整榜单成绩。同日完成 5 个受控 Agent 任务复跑：单 Agent 任务成功率 0/5、隐藏检查平均完成率 0%；Planner/Worker/Reviewer 任务成功率 0/5、隐藏检查平均完成率 27.33%，其中 logops 9/10、ordermvc 7/15，其余任务未形成可验收交付物。该结果只用于暴露执行协议与模型服从性问题，不代表稳定的成功率水平。SWE-bench Lite 单样本已生成预测，但补丁只包含复现脚本；官方 harness 因 Ubuntu 软件源连续返回 503，尚未形成有效 resolved 结果。针对 OpenAI 兼容端点重复发送完整工具调用字段的问题，流式聚合器已兼容完整快照与标准增量分片。Krill AI `gpt-5.5` 完整 5 任务复跑中，单 Agent 成功 3/5、隐藏检查平均完成率 94%，Planner/Worker/Reviewer 成功 1/5、平均完成率 76%；当前 CLI 样本显示单 Agent 更稳定。新增 Saga 协作场景的单次有效运行中，单 Agent 通过 27/30（90.0%，192.8 秒），Planner/Worker/Reviewer 通过 30/30（100.0%，725.1 秒），说明可拆分模块和最终集成任务出现 10 个百分点正确率收益，但耗时为 3.76 倍，且单次结果不能外推。公开长上下文运行中 LongMemEval 代理命中率为 66.7%、RULER 为 100%，但端点仍重复发送完整 content，导致 `8` 聚合为 `88` 等错误；同时 4/12 次调用触发服务端安全拦截，因此 LongBench 16.7% 与 RULER 展示值暂不能作为正常模型成绩。
-
-## Tests
-
-常规快速回归：
-
-```bash
-mvn test -Pquick
-```
-
-针对性测试：
-
-```bash
-mvn test -Dtest=AgentOrchestratorTest -DskipTests=false
-```
-
-全量测试：
-
-```bash
-mvn test -DskipTests=false
-```
-
-默认 `mvn clean package` 会跳过测试，优先产出可手工验收的 jar。
-
-## Project Layout
+工具副作用分为：
 
 ```text
-src/main/java/com/devcli/
-├── agent/       Agent, PlanExecuteAgent, PlanTaskBatchExecutor, PlanTaskExecutionResult, SubAgent, AgentOrchestrator, MultiAgentBatchExecutor
-├── cli/         Main, CliCommandParser
-├── context/     ContextProfile, ContextMode, TokenUsageFormatter
-├── memory/      MemoryManager, WorkingMemory, LongTermMemory, StickyMemory
-├── mcp/         McpServerManager, McpClient, resources, transport
-├── plan/        Planner, ExecutionPlan, Task
-├── policy/      PathGuard, CommandGuard, AuditLog
-├── prompt/      PromptAssembler, PromptContext
-├── rag/         CodeIndex, CodeRetriever, VectorStore, CodeChunker
-├── render/      Renderer, InlineRenderer, PlainRenderer
-├── snapshot/    SideGitManager, SnapshotService
-├── tool/        ToolRegistry
-└── web/         SearchProvider, WebFetcher, HtmlExtractor
+READ_ONLY → LOCAL_CONTEXT → PROJECT_MUTATION → HOST_PROCESS → EXTERNAL_MUTATION
 ```
+
+每个工具在注册时显式声明契约，不再按工具名推断行为：除资源域（上面的副作用等级）外，还声明破坏性等级（`NONE` / `BENIGN` / `STRUCTURAL`）和幂等性（`IDEMPOTENT` / `NON_IDEMPOTENT`），以及能否进入短期结果缓存。只读不代表没有状态变更：已读标记、游标推进这类不可逆但无资损的流转属于 `BENIGN`，必须声明为非幂等。MCP 服务端注解默认不可信，本地只读授权只放宽访问等级，这类工具一律按 `BENIGN` + 非幂等处理。
+
+契约直接驱动执行：只有「只读或本地上下文 + 声明幂等」的工具允许同批并行，非幂等只读工具与副作用工具一样串行；结果缓存资格由 `cacheable` 声明决定，依赖外部可变状态的只读工具显式排除缓存。
+
+并行工具最多 4 路且保留调用顺序。参数错误、策略拒绝、命令非零退出、超时和取消都以结构化状态回传模型；命令耗时和退出码分别由执行元数据与 `CommandResultMetadata` 保留。
+
+工具调用参数生成稳定语义指纹，用于重复动作检测、停滞提醒和硬熔断。只读结果按契约允许会话级短期缓存；副作用操作或项目切换会清理缓存。
+
+审批风险等级与说明同样由声明的契约推导，未在本地声明契约的工具不会被描述成「安全只读」，而是按可能产生外部状态变更处理。
+
+审批本身是三值决策，不再是「某几类工具固定必经的一步」：
+
+```text
+策略硬边界（项目根围栏 / 命令黑名单）
+→ DENY   直接拒绝，不先弹一次注定被拒的审批
+→ 规则层  deny 规则直接拒绝；allow 规则自动放行；ask 规则强制人工审批
+→ 用户授权范围覆盖本次参数
+→ ALLOW  自动放行，并输出授权理由
+→ 其余
+→ HITL   人工确认
+```
+
+授权只能收窄策略允许集，不能放宽，任何授权都不覆盖 `DENY`。授权分两层，两层各只有一个载体：**跨会话的持久授权**写在 `~/.devcli/config.json` 的 `permissions.allow` 规则里，表达「我长期信任这类操作」；**任务例外**由 `/grant` 给出，只作用于下一条任务（含编排轮），表达「这次需要超出常态的权限」。`/grant write` 追加授权写入项目内任意文件、`/grant write <glob>...` 追加给定项目相对路径、`/grant net <域名>...` 追加访问该域名及其子域、`/grant commands` 追加项目构建测试命令、`/grant all` 追加全部、`/grant status` 查看例外/规则层/放行缓存、`/grant off` 取消例外并清空本轮放行缓存。状态栏常驻显示规则层摘要，配置文件本身位于受保护路径名单内，Agent 的工具写路径改不动它。授权 glob 与委派写白名单共用同一套语义：项目相对路径、拒绝绝对路径与 `..`、`dir/**` 表示该目录及其所有后代。
+
+规则层在同一份配置里，写在 `permissions.deny` / `ask` / `allow`，语法是 `Tool` 或 `Tool(specifier)`——`deny` 立即拒绝且不可被任何授权覆盖，`ask` 强制人工审批，`allow` 立即放行。判定次序固定为 `deny` → `allow` → `ask`，命中即短路，与 WorkBuddy 的求值链一致：`deny` 绝对优先，`allow` 先于 `ask`。代价是一条宽泛的 `allow` 会吞掉更窄的 `ask`——`allow write_file(src/**)` 配 `ask write_file(src/secret/**)` 时，后者永远不会生效。这个坑在启动时由覆盖告警直接提示（并给出正确做法：例外改用 `deny` 声明），不靠改次序解决。工具名可写原生名（`write_file`）或 WorkBuddy 风格别名（`Edit` / `Write` / `Read` / `Bash` / `WebFetch` / `WebSearch`）。specifier 只对已声明资源槽的工具有效：路径类写项目相对 glob（`Edit(src/**)`），命令类写命令模式（`Bash(git:*)` 按词边界匹配 `git` 与 `git status`，不匹配 `gitleaks`），网络类写裸域名或 `domain:` 前缀（`WebFetch(domain:example.com)`）；给 `revert_turn` / `apply_patch` / MCP 工具写 specifier 会在解析时被拒绝。命令规则按 `&&` / `||` / `;` / `|` 拆分后逐段判定，`deny` 与 `ask` 任一子命令命中即触发、`allow` 要求全部命中；含重定向时 `allow` 的通配形态失效，只接受精确匹配。任一条规则写错即整体降级为无规则并打印告警，不做部分接受——拒绝规则被静默丢弃会让用户以为它在生效。
+
+`web_fetch` 是需要出口授权的只读工具：命中 `/grant net` 的域名自动放行（相等或其子域，不支持通配符），未授权域名逐次确认（`dontAsk` 模式收口为拒绝）；无论是否授权，`NetworkPolicy` 的 scheme 白名单与环回/内网拦截始终生效。域名取 `URI.getHost()`，即 userinfo（`@`）之后的部分，大小写与末尾点归一化，端口不参与判定。`web_search` 不按域名授权——目的地由 provider 配置决定，工具参数里没有可信资源槽——但两个工具共用同一份出口限流预算（60 秒 / 30 次），且在建连之前判定。命令类授权复用主机白名单（Maven 生命周期 / javac / 只读 Git），所以 `git push` 这类远程副作用仍然必须人工确认；`revert_turn`（批量回写整个工作区）和全部 MCP 工具没有可信的参数级资源槽，一律回到人工审批。已声明资源槽的参数是写入类工具的 `path`、`create_project` 的 `name`、`execute_command` 的 `command` 和 `web_fetch` 的 `url`。
+
+审批的「全部放行」只在当前任务内有效：任务边界会清空按工具和按 MCP server 的放行缓存，同一条用户消息内的后续调用继续复用，下一条消息必须重新确认，不会跨任务静默放行；`/grant status` 用于查看这份缓存，`/grant off` 可以随时撤销。
+
+任务授权另有绑定项目的可撤销作用域：并行调用与工作区 fork 共享作用域，父任务结束后授权一起失效。审计记录执行轮次、步骤、授权、工具调用和逐次审批标识，区分任务授权放行与人工批准；尚未贯通用户请求、Agent 身份与最终文件版本。
+
+受保护路径在策略层拦截，与 HITL 开关无关、也不能被审批放行：`.git` / `.ssh` 整棵目录、`.env` 与 `.env.*`（放行 `.env.example` 这类模板）、`credentials.json` / `service-account.json` / `id_rsa*` / `id_ed25519*` 与 `.pem` / `.key` / `.p12` / `.jks` / `.keystore`。文件写入走 `resolveSafeWritePath`，所以关闭人工审批也不会让凭据或版本库元数据变成可写；`CommandGuard` 另补两条辅助规则拦截删除 `.git` 与重定向写入凭据文件（shell 能绕过文件层围栏）。`target` / `node_modules` 仍只是物化排除项，不是安全边界。
+
+Agent 自身配置单独保护：`.devcli/hooks.json`、`.devcli/mcp.json`、`.devcli/config.json`，以及 `devcli.hooks.file` / `DEVCLI_HOOKS_FILE` 指向的自定义 Hook 文件。共享文件写入入口与 PatchSet 提交前拒绝修改，任务授权、全部批准和关闭审批通道均不能覆盖；快照恢复跳过这些配置并提示。检查覆盖默认用户配置、物理路径别名及隔离工作区对应的主项目路径，普通 `.devcli` 文件和配置示例仍可修改。需要调整时由用户在 Agent 工具之外操作。**这不是操作系统写保护：主机命令、外部 MCP 服务、配置引用的脚本尚未统一限制；没有实现完整防注入或默认命令沙箱。**
+
+`execute_command` 实际走主机后端时，在启动进程前强制单次确认，包括普通主 Agent 和显式 `HOST_RESTRICTED/HOST_WARN` 的隔离任务。此规则优先于命令任务授权和全部批准；关闭审批通道或没有审批处理器时拒绝主机执行，不自动放行。**主机路径同样经过规则层与模式层，但只吸收收紧方向**：`deny` 规则立即拒绝、`dontAsk` 模式收口为拒绝；`allow` 规则与 `bypassPermissions` 不参与，因为主机单次确认刻意不可被放宽类判定免除（比 WorkBuddy 的全局 bypass 更严）——代价是 `allow execute_command(...)` 在主机路径上不生效，启动时会打印告警并提示改用 `deny`。隔离路径走沙箱后端，规则层与模式层正常求值。弹窗展示主机风险、工作目录和完整的脱敏命令，控制字符转义；仅接受 `y`，回车默认拒绝，不允许批量批准、修改参数或脱敏后执行。批准绑定本次命令、目录及后端，取消或过期后不启动进程，单独记录关联调用的审批事件。Docker 工具路径沿用原审批规则。**这是工具入口的授权强化，不是沙箱：批准后的主机命令仍可修改配置；内部 Pre-Review 和外部 MCP 服务不经过这次新增门禁。**
+
+`/mode plan` 让只读能力上限持续作用于后续轮次：写入、命令和外部副作用工具既不注入模型也不会执行。与 `/plan` 组合时该轮会被直接拒绝（编排必须写入隔离工作区，跑到中途只会得到一片能力拒绝），并消费掉只读标记。`/mode default` 恢复逐个询问。
+
+`/mode auto` 把「默认要问」的动作交给权限分类器判断：只有走完整条求值链、没有任何规则或安全机制要求询问的动作才会送到分类器。显式 `ask` 规则、`delete_files` 删除确认、可识别的 Shell 删除、`apply_patch` 删除或移动、`revert_turn`、浏览器与 MCP 逐次审批都不经过分类器——它们有独立于默认策略的询问理由。分类器只看到工具名、参数、项目路径与当前模式，不继承会话历史与记忆；默认超时 10 秒（`devcli.permission.classifier.timeout.seconds`），执行前会确认工具剩余预算足以覆盖该超时，不足、装配缺失、超时、调用失败或响应不可解析一律拒绝，不猜测。连续失败次数在主 Registry 与项目 fork 间共享，默认达到 3 次（`devcli.permission.classifier.failure.threshold`）后退出 `auto` 并回落 `default`；手动切换模式会重置该计数。提示词在 `prompts/permission-classifier.md`，仅允许 `~/.devcli/prompts/` 的可信用户级覆盖；项目 `.devcli/prompts/permission-classifier.md` 会被忽略，避免仓库内容改写自身审批策略。**分类器误判放行时没有人工兜底**——fail-closed 只兜住「分类器不可用」，兜不住「分类器判断错误」，这是 `auto` 相对 `default` 的固有代价。分类器不覆盖规则层 `allow`：用户写了 `allow` 就是用户的选择；代价是无 specifier 的宽泛 `allow` 会让分类器在该工具上完全不参与。
+
+能力范围与任务级授权都随轮次生效并被编排继承：能力范围只能单调收窄（只读 ⊂ 隔离项目 ⊂ 完整），嵌套调用与隔离 fork 都不能放宽外层约束；波次线程池在轮次内新建，因此继承本轮的范围与授权，长生命周期线程池在轮次外创建，不会残留某一轮的约束。
+
+## Prompt 与上下文
+
+Prompt 按稳定性分层：
+
+```text
+base
+→ personality
+→ mode
+→ approval
+→ project_context
+→ skills
+→ context_management
+→ handoff
+```
+
+稳定层前置、易变层后置，以提高模型前缀缓存命中。模型上下文由 `ContextProfile` 和 `TokenBudget` 共同治理，不使用固定字符数代替 Token 预算。
+
+上下文压缩只负责当前运行窗口：达到触发阈值后先做 microcompact 确定性淘汰（只回收内容指纹重复、或同一路径已被更晚写入覆盖的工具结果），历史摘要按预算维护，文件引用、工具证据、失败尝试和下一步动作以结构化恢复段保留。压缩上下文绑定项目、会话、epoch 和 Runtime 事件范围；摘要与降级截断都经过事实闸门，事实补回后再次校验最终预算。压缩不会改变任务状态、长期记忆或工作区状态。
+
+## Skill 系统
+
+Skill 是可路由、可验证、可维护的知识单元，不是默认注入的长手册：
+
+```text
+Skill 索引
+  → 任务相关选择
+  → load_skill 分页加载
+  → reference 按需读取
+  → allowedTools 限制工具
+  → 记录实际激活
+```
+
+Skill 来源分为 builtin、user 和 project 三层。project Skill 默认不可信，必须显式信任；其正文带有不可信参考资料边界，不能覆盖系统规则、提升权限或改变执行结构。
+
+推荐的 Skill 内容边界：
+
+```text
+SKILL.md       触发条件和导航
+rules/         稳定约束
+workflows/     可执行流程
+references/    代码地图和详细资料
+gotchas/       已验证的高成本陷阱
+scripts/       确定性检查
+```
+
+索引展示、正文激活和 reference 激活分别统计，区分“被列出”和“真正改变了任务行为”。
+
+## 记忆分层
+
+```text
+conversationHistory + RollingSummary  当前线程上下文
+SessionMemory                         当前任务运行投影
+LongTermMemory                        跨任务稳定事实
+```
+
+`SessionMemory` 保存本任务的待办、当前工作、下一步动作、工具证据和失败尝试，不跨进程持久化。长期记忆采用 CodeBuddy 风格的主题 Markdown：全局记忆与项目记忆物理分目录存储，项目同名主题在召回时覆盖全局版本。
+
+每个作用域的 `MEMORY.md` 是可从主题文件重建的派生索引；默认启用 LLM 相关性选择器，候选清单最多 4096 tokens，并且模型只能选中实际发送的候选，命中后才读全文。主题 frontmatter 保存类型、创建/更新时间、修订号和可选有效期；过期条目仍可审计，但不参与索引与召回。
+
+`/save` 和 `save_memory` 是明确写入入口，普通消息不自动落盘。自动写入遇到同主题不同内容时保留原文，用户显式保存才会生成新修订；敏感内容拒绝写入并要求脱敏后重试。详见 `docs/adr/0007-长期记忆对齐-workbuddy.md`。
+
+升级时会把旧版 `records/` 记忆卡幂等复制到全局作用域；全部处理成功后写入一次性迁移完成标记，后续构造不再重复解析保留的旧卡片。旧文件保留，不做删除；旧格式没有可靠的项目归属，因此不会猜测并迁入某个项目。
+
+## 代码 RAG
+
+```text
+JavaParser / 文件分块
+  → keyword + semantic + bounded graph
+  → RRF 倒数排名融合
+  → symbol-aware boost
+  → CrossEncoder rerank
+```
+
+索引按文件 generation 和项目 epoch 管理并发。增量索引先写入影子表，通过 CAS 校验后原子提升；旧 epoch 结果不可见。检索结果标记 `CURRENT`、`STALE` 或 `DIRTY`，必要时回读实时文件校验。代码归约会保留 diff、符号、编译位置及 RAG/index/classpath 版本元数据。
+
+`search_code` 负责语义、符号和关系检索；`grep_code` 是独立的精确定位工具，用于类名、方法名、配置键和固定文本。
+
+`grep_code` 的搜索范围按 git 的忽略规则确定：git 仓库使用 `git ls-files --cached --others --exclude-standard`，嵌套 `.gitignore`、否定模式和全局 excludes 都由 git 负责；非 git 目录、git 不可用或命令失败时回落到目录遍历，只用硬编码跳过目录兜底。显式把 `path` 指向被忽略目录时回落遍历，不会因为忽略规则而搜不到。
+
+## 隔离工作区与 PatchSet
+
+副作用任务使用可替换工作区后端：Git worktree、文件系统写时复制或有界复制。敏感文件、符号链接、路径逃逸和工作区边界由统一策略控制。
+
+```text
+Worker 工作区
+  → 文件内容与权限快照
+  → beforeHash / afterHash
+  → 资源租约与版本检查
+  → 项目锁 + 跨进程文件锁
+  → 原子应用 PatchSet
+  → 失败回滚或 checkpoint
+```
+
+同一文件不允许多个运行中步骤并发写入。未通过版本检查、Pre-Review 硬检查、策略或确定性验收的补丁不会写入主项目。
+
+写租约同时受空闲超时（默认 30 秒）和绝对期限（默认 10 分钟）约束，持续续租不延长绝对期限，到期必须重新竞争。
+
+命令默认在禁网、只读根文件系统的 Docker 沙箱执行；`HOST_RESTRICTED`（兼容 `HOST_WARN`）是显式主机白名单模式，不作为自动降级路径。它不提供操作系统隔离：Maven 项目插件、构建脚本和 javac 注解处理器仍可执行任意主机代码，仅适用于可信项目。Maven 本地仓库路径只接受显式配置的绝对目录。
+
+## Reviewer 与验收
+
+确定性验证和模型评审分层：
+
+- 编译、测试、哈希、权限和版本校验由工具负责；
+- Reviewer 负责静态和语义核对；Pre-Review 硬检查实际通过后，其结论作为非阻塞建议；
+- 验收标准声明验证方式、验证器和适用节点；
+- 编译、测试等确定性问题阻断，LLM 评审问题进入 advisory；
+- 缺少真实工具证据时不能伪装为通过。
+
+默认 ReAct 委派只在高风险条件下触发独立 Reviewer，例如大范围修改、关键安全资源或副作用工具失败。Reviewer 可以配置独立模型；配置不可用时失败关闭。
+
+## 运行时、恢复与观测
+
+CLI、Runtime API、后台任务和无头执行都通过 `RunCoordinator` 创建独立 `RunContext`。同一 thread 的 turn 串行执行，不同 thread 可以并行。
+
+执行内核输出强类型 `RunEvent`，覆盖模型调用、工具执行、结果配对、取消、预算退出、失败和完成。`RunStore` 保存运行生命周期，`TraceRecorder` 按 `runId` 写入结构化 trace。
+
+Checkpoint 保存执行图、执行产物、验收元数据、PatchSet 写前日志、文件权限、步骤身份、失败摘要和重做额度，不保存完整的 SubAgent 对话对象图。压缩边界另外持久化稳定快照引用、快照 checksum、来源事件范围和 projection hash；恢复时重建原拓扑并逐项校验，不直接信任旧工作区或旧摘要。
+
+图片输入与压缩只保留图片字节的 SHA-256、来源、MIME 和尺寸等确定性元数据；OCR/视觉摘要未配置时不伪造描述文本，也不使用描述文本计算图片身份。
+
+失败统一提供原因、分类、下一步动作，以及重试、人工接手、接受部分结果和回滚选项。
+
+## AgentDojo 公开数据评测
+
+`benchmarks/agentdojo/run-paired.ps1 -BatchRoot <新目录>` 使用固定版本 AgentDojo 原始任务，经 `AgentSessionRuntime`、生产 MCP、`ToolExecutionPipeline` 执行后交由官方 evaluator 评分。来源、四道任务、Luna 模型、预算、执行顺序及产物哈希在启动前写入 `manifest.json`；已存在的批次和条件目录拒绝复用。
+
+驱动保留 `search_tools` 和 `read_tool_result`，未预激活的工具仍通过生产发现链路启用。显式短词和中文查询不会被停用词过滤；整句预激活单独过滤噪声词。测试源码与单元测试分目录。
+
+MCP 参数保留 `anyOf` / `oneOf` 联合类型，允许 schema 声明的 `null`，不放宽非法类型。修复后的受影响题目可通过 `-CaseId <任务组合标识>` 单独建立新批次，不重跑或混合其他题目。
+
+默认 `-ApprovalPolicy auto-approve` 仅诊断任务效用和审批开销，不能证明安全提升。`terminal` 复用生产人工审批；baseline 同样经过生产执行管线，仅旁路 HITL。本实验不覆盖 Docker 沙箱、PatchSet 或文件回滚，旧批次不得合并为正式总体成绩。
+
+治理主指标为官方攻击成功率 `ASR = attack_success / 有效攻击样本 × 100%`，越低越好；同时报告官方任务效用 `Utility = utility / 有效任务样本 × 100%` 及 `baseline ASR − treatment ASR`（百分点）。百分比必须附样本量、审批策略和外部失败数；两侧均无成功攻击不等于证明治理有效。
+
+## 上下文压缩问答评测
+
+`scripts/swe-bench-multilingual-java.ps1` 的 `-ConversationProtocol original-task-qa` 固定要求：Luna（不可用时记录实际回退模型）、公开原始 Issue、solo、compact-only、64000 Token 阈值、默认 20 轮（以实际达到阈值为准）。同一 Issue 的多轮复用同一 `AgentSessionRuntime`，首轮不追加源码包，后续问题覆盖需求、诊断、实现、验证及证据回顾；禁止自定义大文本替换任务。每题独立工作区，逐轮真实问答与历史窗口记录在 `conversation.jsonl`。
+
+最终补丁仍由 `scripts/score-swebench-official.ps1` 调用官方 harness。`scripts/summarize-swebench-context.py --compact-only` 输出 resolved、F2P、P2P 的百分比，另列实际触发模型压缩的样本比例及该子集的质量；没有触发时压缩后质量为 `null`，不能用普通任务成功代替压缩效果。微压缩、摘要 Token 和耗时单独记录；没有 raw 对照时不计算相对质量保持率。该固定问答协议是公开任务上的多轮实验，不冒充默认单轮榜单。
+
+微压缩仅在恢复引用比原工具结果更省 Token 时替换并落盘；短确认结果保持原文，避免清理后窗口反而增大。
+
+## 设计原则
+
+1. 主 Agent 负责决策和最终验收，子 Agent 只承担边界清晰的子任务。
+2. 默认路径轻量，复杂能力按需启用。
+3. 模型负责理解和生成，程序负责权限、状态、证据和一致性。
+4. 读取、修改、验证、归并和恢复拥有明确边界。
+5. 被加载不等于已生效，模型声明成功不等于任务验收通过。

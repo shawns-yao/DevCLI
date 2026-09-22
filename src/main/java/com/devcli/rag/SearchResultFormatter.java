@@ -33,7 +33,8 @@ public final class SearchResultFormatter {
                     result.filePath()));
             sb.append("   evidence: symbolVersion=").append(result.symbolVersion())
                     .append(", indexEpoch=").append(result.indexEpoch())
-                    .append(", classpathEpoch=").append(result.classpathEpoch()).append('\n');
+                    .append(", classpathEpoch=").append(result.classpathEpoch())
+                    .append(", freshness=").append(result.freshness()).append('\n');
             appendInvalidations(sb, result);
             sb.append("   ").append(buildSnippet(result.content(), 120).replace("\n", "\n   "));
             sb.append("\n\n");
@@ -58,7 +59,8 @@ public final class SearchResultFormatter {
                     result.filePath()));
             sb.append("   evidence: symbolVersion=").append(result.symbolVersion())
                     .append(", indexEpoch=").append(result.indexEpoch())
-                    .append(", classpathEpoch=").append(result.classpathEpoch()).append('\n');
+                    .append(", classpathEpoch=").append(result.classpathEpoch())
+                    .append(", freshness=").append(result.freshness()).append('\n');
             appendInvalidations(sb, result);
             sb.append("   ").append(buildSnippet(result.content(), 180).replace("\n", "\n   ")).append("\n\n");
         }

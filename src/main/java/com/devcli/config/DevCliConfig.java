@@ -10,7 +10,9 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -22,6 +24,7 @@ public class DevCliConfig {
 
     private String defaultProvider = "anthropic";
     private Map<String, ProviderConfig> providers = new LinkedHashMap<>();
+    private PermissionsConfig permissions = new PermissionsConfig();
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class ProviderConfig {
@@ -51,10 +54,72 @@ public class DevCliConfig {
         public void setMaxTokens(int maxTokens) { this.maxTokens = maxTokens; }
     }
 
+    /**
+     * 权限配置段。承载持久授权基线与用户规则层。
+     *
+     * <p>这里刻意只保存原始形态（字符串清单与布尔），不引用 {@code com.devcli.policy} 下的类型：
+     * {@code config} 是叶子包，不得依赖任何其他 {@code com.devcli} 顶层包（见 PackageBoundaryTest）。
+     * 原始值到 {@code TaskGrant} / {@code PermissionRuleSet} 的装配由入口层完成，
+     * 非法值在那里显式拒绝。</p>
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class PermissionsConfig {
+        private String defaultMode = "default";
+        private List<String> deny = new ArrayList<>();
+        private List<String> ask = new ArrayList<>();
+        private List<String> allow = new ArrayList<>();
+
+        /**
+         * 启动时的权限模式，取值见 {@code policy.PermissionMode}。
+         *
+         * <p>默认 {@code default}（危险操作逐个询问）。写成 {@code bypassPermissions} 可回到
+         * 引入模式层之前的行为：不询问、直接执行。这里不做校验，非法值由入口层显式拒绝并回落——
+         * 与规则的处理方式一致。</p>
+         */
+        public String getDefaultMode() {
+            return defaultMode == null || defaultMode.isBlank() ? "default" : defaultMode;
+        }
+
+        public void setDefaultMode(String defaultMode) {
+            this.defaultMode = defaultMode;
+        }
+
+        /** 立即拒绝的规则，优先级最高，不可被任何授权或放行规则覆盖。 */
+        public List<String> getDeny() {
+            return deny == null ? List.of() : deny;
+        }
+
+        public void setDeny(List<String> deny) {
+            this.deny = deny == null ? new ArrayList<>() : new ArrayList<>(deny);
+        }
+
+        /** 强制人工审批的规则。 */
+        public List<String> getAsk() {
+            return ask == null ? List.of() : ask;
+        }
+
+        public void setAsk(List<String> ask) {
+            this.ask = ask == null ? new ArrayList<>() : new ArrayList<>(ask);
+        }
+
+        /** 立即放行的规则；只在策略硬边界通过后生效。 */
+        public List<String> getAllow() {
+            return allow == null ? List.of() : allow;
+        }
+
+        public void setAllow(List<String> allow) {
+            this.allow = allow == null ? new ArrayList<>() : new ArrayList<>(allow);
+        }
+    }
+
     public String getDefaultProvider() { return defaultProvider; }
     public void setDefaultProvider(String defaultProvider) { this.defaultProvider = defaultProvider; }
     public Map<String, ProviderConfig> getProviders() { return providers; }
     public void setProviders(Map<String, ProviderConfig> providers) { this.providers = providers; }
+    public PermissionsConfig getPermissions() { return permissions; }
+    public void setPermissions(PermissionsConfig permissions) {
+        this.permissions = permissions == null ? new PermissionsConfig() : permissions;
+    }
 
     public String getApiKey(String provider) {
         ProviderConfig providerConfig = providers.get(provider);

@@ -3,7 +3,7 @@ package com.devcli.render;
 import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.llm.LlmClient;
-import com.devcli.runtime.event.RunEvent;
+import com.devcli.event.RunEvent;
 import com.devcli.tool.ToolPresentation;
 import org.jline.reader.LineReader;
 import org.junit.jupiter.api.Test;
@@ -23,6 +23,33 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class PlainRendererTest {
+
+    @Test
+    void hostCommandDefaultsToRejectionWithoutBulkModifyOrRedactOptions() {
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+        PlainRenderer renderer = new PlainRenderer(new PrintStream(sink),
+                new BufferedReader(new StringReader("\n")));
+        ApprovalRequest request = ApprovalRequest.hostCommand("{\"command\":\"echo ok\"}", "host-test");
+        assertEquals(ApprovalResult.Decision.REJECTED, renderer.promptApproval(request).decision());
+        String text = sink.toString();
+        assertTrue(text.contains("[y]"));
+        assertFalse(text.contains("[a]"));
+        assertFalse(text.contains("[m]"));
+        assertFalse(text.contains("[r]"));
+    }
+
+    @Test
+    void sensitiveContentDefaultsToRejectAndOffersRedaction() {
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+        PlainRenderer renderer = new PlainRenderer(new PrintStream(sink),
+                new BufferedReader(new StringReader("\n")));
+        ApprovalRequest request = ApprovalRequest.content("read_file", "凭据", "读取", "模型", true);
+        assertEquals(ApprovalResult.Decision.REJECTED, renderer.promptApproval(request).decision());
+        assertTrue(sink.toString().contains("[r]"));
+        PlainRenderer redact = new PlainRenderer(new PrintStream(sink),
+                new BufferedReader(new StringReader("r\n")));
+        assertTrue(redact.promptApproval(request).isRedacted());
+    }
 
     @Test
     void streamReturnsConfiguredPrintStream() {
@@ -274,7 +301,7 @@ class PlainRendererTest {
                 new PrintStream(sink, true, StandardCharsets.UTF_8),
                 new BufferedReader(new StringReader("")));
 
-        renderer.updateStatus(StatusInfo.idle("glm-5.1", 200_000L, false));
+        renderer.updateStatus(StatusInfo.idle("glm-5.1", 200_000L, null));
         assertEquals("", sink.toString(StandardCharsets.UTF_8));
     }
 }

@@ -3,8 +3,10 @@ package com.devcli.rag;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.nio.file.Files;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -14,9 +16,19 @@ class VectorStoreTest {
     private VectorStore store;
     private static final String TEST_PROJECT = "/tmp/test-project";
 
+    /**
+     * SQLite 目录必须真实可写：早期写死 POSIX 路径 {@code /tmp/...}，
+     * 在 Windows 上会落到不可创建的 {@code C:\tmp}，导致全部用例 CANTOPEN。
+     */
+    @TempDir
+    Path ragDir;
+
+    private String previousRagDir;
+
     @BeforeEach
     void setUp() throws Exception {
-        System.setProperty("devcli.rag.dir", "/tmp/devcli-test-rag");
+        previousRagDir = System.getProperty("devcli.rag.dir");
+        System.setProperty("devcli.rag.dir", ragDir.toString());
         store = new VectorStore(TEST_PROJECT);
         store.clearProject();
     }
@@ -25,6 +37,11 @@ class VectorStoreTest {
     void tearDown() throws Exception {
         if (store != null) {
             store.close();
+        }
+        if (previousRagDir == null) {
+            System.clearProperty("devcli.rag.dir");
+        } else {
+            System.setProperty("devcli.rag.dir", previousRagDir);
         }
     }
 
@@ -135,6 +152,274 @@ class VectorStoreTest {
                 "idx-new");
 
         assertEquals("idx-new", store.currentIndexEpoch());
+    }
+
+    @Test
+    void shadowIndexRemainsInvisibleUntilValidatedPromotion() throws Exception {
+        CodeChunk oldChunk = CodeChunk.fileChunk("README.md", "active content");
+        CodeChunk newChunk = CodeChunk.fileChunk("README.md", "shadow content");
+        store.replaceProjectIndex(List.of(
+                new VectorStore.CodeChunkEntry(oldChunk, new float[]{1.0f})), List.of(), "idx-1");
+
+        try (VectorStore.ShadowIndexSession shadow = store.beginShadowIndex(
+                "idx-2", List.of("README.md"), VectorStore.ShadowIndexMode.FULL)) {
+            shadow.stageChunks(List.of(
+                    new VectorStore.CodeChunkEntry(newChunk, new float[]{2.0f})));
+            shadow.stageRelations(List.of());
+            shadow.validate();
+
+            assertEquals(1, store.searchByKeyword("active content").size());
+            assertTrue(store.searchByKeyword("shadow content").isEmpty());
+            assertEquals(VectorStore.IndexFreshness.DIRTY,
+                    store.searchByKeyword("active content").getFirst().freshness());
+
+            assertTrue(shadow.promote());
+        }
+
+        assertTrue(store.searchByKeyword("active content").isEmpty());
+        assertEquals("idx-2", store.searchByKeyword("shadow content").getFirst().indexEpoch());
+    }
+
+    @Test
+    void incrementalShadowIndexReusesUnchangedChunks() throws Exception {
+        CodeChunk dirtyOld = CodeChunk.fileChunk("Dirty.java", "dirty old content");
+        CodeChunk stable = CodeChunk.fileChunk("Stable.java", "stable content");
+        CodeChunk dirtyNew = CodeChunk.fileChunk("Dirty.java", "dirty new content");
+        store.replaceProjectIndex(List.of(
+                new VectorStore.CodeChunkEntry(dirtyOld, new float[]{1.0f}),
+                new VectorStore.CodeChunkEntry(stable, new float[]{2.0f})), List.of(), "idx-1");
+
+        try (VectorStore.ShadowIndexSession shadow = store.beginShadowIndex(
+                "idx-2", List.of("Dirty.java"), VectorStore.ShadowIndexMode.INCREMENTAL)) {
+            shadow.stageChunks(List.of(
+                    new VectorStore.CodeChunkEntry(dirtyNew, new float[]{3.0f})));
+            shadow.stageRelations(List.of());
+            shadow.validate();
+            assertTrue(shadow.promote());
+        }
+
+        assertTrue(store.searchByKeyword("dirty old content").isEmpty());
+        assertEquals(1, store.searchByKeyword("dirty new content").size());
+        assertEquals(1, store.searchByKeyword("stable content").size());
+    }
+
+    @Test
+    void incrementalShadowIndexMatchesAbsoluteDirtyPathToLegacyRelativeChunk(
+            @org.junit.jupiter.api.io.TempDir Path project) throws Exception {
+        Path dirtyFile = project.resolve("Dirty.java");
+        Files.writeString(dirtyFile, "class Dirty { String current() { return \"new\"; } }");
+        try (VectorStore projectStore = new VectorStore(project.toString())) {
+            projectStore.clearProject();
+            projectStore.replaceProjectIndex(List.of(new VectorStore.CodeChunkEntry(
+                    CodeChunk.fileChunk("Dirty.java", "legacy old content"),
+                    new float[]{1.0f})), List.of(), "idx-1");
+
+            try (VectorStore.ShadowIndexSession shadow = projectStore.beginShadowIndex(
+                    "idx-2", List.of(dirtyFile.toString()), VectorStore.ShadowIndexMode.INCREMENTAL)) {
+                shadow.stageChunks(List.of(new VectorStore.CodeChunkEntry(
+                        CodeChunk.fileChunk(dirtyFile.toString(), "current new content"),
+                        new float[]{2.0f})));
+                shadow.stageRelations(List.of());
+                shadow.validate();
+                assertTrue(shadow.promote());
+            }
+
+            assertTrue(projectStore.searchByKeyword("legacy old content").isEmpty());
+            assertEquals(1, projectStore.searchByKeyword("current new content").size());
+        }
+    }
+
+    @Test
+    void dirtyGenerationPreventsShadowPromotion() throws Exception {
+        CodeChunk active = CodeChunk.fileChunk("README.md", "active content");
+        CodeChunk stale = CodeChunk.fileChunk("README.md", "stale shadow content");
+        store.replaceProjectIndex(List.of(
+                new VectorStore.CodeChunkEntry(active, new float[]{1.0f})), List.of(), "idx-1");
+
+        try (VectorStore.ShadowIndexSession shadow = store.beginShadowIndex(
+                "idx-2", List.of("README.md"), VectorStore.ShadowIndexMode.INCREMENTAL)) {
+            shadow.stageChunks(List.of(
+                    new VectorStore.CodeChunkEntry(stale, new float[]{2.0f})));
+            shadow.stageRelations(List.of());
+            shadow.validate();
+            store.markDirtyFiles(List.of("README.md"));
+
+            assertFalse(shadow.promote());
+        }
+
+        assertEquals("idx-1", store.currentIndexEpoch());
+        assertEquals(1, store.searchByKeyword("active content").size());
+        assertTrue(store.searchByKeyword("stale shadow content").isEmpty());
+    }
+
+    @Test
+    void staleBaseEpochRejectsCandidateWithoutRemovingNewActiveIndex() throws Exception {
+        CodeChunk active = CodeChunk.fileChunk("README.md", "active content");
+        CodeChunk stale = CodeChunk.fileChunk("README.md", "stale candidate content");
+        CodeChunk concurrent = CodeChunk.fileChunk("README.md", "concurrent active content");
+        store.replaceProjectIndex(List.of(
+                new VectorStore.CodeChunkEntry(active, new float[]{1.0f})), List.of(), "idx-1");
+
+        try (VectorStore.ShadowIndexSession shadow = store.beginShadowIndex(
+                "idx-2", List.of("README.md"), VectorStore.ShadowIndexMode.INCREMENTAL)) {
+            shadow.stageChunks(List.of(
+                    new VectorStore.CodeChunkEntry(stale, new float[]{2.0f})));
+            shadow.stageRelations(List.of());
+            shadow.validate();
+            store.replaceProjectIndex(List.of(
+                    new VectorStore.CodeChunkEntry(concurrent, new float[]{3.0f})), List.of(), "idx-3");
+
+            assertFalse(shadow.promote());
+        }
+
+        assertEquals("idx-3", store.currentIndexEpoch());
+        assertEquals(1, store.searchByKeyword("concurrent active content").size());
+        assertTrue(store.searchByKeyword("stale candidate content").isEmpty());
+    }
+
+    @Test
+    void ordinaryProjectWriteCanMarkIndexedFileDirty() throws Exception {
+        CodeChunk indexed = CodeChunk.fileChunk("README.md", "indexed content");
+        store.replaceProjectIndex(List.of(
+                new VectorStore.CodeChunkEntry(indexed, new float[]{1.0f})), List.of(), "idx-1");
+
+        store.markDirtyFiles(List.of("README.md"));
+
+        assertEquals(VectorStore.IndexFreshness.DIRTY,
+                store.searchByKeyword("indexed content").getFirst().freshness());
+    }
+
+    @Test
+    void externalFileChangeIsDetectedWhenCandidateIsReturned(@org.junit.jupiter.api.io.TempDir Path project)
+            throws Exception {
+        Path source = project.resolve("README.md");
+        Files.writeString(source, "indexed content");
+        try (VectorStore projectStore = new VectorStore(project.toString())) {
+            projectStore.clearProject();
+            projectStore.replaceProjectIndex(List.of(new VectorStore.CodeChunkEntry(
+                    CodeChunk.fileChunk(source.toString(), "indexed content"),
+                    new float[]{1.0f})), List.of(), "idx-1");
+            Files.writeString(source, "live changed content");
+
+            VectorStore.SearchResult result = projectStore.searchByKeyword("indexed content").getFirst();
+
+            assertEquals(VectorStore.IndexFreshness.DIRTY, result.freshness());
+            assertEquals("live changed content", result.content());
+        }
+    }
+
+    @Test
+    void failedBuildMarksSameEpochResultsStale(@org.junit.jupiter.api.io.TempDir Path project)
+            throws Exception {
+        Path source = project.resolve("README.md");
+        Files.writeString(source, "indexed content");
+        try (VectorStore projectStore = new VectorStore(project.toString())) {
+            projectStore.clearProject();
+            projectStore.replaceProjectIndex(List.of(new VectorStore.CodeChunkEntry(
+                    CodeChunk.fileChunk("README.md", "indexed content"),
+                    new float[]{1.0f})), List.of(), "idx-1");
+            try (VectorStore.ShadowIndexSession ignored = projectStore.beginShadowIndex(
+                    "idx-2", List.of(), VectorStore.ShadowIndexMode.FULL)) {
+                // Closing an unpromoted candidate records a degraded active index.
+            }
+
+            VectorStore.SearchResult result = projectStore.searchByKeyword("indexed content").getFirst();
+
+            assertEquals(VectorStore.IndexFreshness.STALE, result.freshness());
+        }
+    }
+
+    @Test
+    void staleResultReReadsLiveContentBeforeDelivery(@org.junit.jupiter.api.io.TempDir Path project)
+            throws Exception {
+        Path source = project.resolve("README.md");
+        Files.writeString(source, "indexed content");
+        try (VectorStore projectStore = new VectorStore(project.toString())) {
+            projectStore.clearProject();
+            projectStore.replaceProjectIndex(List.of(new VectorStore.CodeChunkEntry(
+                    CodeChunk.fileChunk("README.md", "indexed content"),
+                    new float[]{1.0f})), List.of(), "idx-1");
+            try (VectorStore.ShadowIndexSession ignored = projectStore.beginShadowIndex(
+                    "idx-2", List.of(), VectorStore.ShadowIndexMode.FULL)) {
+                // Closing an unpromoted candidate records a degraded active index.
+            }
+            Files.writeString(source, "live changed content");
+
+            VectorStore.SearchResult result = projectStore.searchByKeyword("indexed content").getFirst();
+
+            assertEquals("live changed content", result.content());
+            assertEquals(VectorStore.IndexFreshness.DIRTY, result.freshness());
+        }
+    }
+
+    @Test
+    void dirtyJavaFileContributesNewMethodToKeywordCandidates(
+            @org.junit.jupiter.api.io.TempDir Path project) throws Exception {
+        Path source = project.resolve("UserService.java");
+        Files.writeString(source, "public class UserService { void existing() {} }");
+        try (VectorStore projectStore = new VectorStore(project.toString())) {
+            projectStore.clearProject();
+            projectStore.replaceProjectIndex(new CodeChunker().chunkFile(source).stream()
+                    .map(chunk -> new VectorStore.CodeChunkEntry(chunk, new float[]{1.0f}))
+                    .toList(), List.of(), "idx-1");
+            Files.writeString(source, """
+                    public class UserService {
+                        void existing() {}
+                        void newlyAddedMethod() {}
+                    }
+                    """);
+            projectStore.markDirtyFiles(List.of("UserService.java"));
+
+            List<VectorStore.SearchResult> results = projectStore.searchByKeyword("newlyAddedMethod");
+
+            assertTrue(results.stream().anyMatch(result -> "method".equals(result.chunkType())
+                    && result.name().contains("newlyAddedMethod")));
+            assertTrue(results.stream().allMatch(
+                    result -> result.freshness() == VectorStore.IndexFreshness.DIRTY));
+        }
+    }
+
+    @Test
+    void dirtyTextFileContributesNewConfigurationKey(
+            @org.junit.jupiter.api.io.TempDir Path project) throws Exception {
+        Path source = project.resolve("application.properties");
+        Files.writeString(source, "server.port=8080");
+        try (VectorStore projectStore = new VectorStore(project.toString())) {
+            projectStore.clearProject();
+            projectStore.replaceProjectIndex(List.of(new VectorStore.CodeChunkEntry(
+                    CodeChunk.fileChunk(source.toString(), "server.port=8080"),
+                    new float[]{1.0f})), List.of(), "idx-1");
+            Files.writeString(source, "server.port=8080\nfeature.audit.enabled=true");
+            projectStore.markDirtyFiles(List.of("application.properties"));
+
+            List<VectorStore.SearchResult> results = projectStore.searchByKeyword("feature.audit.enabled");
+
+            assertEquals(1, results.size());
+            assertTrue(results.getFirst().content().contains("feature.audit.enabled=true"));
+            assertEquals(VectorStore.IndexFreshness.DIRTY, results.getFirst().freshness());
+        }
+    }
+
+    @Test
+    void dirtyFileMergesRelativeIndexAndAbsoluteLiveChunkWithoutDuplicates(
+            @org.junit.jupiter.api.io.TempDir Path project) throws Exception {
+        Path source = project.resolve("application.properties");
+        Files.writeString(source, "feature.audit.enabled=false");
+        try (VectorStore projectStore = new VectorStore(project.toString())) {
+            projectStore.clearProject();
+            projectStore.replaceProjectIndex(List.of(new VectorStore.CodeChunkEntry(
+                    CodeChunk.fileChunk("application.properties", "feature.audit.enabled=false"),
+                    new float[]{1.0f})), List.of(), "idx-1");
+            Files.writeString(source, "feature.audit.enabled=true");
+            projectStore.markDirtyFiles(List.of("application.properties"));
+
+            List<VectorStore.SearchResult> results =
+                    projectStore.searchByKeyword("feature.audit.enabled");
+
+            assertEquals(1, results.size());
+            assertEquals("feature.audit.enabled=true", results.getFirst().content());
+            assertEquals(VectorStore.IndexFreshness.DIRTY, results.getFirst().freshness());
+        }
     }
 
     @Test

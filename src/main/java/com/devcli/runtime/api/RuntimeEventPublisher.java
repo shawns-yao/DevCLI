@@ -1,7 +1,7 @@
 package com.devcli.runtime.api;
 
-import com.devcli.runtime.event.RunEvent;
-import com.devcli.runtime.event.RunEventSink;
+import com.devcli.event.RunEvent;
+import com.devcli.event.RunEventSink;
 
 import java.util.Objects;
 

@@ -4,6 +4,13 @@
 > 它修正 `docs/phase-16-tui-productization.md` 里"Lanterna 三栏"的形态选型：
 > 抽出 `Renderer` 接口、两个实现并存——**inline 流式为默认、Lanterna 为可切换形态**。
 > 不延伸到 phase-17（当前按 ROADMAP 为 LSP 诊断注入；图片复制粘贴输入后移到 phase-21）。
+>
+> ⚠️ **最终结果（2026-09-17 补注）：本文的"双形态并存"没有保留到最后。**
+> `Renderer` 接口与 Inline / Plain 两个实现已落地，但 **Lanterna 形态被彻底移除**：
+> `com.devcli.tui.*` 全部类、Lanterna 依赖和 `DEVCLI_RENDERER=lanterna` 的实际分支都已删除，
+> 旧值只做兼容映射并输出停用提示。
+> 因此本文中"保留 Lanterna 实现""`com.devcli.tui.*` 不删代码""Lanterna 为可切换形态"等表述
+> **均已失效**，仅作方案演进记录保留。当前事实以 `AGENTS.md` 为准。
 
 ---
 

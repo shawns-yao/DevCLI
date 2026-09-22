@@ -1,0 +1,165 @@
+<mxGraphModel adaptiveColors="auto" dx="1422" dy="794" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1920" pageHeight="1080" math="0" shadow="0">
+  <root>
+    <mxCell id="0"/>
+    <mxCell id="1" parent="0"/>
+    <mxCell id="title" value="DevCLI 统一记忆架构：三种生命周期，分层深模块" style="text;html=1;align=center;verticalAlign=middle;fontSize=24;fontStyle=1;fontColor=#1f2937;" vertex="1" parent="1">
+      <mxGeometry x="40" y="20" width="1540" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="runtime" value="&lt;b&gt;Agent Runtime&lt;/b&gt;&lt;br&gt;ReAct / Plan / Team" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=2;" vertex="1" parent="1">
+      <mxGeometry x="40" y="100" width="220" height="80" as="geometry"/>
+    </mxCell>
+    <mxCell id="memory_interface" value="&lt;b&gt;MemoryManager 薄门面&lt;/b&gt;&lt;br&gt;addUserMessage · buildContext&lt;br&gt;completeTask · organize" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;strokeWidth=2;" vertex="1" parent="1">
+      <mxGeometry x="340" y="100" width="260" height="80" as="geometry"/>
+    </mxCell>
+    <mxCell id="turn_context" value="&lt;b&gt;Turn Context&lt;/b&gt;&lt;br&gt;短期片段 + 工作状态&lt;br&gt;+ 相关长期记忆" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;strokeWidth=2;" vertex="1" parent="1">
+      <mxGeometry x="680" y="100" width="260" height="80" as="geometry"/>
+    </mxCell>
+    <mxCell id="prompt" value="&lt;b&gt;PromptAssembler&lt;/b&gt;&lt;br&gt;动态内容追加到本轮消息&lt;br&gt;不污染冻结 system prompt" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;strokeWidth=2;" vertex="1" parent="1">
+      <mxGeometry x="1020" y="100" width="280" height="80" as="geometry"/>
+    </mxCell>
+    <mxCell id="model" value="&lt;b&gt;Planner / Worker / Reviewer&lt;/b&gt;&lt;br&gt;按角色获得裁剪视图" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;strokeWidth=2;" vertex="1" parent="1">
+      <mxGeometry x="1380" y="100" width="200" height="80" as="geometry"/>
+    </mxCell>
+    <mxCell id="memory_system" value="协调边界：门面不保存第二套事实" style="swimlane;startSize=32;fillColor=#f8fafc;strokeColor=#64748b;strokeWidth=2;fontStyle=1;fontSize=16;html=1;" vertex="1" parent="1">
+      <mxGeometry x="40" y="240" width="1540" height="500" as="geometry"/>
+    </mxCell>
+    <mxCell id="short_container" value="① 短期记忆：对话缓冲" style="swimlane;startSize=28;fillColor=#fff9e6;strokeColor=#d6b656;fontStyle=1;html=1;" vertex="1" parent="memory_system">
+      <mxGeometry x="20" y="50" width="450" height="190" as="geometry"/>
+    </mxCell>
+    <mxCell id="raw_history" value="&lt;b&gt;conversationHistory&lt;/b&gt;&lt;br&gt;当前线程原始消息&lt;br&gt;按 Token 预算保留" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="short_container">
+      <mxGeometry x="20" y="55" width="125" height="85" as="geometry"/>
+    </mxCell>
+    <mxCell id="compactor" value="&lt;b&gt;HistoryCompactor&lt;/b&gt;&lt;br&gt;语义压缩&lt;br&gt;不是长期记忆提取" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="short_container">
+      <mxGeometry x="165" y="55" width="125" height="85" as="geometry"/>
+    </mxCell>
+    <mxCell id="compact_summary" value="&lt;b&gt;六段 RollingSummary&lt;/b&gt;&lt;br&gt;不复制任务状态&lt;br&gt;只治理当前线程窗口" style="shape=mxgraph.flowchart.document;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="short_container">
+      <mxGeometry x="310" y="55" width="120" height="85" as="geometry"/>
+    </mxCell>
+    <mxCell id="working_container" value="② 工作记忆：当前任务唯一运行投影" style="swimlane;startSize=28;fillColor=#e8f5e9;strokeColor=#82b366;fontStyle=1;html=1;" vertex="1" parent="memory_system">
+      <mxGeometry x="500" y="50" width="450" height="190" as="geometry"/>
+    </mxCell>
+    <mxCell id="session_memory" value="&lt;b&gt;SessionMemory&lt;/b&gt;&lt;br&gt;目标、约束、当前状态&lt;br&gt;关键事件与工具证据" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="working_container">
+      <mxGeometry x="20" y="55" width="125" height="85" as="geometry"/>
+    </mxCell>
+    <mxCell id="artifact" value="&lt;b&gt;ExecutionArtifact&lt;/b&gt;&lt;br&gt;Plan / Team 终态真相&lt;br&gt;checkpoint 可恢复" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="working_container">
+      <mxGeometry x="165" y="55" width="125" height="85" as="geometry"/>
+    </mxCell>
+    <mxCell id="role_views" value="&lt;b&gt;Role Views&lt;/b&gt;&lt;br&gt;Planner / Worker / Reviewer&lt;br&gt;必要子集、来源可追溯" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b7e1cd;strokeColor=#0f9d58;" vertex="1" parent="working_container">
+      <mxGeometry x="310" y="55" width="120" height="85" as="geometry"/>
+    </mxCell>
+    <mxCell id="long_container" value="③ 长期记忆：经过验证的跨任务事实" style="swimlane;startSize=28;fillColor=#f3e8ff;strokeColor=#9673a6;fontStyle=1;html=1;" vertex="1" parent="memory_system">
+      <mxGeometry x="980" y="50" width="530" height="400" as="geometry"/>
+    </mxCell>
+    <mxCell id="retriever" value="&lt;b&gt;MemoryRetriever&lt;/b&gt;&lt;br&gt;关键词 + 向量 + 新鲜度&lt;br&gt;+ 有上限的使用加权" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="long_container">
+      <mxGeometry x="20" y="55" width="150" height="90" as="geometry"/>
+    </mxCell>
+    <mxCell id="retention" value="&lt;b&gt;Lifecycle + Freshness&lt;/b&gt;&lt;br&gt;最近召回作为新鲜度锚点&lt;br&gt;滑动 TTL / 固定 TTL / 软归档" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="long_container">
+      <mxGeometry x="190" y="55" width="150" height="90" as="geometry"/>
+    </mxCell>
+    <mxCell id="sqlite" value="&lt;b&gt;SQLite Fact Store&lt;/b&gt;&lt;br&gt;唯一事实源&lt;br&gt;recallCount / lastRecalledAt" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#d9e1f2;strokeColor=#5b9bd5;" vertex="1" parent="long_container">
+      <mxGeometry x="370" y="55" width="135" height="90" as="geometry"/>
+    </mxCell>
+    <mxCell id="vector" value="&lt;b&gt;Vector Index&lt;/b&gt;&lt;br&gt;召回索引，不是第二事实源" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#d9e1f2;strokeColor=#5b9bd5;" vertex="1" parent="long_container">
+      <mxGeometry x="20" y="175" width="150" height="80" as="geometry"/>
+    </mxCell>
+    <mxCell id="organizer" value="&lt;b&gt;MemoryOrganizer&lt;/b&gt;&lt;br&gt;只整理旧记忆&lt;br&gt;合并 / 审核 / 归档建议" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="long_container">
+      <mxGeometry x="190" y="175" width="150" height="80" as="geometry"/>
+    </mxCell>
+    <mxCell id="usage_batch" value="&lt;b&gt;Recall Tracker&lt;/b&gt;&lt;br&gt;按 turn 去重&lt;br&gt;一次批量 SQL 回写" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d9ead3;strokeColor=#6aa84f;" vertex="1" parent="long_container">
+      <mxGeometry x="370" y="175" width="135" height="80" as="geometry"/>
+    </mxCell>
+    <mxCell id="curator_container" value="隔离晋升通道：显式配置后启用，只看当前任务，不看旧记忆" style="swimlane;startSize=28;fillColor=#fce4ec;strokeColor=#b85450;fontStyle=1;html=1;" vertex="1" parent="memory_system">
+      <mxGeometry x="20" y="270" width="930" height="180" as="geometry"/>
+    </mxCell>
+    <mxCell id="snapshot" value="&lt;b&gt;TaskMemorySnapshot&lt;/b&gt;&lt;br&gt;脱敏必要子集&lt;br&gt;请求 + 状态 + 证据摘要" style="shape=mxgraph.flowchart.document;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="curator_container">
+      <mxGeometry x="20" y="55" width="150" height="85" as="geometry"/>
+    </mxCell>
+    <mxCell id="curator" value="&lt;b&gt;IsolatedMemoryCurator&lt;/b&gt;&lt;br&gt;空工具列表、无旧记忆&lt;br&gt;单次 LLM 严格 JSON" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;strokeWidth=2;" vertex="1" parent="curator_container">
+      <mxGeometry x="425" y="55" width="175" height="85" as="geometry"/>
+    </mxCell>
+    <mxCell id="promotion" value="&lt;b&gt;MemoryPromotionQueue&lt;/b&gt;&lt;br&gt;SQLite 可重放 WAL&lt;br&gt;PENDING / CURATING / 终态" style="shape=mxgraph.flowchart.document;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="curator_container">
+      <mxGeometry x="210" y="55" width="175" height="85" as="geometry"/>
+    </mxCell>
+    <mxCell id="gate" value="&lt;b&gt;PromotionPipeline + LongTermMemory&lt;/b&gt;&lt;br&gt;作用域、溯源、冲突、去重&lt;br&gt;CONFIRM 持久化等待用户" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;strokeWidth=2;" vertex="1" parent="curator_container">
+      <mxGeometry x="620" y="55" width="175" height="85" as="geometry"/>
+    </mxCell>
+    <mxCell id="no_memory_note" value="禁止输入：长期记忆、旧线程、checkpoint、工具原文、模型推理" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#b85450;dashed=1;fontColor=#b85450;" vertex="1" parent="curator_container">
+      <mxGeometry x="815" y="55" width="95" height="85" as="geometry"/>
+    </mxCell>
+    <mxCell id="delete_box" value="&lt;b&gt;删除 / 不再新增&lt;/b&gt;&lt;br&gt;Memory.md 作为第二事实源 · TODO.md / Plan.md 作为运行状态源 · 通用 SubAgent 充当 Curator · recurrence 原文自动保存 · 按最近 N 轮硬裁剪 · 过期即物理删除 · 仅按使用次数排序" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;strokeWidth=2;align=left;spacingLeft=12;" vertex="1" parent="1">
+      <mxGeometry x="40" y="780" width="1540" height="90" as="geometry"/>
+    </mxCell>
+    <mxCell id="note" value="核心原则：短期层解决上下文窗口；工作层解决当前任务真相；长期层解决跨任务复用。压缩摘要不晋升，工作状态不复制，长期事实不未经验证写入。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f4f8;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="40" y="900" width="1540" height="65" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_runtime_interface" value="统一调用" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;strokeWidth=2;" edge="1" source="runtime" target="memory_interface" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_interface_context" value="按 Token 预算生成" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;strokeWidth=2;" edge="1" source="memory_interface" target="turn_context" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_context_prompt" value="append-only" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;strokeWidth=2;" edge="1" source="turn_context" target="prompt" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_prompt_model" value="角色视图" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;strokeWidth=2;" edge="1" source="prompt" target="model" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_raw_compact" value="预算触发" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" source="raw_history" target="compactor" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_compact_summary" value="替换旧片段" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" source="compactor" target="compact_summary" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_session_roles" value="裁剪" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" source="session_memory" target="role_views" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_artifact_roles" value="终态依据" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" source="artifact" target="role_views" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_retriever_context" value="Top-K" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;strokeColor=#9673a6;" edge="1" source="retriever" target="turn_context" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_roles_context" value="当前状态" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;strokeColor=#82b366;" edge="1" source="role_views" target="turn_context" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_summary_context" value="当前线程" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;strokeColor=#d6b656;" edge="1" source="compact_summary" target="turn_context" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_sqlite_retriever" value="候选事实" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" source="sqlite" target="retriever" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_vector_retriever" value="语义命中" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" source="vector" target="retriever" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_retention_sqlite" value="归档 / 清理" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" source="retention" target="sqlite" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_organizer_retention" value="维护建议" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" source="organizer" target="retention" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_retriever_usage" value="实际注入 ID" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" source="retriever" target="usage_batch" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_usage_sqlite" value="批量回写" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" source="usage_batch" target="sqlite" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_raw_snapshot" value="用户陈述" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;strokeColor=#b85450;" edge="1" source="raw_history" target="snapshot" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_artifact_snapshot" value="验证结果" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;strokeColor=#b85450;" edge="1" source="artifact" target="snapshot" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_snapshot_curator" value="Curator 已配置才落盘" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;strokeColor=#b85450;strokeWidth=2;" edge="1" source="snapshot" target="promotion" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_curator_plan" value="可重放任务" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;strokeColor=#b85450;strokeWidth=2;" edge="1" source="promotion" target="curator" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_plan_gate" value="SAVE / CONFIRM / SKIP" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;strokeColor=#b85450;strokeWidth=2;" edge="1" source="curator" target="gate" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e_gate_sqlite" value="批准后落库" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;strokeColor=#b85450;strokeWidth=2;" edge="1" source="gate" target="sqlite" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+  </root>
+</mxGraphModel>

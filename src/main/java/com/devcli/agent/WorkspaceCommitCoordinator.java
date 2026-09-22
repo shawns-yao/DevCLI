@@ -39,10 +39,10 @@ final class WorkspaceCommitCoordinator {
                 : terminalPersistence;
 
         return session.commit(patchSet,
-                () -> {
+                effectivePatchSet -> {
                     if (checkpoint != null) {
                         checkpoint.preparePatchCommit(
-                                stepId, projectRoot, patchSet, intendedArtifact);
+                                stepId, projectRoot, effectivePatchSet, intendedArtifact);
                     }
                 },
                 applyResult -> {

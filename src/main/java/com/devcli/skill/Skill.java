@@ -20,6 +20,9 @@ public record Skill(
         List<String> allowedTools,
         Context context,
         List<String> paths,
+        List<String> requiresTools,
+        List<String> requiresMcp,
+        List<String> dependsOn,
         Source source,
         String body,
         Path skillMdPath,
@@ -56,7 +59,24 @@ public record Skill(
                  Path skillMdPath,
                  Path referencesDir) {
         this(name, description, version, author, tags, allowedTools, Context.INLINE, List.of(),
+                List.of(), List.of(), List.of(),
                 source, body, skillMdPath, referencesDir);
+    }
+
+    public Skill(String name,
+                 String description,
+                 String version,
+                 String author,
+                 List<String> tags,
+                 List<String> allowedTools,
+                 Context context,
+                 List<String> paths,
+                 Source source,
+                 String body,
+                 Path skillMdPath,
+                 Path referencesDir) {
+        this(name, description, version, author, tags, allowedTools, context, paths,
+                List.of(), List.of(), List.of(), source, body, skillMdPath, referencesDir);
     }
 
     public Skill {
@@ -84,6 +104,9 @@ public record Skill(
         } else {
             paths = List.copyOf(paths);
         }
+        requiresTools = requiresTools == null ? List.of() : List.copyOf(requiresTools);
+        requiresMcp = requiresMcp == null ? List.of() : List.copyOf(requiresMcp);
+        dependsOn = dependsOn == null ? List.of() : List.copyOf(dependsOn);
         if (body == null) {
             body = "";
         }

@@ -44,11 +44,23 @@ class MainTeamPlanReviewTest {
     void formatsSemanticReviewerApprovalBeforeHumanDecision() {
         AgentOrchestrator.TeamPlanReviewRequest request = new AgentOrchestrator.TeamPlanReviewRequest(
                 "实现功能", "step_1 实现", List.of(), false,
-                true, "原始目标、节点和验收标准已闭环");
+                true, true, "原始目标、节点和验收标准已闭环");
 
         String text = Main.formatTeamPlanReview(request);
 
         assertTrue(text.contains("Reviewer 计划语义评审"));
         assertTrue(text.contains("已闭环"));
+    }
+
+    @Test
+    void formatsSemanticReviewerRejectionAsAdvisory() {
+        AgentOrchestrator.TeamPlanReviewRequest request = new AgentOrchestrator.TeamPlanReviewRequest(
+                "实现功能", "step_1 实现", List.of(), false,
+                true, false, "计划遗漏错误处理");
+
+        String text = Main.formatTeamPlanReview(request);
+
+        assertTrue(text.contains("建议"), text);
+        assertTrue(text.contains("计划遗漏错误处理"), text);
     }
 }

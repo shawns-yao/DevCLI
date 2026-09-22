@@ -1,7 +1,7 @@
 package com.devcli.runtime.task;
 
-import com.devcli.runtime.CancellationContext;
-import com.devcli.runtime.RunContext;
+import com.devcli.concurrent.CancellationContext;
+import com.devcli.concurrent.RunContext;
 import com.devcli.runtime.store.SqliteRunStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;

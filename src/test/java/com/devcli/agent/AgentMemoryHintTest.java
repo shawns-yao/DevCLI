@@ -2,7 +2,8 @@ package com.devcli.agent;
 
 import com.devcli.llm.GLMClient;
 import com.devcli.llm.LlmClient;
-import com.devcli.memory.MemoryEntry;
+import com.devcli.memory.LongTermMemory;
+import com.devcli.memory.MemoryManager;
 import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.skill.SkillStateStore;
@@ -17,6 +18,12 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -28,7 +35,7 @@ class AgentMemoryHintTest {
     Path tempDir;
 
     @Test
-    void explicitChromeRememberRequestStoresSitePreferenceInLongTermMemory() {
+    void plainAssistantClaimCannotBypassSaveMemoryTool() {
         String oldMemoryDir = System.getProperty("devcli.memory.dir");
         System.setProperty("devcli.memory.dir", tempDir.toString());
         Agent agent = null;
@@ -44,10 +51,8 @@ class AgentMemoryHintTest {
 
             agent.run("你可以直接复用我已经登录的Chrome，记一下");
 
-            List<String> facts = agent.getMemoryManager().getLongTermMemory().getAll().stream()
-                    .map(MemoryEntry::getContent)
-                    .toList();
-            assertTrue(facts.contains("访问 yuque.com（语雀）时优先复用用户已登录的 Chrome 登录态。"));
+            assertEquals(0, agent.getMemoryManager().getLongTermMemory().size(),
+                    "模型只说“已记住”但没有调用 save_memory 时，不得暗中自动落盘");
         } finally {
             if (agent != null) {
                 agent.close();
@@ -112,7 +117,7 @@ class AgentMemoryHintTest {
                     .reduce((first, second) -> second)
                     .map(LlmClient.Message::content)
                     .orElse("");
-            assertTrue(lastUser.contains("Working Memory"), lastUser);
+            assertTrue(lastUser.contains("Session Memory"), lastUser);
             assertTrue(lastUser.contains("react-working-memory-evidence"), lastUser);
         } finally {
             if (agent != null) {
@@ -127,7 +132,7 @@ class AgentMemoryHintTest {
     }
 
     @Test
-    void shouldMaintainSessionPreSummaryAfterLongTurn(@TempDir Path tempDir) {
+    void shouldMaintainSessionPreSummaryAfterLongTurn(@TempDir Path tempDir) throws InterruptedException {
         String oldMemoryDir = System.getProperty("devcli.memory.dir");
         System.setProperty("devcli.memory.dir", tempDir.resolve("memory").toString());
         Agent agent = null;
@@ -140,9 +145,14 @@ class AgentMemoryHintTest {
 
             agent.run("请记住这段上下文：" + "x".repeat(10_000));
 
-            assertTrue(agent.getMemoryManager().getSessionMemory().currentPreSummary().isPresent());
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (agent.getMemoryManager().getCompactionSummaryCache().currentPreSummary().isEmpty()
+                    && System.nanoTime() < deadline) {
+                Thread.sleep(10);
+            }
+            assertTrue(agent.getMemoryManager().getCompactionSummaryCache().currentPreSummary().isPresent());
             assertEquals("自动维护的会话预摘要",
-                    agent.getMemoryManager().getSessionMemory().currentPreSummary().orElseThrow().summary());
+                    agent.getMemoryManager().getCompactionSummaryCache().currentPreSummary().orElseThrow().summary());
             assertEquals(2, llmClient.messagesByCall.size(), "一次任务响应后应追加一次预摘要维护调用");
         } finally {
             if (agent != null) {
@@ -153,6 +163,31 @@ class AgentMemoryHintTest {
             } else {
                 System.setProperty("devcli.memory.dir", oldMemoryDir);
             }
+        }
+    }
+
+    @Test
+    void finalResponseDoesNotWaitForPreSummaryMaintenance() throws Exception {
+        StubGLMClient llmClient = new StubGLMClient(List.of(
+                new LlmClient.ChatResponse("assistant", "任务完成", null, 20, 10)
+        ));
+        BlockingPreSummaryMemoryManager memoryManager =
+                new BlockingPreSummaryMemoryManager(llmClient, tempDir.resolve("memory-async"));
+        ToolRegistry toolRegistry = new ToolRegistry();
+        Agent agent = new Agent(llmClient, toolRegistry, memoryManager);
+        ExecutorService runner = Executors.newSingleThreadExecutor();
+        try {
+            Future<String> result = runner.submit(() -> agent.run("执行任务"));
+
+            assertTrue(memoryManager.maintenanceScheduled.await(2, TimeUnit.SECONDS));
+            assertEquals("任务完成", result.get(100, TimeUnit.MILLISECONDS),
+                    "预摘要是投机缓存，不能延迟主回合返回");
+        } finally {
+            memoryManager.pending.complete(
+                    MemoryManager.SessionPreSummaryMaintenanceResult.SKIPPED_DISABLED);
+            runner.shutdownNow();
+            agent.close();
+            toolRegistry.close();
         }
     }
 
@@ -263,6 +298,25 @@ class AgentMemoryHintTest {
                 throw new IOException("缺少预设响应");
             }
             return response;
+        }
+    }
+
+    private static final class BlockingPreSummaryMemoryManager extends MemoryManager {
+        private final CountDownLatch maintenanceScheduled = new CountDownLatch(1);
+        private final CompletableFuture<SessionPreSummaryMaintenanceResult> pending =
+                new CompletableFuture<>();
+
+        private BlockingPreSummaryMemoryManager(LlmClient llmClient, Path memoryDir) {
+            super(llmClient, 4_096, 128_000, new LongTermMemory(memoryDir.toFile()));
+        }
+
+        @Override
+        public CompletableFuture<SessionPreSummaryMaintenanceResult> maintainSessionPreSummaryAfterTurnAsync(
+                List<LlmClient.Message> history,
+                int turnToolCalls,
+                int largestToolResultChars) {
+            maintenanceScheduled.countDown();
+            return pending;
         }
     }
 }

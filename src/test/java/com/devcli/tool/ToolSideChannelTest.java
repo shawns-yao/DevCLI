@@ -28,8 +28,15 @@ class ToolSideChannelTest {
                     },
                     ToolRegistry.ToolEffect.READ_ONLY));
 
-            ToolRegistry.ToolExecutionResult first = execute(registry, "call-1");
-            ToolRegistry.ToolExecutionResult second = execute(registry, "call-2");
+            ToolRegistry.ToolExecutionResult[] results = new ToolRegistry.ToolExecutionResult[2];
+            // 结果缓存按任务隔离，生产路径由 AgentExecutionEngine 按 turn 建立身份。
+            ToolRegistry.runWithToolTask("test-task", () -> {
+                results[0] = execute(registry, "call-1");
+                results[1] = execute(registry, "call-2");
+                return null;
+            });
+            ToolRegistry.ToolExecutionResult first = results[0];
+            ToolRegistry.ToolExecutionResult second = results[1];
 
             assertEquals(1, executions.get());
             assertEquals("visible-result", first.result());

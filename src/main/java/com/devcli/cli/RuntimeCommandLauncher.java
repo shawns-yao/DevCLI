@@ -42,7 +42,8 @@ final class RuntimeCommandLauncher {
         try {
             RuntimeThreadStore store = new RuntimeThreadStore(RuntimeThreadStore.defaultDbPath());
             RuntimeSessionTurnRunner turnRunner = new RuntimeSessionTurnRunner(
-                    client, store, Path.of("."));
+                    client, store, Path.of("."),
+                    () -> LlmClientFactory.create(client.getProviderName(), config));
             RuntimeApiServer server = new RuntimeApiServer(
                     store,
                     turnRunner,
@@ -111,8 +112,10 @@ final class RuntimeCommandLauncher {
     }
 
     private static String runTask(String prompt, LlmClient llmClient) {
+        DevCliConfig config = DevCliConfig.load();
         return HeadlessAgentRunner.run(
                 llmClient,
+                LlmClientFactory.create(llmClient.getProviderName(), config),
                 Path.of("."),
                 prompt,
                 List.of());

@@ -1,5 +1,8 @@
 package com.devcli.cli;
 
+import com.devcli.context.ContextInputSnapshotStore;
+import com.devcli.memory.MemoryEntry;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -12,33 +15,43 @@ import java.util.regex.Pattern;
 final class LocalPathMentionExpander {
     private static final int MAX_FILE_BYTES = 120_000;
     private static final int MAX_DIR_ENTRIES = 80;
+    private static final int MAX_REFERENCE_PREVIEW_CHARS = 1_600;
+    private static final int REFERENCE_METADATA_TOKENS = 180;
     private static final Pattern LOCAL_PATH_MENTION = Pattern.compile("(^|\\s)@(<[^>]+>|[^\\s<>:]+)");
 
     private final Path projectRoot;
     private final Path homeDir;
+    private final ContextInputSnapshotStore snapshotStore;
 
     LocalPathMentionExpander(Path projectRoot) {
         this.projectRoot = realPathOrNormalize(projectRoot == null ? Path.of(".") : projectRoot);
         this.homeDir = Path.of(System.getProperty("user.home")).toAbsolutePath().normalize();
+        this.snapshotStore = new ContextInputSnapshotStore(this.projectRoot);
     }
 
     String expand(String input) {
+        return expand(input, Integer.MAX_VALUE);
+    }
+
+    String expand(String input, int remainingTokens) {
         if (input == null || input.isBlank() || input.indexOf('@') < 0) {
             return input;
         }
         Matcher matcher = LOCAL_PATH_MENTION.matcher(input);
         StringBuilder expanded = new StringBuilder();
+        int remaining = Math.max(0, remainingTokens);
         while (matcher.find()) {
             String leading = matcher.group(1);
             String raw = matcher.group(2);
-            String replacement = expandToken(raw);
+            String replacement = expandToken(raw, remaining);
+            remaining = Math.max(0, remaining - MemoryEntry.estimateTokens(replacement));
             matcher.appendReplacement(expanded, Matcher.quoteReplacement(leading + replacement));
         }
         matcher.appendTail(expanded);
         return expanded.toString();
     }
 
-    private String expandToken(String raw) {
+    private String expandToken(String raw, int remainingTokens) {
         if (raw == null || raw.isBlank()) {
             return "@" + raw;
         }
@@ -59,7 +72,7 @@ final class LocalPathMentionExpander {
                 return renderDirectory(realCandidate);
             }
             if (Files.isRegularFile(realCandidate)) {
-                return renderFile(realCandidate);
+                return renderFile(realCandidate, remainingTokens);
             }
         } catch (IOException ignored) {
             return "@" + raw;
@@ -81,18 +94,58 @@ final class LocalPathMentionExpander {
         return projectRoot.resolve(path).normalize();
     }
 
-    private String renderFile(Path path) throws IOException {
+    private String renderFile(Path path, int remainingTokens) throws IOException {
         byte[] bytes = Files.readAllBytes(path);
-        boolean truncated = bytes.length > MAX_FILE_BYTES;
-        int length = Math.min(bytes.length, MAX_FILE_BYTES);
-        if (looksBinary(bytes, length)) {
+        int sampleLength = Math.min(bytes.length, MAX_FILE_BYTES);
+        if (looksBinary(bytes, sampleLength)) {
             return "@<" + displayPath(path) + ">\n<file path=\"" + escapeXml(displayPath(path)) +
                     "\" binary=\"true\">binary content omitted</file>";
         }
-        String content = new String(bytes, 0, length, StandardCharsets.UTF_8);
-        String suffix = truncated ? "\n[file truncated by DevCLI at " + MAX_FILE_BYTES + " bytes]" : "";
-        return "@<" + displayPath(path) + ">\n<file path=\"" + escapeXml(displayPath(path)) + "\">\n" +
-                content + suffix + "\n</file>";
+        String content = new String(bytes, StandardCharsets.UTF_8);
+        String inline = "@<" + displayPath(path) + ">\n<file path=\"" + escapeXml(displayPath(path))
+                + "\">\n" + content + "\n</file>";
+        if (bytes.length <= MAX_FILE_BYTES
+                && MemoryEntry.estimateTokens(inline) <= Math.max(0, remainingTokens)) {
+            return inline;
+        }
+        return renderFileReference(path, bytes, content, remainingTokens);
+    }
+
+    private String renderFileReference(Path path, byte[] bytes, String content,
+                                       int remainingTokens) throws IOException {
+        ContextInputSnapshotStore.Snapshot snapshot = snapshotStore.store(
+                path.getFileName() == null ? "attachment.txt" : path.getFileName().toString(), bytes);
+        int previewBudget = Math.max(0, remainingTokens - REFERENCE_METADATA_TOKENS);
+        int previewChars = Math.min(MAX_REFERENCE_PREVIEW_CHARS, previewBudget * 4);
+        String preview = preview(content, previewChars);
+        long lineCount = content.isEmpty() ? 0 : content.lines().count();
+        StringBuilder reference = new StringBuilder("@<").append(displayPath(path)).append(">\n")
+                .append("<file_reference original_path=\"").append(escapeXml(displayPath(path)))
+                .append("\" stored_path=\"").append(escapeXml(snapshot.storedPath()))
+                .append("\" sha256=\"").append(snapshot.sha256())
+                .append("\" size_bytes=\"").append(snapshot.sizeBytes())
+                .append("\" evidence_required=\"true\">\n")
+                .append("<summary>文本文件，共 ").append(bytes.length)
+                .append(" 字节、约 ").append(lineCount).append(" 行；因上下文预算不足，仅注入引用")
+                .append("</summary>\n");
+        if (!preview.isBlank()) {
+            reference.append("<preview>\n").append(preview).append("\n</preview>\n");
+        }
+        return reference.append("</file_reference>").toString();
+    }
+
+    private static String preview(String content, int maxChars) {
+        if (content == null || content.isBlank() || maxChars <= 0) {
+            return "";
+        }
+        if (content.length() <= maxChars) {
+            return content;
+        }
+        int head = maxChars / 2;
+        int tail = maxChars - head;
+        return content.substring(0, head)
+                + "\n[中间内容已省略，可读取 stored_path 获取完整证据]\n"
+                + content.substring(content.length() - tail);
     }
 
     private String renderDirectory(Path path) throws IOException {
