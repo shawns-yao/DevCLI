@@ -57,10 +57,84 @@ class MemoryManagerPreSummaryAsyncTest {
         }
     }
 
+    @Test
+    void exhaustedBudgetDoesNotStartBackgroundModelCall() throws Exception {
+        BlockingClient client = new BlockingClient();
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager manager = new MemoryManager(client, 4_096, 128_000, longTermMemory)) {
+            var result = manager.maintainSessionPreSummaryAfterTurnAsync(
+                    history("budget"), 4, 0, 100_000, () -> false,
+                    response -> { throw new AssertionError("预算耗尽后不得产生调用费用"); });
+            assertNotEquals(MemoryManager.SessionPreSummaryMaintenanceResult.MAINTAINED,
+                    result.get(2, TimeUnit.SECONDS));
+            assertEquals(0, client.calls.get());
+            assertTrue(manager.getCompactionSummaryCache().currentPreSummary().isEmpty());
+        }
+    }
+
+    @Test
+    void asyncProductionSnapshotIsReusableByFormalCompaction() throws Exception {
+        BlockingClient client = new BlockingClient();
+        client.releaseFirstCall.countDown();
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager manager = new MemoryManager(client, 4_096, 128_000, longTermMemory)) {
+            List<LlmClient.Message> history = new java.util.ArrayList<>(history("closed-loop"));
+
+            assertEquals(MemoryManager.SessionPreSummaryMaintenanceResult.MAINTAINED,
+                    manager.maintainSessionPreSummaryAfterTurnAsync(history, 4, 0, 100,
+                            () -> true, response -> { }).get(2, TimeUnit.SECONDS));
+            assertEquals(1, client.calls.get());
+
+            ConversationHistoryCompactor formal = new ConversationHistoryCompactor(client);
+            formal.setCompactionSummaryCache(manager.getCompactionSummaryCache());
+            assertTrue(formal.compactIfNeeded(history, 100));
+            assertEquals(1, client.calls.get(),
+                    "正式压缩应消费异步生产的预摘要，而不是再次请求摘要");
+        }
+    }
+
+    @Test
+    void deterministicPreSummaryFailureEntersFingerprintCooldown() throws Exception {
+        FailingSummaryClient client = new FailingSummaryClient();
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager manager = new MemoryManager(client, 4_096, 128_000, longTermMemory)) {
+            List<LlmClient.Message> history = history("failure-cooldown");
+
+            assertEquals(MemoryManager.SessionPreSummaryMaintenanceResult.FAILED,
+                    manager.maintainSessionPreSummaryAfterTurn(history, 4, 0));
+            int callsAfterFirstAttempt = client.calls.get();
+            assertEquals(MemoryManager.SessionPreSummaryMaintenanceResult.SKIPPED_FAILURE_COOLDOWN,
+                    manager.maintainSessionPreSummaryAfterTurn(history, 4, 0));
+            assertEquals(callsAfterFirstAttempt, client.calls.get(),
+                    "相同失败输入在冷却期内不得重复消耗模型调用");
+        }
+    }
+
+    @Test
+    void switchingLlmClientClearsPreSummaryCache() throws Exception {
+        BlockingClient first = new BlockingClient();
+        first.releaseFirstCall.countDown();
+        BlockingClient second = new BlockingClient();
+        second.releaseFirstCall.countDown();
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager manager = new MemoryManager(first, 4_096, 128_000, longTermMemory)) {
+            assertEquals(MemoryManager.SessionPreSummaryMaintenanceResult.MAINTAINED,
+                    manager.maintainSessionPreSummaryAfterTurn(history("model-a"), 4, 0));
+            assertTrue(manager.getCompactionSummaryCache().currentPreSummary().isPresent());
+
+            manager.setLlmClient(second);
+
+            assertTrue(manager.getCompactionSummaryCache().currentPreSummary().isEmpty(),
+                    "切换模型后不得复用旧模型生成的预摘要");
+        }
+    }
+
     private static List<LlmClient.Message> history(String marker) {
         return List.of(
                 LlmClient.Message.system("S"),
-                LlmClient.Message.user(marker + " " + "x".repeat(2_100))
+                LlmClient.Message.user(marker + " " + "x".repeat(2_100)),
+                LlmClient.Message.assistant("completed"),
+                LlmClient.Message.user("retained-tail " + "中".repeat(24_000))
         );
     }
 
@@ -103,6 +177,37 @@ class MemoryManagerPreSummaryAsyncTest {
         @Override
         public String getModelName() {
             return "blocking-test";
+        }
+
+        @Override
+        public String getProviderName() {
+            return "test";
+        }
+
+        @Override
+        public int maxContextWindow() {
+            return 128_000;
+        }
+    }
+
+    private static final class FailingSummaryClient implements LlmClient {
+        private final AtomicInteger calls = new AtomicInteger();
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools) throws IOException {
+            calls.incrementAndGet();
+            return new ChatResponse("assistant", "", List.of(), 10, 10);
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools,
+                                 StreamListener listener) throws IOException {
+            return chat(messages, tools);
+        }
+
+        @Override
+        public String getModelName() {
+            return "failing-summary";
         }
 
         @Override

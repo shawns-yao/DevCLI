@@ -477,6 +477,7 @@ public class McpServerManager implements AutoCloseable {
             configLoader.prepare(server.config());
             McpTransport transport = createTransport(server.config());
             McpClient client = new McpClient(server.name(), transport);
+            server.client(client);
             client.initialize();
             registerNotificationHandlers(server, client);
             List<McpToolDescriptor> tools = buildToolList(server, client);
@@ -484,7 +485,6 @@ public class McpServerManager implements AutoCloseable {
                 client.close();
                 return;
             }
-            server.client(client);
             server.markStarted();
             replaceTools(server, client, tools);
             server.tools(tools);
@@ -686,7 +686,8 @@ public class McpServerManager implements AutoCloseable {
         if (config.isHttp()) {
             return new StreamableHttpTransport(config.getUrl(), config.getHeaders());
         }
-        return new StdioTransport(config.getCommand(), config.getArgs(), config.getEnv(), projectDir);
+        return new StdioTransport(config.getCommand(), config.getArgs(), config.getEnv(), projectDir,
+                config.isWindowsNativeSandbox());
     }
 
     private void validateNoDuplicateTools(String serverName, List<McpToolDescriptor> tools) {

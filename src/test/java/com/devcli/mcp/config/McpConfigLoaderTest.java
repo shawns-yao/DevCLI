@@ -12,6 +12,27 @@ import static org.junit.jupiter.api.Assertions.*;
 class McpConfigLoaderTest {
 
     @Test
+    void refusesNativeSandboxForRemoteMcp(@TempDir Path tempDir) throws Exception {
+        Path user = tempDir.resolve("user.json");
+        Files.writeString(user, """
+                {"mcpServers":{"remote":{"url":"https://example.com","sandbox":"WINDOWS_NATIVE"}}}
+                """);
+        McpConfigLoader loader = new McpConfigLoader(user, tempDir.resolve("missing.json"), tempDir);
+        assertThrows(IllegalArgumentException.class, () -> loader.prepare(loader.load().get("remote")));
+    }
+
+    @Test
+    void refusesEnvironmentInjectionIntoNativeMcp(@TempDir Path tempDir) throws Exception {
+        Path user = tempDir.resolve("user.json");
+        Files.writeString(user, """
+                {"mcpServers":{"local":{"command":"node.exe","sandbox":"WINDOWS_NATIVE",
+                  "env":{"NODE_OPTIONS":"--require untrusted.js"}}}}
+                """);
+        McpConfigLoader loader = new McpConfigLoader(user, tempDir.resolve("missing.json"), tempDir);
+        assertThrows(IllegalArgumentException.class, () -> loader.prepare(loader.load().get("local")));
+    }
+
+    @Test
     void projectConfigOverridesUserConfig(@TempDir Path tempDir) throws Exception {
         Path user = tempDir.resolve("user-mcp.json");
         Path project = tempDir.resolve("project-mcp.json");

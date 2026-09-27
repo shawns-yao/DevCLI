@@ -122,6 +122,10 @@ public final class AgentSessionRuntime implements AutoCloseable {
      * 在调用方已有 RunContext 时同步执行，保留同一取消令牌；CLI 的外层输入监听使用此入口。
      */
     public RunResult runInCurrentContext(String prompt) {
+        return runInCurrentContext(prompt, prompt);
+    }
+
+    public RunResult runInCurrentContext(String userInput, String modelInput) {
         synchronized (this) {
             if (activeRun.get() != null) {
                 throw new IllegalStateException("Agent 会话已有正在运行的任务");
@@ -133,7 +137,7 @@ public final class AgentSessionRuntime implements AutoCloseable {
             RunContext context = ownsContext ? CancellationContext.startRunContext(projectPath) : inherited;
             activeContext.set(context);
             try {
-                String output = agent.run(prompt);
+                String output = agent.run(userInput, modelInput, LlmClient.ToolChoice.AUTO);
                 List<LlmClient.Message> history = agent.getConversationHistory();
                 RunResult result = new RunResult(resolveOutput(output, history), history, context.isCancelled());
                 marker.complete(result);

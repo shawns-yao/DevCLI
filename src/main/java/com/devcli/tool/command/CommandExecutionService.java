@@ -17,6 +17,11 @@ public interface CommandExecutionService {
         return true;
     }
 
+    /** Isolation is independent of execution location; unknown backends fail closed. */
+    default boolean providesIsolation(boolean sandboxRequired) {
+        return false;
+    }
+
     /** Run deterministic backend policy checks before presenting an approval request. */
     default void validateRequest(Request request) {
     }

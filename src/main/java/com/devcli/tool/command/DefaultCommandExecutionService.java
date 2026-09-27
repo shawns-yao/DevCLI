@@ -80,8 +80,13 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
     }
 
     @Override
+    public boolean providesIsolation(boolean sandboxRequired) {
+        return sandboxRequired && (sandboxMode == SandboxMode.DOCKER || sandboxMode == SandboxMode.WINDOWS_NATIVE);
+    }
+
+    @Override
     public void validateRequest(Request request) {
-        if (request.sandboxRequired() && executesOnHost(true)) {
+        if (request.sandboxRequired() && !providesIsolation(true)) {
             try {
                 HostWarnCommandPolicy.validateAndNormalize(request.command());
             } catch (IllegalArgumentException denied) {
@@ -92,6 +97,20 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
 
     @Override
     public Result execute(Request request) {
+        if (request.sandboxRequired() && sandboxMode == SandboxMode.WINDOWS_NATIVE) {
+            if (!isWindows()) throw new IllegalStateException("WINDOWS_NATIVE requires Windows");
+            String shell = Path.of(System.getenv("SystemRoot"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe").toString();
+            String encoded = java.util.Base64.getEncoder().encodeToString(
+                    ("$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; "
+                            + "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); "
+                            + "New-PSDrive -Name Work -PSProvider FileSystem -Root '"
+                            + request.projectRoot().toString().replace("'", "''")
+                            + "' | Out-Null; Set-Location -LiteralPath 'Work:\\'; "
+                            + request.command() + "; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }")
+                            .getBytes(StandardCharsets.UTF_16LE));
+            return runProcess(List.of(shell, "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand", encoded),
+                    request, false, () -> { }, true);
+        }
         if (!request.sandboxRequired() || sandboxMode == SandboxMode.DOCKER) {
             return (request.sandboxRequired() ? sandboxBackend : hostBackend).execute(request);
         }
@@ -210,6 +229,11 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
 
     private static Result runProcess(List<String> command, Request request, boolean sandbox,
                                      Runnable externalCleanup) {
+        return runProcess(command, request, sandbox, externalCleanup, false);
+    }
+
+    private static Result runProcess(List<String> command, Request request, boolean sandbox,
+                                     Runnable externalCleanup, boolean windowsNative) {
         ExecutorService outputReader = Executors.newSingleThreadExecutor(task -> {
             Thread thread = new Thread(task, "devcli-command-output");
             thread.setDaemon(true);
@@ -224,7 +248,10 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
             ProcessBuilder builder = new ProcessBuilder(command);
             builder.directory(request.projectRoot().toFile());
             builder.redirectErrorStream(true);
-            process = builder.start();
+            process = windowsNative
+                    ? com.devcli.sandbox.WindowsSandboxProcess.start(command, request.projectRoot(), true,
+                            request.timeoutSeconds(), request.executionContext()::isCancelled, true)
+                    : builder.start();
             Process running = process;
             termination = termination(running, externalCleanup);
             cancellationRegistration = request.executionContext().cancellationToken()
@@ -244,6 +271,8 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
             CapturedOutput captured = output.get(3, TimeUnit.SECONDS);
             String text = captured.text();
             int exitCode = process.exitValue();
+            if (process instanceof com.devcli.sandbox.WindowsSandboxProcess nativeProcess && nativeProcess.timedOut())
+                return Result.timedOut("Windows 沙箱执行超时，Job 已终止\n" + text);
             if (sandbox && exitCode == 125) {
                 throw new IllegalStateException("Docker 命令沙箱启动失败: " + text);
             }
@@ -265,9 +294,10 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
             if (process != null) {
                 termination.run();
             }
-            if (sandbox) {
+            if (request.executionContext().isCancelled()) return cancellationResult(request);
+            if (sandbox || windowsNative) {
                 throw new IllegalStateException(
-                        "隔离命令必须通过 Docker 执行，禁止回退到主机: " + e.getMessage(), e);
+                        "隔离命令启动失败，禁止回退到主机: " + e.getMessage(), e);
             }
             throw new IllegalStateException("命令进程启动失败: " + e.getMessage(), e);
         } catch (Exception e) {
@@ -448,6 +478,7 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
 
     public enum SandboxMode {
         DOCKER,
+        WINDOWS_NATIVE,
         HOST_RESTRICTED,
         HOST_WARN;
 
@@ -457,10 +488,11 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
             }
             return switch (value.trim().toUpperCase(Locale.ROOT).replace('-', '_')) {
                 case "DOCKER" -> DOCKER;
+                case "WINDOWS_NATIVE" -> WINDOWS_NATIVE;
                 case "HOST_WARN" -> HOST_WARN;
                 case "HOST_RESTRICTED" -> HOST_RESTRICTED;
                 default -> throw new IllegalArgumentException(
-                        "sandbox mode must be DOCKER|HOST_WARN|HOST_RESTRICTED: " + value);
+                        "sandbox mode must be DOCKER|WINDOWS_NATIVE|HOST_WARN|HOST_RESTRICTED: " + value);
             };
         }
     }

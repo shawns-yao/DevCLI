@@ -128,7 +128,11 @@ public final class BuiltInToolPolicy {
                 "browser_connect", "browser_disconnect");
         register(values, ToolEffect.EXTERNAL_MUTATION, false, false,
                 Destructiveness.STRUCTURAL, Idempotency.NON_IDEMPOTENT, false,
-                "save_memory", "delegate_task");
+                "delegate_task");
+        // 写入确认在 CONTENT_REVIEW 阶段执行，不进入可复用或自动批准分支。
+        register(values, ToolEffect.EXTERNAL_MUTATION, false, true,
+                Destructiveness.STRUCTURAL, Idempotency.NON_IDEMPOTENT, false,
+                "save_memory");
         return Map.copyOf(values);
     }
 

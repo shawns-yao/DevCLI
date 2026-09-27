@@ -265,6 +265,14 @@ public class HitlToolRegistry extends ToolRegistry {
             return chain.proceed(context);
         }
 
+        if (classifierDecides) {
+            try {
+                context.putAttribute("approval.trusted.intent", trustedIntentContext.get());
+            } catch (TrustedIntentContext.IncompleteContextException incomplete) {
+                context.putAttribute("approval.intent.incomplete", Boolean.TRUE);
+                return askOrDeny(context, chain, incomplete.getMessage());
+            }
+        }
         String mcpServer = ApprovalPolicy.mcpServerName(name);
         boolean forcePerCallApproval = mcpToolRequiresPerCallApproval(name);
         if (!forcePerCallApproval
@@ -348,7 +356,7 @@ public class HitlToolRegistry extends ToolRegistry {
         try {
             verdict = classifier.classify(new PermissionClassifier.Request(
                     context.name(), context.argumentsJson(), getProjectPath(),
-                    currentPermissionMode().id(), trustedIntentContext.get(), permissionRules));
+                    currentPermissionMode().id(), context.attribute("approval.trusted.intent", String.class), permissionRules));
         } catch (java.io.IOException failure) {
             return denyByClassifierFailure(context, failure.getMessage());
         }
@@ -450,6 +458,45 @@ public class HitlToolRegistry extends ToolRegistry {
                 "主机执行仅接受单次明确批准；任务授权、全部批准、修改参数或关闭审批均不能放行");
     }
 
+    @Override
+    protected ToolOutput reviewMemorySave(ToolExecutionPipeline.Context context) {
+        PermissionEvaluator.Result rules = PermissionEvaluator.evaluate(
+                "save_memory", ApprovalGate.resourceValues("save_memory",
+                        parsedArgumentsOf(context), approvalPathScope), permissionRules);
+        if (rules.outcome() == PermissionEvaluator.Outcome.HARD_DENY
+                || !currentPermissionMode().denyReason().isEmpty()) {
+            return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED, "当前权限策略禁止保存长期记忆");
+        }
+        ApprovalResult answer = null;
+        if (hitlHandler != null && hitlHandler.isEnabled()) {
+            try {
+                approvalLock.lockInterruptibly();
+                try {
+                    if (context.executionContext().isCancelled()) return ToolOutput.cancelled("记忆审批已取消");
+                    if (context.executionContext().remainingNanos() == 0) return ToolOutput.timedOut("记忆审批已超时");
+                    answer = hitlHandler.requestApproval(ApprovalRequest.of("save_memory",
+                            context.argumentsJson(), null, context.invocationId(),
+                            "将持久化以下主题、作用域和内容，可能覆盖同名记忆；仅本次确认有效。"));
+                } finally {
+                    approvalLock.unlock();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return ToolOutput.cancelled("记忆审批已取消");
+            }
+        }
+        if (context.executionContext().isCancelled()) return ToolOutput.cancelled("记忆审批已取消");
+        if (context.executionContext().remainingNanos() == 0) return ToolOutput.timedOut("记忆审批已超时");
+        if (answer != null && answer.decision() == ApprovalResult.Decision.APPROVED) {
+            context.putAttribute(PIPELINE_APPROVAL_SOURCE, "memory_once");
+            return null;
+        }
+        recordToolAudit(AuditLog.AuditEntry.denyByHitl("save_memory", "{}",
+                "未获得单次记忆写入确认", 0L), context);
+        return ToolOutput.rejected(ToolErrorCode.HITL_REJECTED,
+                "长期记忆写入仅接受单次确认；自动分类、全部批准或关闭审批均不能放行");
+    }
+
     /** 主机命令被规则层或模式层拦下时的审计记录。 */
     private void recordHostCommandDenial(com.devcli.tool.command.CommandExecutionService.Request request,
                                          String reason, String stage) {
@@ -500,6 +547,12 @@ public class HitlToolRegistry extends ToolRegistry {
         context.putAttribute(PIPELINE_APPROVAL_ID, approvalId);
         ApprovalRequest request = ApprovalRequest.of(
                 context.name(), originalArguments, null, approvalId, sensitiveNotice);
+        boolean incompleteIntent = Boolean.TRUE.equals(context.attribute("approval.intent.incomplete", Boolean.class));
+        if (incompleteIntent) {
+            request = new ApprovalRequest(request.toolName(), request.arguments(), request.dangerLevel(),
+                    request.riskDescription(), request.suggestion(), request.callerContext(),
+                    sensitiveNotice, true, false);
+        }
         ApprovalResult result;
         try {
             approvalLock.lockInterruptibly();
@@ -513,7 +566,8 @@ public class HitlToolRegistry extends ToolRegistry {
             return ToolOutput.cancelled("等待人工审批时执行被取消");
         }
 
-        if (result == null || result.isRedacted()) {
+        if (result == null || result.isRedacted()
+                || (incompleteIntent && result.decision() != ApprovalResult.Decision.APPROVED)) {
             return ToolOutput.rejected(ToolErrorCode.HITL_REJECTED,
                     "当前审批不支持此决策，未执行");
         }

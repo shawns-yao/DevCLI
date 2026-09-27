@@ -321,7 +321,7 @@ class DefaultCommandExecutionServiceTest {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
                 () -> DefaultCommandExecutionService.Config.resolve(properties, Map.of()));
 
-        assertTrue(error.getMessage().contains("DOCKER|HOST_WARN"), error.getMessage());
+        assertTrue(error.getMessage().contains("DOCKER|WINDOWS_NATIVE|HOST_WARN"), error.getMessage());
     }
 
     @Test

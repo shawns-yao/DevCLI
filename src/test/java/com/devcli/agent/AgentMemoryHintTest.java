@@ -148,7 +148,9 @@ class AgentMemoryHintTest {
             ));
             agent = new Agent(llmClient);
 
-            agent.run("请记住这段上下文：" + "x".repeat(10_000));
+            agent.seedHistory(List.of(LlmClient.Message.user("旧上下文" + "x".repeat(12_000)),
+                    LlmClient.Message.assistant("旧任务完成")));
+            agent.run("请记住这段上下文：" + "中".repeat(24_000));
 
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
             while (agent.getMemoryManager().getCompactionSummaryCache().currentPreSummary().isEmpty()
@@ -162,6 +164,10 @@ class AgentMemoryHintTest {
             assertTrue(RollingSummary.parse(summary).get("主要请求与意图")
                     .contains("自动维护的会话预摘要"));
             assertEquals(2, llmClient.messagesByCall.size(), "一次任务响应后应追加一次预摘要维护调用");
+            assertEquals(40, agent.getMemoryManager().getTokenBudget().getTotalInputTokens(),
+                    "后台摘要消耗必须计入会话统计");
+            assertTrue(agent.compactHistoryForPersistence(18_000));
+            assertEquals(2, llmClient.messagesByCall.size(), "正式压缩应直接复用同一原始前缀的预摘要");
         } finally {
             if (agent != null) {
                 agent.close();
@@ -322,7 +328,10 @@ class AgentMemoryHintTest {
         public CompletableFuture<SessionPreSummaryMaintenanceResult> maintainSessionPreSummaryAfterTurnAsync(
                 List<LlmClient.Message> history,
                 int turnToolCalls,
-                int largestToolResultChars) {
+                int largestToolResultChars,
+                int triggerTokens,
+                java.util.function.BooleanSupplier callGuard,
+                java.util.function.Consumer<LlmClient.ChatResponse> usageConsumer) {
             maintenanceScheduled.countDown();
             return pending;
         }

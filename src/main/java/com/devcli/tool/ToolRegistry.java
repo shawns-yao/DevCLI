@@ -1400,6 +1400,11 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         return com.devcli.policy.SensitiveContentPolicy.Decision.REJECT;
     }
 
+    protected ToolOutput reviewMemorySave(ToolExecutionPipeline.Context context) {
+        return ToolOutput.rejected(ToolErrorCode.HITL_REJECTED,
+                "长期记忆写入需要单次确认；当前没有审批处理器，未保存");
+    }
+
     protected void recordContentDecision(String tool, String types, String purpose, String target,
                                          String decision) {
         String metadata = "content_review; types=" + types + "; purpose=" + purpose
@@ -1502,6 +1507,10 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         });
         executionPipeline.register(ToolExecutionPipeline.Stage.CONTENT_REVIEW, (context, chain) -> {
             String name = context.name();
+            if ("save_memory".equals(name)) {
+                ToolOutput denial = reviewMemorySave(context);
+                return denial == null ? chain.proceed(context) : denial;
+            }
             boolean web = "web_fetch".equals(name) || "web_search".equals(name);
             boolean mcp = activeMcpTool(name) != null;
             if (!web && !mcp) return chain.proceed(context);

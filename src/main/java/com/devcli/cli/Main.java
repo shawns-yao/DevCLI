@@ -346,13 +346,6 @@ public class Main {
             hitlToolRegistry.setSkillContextBuffer(skillContextBuffer);
 
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
-            // 分类器要读对话历史才能判定用户意图——参照实现的取向是「默认放行 + 看意图」，
-            // 而意图只能从对话里读出来。装配点必须在 Agent 创建之后，所以传 Supplier 延迟取，
-            // 而不是取一次快照：历史在会话中持续增长。
-            // 过滤与中和都在 TrustedIntentContext 内完成，这里不拼字符串。
-            hitlToolRegistry.withTrustedIntentContext(
-                    () -> com.devcli.hitl.TrustedIntentContext.render(
-                            reactAgent.conversationHistorySnapshot()));
             // Execution Trace：结构化运行事件自动落 ~/.devcli/traces，/trace 查看。
             reactAgent.setRunEventSink(TRACE_SINK);
             AgentSessionRuntime reactSession = AgentSessionRuntime.adoptOwned(
@@ -1024,12 +1017,15 @@ public class Main {
                             createTeamPlanReviewHandler(lineReader, ui),
                             TRACE_SINK,
                             ui);
-                    runTask = () -> reactToolRegistry.runWithTaskGrant(grantForTurn,
-                            () -> orchestrationTaskRunner.run(activeClient, taskInput));
+                    runTask = () -> {
+                        reactAgent.recordUserIntent(submittedInput);
+                        return reactToolRegistry.runWithTaskGrant(grantForTurn,
+                                () -> orchestrationTaskRunner.run(activeClient, taskInput));
+                    };
                 } else {
                     snapshotMode = "react";
                     java.util.function.Supplier<String> reactTurn =
-                            () -> reactSession.runInCurrentContext(taskInput).output();
+                            () -> reactSession.runInCurrentContext(submittedInput, taskInput).output();
                     java.util.function.Supplier<String> grantedTurn =
                             () -> reactToolRegistry.runWithTaskGrant(grantForTurn, reactTurn);
                     runTask = readOnlyTurn

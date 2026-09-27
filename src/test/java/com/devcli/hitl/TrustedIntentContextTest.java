@@ -69,16 +69,14 @@ class TrustedIntentContextTest {
     }
 
     @Test
-    void newestEntriesWinWhenBudgetIsExceeded() {
+    void incompleteHistoryCannotBecomeAuthorizationEvidence() {
         List<LlmClient.Message> history = new ArrayList<>();
         for (int i = 0; i < 40; i++) {
             history.add(LlmClient.Message.user("第" + i + "条 " + "x".repeat(1_000)));
         }
 
-        String text = TrustedIntentContext.render(history);
-
-        assertTrue(text.contains("第39条"), text);
-        assertFalse(text.contains("第0条"), text);
+        org.junit.jupiter.api.Assertions.assertThrows(TrustedIntentContext.IncompleteContextException.class,
+                () -> TrustedIntentContext.render(history));
     }
 
     private static int count(String text, String needle) {

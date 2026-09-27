@@ -30,6 +30,14 @@ public class StdioTransport implements McpTransport {
     private volatile boolean closed;
 
     public StdioTransport(String command, List<String> args, Map<String, String> env, Path workingDir) throws IOException {
+        this(command, args, env, workingDir, false);
+    }
+
+    public StdioTransport(String command, List<String> args, Map<String, String> env, Path workingDir,
+                          boolean windowsNative) throws IOException {
+        if (windowsNative && (workingDir == null || (env != null && !env.isEmpty())
+                || !Path.of(command).isAbsolute() || !command.toLowerCase(java.util.Locale.ROOT).endsWith(".exe")))
+            throw new IOException("Native MCP requires a working directory, absolute .exe and empty env");
         ProcessBuilder builder = new ProcessBuilder();
         if (workingDir != null) {
             builder.directory(workingDir.toFile());
@@ -44,7 +52,9 @@ public class StdioTransport implements McpTransport {
             commandLine.addAll(args);
         }
         builder.command(commandLine);
-        this.process = builder.start();
+        this.process = windowsNative
+                ? com.devcli.sandbox.WindowsSandboxProcess.start(commandLine, workingDir, false, Integer.MAX_VALUE, () -> false)
+                : builder.start();
         this.stdin = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
         startStdoutReader();
         startStderrReader();

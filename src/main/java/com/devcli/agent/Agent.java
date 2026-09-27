@@ -54,6 +54,8 @@ public class Agent implements AutoCloseable {
     private final ToolRegistry toolRegistry;
     private final boolean ownsToolRegistry;
     private final List<LlmClient.Message> conversationHistory;
+    private final List<LlmClient.Message> userIntentHistory = new ArrayList<>();
+    private boolean userIntentIncomplete;
     private final MemoryManager memoryManager;
     private final ConversationHistoryCompactor historyCompactor;
     private final ContextReferenceGuard.ReferenceRegistry contextReferenceRegistry =
@@ -110,6 +112,9 @@ public class Agent implements AutoCloseable {
                 this::buildPostCompactRestoreSection,
                 this::buildCompactBoundaryRuntimeState);
         AgentRuntimeSupport.bindMemory(this.toolRegistry, memoryManager);
+        if (toolRegistry instanceof com.devcli.hitl.HitlToolRegistry approvals) {
+            approvals.withTrustedIntentContext(this::trustedIntentContext);
+        }
         conversationHistory.add(LlmClient.Message.system(buildSystemPrompt()));
     }
 
@@ -144,13 +149,31 @@ public class Agent implements AutoCloseable {
     /**
      * 当前对话历史的只读快照。
      *
-     * <p>公开给 {@code cli} 装配层：权限分类器需要它渲染判定上下文（见
-     * {@code hitl.TrustedIntentContext}），而装配发生在 {@code Main}，不在 {@code agent} 包内。</p>
+     * <p>这是模型窗口投影，包含派生上下文，不得作为用户授权来源。</p>
      *
-     * <p>返回副本而不是内部列表：分类器在工具执行的同步路径上被调用，遍历期间历史可能被追加。</p>
+     * <p>返回副本而不是内部列表，避免调用方修改模型窗口。</p>
      */
     public List<LlmClient.Message> conversationHistorySnapshot() {
         return List.copyOf(conversationHistory);
+    }
+
+    /** 仅接受宿主收到的用户原文；不从摘要、工具结果或历史投影恢复授权。 */
+    public synchronized void recordUserIntent(String input) {
+        if (input == null || input.isBlank()) return;
+        userIntentHistory.add(LlmClient.Message.user(input));
+        if (userIntentHistory.size() > 64) {
+            userIntentHistory.remove(0);
+            userIntentIncomplete = true;
+        }
+    }
+
+    public synchronized String trustedIntentContext() {
+        if (userIntentIncomplete) throw new com.devcli.hitl.TrustedIntentContext.IncompleteContextException();
+        return com.devcli.hitl.TrustedIntentContext.render(userIntentHistory);
+    }
+
+    public synchronized void markTrustedIntentIncomplete() {
+        userIntentIncomplete = true;
     }
 
     public void setExternalContextSupplier(Supplier<String> externalContextSupplier) {
@@ -260,13 +283,19 @@ public class Agent implements AutoCloseable {
      * 运行 Agent 循环，并允许受控执行入口约束首轮工具选择。
      */
     public String run(String userInput, LlmClient.ToolChoice initialToolChoice) {
+        return run(userInput, userInput, initialToolChoice);
+    }
+
+    /** 用户原文与附件展开后的模型输入分别传入，附件不构成授权。 */
+    public String run(String userInput, String modelInput, LlmClient.ToolChoice initialToolChoice) {
+        recordUserIntent(userInput);
         com.devcli.concurrent.CancellationToken inheritedToken = CancellationContext.current();
         activeCancellationToken.set(inheritedToken);
         memoryManager.beginTask(sessionTaskId);
         memoryManager.setActiveProjectScope(toolRegistry.getProjectPath());
         String result = "";
         try {
-            result = runInternal(userInput, initialToolChoice);
+            result = runInternal(modelInput, initialToolChoice);
             return result;
         } finally {
             memoryManager.completeTask(sessionTaskId, userInput, result, toolRegistry.getProjectPath());
@@ -380,6 +409,7 @@ public class Agent implements AutoCloseable {
                                                         List<AgentTurnInbox.Item> messages) {
                         for (AgentTurnInbox.Item message : messages) {
                             memoryManager.addUserMessage(message.text());
+                            recordUserIntent(message.text());
                         }
                         AgentTurnInbox.Snapshot snapshot = turnInbox.snapshot();
                         runEventSink.emit(new RunEvent.QueueUpdated(
@@ -518,14 +548,14 @@ public class Agent implements AutoCloseable {
                         if (streamRenderer.hasStreamedOutput()) {
                             streamRenderer.finish();
                             maintainSessionPreSummaryAfterTurn(
-                                    metrics.toolCalls, metrics.largestToolResultChars);
+                                    metrics.toolCalls, metrics.largestToolResultChars, currentBudget);
                             return "";
                         }
                         streamRenderer.clearThinkingPanel();
                         String finalResponse = formatUserFacingResponse(
                                 reasoningTranscript.toString(), response.content());
                         maintainSessionPreSummaryAfterTurn(
-                                metrics.toolCalls, metrics.largestToolResultChars);
+                                metrics.toolCalls, metrics.largestToolResultChars, currentBudget);
                         return finalResponse;
                     }
 
@@ -587,6 +617,10 @@ public class Agent implements AutoCloseable {
         LlmClient.Message systemMsg = conversationHistory.get(0);
         conversationHistory.clear();
         conversationHistory.add(systemMsg);
+        synchronized (this) {
+            userIntentHistory.clear();
+            userIntentIncomplete = false;
+        }
 
         // 清空当前会话工作记忆
         memoryManager.clearShortTerm();
@@ -725,7 +759,7 @@ public class Agent implements AutoCloseable {
                 memoryManager, toolRegistry, skillContextBuffer, false);
     }
 
-    private void maintainSessionPreSummaryAfterTurn(int turnToolCalls, int largestToolResultChars) {
+    private void maintainSessionPreSummaryAfterTurn(int turnToolCalls, int largestToolResultChars, AgentBudget budget) {
         // 预摘要只用于为未来的语义压缩准备可复用缓存，不能阻塞主 Agent turn。
         // Provider 连接可能因半关闭的 SSE 响应等待到 callTimeout；主链路应继续执行，
         // 真正达到阈值时由 ConversationHistoryCompactor 自己负责有界重试/降级。
@@ -733,7 +767,12 @@ public class Agent implements AutoCloseable {
                 memoryManager.maintainSessionPreSummaryAfterTurnAsync(
                         conversationHistory,
                         turnToolCalls,
-                        largestToolResultChars);
+                        largestToolResultChars,
+                        memoryManager.getContextProfile().historyTriggerTokens(
+                                TokenBudget.estimateToolDefinitionsTokens(toolRegistry.getToolDefinitions())),
+                        () -> (long) budget.totalInputTokens() + budget.totalOutputTokens() < budget.tokenBudget(),
+                        response -> budget.recordTokens(response.inputTokens(), response.outputTokens(),
+                                response.cachedInputTokens()));
         future
                 .whenComplete((result, error) -> {
                     if (error != null) {

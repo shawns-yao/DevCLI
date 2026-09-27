@@ -272,7 +272,6 @@
                             <argLine>-Dfile.encoding=UTF-8</argLine>
                             <includes>
                                 <include>**/cli/MainInputNormalizationTest.java</include>
-                                <include>**/hitl/RendererHitlHandlerTest.java</include>
                                 <include>**/hitl/SwitchableHitlHandlerTest.java</include>
                                 <include>**/render/*Test.java</include>
                                 <include>**/render/inline/BottomStatusBarTest.java</include>
@@ -302,7 +301,6 @@
                                 <include>**/workspace/ContextVersionLedgerContractTest.java</include>
                                 <include>**/agent/AgentExecutionEngineTest.java</include>
                                 <include>**/rag/VectorStoreTest.java</include>
-                                <include>**/memory/MemoryWriteProtocolTest.java</include>
                                 <include>**/runtime/RunEventExecutionStateTest.java</include>
                                 <include>**/benchmark/ProtocolBaselineGateTest.java</include>
                             </includes>

@@ -10,6 +10,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -33,6 +34,12 @@ public class CompactionSummaryCache {
     }
 
     public synchronized void recordPreSummary(List<LlmClient.Message> coveredMessages, String summary) {
+        recordPreSummary(coveredMessages, summary, null);
+    }
+
+    public synchronized void recordPreSummary(List<LlmClient.Message> coveredMessages,
+                                              String summary,
+                                              LlmClient llmClient) {
         if (coveredMessages == null || coveredMessages.isEmpty() || summary == null || summary.isBlank()) {
             return;
         }
@@ -41,10 +48,17 @@ public class CompactionSummaryCache {
                 coveredMessages.size(),
                 TokenBudget.estimateMessagesTokens(coveredMessages),
                 fingerprint(coveredMessages),
+                providerOf(llmClient),
+                modelOf(llmClient),
                 clock.instant());
     }
 
     public synchronized Optional<PreSummary> findReusablePreSummary(List<LlmClient.Message> messages) {
+        return findReusablePreSummary(messages, null);
+    }
+
+    public synchronized Optional<PreSummary> findReusablePreSummary(List<LlmClient.Message> messages,
+                                                                      LlmClient llmClient) {
         if (preSummary == null || messages == null || messages.isEmpty()) {
             return Optional.empty();
         }
@@ -59,6 +73,9 @@ public class CompactionSummaryCache {
         if (!preSummary.fingerprint.equals(currentFingerprint)) {
             return Optional.empty();
         }
+        if (!sameModel(preSummary, llmClient)) {
+            return Optional.empty();
+        }
         return Optional.of(preSummary);
     }
 
@@ -69,6 +86,11 @@ public class CompactionSummaryCache {
      * 压缩或重放后把不相关摘要继续叠加。</p>
      */
     public synchronized Optional<PreSummary> findExtendablePreSummary(List<LlmClient.Message> messages) {
+        return findExtendablePreSummary(messages, null);
+    }
+
+    public synchronized Optional<PreSummary> findExtendablePreSummary(List<LlmClient.Message> messages,
+                                                                        LlmClient llmClient) {
         if (preSummary == null || messages == null || messages.isEmpty()) {
             return Optional.empty();
         }
@@ -80,7 +102,7 @@ public class CompactionSummaryCache {
             return Optional.empty();
         }
         String prefixFingerprint = fingerprint(messages.subList(0, preSummary.messageCount));
-        return preSummary.fingerprint.equals(prefixFingerprint)
+        return preSummary.fingerprint.equals(prefixFingerprint) && sameModel(preSummary, llmClient)
                 ? Optional.of(preSummary)
                 : Optional.empty();
     }
@@ -103,20 +125,62 @@ public class CompactionSummaryCache {
         return summary.createdAt.plus(preSummaryTtl).isBefore(clock.instant());
     }
 
+    static String fingerprintOf(List<LlmClient.Message> messages) {
+        return fingerprint(messages);
+    }
+
     private static String fingerprint(List<LlmClient.Message> messages) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             for (LlmClient.Message message : messages) {
+                if (message == null) {
+                    digest.update((byte) 0);
+                    continue;
+                }
+                digest.update((byte) 1);
                 update(digest, message.role());
                 update(digest, message.content());
                 update(digest, message.reasoningContent());
                 update(digest, message.toolCallId());
+                update(digest, message.source() == null ? null : message.source().name());
+                if (message.contentParts() == null) {
+                    digest.update((byte) 0);
+                } else {
+                    digest.update((byte) 1);
+                    update(digest, Integer.toString(message.contentParts().size()));
+                    for (LlmClient.ContentPart part : message.contentParts()) {
+                        if (part == null) {
+                            digest.update((byte) 0);
+                            continue;
+                        }
+                        digest.update((byte) 1);
+                        update(digest, part.type());
+                        update(digest, part.text());
+                        update(digest, part.imageBase64());
+                        update(digest, part.imageUrl());
+                        update(digest, part.mimeType());
+                    }
+                }
+                if (message.toolCalls() == null) {
+                    digest.update((byte) 0);
+                } else {
+                    digest.update((byte) 1);
+                    update(digest, Integer.toString(message.toolCalls().size()));
+                }
                 if (message.toolCalls() != null) {
                     for (LlmClient.ToolCall toolCall : message.toolCalls()) {
+                        if (toolCall == null) {
+                            digest.update((byte) 0);
+                            continue;
+                        }
+                        digest.update((byte) 1);
                         update(digest, toolCall.id());
                         if (toolCall.function() != null) {
+                            digest.update((byte) 1);
                             update(digest, toolCall.function().name());
                             update(digest, toolCall.function().arguments());
+                        } else {
+                            digest.update((byte) 0);
                         }
                     }
                 }
@@ -139,7 +203,24 @@ public class CompactionSummaryCache {
         digest.update(bytes);
     }
 
+    private static String providerOf(LlmClient llmClient) {
+        return llmClient == null || llmClient.getProviderName() == null ? "" : llmClient.getProviderName();
+    }
+
+    private static String modelOf(LlmClient llmClient) {
+        return llmClient == null || llmClient.getModelName() == null ? "" : llmClient.getModelName();
+    }
+
+    private static boolean sameModel(PreSummary summary, LlmClient llmClient) {
+        if (llmClient == null) {
+            return summary.provider().isBlank() && summary.model().isBlank();
+        }
+        return !summary.provider().isBlank() && !summary.model().isBlank()
+                && Objects.equals(summary.provider(), providerOf(llmClient))
+                && Objects.equals(summary.model(), modelOf(llmClient));
+    }
+
     public record PreSummary(String summary, int messageCount, int tokenEstimate,
-                             String fingerprint, Instant createdAt) {
+                             String fingerprint, String provider, String model, Instant createdAt) {
     }
 }

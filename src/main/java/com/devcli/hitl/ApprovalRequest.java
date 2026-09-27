@@ -40,7 +40,7 @@ public record ApprovalRequest(
     }
 
     public boolean singleDecisionOnly() {
-        return contentReview || hostExecution;
+        return contentReview || hostExecution || "save_memory".equals(toolName);
     }
 
     public ApprovalRequest {
@@ -195,7 +195,8 @@ public record ApprovalRequest(
                     String key = entry.getKey();
                     JsonNode valNode = entry.getValue();
                     if (valNode.isTextual()) {
-                        if (hostExecution || ("execute_command".equals(toolName) && "command".equals(key))) {
+                        if (hostExecution || "save_memory".equals(toolName)
+                                || ("execute_command".equals(toolName) && "command".equals(key))) {
                             // JSON escaping keeps terminal control sequences visible instead of executing them.
                             lines.addAll(wrapByDisplayWidth(key + ": " + valNode.toString(), ARG_LINE_WIDTH));
                             continue;

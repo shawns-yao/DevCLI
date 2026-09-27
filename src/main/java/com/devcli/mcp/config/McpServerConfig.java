@@ -18,6 +18,13 @@ public class McpServerConfig {
     private boolean trustReadOnlyAnnotations;
     private List<String> readOnlyTools = new ArrayList<>();
     private List<String> deniedTools = new ArrayList<>();
+    private String sandbox = "HOST";
+
+    public String getSandbox() { return sandbox; }
+    public void setSandbox(String sandbox) { this.sandbox = sandbox; }
+
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    public boolean isWindowsNativeSandbox() { return "WINDOWS_NATIVE".equals(sandbox); }
 
     public String getCommand() {
         return command;

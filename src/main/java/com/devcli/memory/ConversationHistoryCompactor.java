@@ -718,13 +718,8 @@ public class ConversationHistoryCompactor {
         int systemEnd = "system".equals(history.get(0).role()) ? 1 : 0;
 
         // 1) token 预算保留区：从尾巴往前累计 token，落在 user 边界
-        int tailBudget = adaptiveRetainBudget
-                ? Math.min(retainRecentTokens(), Math.max(1, triggerTokens / 2)) : retainRecentTokens;
-        int splitIdx = findSplitIdxByTokenBudget(history, systemEnd, tailBudget);
-        splitIdx = fitRecentTailWithinTokenBudget(history, systemEnd, splitIdx, tailBudget);
-        if (splitIdx <= systemEnd) {
-            splitIdx = findSplitIdxByCompletedToolBatch(history, systemEnd, tailBudget);
-        }
+        int tailBudget = summaryTailBudget(triggerTokens);
+        int splitIdx = summarySplitIndex(summarySourceHistory, triggerTokens);
         if (splitIdx <= systemEnd) {
             log.info("compactIfNeeded skip: cannot find safe splitIdx > systemEnd={}", systemEnd);
             // 这不是 LLM 调用失败，是结构性无法压缩（如全是 system 或 retainTokens 过大）。
@@ -753,14 +748,14 @@ public class ConversationHistoryCompactor {
 
         // 4) 摘要：优先复用会话预摘要，否则走增量 vs 全量 Map-Reduce。
         String summary = null;
-        if (summaryBase == null && compactionSummaryCache != null) {
-            var reusablePreSummary = compactionSummaryCache.findReusablePreSummary(oldMsgs);
+        if (!periodicLifecycleGc && compactionSummaryCache != null) {
+            var reusablePreSummary = compactionSummaryCache.findReusablePreSummary(oldMsgs, llmClient);
             if (reusablePreSummary.isPresent()) {
                 summary = reusablePreSummary.get().summary();
                 log.info("reuse session memory pre-summary for {} old messages",
                         reusablePreSummary.get().messageCount());
             } else {
-                var extendablePreSummary = compactionSummaryCache.findExtendablePreSummary(oldMsgs);
+                var extendablePreSummary = compactionSummaryCache.findExtendablePreSummary(oldMsgs, llmClient);
                 if (extendablePreSummary.isPresent()) {
                     int absoluteEnd = systemEnd + extendablePreSummary.get().messageCount();
                     summaryBase = new PreviousSummary(
@@ -1480,6 +1475,34 @@ public class ConversationHistoryCompactor {
      * splitIdx 之前的所有内容会被压缩；如果 splitIdx 等于 systemEnd，说明整段都没达到
      * retain 阈值或第一个 user 就达标了，没东西可压，调用方应跳过。
      */
+    private int summarySplitIndex(List<LlmClient.Message> history, int triggerTokens) {
+        int systemEnd = "system".equals(history.get(0).role()) ? 1 : 0;
+        int tailBudget = summaryTailBudget(triggerTokens);
+        int split = findSplitIdxByTokenBudget(history, systemEnd, tailBudget);
+        split = fitRecentTailWithinTokenBudget(history, systemEnd, split, tailBudget);
+        return split > systemEnd ? split : findSplitIdxByCompletedToolBatch(history, systemEnd, tailBudget);
+    }
+
+    private int summaryTailBudget(int triggerTokens) {
+        return adaptiveRetainBudget
+                ? Math.min(retainRecentTokens(), Math.max(1, triggerTokens / 2)) : retainRecentTokens;
+    }
+
+    /** 与正式压缩共用原始消息切点，预摘要只覆盖可淘汰前缀。 */
+    public List<LlmClient.Message> preSummaryHistory(List<LlmClient.Message> history, int triggerTokens) {
+        if (history == null || history.isEmpty()) return List.of();
+        int split = summarySplitIndex(history, triggerTokens);
+        int systemEnd = "system".equals(history.get(0).role()) ? 1 : 0;
+        return split <= systemEnd ? List.of() : List.copyOf(history.subList(0, split));
+    }
+
+    String summarizePrefix(List<LlmClient.Message> messages) throws IOException {
+        PreviousSummary previous = detectPreviousSummary(messages, 0);
+        if (previous == null) return summarize(messages);
+        List<LlmClient.Message> delta = messages.subList(previous.endIdx, messages.size());
+        return delta.isEmpty() ? previous.summaryText : summarizeIncremental(previous.summaryText, delta);
+    }
+
     private static int findSplitIdxByTokenBudget(List<LlmClient.Message> history,
                                                   int systemEnd, int retainTokens) {
         int accumulated = 0;

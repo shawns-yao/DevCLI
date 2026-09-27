@@ -113,6 +113,10 @@ public class McpConfigLoader {
     }
 
     private void validate(McpServerConfig config) {
+        if (!"HOST".equals(config.getSandbox()) && !"WINDOWS_NATIVE".equals(config.getSandbox()))
+            throw new IllegalArgumentException("MCP sandbox must be HOST or WINDOWS_NATIVE");
+        if (config.isWindowsNativeSandbox() && (!config.isStdio() || !config.getEnv().isEmpty()))
+            throw new IllegalArgumentException("WINDOWS_NATIVE MCP requires local stdio and an empty env; offline read-only profile");
         if (config.isStdio() == config.isHttp()) {
             throw new IllegalArgumentException("MCP server 必须且只能配置 command 或 url");
         }

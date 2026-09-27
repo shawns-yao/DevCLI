@@ -3,7 +3,6 @@ package com.devcli.hitl;
 import com.devcli.llm.LlmClient;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 
 /**
@@ -16,7 +15,6 @@ public final class TrustedIntentContext {
     static final String OPEN_TAG = "<intent_context>";
     static final String CLOSE_TAG = "</intent_context>";
 
-    private static final int MAX_ENTRY_CHARS = 1_200;
     private static final int MAX_TOTAL_CHARS = 12_000;
     private static final String EMPTY_NOTICE = "（本次会话尚无可信用户意图）";
 
@@ -27,16 +25,14 @@ public final class TrustedIntentContext {
         List<String> entries = new ArrayList<>();
         int used = 0;
         if (history != null) {
-            for (int index = history.size() - 1; index >= 0 && used < MAX_TOTAL_CHARS; index--) {
-                String entry = entry(history.get(index));
-                if (entry == null || used + entry.length() > MAX_TOTAL_CHARS) {
-                    continue;
-                }
+            for (LlmClient.Message message : history) {
+                String entry = entry(message);
+                if (entry == null) continue;
+                if (entry.length() + 1 > MAX_TOTAL_CHARS - used) throw new IncompleteContextException();
                 entries.add(entry);
-                used += entry.length();
+                used += entry.length() + 1;
             }
         }
-        Collections.reverse(entries);
 
         StringBuilder result = new StringBuilder(OPEN_TAG).append('\n');
         if (entries.isEmpty()) {
@@ -58,7 +54,7 @@ public final class TrustedIntentContext {
             String content = message.content();
             return content == null || content.isBlank()
                     ? null
-                    : "User: " + neutralize(truncate(content.strip()));
+                    : "User: " + neutralize(content.strip());
         }
         if (source != LlmClient.MessageSource.ASSISTANT || message.toolCalls() == null) {
             return null;
@@ -74,13 +70,14 @@ public final class TrustedIntentContext {
             String payload = call.function().name() + " " + call.function().arguments();
             calls.append("ToolCall: ").append(neutralize(payload));
         }
-        return calls.isEmpty() ? null : truncate(calls.toString());
+        return calls.isEmpty() ? null : calls.toString();
     }
 
-    private static String truncate(String text) {
-        return text.length() <= MAX_ENTRY_CHARS
-                ? text
-                : text.substring(0, MAX_ENTRY_CHARS) + "…（本条已截断）";
+    /** 不允许将缺失约束的投影当作完整授权上下文。 */
+    public static final class IncompleteContextException extends IllegalStateException {
+        public IncompleteContextException() {
+            super("可信用户意图超出预算或历史已缺失，无法安全自动审批；请单次确认此操作");
+        }
     }
 
     static String neutralize(String text) {

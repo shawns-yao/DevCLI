@@ -697,7 +697,7 @@ class ToolRegistryTest {
 
     @Test
     void saveMemoryToolUsesInjectedMemorySaver() {
-        ToolRegistry registry = new ToolRegistry();
+        ToolRegistry registry = memoryApprovalRegistry();
         List<String> saved = new ArrayList<>();
         registry.setMemorySaver(saved::add);
 
@@ -709,7 +709,7 @@ class ToolRegistryTest {
 
     @Test
     void saveMemoryToolReportsPolicyRejection() {
-        ToolRegistry registry = new ToolRegistry();
+        ToolRegistry registry = memoryApprovalRegistry();
         registry.setMemorySaveHandler(fact -> new ToolRegistry.MemorySaveResult(false,
                 "长期记忆策略跳过: 一次性临时信息"));
 
@@ -720,7 +720,7 @@ class ToolRegistryTest {
 
     @Test
     void saveMemoryToolPassesScopeTypeAndValidityToHandler() {
-        ToolRegistry registry = new ToolRegistry();
+        ToolRegistry registry = memoryApprovalRegistry();
         java.util.concurrent.atomic.AtomicReference<ToolRegistry.MemorySaveRequest> captured =
                 new java.util.concurrent.atomic.AtomicReference<>();
         registry.setMemorySaveHandler(new ToolRegistry.MemorySaver() {
@@ -749,7 +749,7 @@ class ToolRegistryTest {
 
     @Test
     void saveMemoryToolDoesNotEchoOriginalSensitiveFactAfterHandlerStoresIt() {
-        ToolRegistry registry = new ToolRegistry();
+        ToolRegistry registry = memoryApprovalRegistry();
         registry.setMemorySaveHandler(fact -> new ToolRegistry.MemorySaveResult(true,
                 "已保存脱敏后的长期记忆"));
 
@@ -757,6 +757,16 @@ class ToolRegistryTest {
 
         assertTrue(result.contains("已保存脱敏后的长期记忆"), result);
         assertFalse(result.contains("tok-tool-secret"), result);
+    }
+
+    private static ToolRegistry memoryApprovalRegistry() {
+        return new com.devcli.hitl.HitlToolRegistry(new com.devcli.hitl.HitlHandler() {
+            public com.devcli.hitl.ApprovalResult requestApproval(com.devcli.hitl.ApprovalRequest request) {
+                return com.devcli.hitl.ApprovalResult.approve();
+            }
+            public boolean isEnabled() { return true; }
+            public void setEnabled(boolean enabled) { }
+        });
     }
 
     @Test
