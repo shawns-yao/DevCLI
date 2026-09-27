@@ -20,7 +20,7 @@ class MainAgentDelegationTest {
         var client = new AgentDelegationTest.ScriptedClient(
                 AgentDelegationTest.call("delegate_task", """
                         {"role":"planner","task":"plan only","deliverable":"A bounded plan",
-                         "task_spec":{"execution_kind":"agent_loop","parent_dependency":"none",
+                         "task_spec":{"execution_kind":"agent_loop",
                          "inputs":"Requirements supplied in this task","scope":"Planning only",
                          "done_condition":"Return steps and acceptance criteria"}}
                         """),
@@ -50,7 +50,7 @@ class MainAgentDelegationTest {
         var client = new AgentDelegationTest.ScriptedClient(
                 AgentDelegationTest.call("delegate_task", """
                         {"role":"explorer","task":"inspect note.txt","deliverable":"Observed causes",
-                         "task_spec":{"execution_kind":"agent_loop","parent_dependency":"none",
+                         "task_spec":{"execution_kind":"agent_loop",
                          "inputs":"note.txt","scope":"Read-only investigation",
                          "done_condition":"Return findings with evidence"}}
                         """),
@@ -77,17 +77,15 @@ class MainAgentDelegationTest {
 
     @Test
     void rejectedDelegationReturnsToParentWithoutStartingChild() {
+        // 两个样本分属不同拒绝层：执行粒度由准入层判定，空白字段由工具 schema 判定。
+        // 契约缺项不再由准入层拒绝——那是参数错误而非策略拒绝。详见 ADR 0010。
         for (String contract : List.of(
                 """
-                {"execution_kind":"single_tool","parent_dependency":"none",
+                {"execution_kind":"single_tool",
                  "inputs":"README.md","scope":"read only","done_condition":"Return content"}
                 """,
                 """
-                {"execution_kind":"agent_loop","parent_dependency":"frequent",
-                 "inputs":"README.md","scope":"read only","done_condition":"Return findings"}
-                """,
-                """
-                {"execution_kind":"agent_loop","parent_dependency":"none",
+                {"execution_kind":"agent_loop",
                  "inputs":"README.md","scope":" ","done_condition":"Return findings"}
                 """)) {
             var client = new AgentDelegationTest.ScriptedClient(
@@ -103,7 +101,7 @@ class MainAgentDelegationTest {
                     assertEquals("parent handles task", agent.run("Inspect the project"));
                     assertEquals(2, client.requests.size());
                     assertTrue(client.requests.get(1).stream().anyMatch(m ->
-                            "tool".equals(m.role()) && (m.content().contains("委派策略拒绝")
+                            "tool".equals(m.role()) && (m.content().contains("委派请求被拒绝")
                                     || m.content().contains("工具参数校验失败"))));
                     assertTrue(client.tools.get(1).stream().anyMatch(t -> t.name().equals("delegate_task")));
                 }

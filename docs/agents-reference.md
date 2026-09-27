@@ -30,9 +30,9 @@ HITL 开启时，单次清单数量达到 `DEVCLI_DELETE_APPROVAL_THRESHOLD` / `
 
 默认入口由主 Agent 使用 `delegate_task` 按需调用子 Agent；它不是 `/plan` 的替代命令，也不预先构造 DAG。复用执行内核、现有工具并行池、审批锁、隔离工作区和补丁提交服务，没有第二套调度框架。
 
-委派建议先经过 `DelegationPolicy`。`task_spec` 必须声明执行粒度、父状态依赖、inputs、scope 和 done_condition，同时提供 deliverable；声明为单工具操作、频繁依赖父状态或缺少契约时拒绝。Worker 必须提供非空 allowed_write_paths。旧的仅 role/task 调用会被要求补齐契约，不静默绕过。程序检查共享预算、显式工具权限和上游报告引用，在创建子模型和工作区之前拒绝不满足条件的请求；拒绝结果回传主 Agent，不自动改写成其他工具调用。
+委派建议先经过 `DelegationPolicy`，其判定只保留一条语义判据：`task_spec` 声明的执行粒度必须是多轮 Agent 循环，声明为单工具操作时拒绝、由主 Agent 直接完成。参数结构校验（`task_spec` 的 inputs、scope、done_condition，以及 deliverable 与 Worker 的 allowed_write_paths）由工具 schema 与语义校验层承担，以参数错误返回，不再表现为策略拒绝——模型据此能区分「参数写错了」与「这个任务不该委派」，前者它自己能修。程序还检查共享预算、显式工具权限和上游报告引用，在创建子模型和工作区之前拒绝不满足条件的请求；拒绝结果回传主 Agent，不自动改写成其他工具调用。单会话累计派出量有配额（默认 200，可通过 `devcli.delegate.max.per.session` / `DEVCLI_DELEGATE_MAX_PER_SESSION` 设置为 1～10000），达到上限后拒绝后续委派并提示由主 Agent 接手；真实总量仍由父子共享的 Token 与轮数预算控制，配额的作用是让「委派是有限资源」成为确定信号。子 Agent 不继承父会话历史，契约是唯一信息通道，因此工具说明要求显式传递任务、范围、完成条件与必要背景。
 
-当前收益评分为启发式代理指标：契约基础收益 2，加 Worker 写入作用面隔离收益 0～2（不超过 3 个无通配符且带扩展名的具体路径得 2；仅满足数量少或全部具体路径得 1；其余得 0）；只读角色固定使用中性值 1，不借无效写入声明加分。成本为启动成本 1、context 与 task_spec 合计超过 8000 字符的传递成本 2，以及上游报告传递成本 1。长输入不增加隔离收益，也不证明父状态耦合；当前计费阈值并非完整 Token 成本估算。最低分默认 2，可通过 `devcli.delegation.policy.min.score` / `DEVCLI_DELEGATION_POLICY_MIN_SCORE` 设置为 1～10。评分不证明实际收益；执行粒度、输入封闭性和父状态依赖仍由模型声明。`delegation.policy` 记录准入分数，不等于后续权限和预算检查已通过。现有并行池、资源租约及版本冲突检查继续生效。
+收益评估不再是准入条件，只写入 `delegation.policy` 事件供事后诊断。评分为启发式代理指标：契约基础收益 2，加 Worker 写入作用面隔离收益 0～2（不超过 3 个无通配符且带扩展名的具体路径得 2；仅满足数量少或全部具体路径得 1；其余得 0）；只读角色固定使用中性值 1，不借无效写入声明加分。成本为启动成本 1、context 与 task_spec 合计超过 8000 字符的传递成本 2，以及上游报告传递成本 1。长输入不增加隔离收益，也不证明父状态耦合；当前计费阈值并非完整 Token 成本估算。分数低于告警线（默认 2，可通过 `devcli.delegation.yield.advisory.threshold` / `DEVCLI_DELEGATION_YIELD_ADVISORY_THRESHOLD` 设置为 1～10）时事件标记 `yield_low=true` 并给出建议，但**不影响放行，也不回灌模型**——把分数告诉模型只会诱导它修改声明措辞来「过门槛」，而任务实质不变。评分不证明实际收益；执行粒度与输入封闭性仍由模型声明。`delegation.policy` 同时记录放行结论与诊断分数，不等于后续权限和预算检查已通过。现有并行池、资源租约及版本冲突检查继续生效。
 
 | 角色 | 可用能力 | 上下文 |
 | --- | --- | --- |
@@ -141,9 +141,12 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 ### Long Context Engineering
 
-- `ContextProfile` 计算 short/balanced/long 模式
+- `ContextProfile` **不分模式档位**：所有参数都是当前模型上下文窗口的简单函数，全模型走同一套行为，只有 window 大小造成触发时机与容量差异
 - GLM-5.1: 200k / DeepSeek V4: 1M / StepFun: 256k / Kimi K2.6: 256k
-- long 模式(>=100k)：跳过 Memory 自动摘要，search_code topK=20，MCP resources 自动索引
+- 压缩触发阈值 = `min(window × 0.90, window − 输出预留)`；输出预留 = `min(max(模型输出上限, 20000), window / 2)`。可用 `devcli.context.compression.trigger.tokens` 或环境变量 `DEVCLI_CONTEXT_COMPRESSION_TRIGGER_TOKENS` 覆盖，且只向下收紧（取与默认值的较小者），非法值抛错
+- 其余按 window 派生：短期记忆预算 `window × 0.45`（下限 4000）；记忆注入上限 `clamp(window/200, 500, 5000)`；Skill 索引 / 正文预算 `clamp(window/200, 256, 2048)` / `clamp(window/50, 1024, 8192)`；压缩后原文尾部预算 `clamp(window × 8%, 4000, 32000)`
+- 压缩对**所有** window 都生效，没有按窗口大小跳过自动摘要的分支；`search_code` 未传 `top_k` 时固定默认 5（clamp 1..30），不做档位自适应
+- MCP resource 索引按 `window >= 32000` 注入（与模式档位无关），只含 URI / 名称 / 描述 / mimeType，不含正文
 - prompt caching：能力声明 + cached usage 解析
 
 ### Memory System
@@ -189,8 +192,8 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 写租约在空闲超时之外增加 600000ms 绝对期限，`DEVCLI_TEAM_LEASE_MAX_LIFETIME_MS` / `devcli.team.lease.max.lifetime.ms` 可调。单调时钟避免墙钟跳变，续租保留首次获取时间，到期重新竞争；清理使用条件删除，不移除并发更新后的租约。
 - 任务授权由 Runtime 绑定项目和唯一作用域；fork 与并行调用共享撤销标记，原授权作用域结束后不再免审批。审计关联执行轮次、步骤、授权、调用与逐次审批，并区分真实审批来源；缺失身份不补造，用户请求、Agent 身份及最终 generation 仍未贯通。
 - 授权分两层，两层各只有一个载体：跨会话的持久授权写在 `~/.devcli/config.json` 的 `permissions.allow` 规则里，`/grant` 给出的是只作用于下一轮任务的例外。`permissions.baseline` 与 `TaskGrant.merge` 已删除——前者与规则层完全重叠，后者的并集语义还造成授权只能放宽、不能收紧。`/grant status` 列出例外、规则层与放行缓存，`/grant off` 同时清空例外与 `approvedAll`；状态栏常驻显示规则层摘要。非法规则在启动时显式拒绝并整体降级为无规则，不静默部分生效；配置文件位于受保护路径名单内，工具写路径无法改写。
-- 规则层先于模式基线：`HitlToolRegistry` 先让 `ApprovalGate` 判定策略硬边界，再求值 `PermissionRuleSet`，未命中才回落到 `ApprovalGate` 的授权判定。判定次序固定为 `deny` → `allow` → `ask`，命中即短路，与 WorkBuddy 一致。代价是一条宽泛的 `allow` 会吞掉更窄的 `ask`，由加载期的 `PermissionRuleSet.shadowedAskRules()` 提示并给出替代做法（例外改用 `deny`）；曾按 specifier 字面量长度实现过一版「具体度」比较，因 WorkBuddy 无该机制且度量会判反而回滚。规则写在 `permissions.deny` / `ask` / `allow`，语法 `Tool` 或 `Tool(specifier)`；工具名支持原生名与 WorkBuddy 风格别名（`Edit` / `Write` / `Read` / `Bash` / `WebFetch` / `WebSearch`），别名在解析时归一。specifier 只对已声明资源槽的工具有效（`policy.ToolResourceSlot`），给 `revert_turn` / `apply_patch` / MCP 工具写 specifier 会在解析时被拒绝。命令规则按 `&&` / `||` / `;` / `|` 拆分逐段判定，`deny` 与 `ask` 任一子命令命中即触发、`allow` 要求全部命中，含重定向时 `allow` 的通配形态失效。任一条规则非法即整体降级为无规则并打印告警，不做部分接受；规则集为空时审批链行为与引入前一致（`docs/adr/0006`）。
-- `auto` 只分类默认策略产生的未决询问；显式 `ask`、`delete_files` 与 Shell 删除确认、`apply_patch` 删除/移动、`revert_turn`、浏览器和 MCP 逐次审批仍由人工确认。分类器缺失、超时、协议错误或工具预算不足均失败关闭；连续失败计数在主 Registry 与项目 fork 间共享，达到阈值回落 `default`，手动切换模式会复位。分类器 Prompt 允许用户级覆盖但忽略项目级同名文件，防止仓库内容改变自身审批策略。
+- 规则层使用 `hard_deny` / `soft_deny` / `allow` / `environment`。策略硬边界与 `hard_deny` 始终确定性拒绝；`auto` 将其余三类注入分类器，非 `auto` 按 `hard_deny` → `soft_deny` → `allow` 求值。旧键 `deny` / `ask` 不再读取，覆盖告警启发式及其字面量前缀计算已删除。规则语法、资源槽和命令拆分语义保持不变；任一规则非法仍整组拒绝。详见 `docs/adr/0013`。
+- `auto` 同时处理默认未决动作以及命中 `allow` / `soft_deny` / 任务授权的动作；删除、回滚、浏览器和 MCP 逐次审批仍由人工确认。分类器只接收真实用户消息与 Assistant 的结构化工具调用，排除 Assistant 自述、工具结果、系统注入、插件内容和委派报告；四类规则分别注入系统提示词的固定位置。分类器缺失、超时、协议错误或预算不足均失败关闭，连续失败达到阈值后回落 `default`。详见 `docs/adr/0012` 与 `docs/adr/0013`。
 - `PreReviewVerifier` 独立负责 Maven/javac 选择、Java 文件扫描、超时、进程输出解码和失败摘要。Maven 多模块根目录即使没有根级 Java 源码也执行硬检查；Maven 项目固定使用沙箱镜像内置的 `mvn`，复用显式只读本地仓库，不通过 Wrapper 在禁网临时容器中重复下载 Maven 本体。仅按依赖解析、仓库写入、工具链、超时、取消和沙箱故障的精确信号识别环境失败，普通编译错误中的 `cannot access` 仍归为代码失败。编译、测试等确定性失败继续阻断；只有 Pre-Review 硬检查实际执行并通过时，产物 Reviewer 的拒绝、协议错误或 LLM 故障才记录为建议，不触发 Worker 重做。未执行硬检查时 Reviewer 失败关闭。Reviewer 默认 5 轮，可配置为 `[1, 8]`；最后一轮禁用工具并强制输出裁决 JSON。
 - `Planner.replan()` 不是 Agent 循环，没有工具调用权，因此失败后重规划只读取 ExecutionArtifact 的最小结构化产物事实，不读取完整任务 result 作为主要依据。
 

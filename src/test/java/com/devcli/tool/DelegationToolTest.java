@@ -9,7 +9,7 @@ class DelegationToolTest {
 
     /** delegate_task 的 task_spec 必填字段；与 AgentDelegationTest.brief() 保持一致。 */
     private static final String TASK_SPEC = "{\"execution_kind\":\"agent_loop\","
-            + "\"parent_dependency\":\"none\",\"inputs\":\"Test fixture\","
+            + "\"inputs\":\"Test fixture\","
             + "\"scope\":\"Project fixture\",\"done_condition\":\"Report evidence\"}";
 
     private static String delegation(String role, String task) {

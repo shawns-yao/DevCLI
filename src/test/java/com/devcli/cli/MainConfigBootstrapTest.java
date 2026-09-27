@@ -51,15 +51,17 @@ class MainConfigBootstrapTest {
     @Test
     void loadsPermissionRulesFromConfig() {
         DevCliConfig config = new DevCliConfig();
-        config.getPermissions().setDeny(List.of("execute_command(git push:*)"));
-        config.getPermissions().setAsk(List.of("write_file(.github/**)"));
+        config.getPermissions().setHardDeny(List.of("execute_command(git push:*)"));
+        config.getPermissions().setSoftDeny(List.of("write_file(.github/**)"));
         config.getPermissions().setAllow(List.of("Edit(src/**)"));
+        config.getPermissions().setEnvironment(List.of("可信域名：github.com"));
 
         com.devcli.policy.PermissionRuleSet rules = Main.loadPermissionRules(config);
 
-        assertEquals(1, rules.deny().size());
-        assertEquals(1, rules.ask().size());
+        assertEquals(1, rules.hardDeny().size());
+        assertEquals(1, rules.softDeny().size());
         assertEquals(1, rules.allow().size());
+        assertEquals(1, rules.environment().size(), "环境事实是自由文本，必须原样保留");
         assertEquals("edit_file", rules.allow().get(0).tool(), "别名必须归一到 DevCLI 原生工具名");
         assertEquals("src/**", rules.allow().get(0).specifier());
     }
@@ -74,7 +76,7 @@ class MainConfigBootstrapTest {
     @Test
     void illegalPermissionRuleIsRejectedInsteadOfPartiallyApplied() {
         DevCliConfig config = new DevCliConfig();
-        config.getPermissions().setDeny(List.of("execute_command(git push:*)"));
+        config.getPermissions().setHardDeny(List.of("execute_command(git push:*)"));
         // MCP 工具没有声明参数级资源槽，带括号的规则在解析时就必须被拒绝
         config.getPermissions().setAllow(List.of("mcp__puppeteer__navigate(page)"));
 
@@ -116,16 +118,16 @@ class MainConfigBootstrapTest {
         // 活动轮次能否并发读终端取决于这个判断。判宽了会让审批读取器和队列读取器同时抢 stdin；
         // 判窄了只是少一个便利功能，所以这里按「宁可判窄」取值。
         var noRules = com.devcli.policy.PermissionRuleSet.EMPTY;
-        var askRule = com.devcli.policy.PermissionRuleSet.parse(
-                List.of(), List.of("write_file(*)"), List.of());
+        var softDenyRule = com.devcli.policy.PermissionRuleSet.parse(
+                List.of(), List.of("write_file(*)"), List.of(), List.of());
 
-        // dontAsk 把未决动作收口为拒绝，连显式 ask 规则也被拒绝，不会弹审批
+        // dontAsk 把未决动作收口为拒绝，连显式 soft_deny 规则也被拒绝，不会弹审批
         assertTrue(Main.neverPrompts(com.devcli.policy.PermissionMode.DONT_ASK, noRules));
-        assertTrue(Main.neverPrompts(com.devcli.policy.PermissionMode.DONT_ASK, askRule));
+        assertTrue(Main.neverPrompts(com.devcli.policy.PermissionMode.DONT_ASK, softDenyRule));
 
-        // bypassPermissions 放行未决动作，但显式 ask 规则仍然会询问
+        // bypassPermissions 放行未决动作，但显式 soft_deny 规则仍然会询问
         assertTrue(Main.neverPrompts(com.devcli.policy.PermissionMode.BYPASS_PERMISSIONS, noRules));
-        assertFalse(Main.neverPrompts(com.devcli.policy.PermissionMode.BYPASS_PERMISSIONS, askRule));
+        assertFalse(Main.neverPrompts(com.devcli.policy.PermissionMode.BYPASS_PERMISSIONS, softDenyRule));
 
         // 其余模式都可能弹审批——auto 的分类器失败也会退回询问
         for (var mode : List.of(com.devcli.policy.PermissionMode.DEFAULT,

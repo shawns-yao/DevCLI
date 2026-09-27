@@ -2,6 +2,21 @@
 
 > 本期目标是让 DevCLI 的运行策略随模型上下文窗口变化，而不是继续使用固定 300K token 预算和固定 RAG topK。
 
+> ⚠️ **实现变更提示（截至 2026-09-23 核实）**：本文交付的 **short / balanced / long 三档上下文模式已不存在**。
+> `src/main/java/com/devcli/context/ContextMode.java` 已从仓库移除，`ContextProfile` 改为**不分档**：
+> 所有参数都是模型上下文窗口的简单函数，全模型走同一套行为，只有 window 大小造成触发时机与容量差异。
+>
+> 具体失效项：
+> - 第 1 节 `ContextProfile` 的 short / balanced / long 三档定义 —— 档位概念已删除
+> - Memory 策略「short / balanced 保留压缩、long 跳过自动摘要」—— 压缩对**所有** window 都生效，无跳过分支
+> - RAG 策略「short=5，balanced=10，long=20」—— `search_code` 未传 `top_k` 时**固定默认 5**（上限 30）
+> - MCP resources 索引「long 模式下注入」—— 现按 `window >= 32000` 判定，与档位无关
+> - `/context` 显示「上下文模式」—— 该字段已移除，现输出 window / 压缩阈值 / 占用细分 / MCP 索引开关 / prompt cache 模式
+> - 第 3 节核心文件清单中的 `ContextMode.java` —— 文件已不存在
+>
+> 本文仅作历史交付记录保留。当前事实以 `AGENTS.md`、`docs/agents-reference.md` 和
+> `docs/context-compaction-design.md` 为准。
+
 ## 1. 已交付范围
 
 - `LlmClient` 能力声明：

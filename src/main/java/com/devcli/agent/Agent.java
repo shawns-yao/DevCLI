@@ -42,6 +42,7 @@ import java.util.HexFormat;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Supplier;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -74,6 +75,8 @@ public class Agent implements AutoCloseable {
     /** ReAct 的工作记忆跨用户轮次保留；显式清理后再复用同一会话标识重新开启。 */
     private final String sessionTaskId = "react-run-"
             + java.util.UUID.randomUUID().toString().substring(0, 8);
+    /** 单会话累计派出量。与工作记忆同生命周期，不随单轮 Token 预算重置。详见 ADR 0010。 */
+    private final AtomicInteger delegationSpawnCount = new AtomicInteger();
 
     public Agent(LlmClient llmClient) {
         this(llmClient, new ToolRegistry(), true);
@@ -138,8 +141,15 @@ public class Agent implements AutoCloseable {
         conversationHistory.addAll(messages);
     }
 
-    /** package-private 供测试访问：当前对话消息快照。 */
-    List<LlmClient.Message> conversationHistorySnapshot() {
+    /**
+     * 当前对话历史的只读快照。
+     *
+     * <p>公开给 {@code cli} 装配层：权限分类器需要它渲染判定上下文（见
+     * {@code hitl.TrustedIntentContext}），而装配发生在 {@code Main}，不在 {@code agent} 包内。</p>
+     *
+     * <p>返回副本而不是内部列表：分类器在工具执行的同步路径上被调用，遍历期间历史可能被追加。</p>
+     */
+    public List<LlmClient.Message> conversationHistorySnapshot() {
         return List.copyOf(conversationHistory);
     }
 
@@ -310,7 +320,7 @@ public class Agent implements AutoCloseable {
         LlmClient primaryClient = llmClient;
         DelegationSession delegation = new DelegationSession(toolRegistry,
                 role -> com.devcli.llm.LlmClientFactory.createDelegatedAgent(primaryClient, role),
-                budget, conversationHistory.get(0).content(), runEventSink);
+                budget, conversationHistory.get(0).content(), runEventSink, delegationSpawnCount);
         return toolRegistry.runWithDelegation(delegation, () -> new AgentExecutionEngine<String>(
                 llmClient, budget, HookLifecycle.load(toolRegistry), contextReferenceRegistry).run(
                 new AgentExecutionEngine.Delegate<>() {

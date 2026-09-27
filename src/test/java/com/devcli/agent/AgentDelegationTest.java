@@ -472,7 +472,7 @@ class AgentDelegationTest {
     void evidenceExcerptsAreBoundedAndRedacted() throws Exception {
         Files.writeString(project.resolve("read.txt"), "token=example-secret\n" + "x".repeat(2000));
         var child = new ScriptedClient(call("read_file", "{\"path\":\"read.txt\"}"), answer("read complete"));
-        try (ToolRegistry registry = registry()) {
+        try (ToolRegistry registry = registry(true)) {
             var result = session(registry, child, new AgentBudget(10000, 3, 20)).execute(
                     brief("role", "explorer", "task", "read notes"), ToolExecutionContext.current("redacted"));
             var report = new com.fasterxml.jackson.databind.ObjectMapper().readTree(result.text());
@@ -547,11 +547,34 @@ class AgentDelegationTest {
         }
     }
 
+    @Test
+    void sessionSpawnQuotaRejectsFurtherDelegationAfterLimit() {
+        // 单会话派出量配额：默认 200，此处压到 1 以验证第二次委派被拒。
+        // 配额挂在会话级计数器上，与单轮 Token 预算相互独立。详见 ADR 0010。
+        String previous = System.getProperty("devcli.delegate.max.per.session");
+        System.setProperty("devcli.delegate.max.per.session", "1");
+        var child = new ScriptedClient(call("list_dir", "{\"path\":\".\"}"), answer("done"));
+        try (ToolRegistry registry = registry()) {
+            var session = session(registry, child, new AgentBudget(1_000_000, 3, 100));
+            var first = session.execute(brief("role", "explorer", "task", "inspect"),
+                    ToolExecutionContext.current("first"));
+            assertTrue(first.isSuccess(), first.text());
+            var second = session.execute(brief("role", "explorer", "task", "inspect"),
+                    ToolExecutionContext.current("second"));
+            assertFalse(second.isSuccess());
+            assertEquals(ToolErrorCode.POLICY_DENIED, second.errorCode());
+            assertTrue(second.text().contains("额度已用尽"), second.text());
+        } finally {
+            if (previous == null) System.clearProperty("devcli.delegate.max.per.session");
+            else System.setProperty("devcli.delegate.max.per.session", previous);
+        }
+    }
+
     static Map<String, String> brief(String... fields) {
         Map<String, String> result = new java.util.HashMap<>();
         result.put("deliverable", "Report findings and verification evidence");
         result.put("task_spec", """
-                {"execution_kind":"agent_loop","parent_dependency":"none",
+                {"execution_kind":"agent_loop",
                  "inputs":"Test fixture and explicitly supplied task",
                  "scope":"Project fixture","done_condition":"Report evidence and unresolved items"}
                 """);
@@ -565,18 +588,38 @@ class AgentDelegationTest {
     }
 
     private ToolRegistry registry() {
-        ToolRegistry registry = new NoIndexRegistry();
+        return registry(false);
+    }
+
+    private ToolRegistry registry(boolean allowSensitiveContent) {
+        ToolRegistry registry = new NoIndexRegistry(allowSensitiveContent);
         registry.setProjectPath(project.toString());
         return registry;
     }
 
     // 本组只验证文件隔离与提交；索引数据库不在测试范围。
     private static final class NoIndexRegistry extends ToolRegistry {
-        NoIndexRegistry() { super(); }
-        NoIndexRegistry(ResourceLeaseMaintenance maintenance) { super(maintenance); }
+        private final boolean allowSensitiveContent;
+
+        NoIndexRegistry() { this(false); }
+        NoIndexRegistry(boolean allowSensitiveContent) {
+            super();
+            this.allowSensitiveContent = allowSensitiveContent;
+        }
+        NoIndexRegistry(ResourceLeaseMaintenance maintenance, boolean allowSensitiveContent) {
+            super(maintenance);
+            this.allowSensitiveContent = allowSensitiveContent;
+        }
         @Override public void markRagIndexDirty(Collection<String> paths) { }
+        @Override protected com.devcli.policy.SensitiveContentPolicy.Decision reviewSensitiveContent(
+                String tool, com.devcli.policy.SensitiveContentPolicy.Inspection inspection,
+                String purpose, String target, boolean redactionAllowed) {
+            return allowSensitiveContent
+                    ? com.devcli.policy.SensitiveContentPolicy.Decision.ALLOW_ONCE
+                    : super.reviewSensitiveContent(tool, inspection, purpose, target, redactionAllowed);
+        }
         @Override protected ToolRegistry createProjectForkRegistry(ResourceLeaseMaintenance maintenance) {
-            return new NoIndexRegistry(maintenance);
+            return new NoIndexRegistry(maintenance, allowSensitiveContent);
         }
     }
 

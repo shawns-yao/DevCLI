@@ -231,7 +231,7 @@ class ToolGovernanceEntryTest {
         System.setProperty(key, "2");
         var client = new AgentDelegationTest.ScriptedClient(call("delegate_task", """
                 {"role":"explorer","task":"Inspect directory","deliverable":"Return directory evidence",
-                 "task_spec":{"execution_kind":"agent_loop","parent_dependency":"none",
+                 "task_spec":{"execution_kind":"agent_loop",
                  "inputs":"Project directory","scope":"Read only","done_condition":"Return directory evidence"}}
                 """), call("list_dir", "{\"path\":\".\"}"), answer("child evidence"),
                 call("list_dir", "{\"path\":\".\"}"));

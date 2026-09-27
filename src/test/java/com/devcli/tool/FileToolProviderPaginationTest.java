@@ -99,7 +99,7 @@ class FileToolProviderPaginationTest {
 
     @Test
     void readToolResultRestoresTruncatedContentByCursor() {
-        String original = "a".repeat(5_000) + "b".repeat(15_000);
+        String original = "a".repeat(5_000) + "b".repeat(25_000);
         String managed = ToolResultSizeManager.process(
                 "execute_command", "call_restore", projectRoot.toString(), false, original);
         String resultRef = extractResultRef(managed);
@@ -117,7 +117,7 @@ class FileToolProviderPaginationTest {
 
     @Test
     void readToolResultDefaultPageDoesNotCreateNestedArtifact() {
-        String original = "r".repeat(20_000);
+        String original = "r".repeat(30_000);
         String managed = ToolResultSizeManager.process(
                 "execute_command", "call_no_nested_ref", projectRoot.toString(), false, original);
         String resultRef = extractResultRef(managed);
@@ -150,7 +150,7 @@ class FileToolProviderPaginationTest {
     void readToolResultRejectsTamperedArtifact() throws Exception {
         String managed = ToolResultSizeManager.process(
                 "execute_command", "call_tamper", projectRoot.toString(), false,
-                "v".repeat(20_000));
+                "v".repeat(30_000));
         String resultRef = extractResultRef(managed);
         Files.writeString(ToolResultArtifactStore.rootDirectory().resolve(resultRef), "tampered");
 

@@ -117,7 +117,7 @@ READ_ONLY → LOCAL_CONTEXT → PROJECT_MUTATION → HOST_PROCESS → EXTERNAL_M
 ```text
 策略硬边界（项目根围栏 / 命令黑名单）
 → DENY   直接拒绝，不先弹一次注定被拒的审批
-→ 规则层  deny 规则直接拒绝；allow 规则自动放行；ask 规则强制人工审批
+→ 规则层  hard_deny 直接拒绝；soft_deny / allow 按当前模式判定
 → 用户授权范围覆盖本次参数
 → ALLOW  自动放行，并输出授权理由
 → 其余
@@ -126,7 +126,7 @@ READ_ONLY → LOCAL_CONTEXT → PROJECT_MUTATION → HOST_PROCESS → EXTERNAL_M
 
 授权只能收窄策略允许集，不能放宽，任何授权都不覆盖 `DENY`。授权分两层，两层各只有一个载体：**跨会话的持久授权**写在 `~/.devcli/config.json` 的 `permissions.allow` 规则里，表达「我长期信任这类操作」；**任务例外**由 `/grant` 给出，只作用于下一条任务（含编排轮），表达「这次需要超出常态的权限」。`/grant write` 追加授权写入项目内任意文件、`/grant write <glob>...` 追加给定项目相对路径、`/grant net <域名>...` 追加访问该域名及其子域、`/grant commands` 追加项目构建测试命令、`/grant all` 追加全部、`/grant status` 查看例外/规则层/放行缓存、`/grant off` 取消例外并清空本轮放行缓存。状态栏常驻显示规则层摘要，配置文件本身位于受保护路径名单内，Agent 的工具写路径改不动它。授权 glob 与委派写白名单共用同一套语义：项目相对路径、拒绝绝对路径与 `..`、`dir/**` 表示该目录及其所有后代。
 
-规则层在同一份配置里，写在 `permissions.deny` / `ask` / `allow`，语法是 `Tool` 或 `Tool(specifier)`——`deny` 立即拒绝且不可被任何授权覆盖，`ask` 强制人工审批，`allow` 立即放行。判定次序固定为 `deny` → `allow` → `ask`，命中即短路，与 WorkBuddy 的求值链一致：`deny` 绝对优先，`allow` 先于 `ask`。代价是一条宽泛的 `allow` 会吞掉更窄的 `ask`——`allow write_file(src/**)` 配 `ask write_file(src/secret/**)` 时，后者永远不会生效。这个坑在启动时由覆盖告警直接提示（并给出正确做法：例外改用 `deny` 声明），不靠改次序解决。工具名可写原生名（`write_file`）或 WorkBuddy 风格别名（`Edit` / `Write` / `Read` / `Bash` / `WebFetch` / `WebSearch`）。specifier 只对已声明资源槽的工具有效：路径类写项目相对 glob（`Edit(src/**)`），命令类写命令模式（`Bash(git:*)` 按词边界匹配 `git` 与 `git status`，不匹配 `gitleaks`），网络类写裸域名或 `domain:` 前缀（`WebFetch(domain:example.com)`）；给 `revert_turn` / `apply_patch` / MCP 工具写 specifier 会在解析时被拒绝。命令规则按 `&&` / `||` / `;` / `|` 拆分后逐段判定，`deny` 与 `ask` 任一子命令命中即触发、`allow` 要求全部命中；含重定向时 `allow` 的通配形态失效，只接受精确匹配。任一条规则写错即整体降级为无规则并打印告警，不做部分接受——拒绝规则被静默丢弃会让用户以为它在生效。
+规则层使用 `permissions.hard_deny` / `soft_deny` / `allow` / `environment`。`hard_deny` 无条件拒绝；`soft_deny` 表达可由明确用户意图解除的边界；`allow` 表达允许例外；`environment` 只提供环境事实。`auto` 模式只确定性执行 `hard_deny`，其余三类随可信意图上下文进入分类器；非 `auto` 模式按 `hard_deny` → `soft_deny` → `allow` 求值。旧键 `deny` / `ask` 不再读取。规则语法仍为 `Tool` 或 `Tool(specifier)`，工具别名在解析时归一；任一规则非法则整组拒绝，不部分接受。详见 ADR 0013。
 
 `web_fetch` 是需要出口授权的只读工具：命中 `/grant net` 的域名自动放行（相等或其子域，不支持通配符），未授权域名逐次确认（`dontAsk` 模式收口为拒绝）；无论是否授权，`NetworkPolicy` 的 scheme 白名单与环回/内网拦截始终生效。域名取 `URI.getHost()`，即 userinfo（`@`）之后的部分，大小写与末尾点归一化，端口不参与判定。`web_search` 不按域名授权——目的地由 provider 配置决定，工具参数里没有可信资源槽——但两个工具共用同一份出口限流预算（60 秒 / 30 次），且在建连之前判定。命令类授权复用主机白名单（Maven 生命周期 / javac / 只读 Git），所以 `git push` 这类远程副作用仍然必须人工确认；`revert_turn`（批量回写整个工作区）和全部 MCP 工具没有可信的参数级资源槽，一律回到人工审批。已声明资源槽的参数是写入类工具的 `path`、`create_project` 的 `name`、`execute_command` 的 `command` 和 `web_fetch` 的 `url`。
 

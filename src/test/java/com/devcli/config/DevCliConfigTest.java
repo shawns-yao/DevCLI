@@ -8,6 +8,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -25,9 +26,10 @@ class DevCliConfigTest {
         String json = """
                 {
                   "permissions": {
-                    "deny": ["execute_command(git push:*)"],
-                    "ask": ["write_file(.github/**)"],
-                    "allow": ["Edit(src/**)", "execute_command(mvn test:*)"]
+                    "hard_deny": ["execute_command(git push:*)"],
+                    "soft_deny": ["write_file(.github/**)"],
+                    "allow": ["Edit(src/**)", "execute_command(mvn test:*)"],
+                    "environment": ["生产集群是共享资源"]
                   }
                 }
                 """;
@@ -35,9 +37,10 @@ class DevCliConfigTest {
         DevCliConfig.PermissionsConfig permissions =
                 MAPPER.readValue(json, DevCliConfig.class).getPermissions();
 
-        assertEquals(List.of("execute_command(git push:*)"), permissions.getDeny());
-        assertEquals(List.of("write_file(.github/**)"), permissions.getAsk());
+        assertEquals(List.of("execute_command(git push:*)"), permissions.getHardDeny());
+        assertEquals(List.of("write_file(.github/**)"), permissions.getSoftDeny());
         assertEquals(List.of("Edit(src/**)", "execute_command(mvn test:*)"), permissions.getAllow());
+        assertEquals(List.of("生产集群是共享资源"), permissions.getEnvironment());
     }
 
     @Test
@@ -45,22 +48,32 @@ class DevCliConfigTest {
         DevCliConfig.PermissionsConfig permissions =
                 MAPPER.readValue("{}", DevCliConfig.class).getPermissions();
 
-        assertTrue(permissions.getDeny().isEmpty());
-        assertTrue(permissions.getAsk().isEmpty());
+        assertTrue(permissions.getHardDeny().isEmpty());
+        assertTrue(permissions.getSoftDeny().isEmpty());
         assertTrue(permissions.getAllow().isEmpty());
+        assertTrue(permissions.getEnvironment().isEmpty());
     }
 
     @Test
     void explicitNullPermissionRulesDoNotBreakConfig() throws Exception {
         String json = """
-                {"permissions": {"deny": null, "ask": null, "allow": null}}
+                {"permissions": {"hard_deny": null, "soft_deny": null, "allow": null, "environment": null}}
                 """;
 
         DevCliConfig.PermissionsConfig permissions =
                 MAPPER.readValue(json, DevCliConfig.class).getPermissions();
 
-        assertTrue(permissions.getDeny().isEmpty());
-        assertTrue(permissions.getAsk().isEmpty());
+        assertTrue(permissions.getHardDeny().isEmpty());
+        assertTrue(permissions.getSoftDeny().isEmpty());
         assertTrue(permissions.getAllow().isEmpty());
+        assertTrue(permissions.getEnvironment().isEmpty());
+    }
+
+    @Test
+    void legacyPermissionKeysAreRejected() {
+        String json = "{\"permissions\":{\"deny\":[\"write_file\"],\"ask\":[]}}";
+
+        assertThrows(com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException.class,
+                () -> MAPPER.readValue(json, DevCliConfig.class));
     }
 }

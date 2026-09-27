@@ -32,9 +32,10 @@ class PermissionModeApprovalTest {
 
     private static HitlToolRegistry registry(Path projectRoot, RecordingHandler handler,
                                              PermissionMode mode,
-                                             List<String> deny, List<String> ask, List<String> allow) {
+                                             List<String> hardDeny, List<String> softDeny,
+                                             List<String> allow) {
         HitlToolRegistry registry = new HitlToolRegistry(handler)
-                .withPermissionRules(PermissionRuleSet.parse(deny, ask, allow))
+                .withPermissionRules(PermissionRuleSet.parse(hardDeny, softDeny, allow, List.of()))
                 .withPermissionMode(mode);
         registry.setProjectPath(projectRoot.toString());
         return registry;
@@ -110,7 +111,7 @@ class PermissionModeApprovalTest {
 
     @Test
     void bypassPermissionsCannotOverrideExplicitAskRule(@TempDir Path tempDir) {
-        // 显式 ask 表达的是用户意志，任何模式都不能把它改写成放行
+        // 显式 soft_deny 表达的是用户边界，非 auto 模式不能把它改写成放行
         RecordingHandler handler = new RecordingHandler();
         HitlToolRegistry registry = registry(tempDir, handler, PermissionMode.BYPASS_PERMISSIONS,
                 List.of(), List.of("write_file(*.txt)"), List.of());

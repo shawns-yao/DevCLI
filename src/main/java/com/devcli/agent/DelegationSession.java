@@ -37,6 +37,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 /** 一次主任务的按需委派能力。只装配子循环，不负责规划、评审或自动重做。 */
@@ -56,9 +57,18 @@ final class DelegationSession implements DelegateTaskTool.Handler {
     private final Map<String, String> reportStore = new ConcurrentHashMap<>();
     private final Deque<String> reportOrder = new ArrayDeque<>();
     private final Map<String, List<LlmClient.Tool>> toolSnapshots = new ConcurrentHashMap<>();
+    /** 单会话派出量配额；计数器由 Agent 持有，跨用户轮次累计，不随单轮预算重置。 */
+    private final AtomicInteger spawnCounter;
+    private final int maxSpawnsPerSession;
 
     DelegationSession(ToolRegistry parent, Function<String, LlmClient> modelResolver,
                       AgentBudget parentBudget, String systemPrompt, RunEventSink events) {
+        this(parent, modelResolver, parentBudget, systemPrompt, events, null);
+    }
+
+    DelegationSession(ToolRegistry parent, Function<String, LlmClient> modelResolver,
+                      AgentBudget parentBudget, String systemPrompt, RunEventSink events,
+                      AtomicInteger spawnCounter) {
         this.parent = parent;
         this.modelResolver = modelResolver;
         this.parentBudget = parentBudget;
@@ -71,6 +81,9 @@ final class DelegationSession implements DelegateTaskTool.Handler {
         this.reportSanitizationEnabled = ConfigResolver.booleanValue(
                 "devcli.delegation.report.sanitization.enabled",
                 "DEVCLI_DELEGATION_REPORT_SANITIZATION_ENABLED", true);
+        this.spawnCounter = spawnCounter == null ? new AtomicInteger() : spawnCounter;
+        this.maxSpawnsPerSession = ConfigResolver.intValue("devcli.delegate.max.per.session",
+                "DEVCLI_DELEGATE_MAX_PER_SESSION", 200, 1, 10000);
     }
 
     @Override
@@ -83,17 +96,22 @@ final class DelegationSession implements DelegateTaskTool.Handler {
                     "需要有效角色和非空子任务", false), "failed");
         }
         DelegationPolicy.Decision policy = DelegationPolicy.evaluate(arguments);
+        DelegationPolicy.Yield yield = policy.yield();
+        // 收益诊断只进事件流，不回灌模型：把分数告诉模型只会诱导它修改声明措辞来「过门槛」，
+        // 而任务实质不变。放行结论与诊断分开记录，便于事后统计委派决策质量。详见 ADR 0009。
         events.emit(new RunEvent.CustomMessage(
                 "delegation.policy", policy.summary(),
                 Map.of("child_id", id,
                         "role", role,
                         "allowed", String.valueOf(policy.allowed()),
-                        "score", String.valueOf(policy.score()),
-                        "benefit", String.valueOf(policy.benefit()),
-                        "coordination_cost", String.valueOf(policy.coordinationCost()))));
+                        "yield_score", String.valueOf(yield.score()),
+                        "yield_benefit", String.valueOf(yield.benefit()),
+                        "yield_coordination_cost", String.valueOf(yield.coordinationCost()),
+                        "yield_low", String.valueOf(yield.lowYield()),
+                        "yield_advice", yield.advice())));
         if (!policy.allowed()) {
             return reportFailure(id, ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
-                    "委派策略拒绝：" + policy.reason() + "。请由主 Agent 直接完成该任务。", false), "blocked");
+                    "委派请求被拒绝：" + policy.reason(), false), "blocked");
         }
         if (parent.currentToolAccessScope() != ToolRegistry.ToolAccessScope.FULL) {
             return reportFailure(id, ToolOutput.rejected(ToolErrorCode.CAPABILITY_DENIED,
@@ -120,8 +138,20 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             return reportFailure(id, ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
                     "上游报告不存在或已过期，请补充输入后再委派", false), "blocked");
         }
+        // 单会话派出量配额。放在全部前置检查之后，只统计真正开始执行的委派。
+        // 真实总量由父子共享的 Token 与轮数预算控制，该配额的作用是让「委派是有限资源」
+        // 对模型成为确定信号，而不是承担实际限流。详见 ADR 0010。
+        int spawnIndex = spawnCounter.incrementAndGet();
+        if (spawnIndex > maxSpawnsPerSession) {
+            spawnCounter.decrementAndGet();
+            return reportFailure(id, ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
+                    "本次会话委派额度已用尽（上限 " + maxSpawnsPerSession
+                            + " 次），请由主 Agent 用现有工具直接完成剩余工作。", false), "blocked");
+        }
         events.emit(new RunEvent.CustomMessage("delegation.started", "子任务开始",
-                Map.of("child_id", id, "report_id", id, "role", role)));
+                Map.of("child_id", id, "report_id", id, "role", role,
+                        "spawn_index", String.valueOf(spawnIndex),
+                        "spawn_limit", String.valueOf(maxSpawnsPerSession))));
         ObjectNode candidateReport = null;
         try {
             context.throwIfCancelled();

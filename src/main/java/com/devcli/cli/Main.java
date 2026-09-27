@@ -346,6 +346,13 @@ public class Main {
             hitlToolRegistry.setSkillContextBuffer(skillContextBuffer);
 
             Agent reactAgent = new Agent(llmClient, hitlToolRegistry);
+            // 分类器要读对话历史才能判定用户意图——参照实现的取向是「默认放行 + 看意图」，
+            // 而意图只能从对话里读出来。装配点必须在 Agent 创建之后，所以传 Supplier 延迟取，
+            // 而不是取一次快照：历史在会话中持续增长。
+            // 过滤与中和都在 TrustedIntentContext 内完成，这里不拼字符串。
+            hitlToolRegistry.withTrustedIntentContext(
+                    () -> com.devcli.hitl.TrustedIntentContext.render(
+                            reactAgent.conversationHistorySnapshot()));
             // Execution Trace：结构化运行事件自动落 ~/.devcli/traces，/trace 查看。
             reactAgent.setRunEventSink(TRACE_SINK);
             AgentSessionRuntime reactSession = AgentSessionRuntime.adoptOwned(
@@ -1864,6 +1871,7 @@ public class Main {
      *
      * <p>非法规则显式拒绝并整体降级为「无规则」：一条写错的规则如果被静默丢弃，用户会以为
      * 拒绝规则在生效。语法与校验只保留在 {@code PermissionRule} 里，不在此重复。</p>
+     *
      */
     static com.devcli.policy.PermissionRuleSet loadPermissionRules(DevCliConfig config) {
         DevCliConfig.PermissionsConfig permissions = config == null ? null : config.getPermissions();
@@ -1872,19 +1880,18 @@ public class Main {
         }
         try {
             com.devcli.policy.PermissionRuleSet parsed = com.devcli.policy.PermissionRuleSet.parse(
-                    permissions.getDeny(), permissions.getAsk(), permissions.getAllow());
-                for (String shadowed : parsed.shadowedAskRules()) {
-                    System.err.println("⚠️ " + shadowed);
-                }
-                for (com.devcli.policy.PermissionRule rule : parsed.allowRulesForTool("execute_command")) {
-                    System.err.println("⚠️ 放行规则 " + rule.raw()
-                            + " 在主机执行的命令上不生效：主机命令必须单次人工确认，不接受任何放宽。"
-                            + "要拦某条命令请改用 deny");
-                }
-                return parsed;
+                    permissions.getHardDeny(), permissions.getSoftDeny(),
+                    permissions.getAllow(), permissions.getEnvironment());
+            for (com.devcli.policy.PermissionRule rule : parsed.allowRulesForTool("execute_command")) {
+                System.err.println("⚠️ 放行规则 " + rule.raw()
+                        + " 在主机执行的命令上不生效：主机命令必须单次人工确认，不接受任何放宽。"
+                        + "要拦某条命令请改用 hard_deny");
+            }
+            return parsed;
         } catch (IllegalArgumentException invalid) {
             System.err.println("⚠️ 权限规则非法，已按无规则处理: " + invalid.getMessage());
-            System.err.println("   请检查 ~/.devcli/config.json 的 permissions.deny / ask / allow。");
+            System.err.println("   请检查 ~/.devcli/config.json 的 permissions."
+                    + "hard_deny / soft_deny / allow / environment。");
             return com.devcli.policy.PermissionRuleSet.EMPTY;
         }
     }
@@ -1915,16 +1922,14 @@ public class Main {
      * <p>只有这个条件成立时，主 LineReader 才能与执行并发读取终端——审批读取器和队列读取器
      * 同时抢 stdin 会让输入错乱。</p>
      *
-     * <p>{@code dontAsk} 把未决动作收口为拒绝，连显式 {@code ask} 规则也被拒绝，不会弹；
-     * {@code bypassPermissions} 放行未决动作，但显式 {@code ask} 规则仍然会询问，因此要规则集里
-     * 没有 {@code ask} 规则才算不弹。其余模式（含 {@code auto}；显式 {@code ask} 与硬审批仍会弹）
-     * 都可能弹。</p>
+     * <p>{@code dontAsk} 把未决动作收口为拒绝，不会弹；{@code bypassPermissions} 放行未决动作，
+     * 但 {@code soft_deny} 仍然会询问。其余模式都可能弹出审批。</p>
      */
     static boolean neverPrompts(PermissionMode mode,
                                 com.devcli.policy.PermissionRuleSet rules) {
         return switch (mode.askPolicy()) {
             case DENY -> true;
-            case ALLOW -> rules == null || rules.ask().isEmpty();
+            case ALLOW -> rules == null || rules.softDeny().isEmpty();
             default -> false;
         };
     }

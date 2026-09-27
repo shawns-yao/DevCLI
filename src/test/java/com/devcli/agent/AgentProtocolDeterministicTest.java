@@ -607,7 +607,8 @@ class AgentProtocolDeterministicTest {
             case 6 -> "single-unicode-ＡＰＩ";
             case 7 -> "single-path-C:\\Temp\\A.txt";
             case 8 -> "single-long-" + "x".repeat(64);
-            case 9 -> "single-final-" + "x".repeat(12_100);
+            // 样本必须超过 ToolResultSizeManager 的放行线，否则结果原样返回、不触发尺寸治理
+            case 9 -> "single-final-" + "x".repeat(30_000);
             default -> throw new IllegalArgumentException("variant");
         };
     }

@@ -104,28 +104,7 @@ public record PermissionRule(String tool, String specifier, String raw) {
     }
 
     /**
-     * specifier 中第一个通配符之前的字面量；没有 specifier 时返回 {@code null}。
-     *
-     * <p>只服务于加载期的规则覆盖告警（{@link PermissionRuleSet#shadowedAskRules()}），
-     * 不参与任何判定。字面量长度不是可靠的「宽窄」度量——{@code **&#47;secret&#47;**} 的字面量前缀
-     * 是空串，语义上却比 {@code src&#47;**} 更窄。启发式只配做告警：误报的代价是用户多看一眼，
-     * 误判的代价是安全漏洞。</p>
-     */
-    String literalPrefix() {
-        if (specifier == null) {
-            return null;
-        }
-        for (int index = 0; index < specifier.length(); index++) {
-            char current = specifier.charAt(index);
-            if (current == '*' || current == '?') {
-                return specifier.substring(0, index);
-            }
-        }
-        return specifier;
-    }
-
-    /**
-     * deny / ask 语义：任一子命令或任一资源命中即算命中。
+     * hard_deny / soft_deny 语义：任一子命令或任一资源命中即算命中。
      *
      * @param values 由 {@code ApprovalGate} 按资源槽归一化后的资源值；
      *               {@code null} 表示无法解析，此时带 specifier 的规则一律不命中
@@ -148,7 +127,7 @@ public record PermissionRule(String tool, String specifier, String raw) {
     }
 
     /**
-     * allow 语义：全部子命令与全部资源都必须命中。
+     * allow 例外语义：全部子命令与全部资源都必须命中。
      *
      * <p>命令含重定向（{@code >} / {@code <}）时通配符不生效，只接受精确匹配：重定向能改写的
      * 目标不在命令文本的资源槽里，通配放行会顺带授权一个未声明的写入目标。</p>

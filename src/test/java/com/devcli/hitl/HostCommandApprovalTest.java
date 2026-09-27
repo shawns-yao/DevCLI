@@ -202,9 +202,9 @@ class HostCommandApprovalTest {
     }
 
     private HitlToolRegistry registry(Handler handler, PermissionMode mode,
-                                     List<String> deny, List<String> allow) {
+                                     List<String> hardDeny, List<String> allow) {
         HitlToolRegistry registry = new HitlToolRegistry(handler)
-                .withPermissionRules(PermissionRuleSet.parse(deny, List.of(), allow))
+                .withPermissionRules(PermissionRuleSet.parse(hardDeny, List.of(), allow, List.of()))
                 .withPermissionMode(mode);
         registry.setProjectPath(root.toString());
         return registry;

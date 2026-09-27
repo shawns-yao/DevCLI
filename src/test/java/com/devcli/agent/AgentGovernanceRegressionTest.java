@@ -90,7 +90,7 @@ class AgentGovernanceRegressionTest {
                         "allowed_write_paths", List.of("allowed.txt"))),
                 call("execute_command", Map.of("command", "javac -h . NativeApi.java")),
                 answer("worker done"), answer("parent done"));
-        try (Fixture fixture = fixture(client)) {
+        try (Fixture fixture = fixture(client, true)) {
             Files.writeString(fixture.project.resolve("NativeApi.java"),
                     "public class NativeApi { public native void invoke(); }");
             fixture.agent.run("Delegate JNI header generation within the supplied write scope");
@@ -142,12 +142,16 @@ class AgentGovernanceRegressionTest {
     }
 
     private Fixture fixture(ScriptedClient client) throws IOException {
+        return fixture(client, false);
+    }
+
+    private Fixture fixture(ScriptedClient client, boolean approveHostCommand) throws IOException {
         property(MemoryManager.SESSION_PRE_SUMMARY_ENABLED_PROPERTY, "false");
         property("devcli.context.compaction.enabled", "true");
         property("devcli.context.compression.trigger.tokens", "2000");
         property("devcli.react.token.budget", "1000000");
         Path project = Files.createDirectories(root.resolve("project"));
-        ToolRegistry registry = new NoIndexRegistry();
+        ToolRegistry registry = new NoIndexRegistry(approveHostCommand);
         registry.setProjectPath(project.toString());
         LongTermMemory memory = new LongTermMemory(root.resolve("memory"));
         MemoryManager manager = new MemoryManager(client, 1_000, client.window, memory);
@@ -209,11 +213,23 @@ class AgentGovernanceRegressionTest {
     }
 
     private static final class NoIndexRegistry extends ToolRegistry {
-        NoIndexRegistry() { super(); }
-        NoIndexRegistry(ResourceLeaseMaintenance maintenance) { super(maintenance); }
+        private final boolean approveHostCommand;
+
+        NoIndexRegistry(boolean approveHostCommand) {
+            super();
+            this.approveHostCommand = approveHostCommand;
+        }
+        NoIndexRegistry(ResourceLeaseMaintenance maintenance, boolean approveHostCommand) {
+            super(maintenance);
+            this.approveHostCommand = approveHostCommand;
+        }
         @Override public void markRagIndexDirty(Collection<String> paths) { }
+        @Override protected com.devcli.tool.ToolOutput reviewHostCommand(
+                com.devcli.tool.command.CommandExecutionService.Request request) {
+            return approveHostCommand ? null : super.reviewHostCommand(request);
+        }
         @Override protected ToolRegistry createProjectForkRegistry(ResourceLeaseMaintenance maintenance) {
-            return new NoIndexRegistry(maintenance);
+            return new NoIndexRegistry(maintenance, approveHostCommand);
         }
     }
 

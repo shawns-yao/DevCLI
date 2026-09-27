@@ -7,19 +7,59 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.Map;
 
-/** Admission rules for model-proposed delegation, without keyword-based scoring. */
+/**
+ * Admission rules for model-proposed delegation.
+ *
+ * <p>本层只保留一条语义判据：模型自述的执行粒度必须是需要多轮循环。
+ * 参数结构校验（输入、范围、完成条件、交付物、Worker 写入范围）已归入
+ * 工具语义校验层，以参数错误而非策略拒绝返回，使模型能区分「参数写错了」
+ * 与「这个任务不该委派」。详见 ADR 0010。
+ *
+ * <p>收益评估（{@link Yield}）仍然计算契约闭合、作用面隔离与传递成本，
+ * 但只写入运行事件供事后诊断，不参与放行，也不回灌给模型：把分数告诉模型
+ * 只会诱导它修改声明措辞来「过门槛」，而任务实质不变。详见 ADR 0009。
+ */
 public final class DelegationPolicy {
     private static final ObjectMapper JSON = new ObjectMapper();
 
-    private DelegationPolicy() { }
-
-    public record Decision(boolean allowed, int score, int benefit, int coordinationCost,
-                           String reason, List<String> factors) {
+    /** 准入判定结果；{@code allowed} 只反映「能不能干」。 */
+    public record Decision(boolean allowed, String reason, Yield yield) {
+        /**
+         * 事件摘要。放行结论与收益诊断分开表述，避免把诊断读成拒绝理由。
+         */
         public String summary() {
-            return reason + " (score=" + score + ", benefit=" + benefit
-                    + ", coordination_cost=" + coordinationCost + ")";
+            return reason + " (yield=" + yield.score() + ", benefit=" + yield.benefit()
+                    + ", coordination_cost=" + yield.coordinationCost() + ")";
         }
     }
+
+    /**
+     * 收益诊断，只用于观测委派决策质量。
+     *
+     * <p>{@code lowYield} 是告警标记，不改变 {@link Decision#allowed()}：
+     * 低收益委派照常执行，抑制浪费由提示词软策略承担。
+     */
+    public record Yield(int benefit, int coordinationCost, int score, boolean lowYield, String advice) {
+        static final Yield NOT_EVALUATED = new Yield(0, 0, 0, false, "未评估");
+
+        static Yield of(Map<String, String> args, JsonNode spec, List<String> writePaths) {
+            // 收益来自「任务被隔离得多干净」，而不是「输入文本有多长」。
+            // 文本长度只计入传递成本，不作为状态耦合或隔离收益的证明。
+            int benefit = 2 + writeScopeIsolation(writePaths);
+            int cost = 1 + (args.getOrDefault("context", "").length() + spec.toString().length()
+                    > 8000 ? 2 : 0) + (args.getOrDefault("upstream_report_id", "").isBlank() ? 0 : 1);
+            int score = benefit - cost;
+            int advisory = ConfigResolver.intValue("devcli.delegation.yield.advisory.threshold",
+                    "DEVCLI_DELEGATION_YIELD_ADVISORY_THRESHOLD", 2, 1, 10);
+            boolean lowYield = score < advisory;
+            return new Yield(benefit, cost, score, lowYield,
+                    lowYield
+                            ? "本次委派收益偏低，建议由主 Agent 直接完成；该判断仅供参考，不影响本次放行"
+                            : "委派收益正常");
+        }
+    }
+
+    private DelegationPolicy() { }
 
     public static Decision evaluate(Map<String, String> args) {
         if (args == null) return deny("缺少任务包");
@@ -30,31 +70,13 @@ public final class DelegationPolicy {
             return deny("task_spec 不是合法 JSON");
         }
         if (spec == null || !spec.isObject()) return deny("缺少结构化任务声明");
+        // 自述式判据：模型自己声明该任务为单次工具操作时，说明无需开启子循环。
+        // 它同时免疫误伤（不按文件数或输入长度推断）与刷分（改写成循环等于承诺多轮迭代）。
         if (!spec.path("execution_kind").asText().equals("agent_loop"))
             return deny("单次工具操作或未声明执行粒度，应由主 Agent 执行");
-        if (!spec.path("parent_dependency").asText().equals("none"))
-            return deny("任务依赖父 Agent 的中间状态");
-        for (String field : List.of("inputs", "scope", "done_condition")) {
-            if (!spec.path(field).isTextual() || spec.path(field).asText().isBlank())
-                return deny("任务包缺少 " + field);
-        }
-        if (args.getOrDefault("deliverable", "").isBlank())
-            return deny("缺少明确交付物");
-        if ("worker".equals(args.get("role"))) {
-            if (parseWritePaths(args).isEmpty()) return deny("Worker 必须声明写入范围");
-        }
-        // 收益来自「任务被隔离得多干净」，而不是「输入文本有多长」。
-        // 文本长度只计入传递成本，不作为状态耦合或隔离收益的证明。
-        int isolation = writeScopeIsolation("worker".equals(args.get("role"))
-                ? parseWritePaths(args) : List.of());
-        int benefit = 2 + isolation;
-        int cost = 1 + (args.getOrDefault("context", "").length() + spec.toString().length()
-                > 8000 ? 2 : 0) + (args.getOrDefault("upstream_report_id", "").isBlank() ? 0 : 1);
-        int minimum = ConfigResolver.intValue("devcli.delegation.policy.min.score",
-                "DEVCLI_DELEGATION_POLICY_MIN_SCORE", 2, 1, 10);
-        return new Decision(benefit - cost >= minimum, benefit - cost, benefit, cost,
-                benefit - cost >= minimum ? "任务契约通过委派准入" : "委派收益不足，应由主 Agent 执行",
-                List.of("closed_contract", "write_scope_isolation", "transfer_cost"));
+        List<String> writePaths = "worker".equals(args.get("role"))
+                ? parseWritePaths(args) : List.of();
+        return new Decision(true, "委派请求通过准入检查", Yield.of(args, spec, writePaths));
     }
 
     /**
@@ -99,6 +121,6 @@ public final class DelegationPolicy {
     }
 
     private static Decision deny(String reason) {
-        return new Decision(false, 0, 0, 0, reason, List.of());
+        return new Decision(false, reason, Yield.NOT_EVALUATED);
     }
 }

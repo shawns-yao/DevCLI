@@ -87,7 +87,11 @@ class MemoryManagerPreSummaryAsyncTest {
                     throw new IOException("预摘要调用被中断", e);
                 }
             }
-            return new ChatResponse("assistant", "摘要-" + call, List.of(), 10, 10);
+            return new ChatResponse("assistant", """
+                    {"schema_version":2,"request_intent":"异步预摘要-%d",\
+                    "concepts":[],"files":[],"pitfalls":[],"resolution_steps":[],\
+                    "user_messages":["异步预摘要"],"protected_facts":[]}
+                    """.formatted(call), List.of(), 10, 10);
         }
 
         @Override

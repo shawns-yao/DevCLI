@@ -126,7 +126,7 @@ class PermissionRuleTest {
         List<String> mixed = List.of("src/a.java", "docs/readme.md");
 
         assertTrue(rule.triggersOn(ToolResourceSlot.PATH_LIST, mixed),
-                "deny / ask 语义下任一目标命中即触发");
+                "hard_deny / soft_deny 语义下任一目标命中即触发");
         assertFalse(rule.allows(ToolResourceSlot.PATH_LIST, mixed),
                 "allow 语义下必须每个目标都在范围内");
         assertTrue(rule.allows(ToolResourceSlot.PATH_LIST, List.of("src/a.java", "src/b.java")));
@@ -216,27 +216,4 @@ class PermissionRuleTest {
         assertTrue(rule.triggersOn(ToolResourceSlot.HOST, List.of("raw.github.com")));
     }
 
-    // ------------------ 字面量前缀（只服务于加载期覆盖告警） ------------------
-
-    @Test
-    void literalPrefixStopsAtFirstWildcard() {
-        assertEquals("", PermissionRule.parse("write_file(**)").literalPrefix(),
-                "通配符在首位时字面量前缀是空串");
-        assertEquals("src/", PermissionRule.parse("write_file(src/**)").literalPrefix());
-        assertEquals("src/secret/", PermissionRule.parse("write_file(src/secret/**)").literalPrefix());
-        assertEquals("", PermissionRule.parse("write_file(**/secret/**)").literalPrefix(),
-                "字面量前缀不是宽窄度量：这条语义上比 src/** 更窄，前缀反而更短");
-    }
-
-    @Test
-    void literalPrefixIsNullWithoutSpecifier() {
-        assertNull(PermissionRule.parse("write_file").literalPrefix());
-    }
-
-    @Test
-    void literalPrefixIsWholeSpecifierWithoutWildcard() {
-        assertEquals("src/a.java", PermissionRule.parse("write_file(src/a.java)").literalPrefix());
-        assertEquals("git push:", PermissionRule.parse("execute_command(git push:*)").literalPrefix(),
-                "第一个通配符就在 :* 的 * 上，因此冒号仍在字面量里");
-    }
 }

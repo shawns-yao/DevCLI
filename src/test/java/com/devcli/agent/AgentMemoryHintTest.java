@@ -4,6 +4,7 @@ import com.devcli.llm.GLMClient;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.LongTermMemory;
 import com.devcli.memory.MemoryManager;
+import com.devcli.memory.RollingSummary;
 import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.skill.SkillStateStore;
@@ -139,7 +140,11 @@ class AgentMemoryHintTest {
         try {
             RecordingStubGLMClient llmClient = new RecordingStubGLMClient(List.of(
                     new LlmClient.ChatResponse("assistant", "长会话回答", null, 20, 10),
-                    new LlmClient.ChatResponse("assistant", "自动维护的会话预摘要", null, 20, 10)
+                    new LlmClient.ChatResponse("assistant", """
+                            {"schema_version":2,"request_intent":"自动维护的会话预摘要",\
+                            "concepts":[],"files":[],"pitfalls":[],"resolution_steps":[],\
+                            "user_messages":["请记住这段上下文"],"protected_facts":[]}
+                            """, null, 20, 10)
             ));
             agent = new Agent(llmClient);
 
@@ -151,8 +156,11 @@ class AgentMemoryHintTest {
                 Thread.sleep(10);
             }
             assertTrue(agent.getMemoryManager().getCompactionSummaryCache().currentPreSummary().isPresent());
-            assertEquals("自动维护的会话预摘要",
-                    agent.getMemoryManager().getCompactionSummaryCache().currentPreSummary().orElseThrow().summary());
+            String summary = agent.getMemoryManager().getCompactionSummaryCache()
+                    .currentPreSummary().orElseThrow().summary();
+            assertTrue(summary.contains("## 主要请求与意图"));
+            assertTrue(RollingSummary.parse(summary).get("主要请求与意图")
+                    .contains("自动维护的会话预摘要"));
             assertEquals(2, llmClient.messagesByCall.size(), "一次任务响应后应追加一次预摘要维护调用");
         } finally {
             if (agent != null) {

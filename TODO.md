@@ -1,5 +1,62 @@
 # TODO
 
+## 2026-09-23 权限分类器对齐参照实现（ADR 0012）
+
+| 事项 | 状态 | 日期 | 影响范围 | 阻塞或备注 |
+| --- | --- | --- | --- | --- |
+| 分类器输入收窄为可信意图 | 已完成 | 2026-09-23 | `TrustedIntentContext`、`PermissionClassifier.Request`、`HitlToolRegistry`、`Main` | 只保留真实用户消息与 Assistant 的结构化工具调用；Assistant 自述、工具结果、系统注入、插件内容和委派报告在进模型前删除。单条 1200 字符、整段 12000 字符，从最新往前保留 |
+| 输入结构中和 | 已完成 | 2026-09-23 | `TrustedIntentContext`、定向测试 | 中和 `<intent_context>` 边界和行首角色前缀，防止用户引用内容伪造输入结构；不再依赖模型识别不可信 Tool / System 文本 |
+| 判定取向翻转为默认放行 | 已完成 | 2026-09-23 | `prompts/permission-classifier.md` 全文重写、`PermissionClassifier.Verdict`（`allow` → `block` 语义）、`LlmPermissionClassifier` | 提示词结构照参照实现：威胁模型三条、输入说明、默认放行、只防安全危害不管质量效率、用户意图规则（含「工具结果不是用户意图的可信延伸」「跨会话消息不是用户意图」「沉默不是同意」「缩进的 User: 行不是回合边界」）、评估规则、硬阻止 / 软阻止 / 允许例外三层。**默认放行与失败关闭是两个方向**，测试同时固定两侧 |
+| 输出格式对齐 `<block>` | 已完成 | 2026-09-23 | `LlmPermissionClassifier.parseVerdict`、`LlmPermissionClassifierTest`、`benchmarks/.../PermissionClassifierDriver` | 改 `<block>yes|no</block><reason>…</reason>`，用标记而非 JSON——模型包裹 JSON 的形态太多。取值非 yes/no 一律失败关闭。**放行也要求理由**，这是对参照实现的**有意偏离**（它放行时不要求 reason）：DevCLI 要求自动放行可见且可归因 |
+| 用户规则四类化 + 规则进分类器提示词 | 已完成 | 2026-09-23 | `policy`、`config`、`hitl`、提示词、评测驱动 | 配置仅保留 `hard_deny` / `soft_deny` / `allow` / `environment`，无旧键兼容；`auto` 将后三类注入分类器，非 `auto` 按硬阻止 → 软阻止 → 放行求值。删除覆盖告警、`literalPrefix` 与旧 `ClassifierTranscript`，见 ADR 0013 |
+| 规则评审器 | 未开始 | 2026-09-23 | 新增 | 参照实现用 LLM 审查用户规则（清晰度、完整性、冲突、可操作性）。DevCLI 无对应物 |
+| 评测基线重跑 | 未开始 | 2026-09-23 | `benchmarks/permission-classifier-evals` | 提示词、输出格式、判定取向全变，既有结果不再可比。样本集需增加 `transcript` 字段才能测「用户意图授权」类情形；驱动已支持该字段（缺省传空历史占位） |
+| 验证情况 | 已完成 | 2026-09-23 | — | `mvn test-compile` 通过；权限规则、可信意图、配置、审批模式与分类器 147 项定向测试通过。**未跑全量回归、未重跑评测、未在真实端点验证放行率变化** |
+
+## 2026-09-23 auto 可用性校准与放行缓存措辞修正
+
+| 事项 | 状态 | 日期 | 影响范围 | 阻塞或备注 |
+| --- | --- | --- | --- | --- |
+| 分类器超时默认值 10 → 30 秒 | 已完成 | 2026-09-23 | `LlmPermissionClassifier`、`docs/adr/0006`（加修订横幅并改写超时段落）、`docs/adr/README.md`、`AGENTS.md`、`docs/adr/0011`、`docs/permission-classifier-evals.md` | 按实测中位延迟 12.0 秒校准（10 秒下 14/21 超时并全部 fail-closed 成拒绝，30 秒下 21/21 可评分）。**这是推翻 ADR 0006 的既有决定**：原文刻意「不预设一个『正确』默认值，而是把权衡写进文档」，理由是「两边都要权衡」。该理由把两类代价当成对称的，实际不对称——设短是 fail-closed 误拒且用户无从诊断，设长只是延迟、不损失安全。已在 0006 加修订横幅并改写该条，索引同步标注 |
+| 超时与预算不足拒绝消息自解释 | 已完成 | 2026-09-23 | `LlmPermissionClassifier`、`HitlToolRegistry`、`PermissionClassifier` | 超时消息现在给出超时值、可调参数与设置方式，并注明**只认系统属性与环境变量（`.env` 不生效）**——项目里模型配置走 `.env`，用户会自然以为通用。预算不足那条补上「可调小该参数」与分类器预算／工具剩余的实际秒数，两条消息互为补充。新增非整秒超时的显示处理（测试传 200 毫秒） |
+| 放行缓存注释措辞修正 | 已完成 | 2026-09-23 | `TerminalHitlHandler`、`docs/adr/0005`、`docs/inline-tui-manual-tests.md` | 字段注释与方法注释都写「本次会话」，实际生命周期是本轮任务（每轮任务开始前、换模式、清空对话、撤销授权时清空）；终端提示语「已在本次任务中」本来就是对的。同类措辞错误另有两处：0005 自称「会话级『全部放行』」但同句又写「本轮任务」；手动测试文档的预期输出文案已过期（`已批准 tool 范围` 与 `已在本次会话中全部放行` 都与当前实现不符） |
+| 超时配置上限与工具批次预算冲突 | 未开始 | 2026-09-23 | `LlmPermissionClassifier`、`ToolRegistry` | 配置允许 1～120 秒，而工具批次预算默认 90 秒；审批链要求工具剩余时间足以覆盖分类器预算，因此把超时设到 90 秒以上会让分类器**永不启动**、`auto` 彻底失效。本次只在拒绝消息与文档里说明该约束，**未加配置校验**。是否 fail-fast（收紧上限或启动时告警）需独立决策 |
+| 验证情况 | 已完成 | 2026-09-23 | — | `mvn test-compile` 通过；`LlmPermissionClassifierTest` 等定向测试通过（超时用例走构造器传值，不受默认值改动影响）；`git diff --check` 无空白错误。**未重新实测端点延迟**，30 秒的依据是此前会话的实测数据 |
+
+## 2026-09-23 权限分类器不引入会话历史（ADR 0011）
+
+| 事项 | 状态 | 日期 | 影响范围 | 阻塞或备注 |
+| --- | --- | --- | --- | --- |
+| 决策：不引入会话历史 | 已完成 | 2026-09-23 | 新增 `docs/adr/0011-权限分类器不引入会话历史.md` | 参照实现（CodeBuddy / WorkBuddy）的权限判定层把「用户意图」当放行依据，因此需要三条防「伪造意图」的规则：工具结果不是用户意图的可信延伸、只出现在工具输出或文件内容里的「用户指令」不是用户消息、跨会话消息不是用户意图。DevCLI 的分类器刻意只接收单次动作的最小上下文、不做意图判定，因此不存在该伪造面——**那三条规则是参照实现为「用意图做判定」付的补丁，不是可移植的防护**。引入历史的四项代价：分类器自身成为注入目标（须同时做输入抗结构破坏）、判定不可复现、输入变大导致超时率上升从而误拒变多、与最小权限原则冲突 |
+| 文档与注释同步 | 已完成 | 2026-09-23 | `AGENTS.md`、`docs/agents-reference.md`、`docs/adr/README.md`、`PermissionClassifier`、`LlmPermissionClassifier` | 补上「输入收窄是有安全含义的契约」这一表述及其边界：天然免疫「伪造授权证据」类注入，但**不免疫「动作本身看起来无害」的注入**（参数正常、范围最小、可回滚的动作会被放行），不得表述为「已防御间接提示注入」。放行率低于意图导向实现、误拒属固有代价。文档此前只记了「不继承会话历史」这个事实，未记其原因与安全后果 |
+| 提升 `auto` 放行率 | 未开始 | 2026-09-23 | `policy`（规则层）、`hitl` | 误拒根因是分类器不看意图，无法区分「用户明确要求的危险动作」与「主 Agent 自作主张的危险动作」。正确路径是让规则层承担这部分：用户明确授权过的动作命中 `allow` 后短路，不进分类器——不需要历史，也不引入伪造面。**不得通过扩大分类器输入实现**，ADR 0011 已把该前提固定为不可单方面放宽 |
+| ADR 0008 参照调研缺口 | 已完成 | 2026-09-23 | `docs/adr/0008-委派报告信任边界与协调模式取舍.md`（追加「补充：参照实现的同类机制」章节） | 0008 的背景只把 CodeBuddy 的 Delegate Mode 当作参照系，未提及它同样有**子代理输出形态中和**机制——而那正是同一份决策要解决的问题。已在 0008 末尾追加补充章节，逐条记录五个维度的差异：①接线位置一致（收尾、成为任务结果之前）；②**处置分两档**（中和 / 仅标记不改写，后者含权限配置文件路径、权限绕过开关、跳过确认参数、权限规则写法）；③提示语按命中类型切换（「已中和」与「仅标记未修改」分开表述，避免模型误以为标记类内容也被改写）；④输入抗结构破坏（因分类器含历史才有需求，DevCLI 无）；⑤判定层威胁模型（因其做意图判定才有伪造面，DevCLI 无）。**0008 原决定不受影响**——仍按字段收口、仍强制写入不可信标记。其中 ②③ 两条是**尚未采纳的候选**，采纳与否需独立决策，已在补充章节写明不在 0008 范围内 |
+| 验证情况 | 已完成 | 2026-09-23 | — | 本次**零行为变更**，只改文档与注释；未运行测试。第 32 题讲解中「补在分类器里比补在净化规则里收益大得多」的判断，经本次核实已推翻并纠正——该判断预设了分类器能看到会话历史，而它刻意看不到 |
+
+## 2026-09-22 委派程序侧准入对齐参照实现（ADR 0010）
+
+| 事项 | 状态 | 日期 | 影响范围 | 阻塞或备注 |
+| --- | --- | --- | --- | --- |
+| 参数结构校验从准入层归位 | 已完成 | 2026-09-22 | `DelegationPolicy`、`ToolSemanticValidator`、`DelegateTaskTool` | 准入层不再判定契约完整性。inputs/scope/done_condition 的非空已由工具 schema（`required` + `minLength`）承担，本次补 `deliverable` 的 `minLength: 1`；worker 写入范围是条件必填、schema 无法表达，改由语义校验层承担。契约缺项现在返回 `INVALID_ARGUMENTS` 而非 `POLICY_DENIED`，使模型能区分「参数写错了」与「这个任务不该委派」。工具 schema 经 `McpSchemaValidator` 真校验（内置工具同样走该路径，非仅 MCP） |
+| 移除语义判据与父状态依赖字段 | 已完成 | 2026-09-22 | `DelegationPolicy`、`DelegateTaskTool`、5 个测试类 | 「不频繁依赖父 Agent 中间状态」判断的是任务耦合度而非子代理能否开工，已移除；其唯一消费方 `parent_dependency` 字段一并从 `task_spec` 移除（该层 `additionalProperties: false`，继续传会被 schema 拒绝）。耦合度判断改由工具说明的软策略承担。准入层现只剩自述式执行粒度判据 |
+| 新增单会话派出量配额 | 已完成 | 2026-09-22 | `Agent`、`DelegationSession` | 默认 200，`devcli.delegate.max.per.session` / `DEVCLI_DELEGATE_MAX_PER_SESSION`，取值 1～10000。计数器挂在 Agent 实例上（与工作记忆同生命周期），不随单轮预算重置；`delegation.started` 事件新增 `spawn_index` 与 `spawn_limit`。检查放在全部前置检查之后，只统计真正开始执行的委派。ADR 0009 曾把深度上限与数量上限打包否决，其理由只对深度成立，本次修正 |
+| ADR 与文档同步 | 已完成 | 2026-09-22 | 新增 `docs/adr/0010-委派程序侧准入对齐参照实现.md`；`docs/adr/0009`、`docs/adr/README.md`、`AGENTS.md`、`docs/agents-reference.md` | 0009 加修订横幅并保留仍有效的结论（收益诊断不回灌、唯一滥用硬规则、拒绝文案可操作、软策略下沉）；README 索引标注 0009 准入范围已被 0010 修订。ADR 0010 记录参照实现的程序侧准入构成（Claude Code 六条能力校验、CodeBuddy 两条配额）与「不校验契约」不可照搬的原因：其分叉子代理继承父的完整上下文，DevCLI 不继承 |
+| 定向验证 | 已完成 | 2026-09-22 | `DelegationPolicyTest`、`MainAgentDelegationTest`、`ToolSemanticValidatorTest`、`AgentDelegationTest`、`DelegationToolTest`、`ToolGovernanceEntryTest` | 委派相关定向测试 55 项 1 失败，失败项是既有的内容审查路径（`evidenceExcerptsAreBoundedAndRedacted`），与本次改动无交集。新增 3 项：`ToolSemanticValidatorTest` 2 项覆盖「契约非空由 schema 承担」与「worker 条件必填由语义层承担」；`AgentDelegationTest` 1 项覆盖单会话配额耗尽后拒绝（把 `devcli.delegate.max.per.session` 压到 1，验证同一会话第二次委派返回 `POLICY_DENIED` 且文案含「额度已用尽」），均通过 |
+| 精简准入判定结果 | 已完成 | 2026-09-22 | `DelegationPolicy` | `Decision` 移除 `factors` 组件：该字段在 `src/` 内无任何读取方，且准入层只剩一条判据后其内容恒为固定三项、零信息量，属于上一轮引入的「只写不读」字段。诊断维度信息仍由 `Yield` 的收益与协调成本承载。签名变更由编译期覆盖（`benchmarks/src` 也在源码根内），定向 63 项 1 失败，失败项仍为既有内容审查问题 |
+| 配额不可中途重置 | 未开始 | 2026-09-22 | `Agent`、`Main`、`SessionTreeService` | 单会话配额按 Agent 实例累计，而 CLI 的 Agent 在启动时创建一次并复用（`Main:348`），`/clear` 只清对话历史、会话切换（`SessionTreeService.replaceAgentHistory`）只替换历史，**均不重建 Agent**，因此配额触达上限后只能靠重启恢复。需要引入会话级重置点，但「什么算新会话」（新建 / 切换分支）属产品语义，未擅自决定。runtime API 路径的 `resetSession` 会移除并关闭会话对象、下次重建 Agent，不受影响 |
+| 全量回归 | 已完成 | 2026-09-22 | — | `-Pquick` **2097 项 3 失败**，三项均为上一轮已定位的既有失败（内容审查拒绝、主机 `javac` 环境、Windows 符号链接环境），**无新增失败**；对比上一轮 2095 项 3 失败，多出的 2 项是本次新增的语义校验用例。`parent_dependency` 已全仓清零（`src/`、`benchmarks/` 无残留） |
+
+## 2026-09-22 委派准入降级为决策辅助（ADR 0009）
+
+| 事项 | 状态 | 日期 | 影响范围 | 阻塞或备注 |
+| --- | --- | --- | --- | --- |
+| 委派判定拆分为硬门槛与收益诊断 | 已完成 | 2026-09-22 | `DelegationPolicy` | 放行只由硬门槛决定：结构化声明合法、执行粒度自述为多轮循环、不频繁依赖父状态、inputs/scope/done_condition/deliverable 非空、Worker 声明写入范围。收益评估（作用面隔离、传递成本）改为 `Yield` 诊断记录，不参与放行。契约完整性保留在硬门槛，不降级为「基本完整」——子 Agent 不继承父会话历史，契约不全只能靠猜 |
+| 收益分数改为仅观测 | 已完成 | 2026-09-22 | `DelegationSession`、`DelegationPolicy` | `delegation.policy` 事件字段由 `score`/`benefit`/`coordination_cost` 改为 `yield_*` 前缀并新增 `yield_low`、`yield_advice`。分数不回灌模型：回灌只会诱导模型修改声明措辞来「过门槛」。阈值配置键由 `devcli.delegation.policy.min.score` 改为 `devcli.delegation.yield.advisory.threshold`，语义由准入门槛改为低收益告警线，旧键不再读取 |
+| 收益判断下沉为提示词软策略 | 已完成 | 2026-09-22 | `DelegateTaskTool`、`prompts/modes/agent.md` | 用可对照的量化条件替代相对表述：改动集中在 1～3 个具体文件、边界在委派前可说清、不依赖未定中间结论时适合委派；需多轮试错才能定范围、跨多个模块、需边做边决定时自己做。工具说明同步删除「收益不足会被拒绝」 |
+| ADR 与文档同步 | 已完成 | 2026-09-22 | 新增 `docs/adr/0009-委派准入只保留硬门槛.md`；`docs/adr/README.md`、`AGENTS.md`、`docs/agents-reference.md` | ADR 记录职责分离（程序判能不能派、模型判该不该派、运行时判派出去能干什么）与不新增嵌套深度及派出量上限的理由：子 Agent 已禁止递归、深度恒为 1，总量由共享预算控制，新增独立计数器会形成第二套总量机制 |
+| 定向验证 | 已完成 | 2026-09-22 | `DelegationPolicyTest`、`MainAgentDelegationTest` | `mvn test-compile` BUILD SUCCESS（390 主源码 + 301 测试源码）。委派定向测试 44 项中 43 通过：`DelegationPolicyTest` 7/7、`DelegationReviewGateTest` 4/4、`DelegationReviewProtocolTest` 4/4、`MainAgentDelegationTest` 3/3；`AgentDelegationTest` 26 项中 1 项失败，位于内容审查路径，与本次改动无交集 |
+| 全量回归与阈值连带修复 | 已完成 | 2026-09-22 | `AgentProtocolDeterministicTest`、`FileToolProviderPaginationTest` | `-Pquick` 首轮 1976 项 7 失败，其中 4 项是 2026-09-22 早前阈值放宽的**连带影响**：测试样本（12000 / 20000 字符）恰好卡在新放行线 20000 上，不再触发尺寸治理。样本调至 30000 字符后该两项 128 项全绿；复跑全量 **2095 项 3 失败**，剩余 3 项均与本次改动无交集（内容审查拒绝、主机 `javac` 环境、Windows 符号链接环境）。教训：改常量阈值必须跑全量回归，定向测试覆盖不到以旧阈值为隐含前提的样本 |
+
 ## 2026-09-22 工具结果体积与并发上限放宽
 
 | 事项 | 状态 | 日期 | 影响范围 | 阻塞或备注 |
@@ -7,7 +64,7 @@
 | 工具层结果分档阈值放宽 | 已完成 | 2026-09-22 | `ToolResultSizeManager` | 单条放行线 5000 → 20000 字符，落盘线 50000 → 100000，落盘预览 1500 → 5000，同轮聚合额度 20000 → 100000（仍为放行线的 5 倍），聚合超限后的单条截断目标 2500 → 10000。改动理由是原阈值在两层串联下把常见的中等结果也压成截断，模型读 30000 字符文件实际只看到约 6000。阈值仍为常量，不新增配置项 |
 | agent 层回灌预算放宽 | 已完成 | 2026-09-22 | `ToolResultWindow` | 单批额度 20000 → 100000 字符、8000 → 25000 Token。该层按条均分额度，与工具层串联；两层都放宽后「中等结果被截断」的体感问题才消除 |
 | 并发上限改为可配置 | 已完成 | 2026-09-22 | `ToolRegistry` | 删除写死的 `MAX_PARALLEL_TOOLS = 4`，改为读取 `devcli.tool.batch.max.parallel` / `DEVCLI_TOOL_BATCH_MAX_PARALLEL`，默认 10、取值 1～64。默认值与 Claude Code 一致。并发宽度只作用于只读工具，副作用工具仍受工作区级串行锁约束 |
-| 定向测试与文档同步 | 进行中 | 2026-09-22 | `ToolResultSizeManagerTest`；AGENTS.md、`docs/agents-reference.md` | 阈值断言按新常量同步，并补入并发可配置与两层尺寸分档的文档说明。定向测试正在运行，尚未取得结果；未运行 `-Pquick` 全量回归，未跑公开权威数据测试 |
+| 定向测试与文档同步 | 已完成 | 2026-09-22 | `ToolResultSizeManagerTest`；AGENTS.md、`docs/agents-reference.md` | 阈值断言按新常量同步，19/19 通过；补入并发可配置与两层尺寸分档的文档说明。相邻 88 项定向测试中 2 项失败，均为 `ToolRegistryTest` 既有的主机命令前置条件失败，与本次改动无关。未运行 `-Pquick` 全量回归，未跑公开权威数据测试 |
 
 ## 2026-09-21 委派报告信任边界（ADR 0008）
 
@@ -676,10 +733,10 @@
 - 状态：已实现
 - 来源：对照 Agent 开发面经复查长会话摘要、长期记忆注入、RAG 可观测性和原始会话审计能力
 - 影响范围：会话预摘要缓存、长期记忆检索与意图分类、RAG 检索审计、CLI 会话归档、配置模板、记忆与检索测试、README、AGENTS 和详细行为文档
-- 已实现：会话预摘要使用旧摘要和新增消息增量维护，并记录输入、覆盖、摘要长度及成功失败指标；长期记忆统一识别保存、删除、忽略、目录查看和历史依赖意图，检索保留语义、关键词和合并分数，按最低分数、第一名分差和最大数量限制注入；RAG 审计记录 keyword / semantic / graph、RRF、rerank、最终结果和降级状态，不保存代码正文；普通 CLI 会话归档默认关闭，启用后 ReAct 保存脱敏模型消息，Plan / Team 保存顶层输入输出，按期限清理，`/history clear` 支持删除归档
+- 已实现：会话预摘要与正式压缩共用固定六段协议；首次生成结构化快照，后续只向模型提供旧摘要结构索引和新增消息，由模型提出受限变更操作、本地 Reducer 合并，并记录输入、覆盖、摘要长度及成功失败指标；长期记忆统一识别保存、删除、忽略、目录查看和历史依赖意图，检索保留语义、关键词和合并分数，按最低分数、第一名分差和最大数量限制注入；RAG 审计记录 keyword / semantic / graph、RRF、rerank、最终结果和降级状态，不保存代码正文；普通 CLI 会话归档默认关闭，启用后 ReAct 保存脱敏模型消息，Plan / Team 保存顶层输入输出，按期限清理，`/history clear` 支持删除归档
 - 未实现：独立低成本摘要模型；普通 CLI 归档的跨文件会话重建命令
 - 验证建议：运行记忆、RAG、会话归档、Trace 和工具 Provider 的限定测试
-- 风险：不同 embedding 模型的分数分布可能需要调整默认阈值；增量摘要仍依赖模型输出完整替代摘要；启用 CLI 会话归档后会保存本机上下文，虽然执行脱敏和期限清理，仍需由用户承担本机文件访问控制
+- 风险：不同 embedding 模型的分数分布可能需要调整默认阈值；摘要主题键质量仍会影响同主题条目的合并；启用 CLI 会话归档后会保存本机上下文，虽然执行脱敏和期限清理，仍需由用户承担本机文件访问控制
 
 ## 2026-07-17 非 Git 写时复制工作区后端
 

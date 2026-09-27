@@ -22,20 +22,28 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * {@code auto} 模式接入审批链后的行为。
  *
- * <p>分类器是求值链的第 10 阶段，位置本身带语义：它只接管走完整条链、没有任何规则或安全机制
- * 要求询问、仅仅因为默认策略才需要询问的动作。因此本测试的重点不是「分类器能放行什么」，
- * 而是「分类器放不过什么」——规则层、删除确认、显式 {@code ask} 都不该到它手里，
- * 判定失败也不该变成放行。</p>
+ * <p>分类器在 {@code auto} 模式下是判定者，但它拿到的动作有两类：走完整条链、仅仅因为默认策略
+ * 才需要询问的；以及命中用户 {@code allow} / {@code soft_deny} 规则的——那个模式下规则层刻意
+ * 不短路，规则作为分类器输入参与同一次判定。因此本测试要固定两件事：<b>该到它手里的</b>
+ * （未决动作与两类用户规则）确实到了，<b>不该到它手里的</b>（策略硬边界、{@code hard_deny}、
+ * 删除确认、补丁与回滚确认、逐次审批）一个都没到；判定失败也不该变成放行。</p>
  *
  * <p>全部用注入桩，不依赖真实模型：分类器引入非确定性，测试必须能确定地复现失败路径。</p>
  */
 class PermissionClassifierTest {
 
+    private static final String PROMPT = "你是安全监控。\n"
+            + ClassifierRuleBlocks.ENVIRONMENT_SLOT + "\n"
+            + ClassifierRuleBlocks.HARD_DENY_SLOT + "\n"
+            + ClassifierRuleBlocks.SOFT_DENY_SLOT + "\n"
+            + ClassifierRuleBlocks.ALLOW_SLOT + "\n";
+
     private static HitlToolRegistry registry(Path projectRoot, RecordingHandler handler,
                                              PermissionMode mode, PermissionClassifier classifier,
-                                             List<String> deny, List<String> ask, List<String> allow) {
+                                             List<String> hardDeny, List<String> softDeny,
+                                             List<String> allow) {
         HitlToolRegistry registry = new HitlToolRegistry(handler)
-                .withPermissionRules(PermissionRuleSet.parse(deny, ask, allow))
+                .withPermissionRules(PermissionRuleSet.parse(hardDeny, softDeny, allow, List.of()))
                 .withPermissionMode(mode)
                 .withPermissionClassifier(classifier);
         registry.setProjectPath(projectRoot.toString());
@@ -91,7 +99,7 @@ class PermissionClassifierTest {
     void classifierDenyRejectsWithoutAsking(@TempDir Path tempDir) {
         RecordingHandler handler = new RecordingHandler();
         StubClassifier classifier = new StubClassifier()
-                .always(PermissionClassifier.Verdict.deny("写入位置无法从参数确认"));
+                .always(PermissionClassifier.Verdict.block("写入位置无法从参数确认"));
         HitlToolRegistry registry = registry(tempDir, handler, PermissionMode.AUTO, classifier);
 
         var output = registry.executeToolOutput("write_file", writeArgs("a.txt"));
@@ -103,11 +111,13 @@ class PermissionClassifierTest {
     }
 
     @Test
-    void classifierReceivesMinimalContext(@TempDir Path tempDir) {
+    void classifierReceivesActionTrustedIntentAndRules(@TempDir Path tempDir) {
         RecordingHandler handler = new RecordingHandler();
         StubClassifier classifier = new StubClassifier()
                 .always(PermissionClassifier.Verdict.allow("ok"));
-        HitlToolRegistry registry = registry(tempDir, handler, PermissionMode.AUTO, classifier);
+        HitlToolRegistry registry = registry(tempDir, handler, PermissionMode.AUTO, classifier,
+                List.of(), List.of("write_file(notes/**)"), List.of())
+                .withTrustedIntentContext(() -> "<intent_context>\nUser: 建一个文件\n</intent_context>");
 
         registry.executeToolOutput("write_file", writeArgs("a.txt"));
 
@@ -116,6 +126,97 @@ class PermissionClassifierTest {
         assertEquals(writeArgs("a.txt"), seen.argumentsJson());
         assertEquals(tempDir.toString(), seen.projectPath());
         assertEquals("auto", seen.mode());
+        assertTrue(seen.intentContext().contains("建一个文件"),
+                "可信意图必须随请求送达：漏接线会让分类器看不到用户意图");
+        assertEquals(1, seen.rules().softDeny().size(),
+                "规则必须随请求送达：auto 模式下规则层不短路，规则全靠这里进判定");
+    }
+
+    // ------------------ auto 模式下规则层让位给分类器 ------------------
+
+    @Test
+    void autoModeSendsAllowRuleToClassifierInsteadOfShortCircuiting(@TempDir Path tempDir) {
+        // 允许例外在参照实现里是「命中即必须放行」，但两个例外情形（伪装成例外的可疑动作、
+        // 用户明确设下的边界）只有看得到历史的分类器判得出来。规则若在此短路，分类器永远
+        // 看不到它，那两个情形就都没法生效。
+        RecordingHandler handler = new RecordingHandler();
+        StubClassifier classifier = new StubClassifier()
+                .always(PermissionClassifier.Verdict.allow("用户允许改 src"));
+        HitlToolRegistry registry = registry(tempDir, handler, PermissionMode.AUTO, classifier,
+                List.of(), List.of(), List.of("write_file(src/**)"));
+
+        var output = registry.executeToolOutput("write_file", writeArgs("src/a.txt"));
+
+        assertNotEquals(ToolErrorCode.POLICY_DENIED, output.errorCode(), output.text());
+        assertEquals(1, classifier.callCount(), "放行规则必须交给分类器，不能自己短路");
+    }
+
+    @Test
+    void autoModeSendsSoftDenyRuleToClassifierInsteadOfPrompting(@TempDir Path tempDir) {
+        // soft_deny 的语义是「明确且具体的用户意图可以清除它」。判断意图需要历史，
+        // 所以在 auto 模式下它不是「一定询问」，而是分类器的一条输入。
+        RecordingHandler handler = new RecordingHandler();
+        StubClassifier classifier = new StubClassifier()
+                .always(PermissionClassifier.Verdict.block("用户设了边界"));
+        HitlToolRegistry registry = registry(tempDir, handler, PermissionMode.AUTO, classifier,
+                List.of(), List.of("write_file(notes/**)"), List.of());
+
+        var output = registry.executeToolOutput("write_file", writeArgs("notes/todo.md"));
+
+        assertEquals(ToolErrorCode.POLICY_DENIED, output.errorCode(), output.text());
+        assertTrue(output.text().contains("[分类器]"), output.text());
+        assertEquals(1, classifier.callCount(), "软阻止规则必须交给分类器");
+        assertEquals(0, handler.requestCount(), "auto 模式下不应因为软阻止规则而弹审批");
+    }
+
+    @Test
+    void nonAutoModeStillShortCircuitsSoftDenyToApproval(@TempDir Path tempDir) {
+        // 其余模式没有分类器可用，软阻止只能退回「强制人工审批」——规则层的行为逐字不变。
+        RecordingHandler handler = new RecordingHandler();
+        StubClassifier classifier = new StubClassifier()
+                .always(PermissionClassifier.Verdict.allow("不该被调用"));
+        HitlToolRegistry registry = registry(tempDir, handler, PermissionMode.DEFAULT, classifier,
+                List.of(), List.of("write_file(notes/**)"), List.of());
+
+        registry.executeToolOutput("write_file", writeArgs("notes/todo.md"));
+
+        assertEquals(1, handler.requestCount(), "非 auto 模式下软阻止规则仍然强制人工审批");
+        assertEquals(0, classifier.callCount(), "非 auto 模式不启动分类器");
+    }
+
+    @Test
+    void hardDenyShortCircuitsInAutoModeWithoutCallingClassifier(@TempDir Path tempDir) {
+        // 硬阻止的判定结果与分类器的硬阻止检查完全相同（无条件阻止），短路不改变结论，
+        // 却省掉一次模型调用，也不受端点可用性影响。规则本身仍会进提示词——分类器需要它
+        // 才能识别「这次委派要求子代理去做硬阻止清单里的动作」这类间接违规。
+        RecordingHandler handler = new RecordingHandler();
+        StubClassifier classifier = new StubClassifier()
+                .always(PermissionClassifier.Verdict.allow("不该被调用"));
+        HitlToolRegistry registry = registry(tempDir, handler, PermissionMode.AUTO, classifier,
+                List.of("write_file(notes/**)"), List.of(), List.of());
+
+        var output = registry.executeToolOutput("write_file", writeArgs("notes/todo.md"));
+
+        assertEquals(ToolErrorCode.POLICY_DENIED, output.errorCode(), output.text());
+        assertTrue(output.text().contains("[规则]"), output.text());
+        assertEquals(0, classifier.callCount(), "硬阻止必须自己短路，不依赖模型可用性");
+    }
+
+    @Test
+    void allowRuleDoesNotClearIndependentSafetyChecks(@TempDir Path tempDir) {
+        // 删除确认、命令删除、补丁与回滚确认、逐次审批是各自独立的安全要求，不是规则层的
+        // 短路出口。分类器接管规则判定，不能顺带把这些也接管过去——一条宽泛的 allow 规则
+        // 也不该让工作区回滚免于人工确认。
+        RecordingHandler handler = new RecordingHandler();
+        StubClassifier classifier = new StubClassifier()
+                .always(PermissionClassifier.Verdict.allow("不该被调用"));
+        HitlToolRegistry registry = registry(tempDir, handler, PermissionMode.AUTO, classifier,
+                List.of(), List.of(), List.of("revert_turn"));
+
+        registry.executeToolOutput("revert_turn", "{\"offset\":1}");
+
+        assertEquals(1, handler.requestCount(), "回滚确认必须仍然人工审批，放行规则不能免除它");
+        assertEquals(0, classifier.callCount(), "独立安全要求不进分类器");
     }
 
     // ------------------ 失败路径：一律拒绝，绝不猜测 ------------------
@@ -211,10 +312,10 @@ class PermissionClassifierTest {
                 "离开 auto 已经中断连续失败序列，重新进入后应重新计数");
     }
 
-    // ------------------ 分类器拿不到「有独立询问理由」的动作 ------------------
+    // ------------------ 分类器拿不到硬拒绝或强制逐次确认的动作 ------------------
 
     @Test
-    void denyRuleNeverReachesClassifier(@TempDir Path tempDir) {
+    void hardDenyRuleNeverReachesClassifier(@TempDir Path tempDir) {
         RecordingHandler handler = new RecordingHandler();
         StubClassifier classifier = new StubClassifier()
                 .always(PermissionClassifier.Verdict.allow("分类器想放行"));
@@ -226,36 +327,6 @@ class PermissionClassifierTest {
         assertEquals(ToolErrorCode.POLICY_DENIED, output.errorCode(), output.text());
         assertTrue(output.text().contains("[规则]"), output.text());
         assertEquals(0, classifier.callCount(), "规则层已判定，分类器不该被调用");
-    }
-
-    @Test
-    void allowRuleNeverReachesClassifier(@TempDir Path tempDir) {
-        RecordingHandler handler = new RecordingHandler();
-        StubClassifier classifier = new StubClassifier()
-                .always(PermissionClassifier.Verdict.deny("分类器想拒绝"));
-        HitlToolRegistry registry = registry(tempDir, handler, PermissionMode.AUTO, classifier,
-                List.of(), List.of(), List.of("write_file(*.txt)"));
-
-        var output = registry.executeToolOutput("write_file", writeArgs("a.txt"));
-
-        assertNotEquals(ToolErrorCode.POLICY_DENIED, output.errorCode(), output.text());
-        assertEquals(0, classifier.callCount(),
-                "用户显式写的 allow 是用户的选择，auto 不把它改写掉");
-    }
-
-    @Test
-    void explicitAskRuleNeverReachesClassifier(@TempDir Path tempDir) {
-        RecordingHandler handler = new RecordingHandler();
-        StubClassifier classifier = new StubClassifier()
-                .always(PermissionClassifier.Verdict.allow("分类器想放行"));
-        HitlToolRegistry registry = registry(tempDir, handler, PermissionMode.AUTO, classifier,
-                List.of(), List.of("write_file(*.txt)"), List.of());
-
-        var output = registry.executeToolOutput("write_file", writeArgs("a.txt"));
-
-        assertNotEquals(ToolErrorCode.POLICY_DENIED, output.errorCode(), output.text());
-        assertEquals(0, classifier.callCount(), "用户已经表达了「这个要问我」");
-        assertEquals(1, handler.requestCount());
     }
 
     @Test
@@ -355,7 +426,7 @@ class PermissionClassifierTest {
     void nonAutoModeNeverCallsClassifier(@TempDir Path tempDir) {
         RecordingHandler handler = new RecordingHandler();
         StubClassifier classifier = new StubClassifier()
-                .always(PermissionClassifier.Verdict.deny("分类器想拒绝"));
+                .always(PermissionClassifier.Verdict.block("分类器想拒绝"));
         HitlToolRegistry registry = registry(tempDir, handler, PermissionMode.DEFAULT, classifier);
 
         var output = registry.executeToolOutput("write_file", writeArgs("a.txt"));
@@ -405,7 +476,7 @@ class PermissionClassifierTest {
         };
         RecordingHandler handler = new RecordingHandler();
         try (LlmPermissionClassifier classifier =
-                     new LlmPermissionClassifier(() -> client, "system", 120_000);
+                     new LlmPermissionClassifier(() -> client, PROMPT, 120_000);
              HitlToolRegistry registry = registry(tempDir, handler, PermissionMode.AUTO, classifier)) {
 
             var result = registry.executeTools(List.of(

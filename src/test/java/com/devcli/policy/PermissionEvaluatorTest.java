@@ -11,15 +11,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * 规则层求值次序的定向测试。
  *
- * <p>次序本身就是安全语义：{@code deny} 必须最先且不可覆盖，{@code allow} 先于 {@code ask}
- * 短路。这个次序与 WorkBuddy 一致，代价是一条宽泛的 {@code allow} 会吞掉更窄的 {@code ask}——
- * 下面用 {@link #broaderAllowShadowsNarrowerAsk()} 把这个代价钉成显式契约，任何调整都必须
- * 先改 ADR 再改测试。</p>
+ * <p>{@code hard_deny} 必须最先且不可覆盖；非自动模式无法判断用户意图，因此显式
+ * {@code soft_deny} 必须先于宽泛 {@code allow}，避免授权静默吞掉人工确认边界。</p>
  */
 class PermissionEvaluatorTest {
 
-    private static PermissionRuleSet rules(List<String> deny, List<String> ask, List<String> allow) {
-        return PermissionRuleSet.parse(deny, ask, allow);
+    private static PermissionRuleSet rules(List<String> hardDeny, List<String> softDeny,
+                                           List<String> allow) {
+        return PermissionRuleSet.parse(hardDeny, softDeny, allow, List.of());
     }
 
     @Test
@@ -42,7 +41,7 @@ class PermissionEvaluatorTest {
     }
 
     @Test
-    void denyBeatsAllowAndAsk() {
+    void hardDenyBeatsAllowAndSoftDeny() {
         PermissionRuleSet set = rules(
                 List.of("execute_command(git push:*)"),
                 List.of("execute_command(git push:*)"),
@@ -51,14 +50,12 @@ class PermissionEvaluatorTest {
         PermissionEvaluator.Result result =
                 PermissionEvaluator.evaluate("execute_command", List.of("git push origin main"), set);
 
-        assertEquals(PermissionEvaluator.Outcome.DENY, result.outcome());
+        assertEquals(PermissionEvaluator.Outcome.HARD_DENY, result.outcome());
         assertTrue(result.reason().contains("git push:*"), result.reason());
     }
 
     @Test
-    void broaderAllowShadowsNarrowerAsk() {
-        // 这是固定次序的真实代价，不是缺陷：allow 先短路，更窄的 ask 永远轮不到。
-        // 加载期由 PermissionRuleSet.shadowedAskRules() 提示用户，次序本身不为此让步。
+    void narrowerSoftDenyOverridesBroadAllow() {
         PermissionRuleSet set = rules(
                 List.of(),
                 List.of("write_file(src/secret/**)"),
@@ -67,41 +64,41 @@ class PermissionEvaluatorTest {
         PermissionEvaluator.Result result =
                 PermissionEvaluator.evaluate("write_file", List.of("src/secret/key.txt"), set);
 
-        assertEquals(PermissionEvaluator.Outcome.ALLOW, result.outcome());
-        assertTrue(result.reason().contains("src/**"), result.reason());
+        assertEquals(PermissionEvaluator.Outcome.SOFT_DENY, result.outcome());
+        assertTrue(result.reason().contains("src/secret/**"), result.reason());
     }
 
     @Test
-    void allowIsEvaluatedBeforeAsk() {
+    void softDenyIsEvaluatedBeforeAllow() {
         PermissionRuleSet set = rules(
                 List.of(),
                 List.of("write_file"),
                 List.of("write_file(src/**)"));
 
-        assertEquals(PermissionEvaluator.Outcome.ALLOW,
+        assertEquals(PermissionEvaluator.Outcome.SOFT_DENY,
                 PermissionEvaluator.evaluate("write_file", List.of("src/a.java"), set).outcome());
     }
 
     @Test
-    void identicalRuleInBothGroupsResolvesToAllow() {
+    void identicalRuleInBothGroupsResolvesToSoftDeny() {
         PermissionRuleSet set = rules(
                 List.of(),
                 List.of("write_file(src/**)"),
                 List.of("write_file(src/**)"));
 
-        assertEquals(PermissionEvaluator.Outcome.ALLOW,
+        assertEquals(PermissionEvaluator.Outcome.SOFT_DENY,
                 PermissionEvaluator.evaluate("write_file", List.of("src/a.java"), set).outcome(),
-                "同一条规则同时出现在 allow 与 ask 时，allow 先短路");
+                "同一条规则同时出现时，显式边界优先");
     }
 
     @Test
-    void denyWinsRegardlessOfRuleGroups() {
+    void hardDenyWinsRegardlessOfRuleGroups() {
         PermissionRuleSet set = rules(
                 List.of("write_file"),
                 List.of("write_file"),
                 List.of("write_file(src/**)"));
 
-        assertEquals(PermissionEvaluator.Outcome.DENY,
+        assertEquals(PermissionEvaluator.Outcome.HARD_DENY,
                 PermissionEvaluator.evaluate("write_file", List.of("src/a.java"), set).outcome());
     }
 
@@ -120,14 +117,14 @@ class PermissionEvaluatorTest {
     }
 
     @Test
-    void askForcesApprovalWithoutDenying() {
+    void softDenyIsReportedAsBoundaryNotAsImmediateRefusal() {
         PermissionRuleSet set = rules(List.of(), List.of("delete_files(src/**)"), List.of());
 
         PermissionEvaluator.Result result =
                 PermissionEvaluator.evaluate("delete_files", List.of("src/a.java"), set);
 
-        assertEquals(PermissionEvaluator.Outcome.ASK, result.outcome());
-        assertTrue(result.reason().contains("询问规则"), result.reason());
+        assertEquals(PermissionEvaluator.Outcome.SOFT_DENY, result.outcome());
+        assertTrue(result.reason().contains("软阻止规则"), result.reason());
     }
 
     @Test
@@ -143,7 +140,7 @@ class PermissionEvaluatorTest {
     void ruleWithoutSpecifierMatchesToolWithoutResourceSlot() {
         PermissionRuleSet set = rules(List.of("apply_patch"), List.of(), List.of());
 
-        assertEquals(PermissionEvaluator.Outcome.DENY,
+        assertEquals(PermissionEvaluator.Outcome.HARD_DENY,
                 PermissionEvaluator.evaluate("apply_patch", List.of(), set).outcome());
     }
 
@@ -160,7 +157,8 @@ class PermissionEvaluatorTest {
     @Test
     void parseRejectsAnyIllegalRuleInsteadOfPartiallyAccepting() {
         assertThrows(IllegalArgumentException.class,
-                () -> PermissionRuleSet.parse(List.of(), List.of(), List.of("mcp__x__y(page)")));
+                () -> PermissionRuleSet.parse(List.of(), List.of(), List.of("mcp__x__y(page)"),
+                        List.of()));
     }
 
     @Test
@@ -169,6 +167,18 @@ class PermissionEvaluatorTest {
                 "无规则时状态栏不能出现长期占位的空字段");
 
         PermissionRuleSet set = rules(List.of("apply_patch"), List.of(), List.of("write_file(src/**)"));
-        assertEquals("deny 1 · allow 1", set.compactSummary());
+        assertEquals("hard_deny 1 · allow 1", set.compactSummary());
+    }
+
+    @Test
+    void environmentAloneIsNotAnEmptyRuleSet() {
+        // 环境事实不产生判定，但它是用户写下的配置：摘要里要显示，否则用户会以为自己没保存成功。
+        PermissionRuleSet set = PermissionRuleSet.parse(List.of(), List.of(), List.of(),
+                List.of("可信域名：github.com"));
+
+        assertEquals("environment 1", set.compactSummary());
+        assertEquals(PermissionEvaluator.Outcome.UNDECIDED,
+                PermissionEvaluator.evaluate("write_file", List.of("src/a.java"), set).outcome(),
+                "环境事实不得影响任何判定");
     }
 }

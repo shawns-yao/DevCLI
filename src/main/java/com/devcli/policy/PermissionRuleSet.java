@@ -1,45 +1,69 @@
 package com.devcli.policy;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 一次求值要用的规则全集：{@code deny} / {@code ask} / {@code allow} 三组。
+ * 一次求值要用的规则全集，四类：{@code hard_deny} / {@code soft_deny} / {@code allow} / {@code environment}。
  *
- * <p>三组的分工不重叠：{@code deny} 立即拒绝且不可被任何授权覆盖；{@code allow} 立即放行；
- * {@code ask} 强制人工审批。求值顺序见 {@link PermissionEvaluator}。</p>
+ * <p>四类的分工对应参照实现的四个用户规则类别，语义不重叠：</p>
+ * <ul>
+ *   <li>{@code hard_deny} —— 安全边界，<b>无条件</b>拒绝。用户意图不能清除，允许例外也不能覆盖。
+ *       对应 {@link PermissionEvaluator.Outcome#HARD_DENY}。</li>
+ *   <li>{@code soft_deny} —— 用户声明的边界。<b>明确且具体的用户意图可以清除它</b>，但只有分类器
+ *       有资格判断意图，所以在 {@code auto} 模式下它不短路，而是作为分类器输入参与同一次判定；
+ *       其余模式没有分类器可用，退回「强制人工审批」。对应
+ *       {@link PermissionEvaluator.Outcome#SOFT_DENY}。</li>
+ *   <li>{@code allow} —— 允许例外。仅在软阻止上生效，且同样在 {@code auto} 模式下交给分类器
+ *       判断（参照实现规定例外是强制的，但有两个例外情形：伪装成例外的可疑动作、用户明确设下的
+ *       边界——两者都要分类器才判得出来）。</li>
+ *   <li>{@code environment} —— 用户环境的事实描述（哪些域名可信、哪些资源是共享的）。
+ *       它<b>不产生任何判定</b>，只作为上下文进分类器提示词，供其余三类规则与内置判据引用。</li>
+ * </ul>
+ *
+ * <p>非自动模式的求值顺序见 {@link PermissionEvaluator}：
+ * {@code hard_deny} → {@code soft_deny} → {@code allow}。</p>
  *
  * <p>不可变值对象。规则集为空是合法状态，表示「没有用户规则」，此时求值一律返回未决，
  * 由下游的模式基线策略接管——这也是关闭规则层的方式。</p>
  */
-public record PermissionRuleSet(List<PermissionRule> deny,
-                                List<PermissionRule> ask,
-                                List<PermissionRule> allow) {
+public record PermissionRuleSet(List<PermissionRule> hardDeny,
+                                List<PermissionRule> softDeny,
+                                List<PermissionRule> allow,
+                                List<String> environment) {
 
     /** 没有用户规则。 */
     public static final PermissionRuleSet EMPTY =
-            new PermissionRuleSet(List.of(), List.of(), List.of());
+            new PermissionRuleSet(List.of(), List.of(), List.of(), List.of());
 
     public PermissionRuleSet {
-        deny = deny == null ? List.of() : List.copyOf(deny);
-        ask = ask == null ? List.of() : List.copyOf(ask);
+        hardDeny = hardDeny == null ? List.of() : List.copyOf(hardDeny);
+        softDeny = softDeny == null ? List.of() : List.copyOf(softDeny);
         allow = allow == null ? List.of() : List.copyOf(allow);
+        environment = environment == null ? List.of() : environment.stream()
+                .filter(entry -> entry != null && !entry.isBlank())
+                .map(String::trim)
+                .toList();
     }
 
     /**
-     * 从原始规则文本解析三组规则。
+     * 从原始规则文本解析四类规则。
      *
-     * @throws IllegalArgumentException 任一条非法；调用方负责拒绝启动而不是部分接受
+     * <p>{@code environment} 是自由文本而不是 {@code Tool(specifier)} 形态，因此不做规则语法校验，
+     * 只做去空白与丢弃空条目。</p>
+     *
+     * @throws IllegalArgumentException 任一条规则非法；调用方负责拒绝启动而不是部分接受
      */
-    public static PermissionRuleSet parse(List<String> deny, List<String> ask, List<String> allow) {
+    public static PermissionRuleSet parse(List<String> hardDeny, List<String> softDeny,
+                                          List<String> allow, List<String> environment) {
         return new PermissionRuleSet(
-                PermissionRule.parseAll(deny),
-                PermissionRule.parseAll(ask),
-                PermissionRule.parseAll(allow));
+                PermissionRule.parseAll(hardDeny),
+                PermissionRule.parseAll(softDeny),
+                PermissionRule.parseAll(allow),
+                environment);
     }
 
     public boolean isEmpty() {
-        return deny.isEmpty() && ask.isEmpty() && allow.isEmpty();
+        return hardDeny.isEmpty() && softDeny.isEmpty() && allow.isEmpty() && environment.isEmpty();
     }
 
     /** 状态栏与授权状态视图用的单行摘要；无规则时返回空串，避免常驻占位。 */
@@ -48,9 +72,10 @@ public record PermissionRuleSet(List<PermissionRule> deny,
             return "";
         }
         StringBuilder summary = new StringBuilder();
-        appendCount(summary, "deny", deny.size());
-        appendCount(summary, "ask", ask.size());
+        appendCount(summary, "hard_deny", hardDeny.size());
+        appendCount(summary, "soft_deny", softDeny.size());
         appendCount(summary, "allow", allow.size());
+        appendCount(summary, "environment", environment.size());
         return summary.toString();
     }
 
@@ -65,37 +90,6 @@ public record PermissionRuleSet(List<PermissionRule> deny,
     }
 
     /**
-     * 加载期告警：找出被更宽的 {@code allow} 规则覆盖、因而永远不会生效的 {@code ask} 规则。
-     *
-     * <p>{@link PermissionEvaluator} 按固定次序判定，{@code allow} 先于 {@code ask} 短路。因此
-     * {@code allow write_file(src/**)} 加上 {@code ask write_file(src/secret/**)} 时，那条 ask 是
-     * 死文本——用户以为自己声明了例外，实际没有。这个次序与 WorkBuddy 一致，不打算改；能做的是
-     * 让沉默的失效变成显式的提示。</p>
-     *
-     * <p>检测是启发式的（同工具、或无 specifier、或 allow 的字面量前缀是 ask 的前缀），
-     * 只用于提示。规则本身仍然照常求值，本方法不改变任何判定结果。</p>
-     *
-     * @return 可直接打印的中文提示行；没有可疑规则时返回空清单
-     */
-    public List<String> shadowedAskRules() {
-        if (ask.isEmpty() || allow.isEmpty()) {
-            return List.of();
-        }
-        List<String> warnings = new ArrayList<>();
-        for (PermissionRule asked : ask) {
-            for (PermissionRule allowed : allow) {
-                if (covers(allowed, asked)) {
-                    warnings.add("询问规则 " + asked.raw() + " 被放行规则 " + allowed.raw()
-                            + " 覆盖，按 deny → allow → ask 的固定次序永远不会生效；"
-                            + "要声明例外请改用 deny");
-                    break;
-                }
-            }
-        }
-        return List.copyOf(warnings);
-    }
-
-    /**
      * 命中所给工具的放行规则。
      *
      * <p>供调用方检查「这条规则到底会不会生效」：主机执行的命令必须单次人工确认，
@@ -105,32 +99,4 @@ public record PermissionRuleSet(List<PermissionRule> deny,
         return allow.stream().filter(rule -> rule.matchesTool(toolName)).toList();
     }
 
-    private static boolean covers(PermissionRule allowed, PermissionRule asked) {
-        if (!allowed.matchesTool(asked.tool())) {
-            return false;
-        }
-        if (allowed.specifier() == null) {
-            // 裸工具名覆盖该工具的全部调用
-            return true;
-        }
-        if (allowed.specifier().equals(asked.specifier())) {
-            // 同一条规则同时出现在 allow 与 ask，allow 先短路
-            return true;
-        }
-        if (asked.specifier() == null) {
-            // ask 比 allow 更宽，不可能被完全覆盖
-            return false;
-        }
-        String prefix = allowed.literalPrefix();
-        if (prefix.length() == allowed.specifier().length()) {
-            // 无通配符的 allow 只覆盖它自己，相等的情形上面已判过
-            return false;
-        }
-        if (prefix.isEmpty()) {
-            // 通配符在首位时前缀没有信息量（**/secret/** 比 src/** 更窄），
-            // 只有整条规则都是通配符才敢断定它覆盖全部
-            return allowed.specifier().chars().allMatch(current -> current == '*');
-        }
-        return asked.specifier().startsWith(prefix);
-    }
 }

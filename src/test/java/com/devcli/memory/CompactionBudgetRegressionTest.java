@@ -94,7 +94,11 @@ class CompactionBudgetRegressionTest {
         public ChatResponse chat(List<Message> messages, List<Tool> tools) {
             calls.incrementAndGet();
             captured.set(List.copyOf(messages));
-            return new ChatResponse("assistant", "摘要", List.of(), 10, 10);
+            return new ChatResponse("assistant", """
+                    {"schema_version":2,"request_intent":"检查文件",\
+                    "concepts":[],"files":[],"pitfalls":[],"resolution_steps":[],\
+                    "user_messages":["检查文件"],"protected_facts":[]}
+                    """, List.of(), 10, 10);
         }
 
         @Override

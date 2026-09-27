@@ -281,6 +281,12 @@
 
 **目标**：适配 GLM-5.1（200k）/ DeepSeek V4（1M）/ StepFun（256k）/ Kimi K2.6（256k）/ Claude Sonnet 4.6（1M）等长上下文模型。第 3 期 Memory 是基于"短上下文兜底"假设设计的，长窗口下要切换策略。
 
+> ⚠️ **后续修订（截至 2026-09-23 核实）**：本期交付的 **short / balanced / long 三档上下文模式已移除**，
+> `ContextMode` 类已删除。`ContextProfile` 改为按模型上下文窗口直接派生参数，全模型走同一套行为；
+> 压缩对所有窗口都生效（不再"long 跳过摘要压缩"）；`search_code` 默认 topK **固定 5**（不再按档取 5 / 10 / 20）。
+> 因此下文"统一管理三种上下文模式""长 / 短上下文双模式""检索策略自适应"三条描述**均已失效**，仅作历史记录保留。
+> 当前事实见 `docs/agents-reference.md` 与 `docs/context-compaction-design.md`。
+
 **功能迭代**（详细开发任务见 `docs/phase-12-long-context.md`）：
 - `LlmClient` 接口扩展能力声明：`maxContextWindow()` / `supportsPromptCaching()` / `promptCacheMode()`
 - `ContextProfile` 统一管理 short / balanced / long 三种上下文模式

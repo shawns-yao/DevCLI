@@ -80,4 +80,34 @@ class ToolSemanticValidatorTest {
             throw new AssertionError(e);
         }
     }
+
+    @Test
+    void rejectsDelegationWithBlankContractFieldBeforeAdmission() {
+        // 契约字段的非空由工具 schema 承担，错误码是参数错误而非策略拒绝，
+        // 模型据此能区分「参数写错了」与「这个任务不该委派」。详见 ADR 0010。
+        try (ToolRegistry registry = new ToolRegistry()) {
+            ToolOutput output = registry.executeToolOutput("delegate_task",
+                    "{\"role\":\"explorer\",\"task\":\"Inspect\",\"deliverable\":\"Findings\","
+                            + "\"task_spec\":{\"execution_kind\":\"agent_loop\",\"inputs\":\"Fixture\","
+                            + "\"scope\":\" \",\"done_condition\":\"Report\"}}");
+
+            assertEquals(ToolErrorCode.INVALID_ARGUMENTS, output.errorCode());
+            assertTrue(output.text().contains("scope"), output.text());
+        }
+    }
+
+    @Test
+    void rejectsWorkerDelegationWithoutWriteScope() {
+        // worker 写入范围是隔离工作区与运行时租约的必要输入。该字段对 worker 是条件必填，
+        // schema 无法表达，因此由本层承担；它属于结构校验而非准入判据。详见 ADR 0010。
+        try (ToolRegistry registry = new ToolRegistry()) {
+            ToolOutput output = registry.executeToolOutput("delegate_task",
+                    "{\"role\":\"worker\",\"task\":\"Edit one file\",\"deliverable\":\"Patch\","
+                            + "\"task_spec\":{\"execution_kind\":\"agent_loop\",\"inputs\":\"Fixture\","
+                            + "\"scope\":\"One file\",\"done_condition\":\"Report\"}}");
+
+            assertEquals(ToolErrorCode.INVALID_ARGUMENTS, output.errorCode());
+            assertTrue(output.text().contains("allowed_write_paths"), output.text());
+        }
+    }
 }

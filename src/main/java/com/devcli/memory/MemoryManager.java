@@ -44,13 +44,13 @@ public class MemoryManager implements AutoCloseable {
     private static final int SESSION_PRE_SUMMARY_TOKEN_DELTA = 2_000;
     private static final int SESSION_PRE_SUMMARY_TOOL_CALLS = 4;
     private static final int SESSION_PRE_SUMMARY_LARGE_TOOL_CHARS = 12_000;
-    private static final int SESSION_PRE_SUMMARY_MAX_RENDER_CHARS = 64_000;
     /** 索引段落标题；其 token 也要从本轮记忆预算里扣掉。 */
     private static final String INDEX_HEADER = "## 长期记忆\n\n";
     /** 相关性全文段落的固定标题；其 token 也要从本轮记忆预算里扣掉。 */
     private static final String RELEVANT_MEMORY_HEADER = "\n\n## 与本次问题相关的长期记忆\n\n";
     private final SessionMemory sessionMemory;
     private final CompactionSummaryCache compactionSummaryCache;
+    private final ConversationHistoryCompactor sessionPreSummaryCompactor;
     private final LongTermMemory longTermMemory;
     private final ExecutorService sessionPreSummaryExecutor;
     /** 后台预摘要最多保留一个运行中任务和一个最新待处理任务。 */
@@ -92,6 +92,8 @@ public class MemoryManager implements AutoCloseable {
         this.contextProfile = contextProfile;
         this.sessionMemory = new SessionMemory();
         this.compactionSummaryCache = new CompactionSummaryCache();
+        this.sessionPreSummaryCompactor = new ConversationHistoryCompactor(llmClient);
+        this.sessionPreSummaryCompactor.setSummaryUsageConsumer(this::recordPreSummaryUsage);
         this.longTermMemory = longTermMemory != null ? longTermMemory : new LongTermMemory();
         this.tokenBudget = new TokenBudget(contextProfile.maxContextWindow());
         this.sessionPreSummaryExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -103,6 +105,7 @@ public class MemoryManager implements AutoCloseable {
 
     public void setLlmClient(LlmClient llmClient) {
         this.llmClient = llmClient;
+        this.sessionPreSummaryCompactor.setLlmClient(llmClient);
         applyContextProfile(ContextProfile.from(llmClient));
     }
 
@@ -732,51 +735,52 @@ public class MemoryManager implements AutoCloseable {
         try {
             Optional<CompactionSummaryCache.PreSummary> incrementalBase =
                     compactionSummaryCache.findExtendablePreSummary(coveredMessages);
-            List<LlmClient.Message> summaryRequest;
             String maintenanceMode;
             int deltaMessageCount;
+            int inputTokenEstimate;
+            String summary;
             if (incrementalBase.isPresent()) {
                 CompactionSummaryCache.PreSummary base = incrementalBase.get();
                 List<LlmClient.Message> deltaMessages =
                         coveredMessages.subList(base.messageCount(), coveredMessages.size());
                 maintenanceMode = "incremental";
                 deltaMessageCount = deltaMessages.size();
-                summaryRequest = List.of(
-                        LlmClient.Message.system("你是会话增量预摘要维护器。请把旧摘要与新增消息合并为一份完整替代摘要，保留用户目标、关键决策、文件路径、工具结果、约束和未完成事项，不要只输出本次增量。"),
-                        LlmClient.Message.user("旧摘要：\n" + base.summary()
-                                + "\n\n新增消息：\n" + renderMessagesForPreSummary(deltaMessages))
-                );
+                inputTokenEstimate = TokenBudget.estimateMessagesTokens(deltaMessages)
+                        + MemoryEntry.estimateTokens(base.summary());
+                if (preSummaryInputExceedsBudget(inputTokenEstimate)) {
+                    return SessionPreSummaryMaintenanceResult.SKIPPED_INPUT_TOO_LARGE;
+                }
+                summary = sessionPreSummaryCompactor.summarizeIncremental(
+                        base.summary(), deltaMessages);
             } else {
                 maintenanceMode = "full";
                 deltaMessageCount = coveredMessages.size();
-                summaryRequest = List.of(
-                        LlmClient.Message.system("你是会话预摘要维护器。请保留用户目标、关键决策、文件路径、工具结果、约束和未完成事项，输出简洁中文摘要。"),
-                        LlmClient.Message.user("请为以下会话内容生成可供后续上下文压缩复用的预摘要：\n\n"
-                                + renderMessagesForPreSummary(coveredMessages))
-                );
+                inputTokenEstimate = TokenBudget.estimateMessagesTokens(coveredMessages);
+                if (preSummaryInputExceedsBudget(inputTokenEstimate)) {
+                    return SessionPreSummaryMaintenanceResult.SKIPPED_INPUT_TOO_LARGE;
+                }
+                summary = sessionPreSummaryCompactor.summarize(coveredMessages);
             }
-            if (TokenBudget.estimateMessagesTokens(summaryRequest)
-                    > Math.max(256, contextProfile.compressionTriggerTokens())) {
-                log.info("skip session pre-summary because request exceeds the local input budget");
-                return SessionPreSummaryMaintenanceResult.SKIPPED_INPUT_TOO_LARGE;
-            }
-            LlmClient.ChatResponse response = llmClient.chat(summaryRequest, List.of());
-            if (Boolean.parseBoolean(System.getProperty(
-                    ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY, "false"))) {
-                System.err.printf(java.util.Locale.ROOT,
-                        "[context-compaction] kind=pre-summary-call inputTokens=%d outputTokens=%d cachedInputTokens=%d%n",
-                        response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
-            }
-            String summary = response.content();
             if (summary == null || summary.isBlank()) {
                 preSummaryFailureCount.incrementAndGet();
                 return SessionPreSummaryMaintenanceResult.FAILED;
             }
+            RollingSummary structured = RollingSummary.parse(summary);
+            if (structured.isEmpty()) {
+                preSummaryFailureCount.incrementAndGet();
+                return SessionPreSummaryMaintenanceResult.FAILED;
+            }
+            summary = structured.render();
             CompactionSemanticGuard.Validation validation = CompactionSemanticGuard.validateAndRepair(
                     coveredMessages, summary, ConversationHistoryCompactor.MAX_SUMMARY_CHARS);
             summary = validation.repairedSummary();
-            if (summary == null || summary.isBlank()
-                    || summary.length() > ConversationHistoryCompactor.MAX_SUMMARY_CHARS) {
+            structured = RollingSummary.parse(summary);
+            if (structured.isEmpty()) {
+                preSummaryFailureCount.incrementAndGet();
+                return SessionPreSummaryMaintenanceResult.FAILED;
+            }
+            summary = structured.render();
+            if (summary.length() > ConversationHistoryCompactor.MAX_SUMMARY_CHARS) {
                 preSummaryFailureCount.incrementAndGet();
                 return SessionPreSummaryMaintenanceResult.FAILED;
             }
@@ -790,7 +794,7 @@ public class MemoryManager implements AutoCloseable {
                     maintenanceMode,
                     coveredMessages.size(),
                     deltaMessageCount,
-                    TokenBudget.estimateMessagesTokens(summaryRequest),
+                    inputTokenEstimate,
                     summary.length(),
                     preSummaryFullCount.get(),
                     preSummaryIncrementalCount.get(),
@@ -808,6 +812,25 @@ public class MemoryManager implements AutoCloseable {
             log.warn("session pre-summary maintenance failed", e);
             return SessionPreSummaryMaintenanceResult.FAILED;
         }
+    }
+
+    private boolean preSummaryInputExceedsBudget(int inputTokenEstimate) {
+        boolean exceeded = inputTokenEstimate
+                > Math.max(256, contextProfile.compressionTriggerTokens());
+        if (exceeded) {
+            log.info("skip session pre-summary because source exceeds the local input budget");
+        }
+        return exceeded;
+    }
+
+    private void recordPreSummaryUsage(LlmClient.ChatResponse response) {
+        if (response == null || !Boolean.parseBoolean(System.getProperty(
+                ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY, "false"))) {
+            return;
+        }
+        System.err.printf(java.util.Locale.ROOT,
+                "[context-compaction] kind=pre-summary-call inputTokens=%d outputTokens=%d cachedInputTokens=%d%n",
+                response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
     }
 
     public CompletableFuture<SessionPreSummaryMaintenanceResult> maintainSessionPreSummaryAfterTurnAsync(
@@ -882,40 +905,6 @@ public class MemoryManager implements AutoCloseable {
             pendingSessionPreSummary = null;
             sessionPreSummaryExecutor.execute(runningSessionPreSummary);
         }
-    }
-
-    private static String renderMessagesForPreSummary(List<LlmClient.Message> messages) {
-        StringBuilder sb = new StringBuilder();
-        for (LlmClient.Message message : messages) {
-            sb.append("[").append(message.role()).append("] ");
-            if (message.toolCallId() != null && !message.toolCallId().isBlank()) {
-                sb.append("toolCallId=").append(message.toolCallId()).append(' ');
-            }
-            if (message.toolCalls() != null && !message.toolCalls().isEmpty()) {
-                sb.append("toolCalls=");
-                for (LlmClient.ToolCall toolCall : message.toolCalls()) {
-                    if (toolCall.function() != null) {
-                        sb.append(toolCall.function().name());
-                        if (toolCall.function().arguments() != null
-                                && !toolCall.function().arguments().isBlank()) {
-                            sb.append(" args=")
-                                    .append(truncateForPrompt(toolCall.function().arguments(), 1_000));
-                        }
-                        sb.append(' ');
-                    }
-                }
-            }
-            String content = message.content();
-            if (content != null && !content.isBlank()) {
-                sb.append(truncateForPrompt(content, 2_000));
-            }
-            sb.append("\n\n");
-            if (sb.length() >= SESSION_PRE_SUMMARY_MAX_RENDER_CHARS) {
-                sb.append("[预摘要输入超过上限，未继续展开更早消息]");
-                break;
-            }
-        }
-        return sb.toString().trim();
     }
 
     /**

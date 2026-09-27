@@ -10,6 +10,11 @@
 > 因此本文列出的 `TuiBootstrap` / `TuiSessionController` / `LanternaWindow` / `CenterPane` /
 > `StatusPane` / `FileTreePane` 等类**均已不存在**，本文仅作历史设计记录保留。
 > 当前事实以 `AGENTS.md` 为准。
+>
+> **另需注意（截至 2026-09-23 核实）**：本文状态栏与配置面板中出现的"上下文模式 Balanced (128k)"一项，
+> 属于已移除的 short / balanced / long 三档设计，配置面板**不再有该字段**。
+> 当前 `/config` 是**只读视图**，只列出模型、默认 Provider、权限模式、Skill 启用数、渲染器和配置文件路径；
+> 编辑配置需改 `~/.devcli/config.json` 后重启。
 
 
 > 这份文档是给执行 Agent 的开发任务说明书，自包含、可直接照着推进。

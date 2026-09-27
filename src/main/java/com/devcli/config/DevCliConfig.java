@@ -1,6 +1,7 @@
 package com.devcli.config;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 
@@ -57,17 +58,23 @@ public class DevCliConfig {
     /**
      * 权限配置段。承载持久授权基线与用户规则层。
      *
+     * <p>规则分四类，与参照实现的四个用户规则类别一一对应：{@code hardDeny}（无条件拒绝）、
+     * {@code softDeny}（用户声明的边界，明确意图可清除）、{@code allow}（允许例外）、
+     * {@code environment}（环境事实，只作上下文不产生判定）。配置键使用
+     * {@code hard_deny} / {@code soft_deny} / {@code allow} / {@code environment}，不保留旧别名。</p>
+     *
      * <p>这里刻意只保存原始形态（字符串清单与布尔），不引用 {@code com.devcli.policy} 下的类型：
      * {@code config} 是叶子包，不得依赖任何其他 {@code com.devcli} 顶层包（见 PackageBoundaryTest）。
      * 原始值到 {@code TaskGrant} / {@code PermissionRuleSet} 的装配由入口层完成，
      * 非法值在那里显式拒绝。</p>
      */
-    @JsonIgnoreProperties(ignoreUnknown = true)
+    @JsonIgnoreProperties(ignoreUnknown = false)
     public static class PermissionsConfig {
         private String defaultMode = "default";
-        private List<String> deny = new ArrayList<>();
-        private List<String> ask = new ArrayList<>();
+        private List<String> hardDeny = new ArrayList<>();
+        private List<String> softDeny = new ArrayList<>();
         private List<String> allow = new ArrayList<>();
+        private List<String> environment = new ArrayList<>();
 
         /**
          * 启动时的权限模式，取值见 {@code policy.PermissionMode}。
@@ -84,25 +91,29 @@ public class DevCliConfig {
             this.defaultMode = defaultMode;
         }
 
-        /** 立即拒绝的规则，优先级最高，不可被任何授权或放行规则覆盖。 */
-        public List<String> getDeny() {
-            return deny == null ? List.of() : deny;
+        /** 安全边界规则：无条件拒绝，用户意图不能清除，允许例外也不能覆盖。 */
+        @JsonProperty("hard_deny")
+        public List<String> getHardDeny() {
+            return hardDeny == null ? List.of() : hardDeny;
         }
 
-        public void setDeny(List<String> deny) {
-            this.deny = deny == null ? new ArrayList<>() : new ArrayList<>(deny);
+        @JsonProperty("hard_deny")
+        public void setHardDeny(List<String> hardDeny) {
+            this.hardDeny = hardDeny == null ? new ArrayList<>() : new ArrayList<>(hardDeny);
         }
 
-        /** 强制人工审批的规则。 */
-        public List<String> getAsk() {
-            return ask == null ? List.of() : ask;
+        /** 用户声明的边界规则：明确且具体的用户意图可以清除它。 */
+        @JsonProperty("soft_deny")
+        public List<String> getSoftDeny() {
+            return softDeny == null ? List.of() : softDeny;
         }
 
-        public void setAsk(List<String> ask) {
-            this.ask = ask == null ? new ArrayList<>() : new ArrayList<>(ask);
+        @JsonProperty("soft_deny")
+        public void setSoftDeny(List<String> softDeny) {
+            this.softDeny = softDeny == null ? new ArrayList<>() : new ArrayList<>(softDeny);
         }
 
-        /** 立即放行的规则；只在策略硬边界通过后生效。 */
+        /** 允许例外规则：只在软阻止未命中时生效。 */
         public List<String> getAllow() {
             return allow == null ? List.of() : allow;
         }
@@ -110,6 +121,16 @@ public class DevCliConfig {
         public void setAllow(List<String> allow) {
             this.allow = allow == null ? new ArrayList<>() : new ArrayList<>(allow);
         }
+
+        /** 环境事实：可信域名、共享资源、部署目标等，只作为分类器上下文，不产生判定。 */
+        public List<String> getEnvironment() {
+            return environment == null ? List.of() : environment;
+        }
+
+        public void setEnvironment(List<String> environment) {
+            this.environment = environment == null ? new ArrayList<>() : new ArrayList<>(environment);
+        }
+
     }
 
     public String getDefaultProvider() { return defaultProvider; }

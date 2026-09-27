@@ -47,6 +47,16 @@ public class HitlToolRegistry extends ToolRegistry {
      * 达到阈值后回落到 {@code default}。判定链上「拿不到答案」只能收紧，不能放宽。</p>
      */
     private volatile PermissionClassifier permissionClassifier;
+    /**
+     * 可信意图上下文来源。默认空上下文。
+     *
+     * <p>用 {@link java.util.function.Supplier} 而不是固定字符串：历史在会话中持续增长，
+     * 装配时取一次会让分类器永远看到启动那一刻的空历史。与分类器一样是启动装配一次、之后只读。</p>
+     *
+     * <p>返回文本必须由 {@link TrustedIntentContext} 过滤并中和。</p>
+     */
+    private volatile java.util.function.Supplier<String> trustedIntentContext =
+            () -> TrustedIntentContext.render(java.util.List.of());
     /** 分类器连续失败次数：成功一次即归零，达阈值后退出 {@code auto} 模式。 */
     private java.util.concurrent.atomic.AtomicInteger classifierFailures =
             new java.util.concurrent.atomic.AtomicInteger();
@@ -107,6 +117,21 @@ public class HitlToolRegistry extends ToolRegistry {
      */
     public HitlToolRegistry withPermissionClassifier(PermissionClassifier classifier) {
         this.permissionClassifier = classifier;
+        return this;
+    }
+
+    /**
+     * 装配可信意图上下文来源，供 {@code auto} 模式下的分类器判定用户意图。
+     *
+     * <p>不装配时分类器收到空历史，也就是「没有任何用户意图证据」，判定会更偏阻止——
+     * 这与「缺一个判定来源只能收紧」的取向一致，不会因为漏接线而静默放宽。</p>
+     *
+     * <p>装配方必须传经 {@link TrustedIntentContext#render} 处理的文本。</p>
+     */
+    public HitlToolRegistry withTrustedIntentContext(java.util.function.Supplier<String> context) {
+        this.trustedIntentContext = context == null
+                ? () -> TrustedIntentContext.render(java.util.List.of())
+                : context;
         return this;
     }
 
@@ -171,21 +196,30 @@ public class HitlToolRegistry extends ToolRegistry {
                     "[策略] 已拒绝：" + gate.reason() + "；用户授权不能放宽系统策略边界");
         }
 
-        // 求值链第 1/2/4 步：用户规则层，顺序固定 deny → allow → ask。
-        // 规则未命中时结果未决，判定权交回下游模式基线策略，也就是上面 gate 的三值结果。
+        // 非 auto 模式按 hard_deny → soft_deny → allow 求值；auto 只提前执行 hard_deny，
+        // 其余规则交给分类器结合可信用户意图统一判断。
         PermissionEvaluator.Result rules = PermissionEvaluator.evaluate(
                 name,
                 ApprovalGate.resourceValues(name, parsedArgumentsOf(context), approvalPathScope),
                 permissionRules);
-        if (rules.outcome() == PermissionEvaluator.Outcome.DENY) {
+        if (rules.outcome() == PermissionEvaluator.Outcome.HARD_DENY) {
             recordToolAudit(AuditLog.AuditEntry.denyByPolicy(
                     name, argumentsJson, rules.reason(), 0L), context);
             return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
                     "[规则] 已拒绝：" + rules.reason() + "；放行规则与任务授权都不能覆盖它");
         }
+        // auto 模式下规则层不短路：分类器是那个模式的判定者，用户规则作为它的输入参与同一次判定
+        // （见 docs/adr/0013）。allow 与 soft_deny 若在此短路，注入提示词的规则就是死文本——
+        // 分类器永远看不到它们，用户声明的边界与例外都不会被采纳。
+        //
+        // 其余模式没有分类器可用，规则层照常短路：soft_deny 退回「强制人工审批」，
+        // allow 直接放行。hard_deny 在两种模式下都短路——它的判定结果与分类器的硬阻止检查完全
+        // 相同（无条件阻止），短路不会改变结论，却省掉一次模型调用、也不受端点可用性影响。
+        boolean classifierDecides =
+                currentPermissionMode().askPolicy() == PermissionMode.AskPolicy.AUTO;
         // 求值链第 5 步：模式短路。bypassPermissions 与 acceptEdits 在规则层之后、任务授权之前放行。
         // 放在这里而不是更晚：更晚会被任务授权范围二次约束，「不询问」等于没生效。
-        // 只接管规则层未决的动作——显式 ask 规则表达的是用户意志，任何模式都不能改写它。
+        // 只接管规则层未决的动作；soft_deny 在非 auto 模式下仍强制人工确认。
         if (rules.outcome() == PermissionEvaluator.Outcome.UNDECIDED && currentPermissionMode().autoAllows(name)) {
             context.putAttribute(PIPELINE_APPROVAL_SOURCE, "permission_mode");
             hitlHandler.onTaskGrantAllow(name, currentPermissionMode().autoAllowReason());
@@ -193,7 +227,9 @@ public class HitlToolRegistry extends ToolRegistry {
         }
 
         boolean allowedByRules = rules.outcome() == PermissionEvaluator.Outcome.ALLOW;
-        // 任务授权与放行规则处于同一层级：都表示「用户已经授权」，删除阈值只按数量兜底
+        // 任务授权与放行规则处于同一层级：都表示「用户已经授权」，删除阈值只按数量兜底。
+        // 这里不因 auto 模式而改变：删除阈值、命令删除、补丁与回滚是各自独立的安全要求，
+        // 不是规则层的短路出口，不能因为分类器接管了规则判定就跟着放宽。
         boolean authorized = gate.decision() == ApprovalGate.Decision.ALLOW || allowedByRules;
 
         DeleteFilesTool.Plan deletion = context.attribute(DeleteFilesTool.PLAN_ATTRIBUTE,
@@ -219,10 +255,10 @@ public class HitlToolRegistry extends ToolRegistry {
                     "工作区回滚会批量覆盖当前文件，必须单次人工确认；恢复前虽会创建快照，"
                             + "仍不得由自动分类器代替用户决定。");
         }
-        if (rules.outcome() == PermissionEvaluator.Outcome.ASK) {
+        if (!classifierDecides && rules.outcome() == PermissionEvaluator.Outcome.SOFT_DENY) {
             return askOrDeny(context, chain, rules.reason());
         }
-        if (authorized) {
+        if (!classifierDecides && authorized) {
             context.putAttribute(PIPELINE_APPROVAL_SOURCE,
                     allowedByRules ? "permission_rule" : "task_grant");
             hitlHandler.onTaskGrantAllow(name, allowedByRules ? rules.reason() : gate.reason());
@@ -241,8 +277,9 @@ public class HitlToolRegistry extends ToolRegistry {
         if (forcePerCallApproval) {
             return askOrDeny(context, chain, mcpToolApprovalNotice(name));
         }
-        // 走到这里说明没有任何规则或安全机制要求询问，只是默认策略是「问」——只有这种动作才交给
-        // 分类器。删除确认、命令删除、浏览器与 MCP 的逐次审批、显式 ask 规则都在上面各自短路了。
+        // 走到这里的动作分两类：没有任何规则或安全机制要求询问、只是默认策略是「问」的；
+        // 以及 auto 模式下命中用户 allow / soft_deny 规则、规则层刻意没有短路的。
+        // 删除确认、命令删除、补丁与回滚确认、浏览器与 MCP 的逐次审批都在上面各自短路了。
         return askOrClassify(context, chain);
     }
 
@@ -251,7 +288,7 @@ public class HitlToolRegistry extends ToolRegistry {
      *
      * <p>所有询问路径都收敛到这里，是为了让 {@code dontAsk} 只需实现一次。
      * WorkBuddy 的语义是「把最后得到的 ask 改写成 deny」，因此凡是会走到询问的动作都要经过这里，
-     * 包括显式 {@code ask} 规则、删除阈值与命令删除确认。</p>
+     * 包括非 auto 模式下的 {@code soft_deny} 规则、删除阈值与命令删除确认。</p>
      *
      * <p>审批通道不可用时失败关闭，而不是继续询问：{@code requestApproval} 在处理器关闭后
      * 仍然会去读 stdin，静默阻塞比拒绝更难排查。</p>
@@ -274,11 +311,17 @@ public class HitlToolRegistry extends ToolRegistry {
     }
 
     /**
-     * 「默认要问」的出口：{@code auto} 模式下交分类器，其余情况照常询问。
+     * 交给分类器的出口：{@code auto} 模式下由它判定，其余情况照常询问。
+     *
+     * <p>进到这里的有两类动作。一类是走完整条求值链、没有任何规则或安全机制要求询问、
+     * 仅仅因为默认策略才要问的；另一类是命中用户 {@code allow} / {@code soft_deny} 规则的——
+     * {@code auto} 模式下规则层不短路，规则作为分类器输入参与同一次判定，因为只有分类器看得见
+     * 对话历史，而这两类规则的语义（软阻止可被明确意图清除、允许例外可被用户边界压过）
+     * 都要求判断意图。</p>
      *
      * <p>与 {@link #askOrDeny} 分开是必要的：后者承载的是「有独立理由必须问」的动作——删除确认、
-     * 命令删除、逐次审批、显式 {@code ask} 规则。把它们一起交给分类器，等于让模型替用户取消
-     * 他自己声明的例外。</p>
+     * 命令删除、补丁与回滚确认、逐次审批。把它们一起交给分类器，等于让模型替用户取消
+     * 这些刻意不可免除的硬要求。</p>
      */
     private ToolOutput askOrClassify(ToolExecutionPipeline.Context context,
                                      ToolExecutionPipeline.Chain chain) {
@@ -296,22 +339,25 @@ public class HitlToolRegistry extends ToolRegistry {
                 && classifierBudgetNanos > 0L
                 && remainingNanos < classifierBudgetNanos) {
             return denyByClassifierFailure(context,
-                    "工具剩余时间不足以覆盖权限分类器超时预算，未启动分类器请求");
+                    "工具剩余时间不足以覆盖权限分类器超时预算，未启动分类器请求；"
+                            + "可调小 devcli.permission.classifier.timeout.seconds"
+                            + "（当前分类器预算 " + TimeUnit.NANOSECONDS.toSeconds(classifierBudgetNanos)
+                            + " 秒，工具剩余 " + TimeUnit.NANOSECONDS.toSeconds(remainingNanos) + " 秒）");
         }
         PermissionClassifier.Verdict verdict;
         try {
             verdict = classifier.classify(new PermissionClassifier.Request(
                     context.name(), context.argumentsJson(), getProjectPath(),
-                    currentPermissionMode().id()));
+                    currentPermissionMode().id(), trustedIntentContext.get(), permissionRules));
         } catch (java.io.IOException failure) {
             return denyByClassifierFailure(context, failure.getMessage());
         }
         classifierFailures.set(0);
-        if (!verdict.allow()) {
+        if (verdict.block()) {
             recordToolAudit(AuditLog.AuditEntry.denyByPolicy(context.name(), context.argumentsJson(),
-                    "分类器拒绝：" + verdict.reason(), 0L), context);
+                    "分类器阻止：" + verdict.reason(), 0L), context);
             return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
-                    "[分类器] 已拒绝：" + verdict.reason() + "；改用 /mode default 可恢复逐个询问");
+                    "[分类器] 已阻止：" + verdict.reason() + "；改用 /mode default 可恢复逐个询问");
         }
         context.putAttribute(PIPELINE_APPROVAL_SOURCE, "permission_classifier");
         if (hitlHandler != null) {
@@ -353,7 +399,7 @@ public class HitlToolRegistry extends ToolRegistry {
         String hostCommand = request.command() == null ? "" : request.command();
         PermissionEvaluator.Result hostRules = PermissionEvaluator.evaluate(
                 "execute_command", java.util.List.of(hostCommand), permissionRules);
-        if (hostRules.outcome() == PermissionEvaluator.Outcome.DENY) {
+        if (hostRules.outcome() == PermissionEvaluator.Outcome.HARD_DENY) {
             recordHostCommandDenial(request, hostRules.reason(), "host_rule");
             return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
                     "[规则] 已拒绝：" + hostRules.reason() + "；主机执行不接受任何放宽");
@@ -530,7 +576,10 @@ public class HitlToolRegistry extends ToolRegistry {
         return new HitlToolRegistry(hitlHandler, maintenance, approvalLock, permissionMode,
                 classifierFailures)
                 .withPermissionRules(permissionRules)
-                .withPermissionClassifier(permissionClassifier);
+                .withPermissionClassifier(permissionClassifier)
+                // fork 属于同一个会话，历史来源与根注册表相同：不传递会让 fork 内的分类器
+                // 看不到任何用户意图，同一动作在主注册表被放行、在 fork 里被阻止。
+                .withTrustedIntentContext(trustedIntentContext);
     }
 
     public HitlHandler getHitlHandler() {

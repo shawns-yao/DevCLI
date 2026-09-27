@@ -25,9 +25,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class PermissionRuleApprovalTest {
 
     private static HitlToolRegistry registry(Path projectRoot, RecordingHandler handler,
-                                             List<String> deny, List<String> ask, List<String> allow) {
+                                             List<String> hardDeny, List<String> softDeny,
+                                             List<String> allow) {
         HitlToolRegistry registry = new HitlToolRegistry(handler)
-                .withPermissionRules(PermissionRuleSet.parse(deny, ask, allow));
+                .withPermissionRules(PermissionRuleSet.parse(hardDeny, softDeny, allow, List.of()));
         registry.setProjectPath(projectRoot.toString());
         return registry;
     }

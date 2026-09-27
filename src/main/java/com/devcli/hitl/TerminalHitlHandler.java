@@ -32,7 +32,8 @@ public class TerminalHitlHandler implements HitlHandler {
 
     private volatile boolean enabled;
 
-    // 本次会话中已批准"全部放行"的集合（并发安全）
+    // 本轮任务内已批准"全部放行"的集合（并发安全）。
+    // 生命周期由调用方按任务边界收敛，不是整个会话——见 clearApprovedAll()。
     private final Set<String> approvedAllByTool = ConcurrentHashMap.newKeySet();
     private final Set<String> approvedAllByServer = ConcurrentHashMap.newKeySet();
 
@@ -242,8 +243,11 @@ public class TerminalHitlHandler implements HitlHandler {
     }
 
     /**
-     * 清除本次会话中积累的"全部放行"记录
-     * 在 /clear 或新会话开始时调用
+     * 清除本轮任务积累的"全部放行"记录。
+     *
+     * <p>生命周期是<b>本轮任务</b>，不是整个会话：每轮任务开始前清空，切换权限模式、清空对话、
+     * 撤销任务授权时也清空。一次「全部放行」不跨用户消息静默继承；{@code /plan} 或 Team 的一次
+     * 运行属于同一任务，内部仍共享放行。</p>
      */
     @Override
     public void clearApprovedAll() {

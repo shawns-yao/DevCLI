@@ -108,6 +108,7 @@ public final class ToolSemanticValidator {
             case "web_search" -> validateWebSearch(arguments);
             case "web_fetch" -> validateWebFetch(arguments);
             case "load_skill" -> validateLoadSkill(arguments);
+            case "delegate_task" -> validateDelegation(arguments);
             case "list_memory" -> validatePositiveInteger(arguments, "limit", 1, 10_000);
             case "save_memory" -> requireText(arguments, "fact", "fact 不能为空");
             default -> ValidationResult.ok();
@@ -330,6 +331,24 @@ public final class ToolSemanticValidator {
         String reference = args.path("reference").asText("");
         if (reference.startsWith("/") || reference.startsWith("\\") || reference.contains("..")) {
             return policy("Skill reference 路径不能是绝对路径或包含 ..");
+        }
+        return ValidationResult.ok();
+    }
+
+    /**
+     * 委派参数中 schema 无法表达的部分：写入范围对 worker 角色是条件必填。
+     *
+     * <p>其余结构校验（输入、范围、完成条件、交付物的存在与非空）由工具 schema 承担，
+     * 本层不重复实现。本层返回参数错误而非策略拒绝，使模型能区分「参数写错了」
+     * 与「这个任务不该委派」——前者它能自己修，后者只能改由自己完成。详见 ADR 0010。
+     */
+    private static ValidationResult validateDelegation(JsonNode args) {
+        if (!"worker".equals(args.path("role").asText())) {
+            return ValidationResult.ok();
+        }
+        JsonNode paths = args.get("allowed_write_paths");
+        if (paths == null || !paths.isArray() || paths.size() == 0) {
+            return argument("worker 角色必须声明非空的 allowed_write_paths");
         }
         return ValidationResult.ok();
     }

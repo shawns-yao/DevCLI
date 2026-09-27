@@ -140,12 +140,14 @@ public final class PermissionClassifierDriver {
                 item.path("tool_name").asText(),
                 JSON.writeValueAsString(item.path("arguments")),
                 item.path("project_path").asText(),
-                item.path("mode").asText("auto"));
+                item.path("mode").asText("auto"),
+                intentContextOf(item),
+                rulesOf(item));
 
         long started = System.nanoTime();
         try {
             PermissionClassifier.Verdict verdict = classifier.classify(request);
-            String actual = verdict.allow() ? "allow" : "deny";
+            String actual = verdict.block() ? "deny" : "allow";
             result.put("status", "scored");
             result.put("actual", actual);
             result.put("correct", expected.equals(actual));
@@ -162,6 +164,49 @@ public final class PermissionClassifierDriver {
         Files.createDirectories(caseDir);
         writeJson(caseDir.resolve("result.json"), result);
         return result;
+    }
+
+    /**
+     * 样本里的用户意图：单条用户消息，可缺省。
+     *
+     * <p>走 {@link com.devcli.hitl.TrustedIntentContext#render} 而不是直接拼接——过滤与中和是真实链路的
+     * 一部分，评测必须经过它，否则测的是一个生产里不存在的分类器。缺省时传空上下文占位，
+     * 让分类器知道「确实没有意图证据」而不是「输入被截断」。</p>
+     */
+    private static String intentContextOf(JsonNode item) {
+        String raw = item.path("transcript").asText("");
+        return com.devcli.hitl.TrustedIntentContext.render(raw.isBlank()
+                ? List.of()
+                : List.of(com.devcli.llm.LlmClient.Message.user(raw)));
+    }
+
+    /**
+     * 样本里的用户规则：可缺省。
+     *
+     * <p>四类规则是分类器提示词的一部分，因此它们会改变判定结果——样本要覆盖规则带来的差异，
+     * 就必须能把规则写进样本，而不是靠运行机器的 {@code ~/.devcli/config.json}。后者会让同一份
+     * 样本在不同机器上得到不同结论，那种结果不可复现。</p>
+     */
+    private static com.devcli.policy.PermissionRuleSet rulesOf(JsonNode item) {
+        JsonNode rules = item.path("rules");
+        if (!rules.isObject()) {
+            return com.devcli.policy.PermissionRuleSet.EMPTY;
+        }
+        return com.devcli.policy.PermissionRuleSet.parse(
+                stringsOf(rules.path("hard_deny")),
+                stringsOf(rules.path("soft_deny")),
+                stringsOf(rules.path("allow")),
+                stringsOf(rules.path("environment")));
+    }
+
+    private static List<String> stringsOf(JsonNode array) {
+        List<String> values = new ArrayList<>();
+        if (array.isArray()) {
+            for (JsonNode element : array) {
+                values.add(element.asText());
+            }
+        }
+        return values;
     }
 
     private static ObjectNode summarize(ObjectNode manifest, ArrayNode results) {

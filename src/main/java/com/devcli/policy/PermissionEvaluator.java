@@ -8,22 +8,19 @@ import java.util.List;
  * <p>只覆盖规则层三步，不包含模式、沙箱、非交互兜底与分类器——那些阶段需要会话上下文，
  * 由 {@code HitlToolRegistry} 的审批链持有。本类保持纯函数：只读工具名、资源值与规则集。</p>
  *
- * <p>判定次序固定为 {@code deny} → {@code allow} → {@code ask}，命中即短路：</p>
+ * <p>非自动模式的判定次序固定为 {@code hard_deny} → {@code soft_deny} → {@code allow}：</p>
  * <ol>
- *   <li>{@code deny} 绝对优先，命中的第一条即返回 {@link Outcome#DENY}，
- *       任何授权与放行规则都不能覆盖它；</li>
+ *   <li>{@code hard_deny} 绝对优先，命中的第一条即返回 {@link Outcome#HARD_DENY}，
+ *       任何授权与允许例外都不能覆盖它；</li>
+ *   <li>{@code soft_deny} 命中即返回 {@link Outcome#SOFT_DENY}，交由人工确认；</li>
  *   <li>{@code allow} 命中即返回 {@link Outcome#ALLOW}；</li>
- *   <li>{@code ask} 命中即返回 {@link Outcome#ASK}；</li>
- *   <li>三组都未命中返回 {@link Outcome#UNDECIDED}，交回调用方。</li>
+ *   <li>四类都未命中返回 {@link Outcome#UNDECIDED}，交回调用方。</li>
  * </ol>
  *
- * <p>这个次序与 WorkBuddy 的求值链一致（其阶段 1 deny、阶段 2 可信 allow、阶段 4 ask）。
- * 代价是真实的：一条宽泛的 {@code allow} 会静默吞掉更窄的 {@code ask}，例如
- * {@code allow write_file(src/**)} 配 {@code ask write_file(src/secret/**)} 时后者永不生效。
- * 这个坑由 {@link PermissionRuleSet#shadowedAskRules()} 在加载期提示，不靠改次序解决——
- * 曾尝试用「specifier 字面量长度」当具体度来比较两者，但那个度量会判反
- * （{@code **&#47;secret&#47;**} 的字面量前缀是空串，语义上却比 {@code src&#47;**} 更窄），
- * 在安全判定里不可接受。真正的解法是存储层的信任分层，让 {@code ask} 按规则来源而非 glob 形状取胜。</p>
+ * <p><b>本类只服务不走分类器的路径。</b>{@code auto} 模式下规则层不短路，
+ * {@code allow} 与 {@code soft_deny} 都作为分类器输入参与同一次判定，覆盖告警在那里不适用；
+ * 只有 {@code hard_deny} 无条件提前拒绝。其他模式无法判断用户意图，因此显式软阻止必须先于
+ * 宽泛放行，不能让授权静默吞掉人工确认边界。</p>
  *
  * <p>策略硬边界（路径越界、命令黑名单、非法 URL scheme）不在本类内，必须由调用方在此之前
  * 完成——本类的 {@link Outcome#ALLOW} 只在硬边界已经通过的前提下才意味着可以放行。</p>
@@ -33,8 +30,8 @@ public final class PermissionEvaluator {
     /** 规则层的四值结果：前三值终止判定，{@link #UNDECIDED} 交回调用方。 */
     public enum Outcome {
         ALLOW,
-        ASK,
-        DENY,
+        SOFT_DENY,
+        HARD_DENY,
         UNDECIDED
     }
 
@@ -60,19 +57,19 @@ public final class PermissionEvaluator {
         }
         ToolResourceSlot slot = ToolResourceSlot.of(toolName);
 
-        for (PermissionRule rule : effective.deny()) {
+        for (PermissionRule rule : effective.hardDeny()) {
             if (rule.matchesTool(toolName) && rule.triggersOn(slot, resourceValues)) {
-                return new Result(Outcome.DENY, "命中拒绝规则 " + rule.raw());
+                return new Result(Outcome.HARD_DENY, "命中硬阻止规则 " + rule.raw());
+            }
+        }
+        for (PermissionRule rule : effective.softDeny()) {
+            if (rule.matchesTool(toolName) && rule.triggersOn(slot, resourceValues)) {
+                return new Result(Outcome.SOFT_DENY, "命中软阻止规则 " + rule.raw());
             }
         }
         for (PermissionRule rule : effective.allow()) {
             if (rule.matchesTool(toolName) && rule.allows(slot, resourceValues)) {
                 return new Result(Outcome.ALLOW, "命中放行规则 " + rule.raw());
-            }
-        }
-        for (PermissionRule rule : effective.ask()) {
-            if (rule.matchesTool(toolName) && rule.triggersOn(slot, resourceValues)) {
-                return new Result(Outcome.ASK, "命中询问规则 " + rule.raw());
             }
         }
         return UNDECIDED;
