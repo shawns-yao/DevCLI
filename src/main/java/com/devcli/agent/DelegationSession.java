@@ -812,6 +812,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             return result;
         }
         @Override public List<LlmClient.Message> history() { return history; }
+        @Override public String toolRoutingInput() { return arguments.get("task"); }
         @Override public List<LlmClient.Tool> toolDefinitions(int iteration) { return tools; }
         @Override public ToolRegistry.ToolSnapshot toolSnapshot(int iteration) {
             return registry.snapshotForCurrentAccess().withDefinitions(tools);

@@ -545,6 +545,11 @@ public class PlanExecuteAgent {
                     }
 
                     @Override
+                    public String toolRoutingInput() {
+                        return task.getDescription();
+                    }
+
+                    @Override
                     public List<LlmClient.Tool> toolDefinitions(int iteration) {
                         return toolSnapshot(iteration).definitions();
                     }

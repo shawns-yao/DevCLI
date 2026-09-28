@@ -297,7 +297,7 @@ public class Agent implements AutoCloseable {
         memoryManager.setActiveProjectScope(toolRegistry.getProjectPath());
         String result = "";
         try {
-            result = runInternal(modelInput, initialToolChoice);
+            result = runInternal(modelInput, initialToolChoice, userInput);
             return result;
         } finally {
             memoryManager.completeTask(sessionTaskId, userInput, result, toolRegistry.getProjectPath());
@@ -308,7 +308,8 @@ public class Agent implements AutoCloseable {
         }
     }
 
-    private String runInternal(String userInput, LlmClient.ToolChoice initialToolChoice) {
+    private String runInternal(String userInput, LlmClient.ToolChoice initialToolChoice, String routingInputText) {
+        AtomicReference<String> routingInput = new AtomicReference<>(routingInputText == null ? "" : routingInputText);
         LlmClient.ToolChoice effectiveInitialToolChoice = initialToolChoice == null
                 ? LlmClient.ToolChoice.AUTO
                 : initialToolChoice;
@@ -366,6 +367,11 @@ public class Agent implements AutoCloseable {
                     }
 
                     @Override
+                    public String toolRoutingInput() {
+                        return routingInput.get();
+                    }
+
+                    @Override
                     public List<LlmClient.Tool> toolDefinitions(int iteration) {
                         return toolSnapshot(iteration).definitions();
                     }
@@ -417,6 +423,7 @@ public class Agent implements AutoCloseable {
                         for (AgentTurnInbox.Item message : messages) {
                             memoryManager.addUserMessage(message.text());
                             recordUserIntent(message.text());
+                            routingInput.set(message.text());
                         }
                         AgentTurnInbox.Snapshot snapshot = turnInbox.snapshot();
                         runEventSink.emit(new RunEvent.QueueUpdated(

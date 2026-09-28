@@ -40,6 +40,10 @@ final class AgentExecutionEngine<R> {
             return true;
         }
 
+        default String toolRoutingInput() {
+            return null;
+        }
+
         LlmClient.StreamListener streamListener();
 
         default RunEventSink eventSink() {
@@ -291,7 +295,8 @@ final class AgentExecutionEngine<R> {
                     List<LlmClient.Tool> toolDefinitions = originalDefinitions;
                     requestedToolChoice = contextReferenceGuard.toolChoice(requestedToolChoice);
                     if (delegate.allowsToolRouting()) {
-                        toolDefinitions = toolGovernance.route(toolDefinitions, delegate.history(), requestedToolChoice);
+                        toolDefinitions = toolGovernance.route(toolDefinitions, delegate.history(),
+                                requestedToolChoice, delegate.toolRoutingInput());
                     }
                     // 只在路由真的改动了定义时才重建快照，保持「同一份定义同时用于模型与执行」的身份契约，
                     // 避免每轮无条件新建快照破坏前缀缓存与身份断言。

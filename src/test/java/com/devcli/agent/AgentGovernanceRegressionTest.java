@@ -141,6 +141,32 @@ class AgentGovernanceRegressionTest {
         }
     }
 
+    @Test
+    void discoveredToolsSurviveActualHistoryCompaction() throws Exception {
+        ScriptedClient client = new ScriptedClient(
+                call("search_tools", Map.of("query", "zz_journal", "limit", "1")),
+                call("read_file", Map.of("path", "first.txt")),
+                call("read_file", Map.of("path", "second.txt")), answer("done"));
+        client.window = 16_000;
+        try (Fixture fixture = fixture(client)) {
+            for (int i = 0; i < 20; i++) {
+                fixture.registry.registerTool(new ToolRegistry.Tool("lookup_" + i, "Read lookup_" + i,
+                        JSON.readTree("{\"type\":\"object\"}"), args -> "value", ToolRegistry.ToolEffect.READ_ONLY));
+            }
+            fixture.registry.registerTool(new ToolRegistry.Tool("zz_journal", "Read journal",
+                    JSON.readTree("{\"type\":\"object\"}"), args -> "journal", ToolRegistry.ToolEffect.READ_ONLY));
+            for (String name : List.of("first.txt", "second.txt")) {
+                Files.writeString(fixture.project.resolve(name), (name + " ").repeat(40_000));
+            }
+            fixture.agent.run("lookup_9; inspect the supplied files and keep the API unchanged");
+            assertTrue(client.summaryCalls > 0);
+            assertTrue(client.requests.getLast().stream().anyMatch(message -> message.content() != null
+                    && message.content().contains("<compact_boundary>")));
+            assertTrue(client.tools.getLast().stream().anyMatch(tool -> tool.name().equals("zz_journal")));
+            assertToolPairs(fixture.agent.getConversationHistory());
+        }
+    }
+
     private Fixture fixture(ScriptedClient client) throws IOException {
         return fixture(client, false);
     }
@@ -239,6 +265,7 @@ class AgentGovernanceRegressionTest {
     private static final class ScriptedClient implements LlmClient {
         private final ArrayDeque<ChatResponse> responses;
         private final List<List<Message>> requests = new ArrayList<>();
+        private final List<List<Tool>> tools = new ArrayList<>();
         private int window = 128_000;
         private int summaryCalls;
         private BeforeResponse beforeResponse = () -> {};
@@ -259,6 +286,7 @@ class AgentGovernanceRegressionTest {
                         + "- first.txt / second.txt / third.txt were read through read_file.");
             }
             requests.add(List.copyOf(messages));
+            this.tools.add(List.copyOf(tools));
             beforeResponse.run();
             if (responses.isEmpty()) throw new IOException("Unexpected extra model request");
             return responses.removeFirst();

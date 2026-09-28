@@ -21,37 +21,40 @@ import java.util.Set;
 final class ToolCallGovernance {
     private static final Set<String> CONTROL_TOOLS = Set.of(
             "search_tools", "read_tool_result", "delegate_task", "delegate_control");
+    private static final int MAX_RETAINED_TOOLS = 8;
     private final Deque<String> observations = new ArrayDeque<>();
-    private List<String> discovered = List.of();
+    private final Set<String> discovered = new LinkedHashSet<>();
 
     List<LlmClient.Tool> route(List<LlmClient.Tool> available, List<LlmClient.Message> history,
-                               LlmClient.ToolChoice choice) {
-        List<String> priority = discovered;
-        discovered = List.of();
-        if (available == null || available.size() <= 12
+                               LlmClient.ToolChoice choice, String routingInput) {
+        if (available == null) {
+            discovered.clear();
+            return null;
+        }
+        Set<String> names = available.stream().map(LlmClient.Tool::name)
+                .collect(java.util.stream.Collectors.toSet());
+        discovered.retainAll(names);
+        if (available.size() <= 12
                 || available.stream().noneMatch(tool -> "search_tools".equals(tool.name()))) {
             return available;
         }
-        String query = "";
-        for (LlmClient.Message message : history) {
-            if (message.source() == LlmClient.MessageSource.USER
-                    || message.source() == LlmClient.MessageSource.STEERING) {
-                query = message.content();
+        String query = routingInput == null ? "" : routingInput;
+        if (routingInput == null) {
+            for (LlmClient.Message message : history) {
+                if (message.source() == LlmClient.MessageSource.USER
+                        || message.source() == LlmClient.MessageSource.STEERING) {
+                    query = message.content();
+                }
             }
         }
         Set<String> selected = new LinkedHashSet<>();
         available.stream().filter(tool -> CONTROL_TOOLS.contains(tool.name()))
                 .forEach(tool -> selected.add(tool.name()));
         if (choice != null && choice.hasSpecificTool()) selected.add(choice.toolName());
-        Set<String> names = available.stream().map(LlmClient.Tool::name)
-                .collect(java.util.stream.Collectors.toSet());
-        int remaining = 5;
-        for (String name : priority) {
-            if (remaining > 0 && names.contains(name) && selected.add(name)) remaining--;
-        }
-        for (LlmClient.Tool candidate : ToolSearchProvider.rankCandidates(available, query)) {
-            if (remaining > 0 && selected.add(candidate.name())) remaining--;
-        }
+        selected.addAll(discovered);
+        ToolSearchProvider.rankCandidates(available, query).stream()
+                .filter(tool -> !CONTROL_TOOLS.contains(tool.name())).limit(5)
+                .map(LlmClient.Tool::name).forEach(selected::add);
         return available.stream().filter(tool -> selected.contains(tool.name())).toList();
     }
 
@@ -60,7 +63,14 @@ final class ToolCallGovernance {
             if ("search_tools".equals(result.name()) && result.status() == ToolStatus.SUCCESS) {
                 result.sideChannels().stream().filter(ToolSearchProvider.DiscoveredTools.class::isInstance)
                         .map(ToolSearchProvider.DiscoveredTools.class::cast)
-                        .forEach(match -> discovered = match.names());
+                        .forEach(match -> {
+                            for (int index = match.names().size() - 1; index >= 0; index--) {
+                                retainTool(match.names().get(index));
+                            }
+                        });
+            } else if (result.status() == ToolStatus.SUCCESS && snapshot != null
+                    && snapshot.definitions().stream().anyMatch(tool -> tool.name().equals(result.name()))) {
+                retainTool(result.name());
             }
         }
         // Unknown effects, mutations and rich evidence are not proof of an unchanged observation.
@@ -93,6 +103,13 @@ final class ToolCallGovernance {
             if (repeated) return true;
         }
         return false;
+    }
+
+    private void retainTool(String name) {
+        if (CONTROL_TOOLS.contains(name)) return;
+        discovered.remove(name);
+        discovered.add(name);
+        while (discovered.size() > MAX_RETAINED_TOOLS) discovered.remove(discovered.iterator().next());
     }
 
     static String modelResult(ToolRegistry.ToolExecutionResult result) {

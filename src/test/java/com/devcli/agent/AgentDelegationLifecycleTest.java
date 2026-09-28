@@ -222,6 +222,32 @@ class AgentDelegationLifecycleTest {
         }
     }
 
+    @Test void parentDiscoveryIsNotInheritedByDelegatedPlanner() throws Exception {
+        Path project = Files.createDirectory(temp.resolve("project"));
+        try (Fixture fixture = new Fixture(); ToolRegistry registry = new NoIndexRegistry()) {
+            for (int i = 0; i < 20; i++) {
+                registry.registerTool(new ToolRegistry.Tool("lookup_" + i, "Read lookup_" + i,
+                        JSON.readTree("{\"type\":\"object\"}"), args -> "value", ToolRegistry.ToolEffect.READ_ONLY));
+            }
+            registry.registerTool(new ToolRegistry.Tool("zz_journal", "Read journal",
+                    JSON.readTree("{\"type\":\"object\"}"), args -> "journal", ToolRegistry.ToolEffect.READ_ONLY));
+            fixture.parent(request -> fixture.tool("search_tools", JSON.valueToTree(Map.of("query", "zz_journal"))));
+            fixture.parent(request -> fixture.delegate(brief("planner", "Inspect lookup_9", List.of())));
+            fixture.parent(request -> fixture.answer("delegation checked"));
+            fixture.child(request -> fixture.answer("planning complete"));
+            try (Agent agent = agent(fixture, registry, project)) {
+                agent.run("lookup_9");
+                assertTrue(toolNames(fixture.parentRequests.getLast()).contains("zz_journal"));
+                assertEquals(1, fixture.childRequests.size());
+                var childNames = toolNames(fixture.childRequests.getFirst());
+                assertFalse(childNames.contains("zz_journal"), childNames.toString());
+                assertTrue(childNames.contains("read_file"), childNames.toString());
+                assertTrue(java.util.Collections.disjoint(childNames,
+                        List.of("delegate_task", "delegate_control", "save_memory", "list_memory", "write_file")));
+            }
+        }
+    }
+
     @Test void failedWorkerPatchAndHistorySurviveNewAgentInstance() throws Exception {
         Path project = Files.createDirectory(temp.resolve("project"));
         try (Fixture fixture = new Fixture(); ToolRegistry registry = new ToolRegistry()) {
@@ -548,6 +574,11 @@ class AgentDelegationLifecycleTest {
     private static List<JsonNode> toolMessages(JsonNode request) {
         return java.util.stream.StreamSupport.stream(request.path("messages").spliterator(), false)
                 .filter(message -> "tool".equals(message.path("role").asText())).toList();
+    }
+
+    private static List<String> toolNames(JsonNode request) {
+        return java.util.stream.StreamSupport.stream(request.path("tools").spliterator(), false)
+                .map(tool -> tool.path("function").path("name").asText()).toList();
     }
 
     private static final class NoIndexRegistry extends ToolRegistry {

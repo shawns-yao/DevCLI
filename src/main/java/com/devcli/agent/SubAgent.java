@@ -552,6 +552,11 @@ public class SubAgent {
                     }
 
                     @Override
+                    public String toolRoutingInput() {
+                        return task.content();
+                    }
+
+                    @Override
                     public ToolRegistry.ToolSnapshot toolSnapshot(int iteration) {
                         if (!toolsEnabled || !shouldUseTools() || isReviewerFinalIteration(iteration)) {
                             return null;
