@@ -79,6 +79,7 @@ public class Agent implements AutoCloseable {
             + java.util.UUID.randomUUID().toString().substring(0, 8);
     /** 单会话累计派出量。与工作记忆同生命周期，不随单轮 Token 预算重置。详见 ADR 0010。 */
     private final AtomicInteger delegationSpawnCount = new AtomicInteger();
+    private volatile DelegationState delegationState;
 
     public Agent(LlmClient llmClient) {
         this(llmClient, new ToolRegistry(), true);
@@ -240,6 +241,7 @@ public class Agent implements AutoCloseable {
     }
 
     public void abort() {
+        if (delegationState != null) delegationState.cancelAll();
         com.devcli.concurrent.CancellationToken token = activeCancellationToken.get();
         if (token != null) {
             token.cancel();
@@ -347,9 +349,14 @@ public class Agent implements AutoCloseable {
         // 主退出条件 = LLM 自己决定（不再调用工具就返回）；
         // budget 仅在 token 用尽 / 检测到死循环 / 超出硬轮数时兜底。
         LlmClient primaryClient = llmClient;
+        Path projectRoot = Path.of(toolRegistry.getProjectPath());
+        if (delegationState == null || !delegationState.belongsTo(projectRoot)) {
+            if (delegationState != null) delegationState.close();
+            delegationState = new DelegationState(projectRoot);
+        }
         DelegationSession delegation = new DelegationSession(toolRegistry,
                 role -> com.devcli.llm.LlmClientFactory.createDelegatedAgent(primaryClient, role),
-                budget, conversationHistory.get(0).content(), runEventSink, delegationSpawnCount);
+                budget, conversationHistory.get(0).content(), runEventSink, delegationSpawnCount, delegationState);
         return toolRegistry.runWithDelegation(delegation, () -> new AgentExecutionEngine<String>(
                 llmClient, budget, HookLifecycle.load(toolRegistry), contextReferenceRegistry).run(
                 new AgentExecutionEngine.Delegate<>() {
@@ -421,6 +428,10 @@ public class Agent implements AutoCloseable {
 
                     @Override
                     public void beforeIteration(int iteration, AgentBudget currentBudget) {
+                        String delegationNotice = delegationState.drainNotifications();
+                        if (!delegationNotice.isBlank()) {
+                            conversationHistory.add(LlmClient.Message.internalUser(delegationNotice));
+                        }
                         // 不在这里重建 system prompt：迭代内重建会让 messages[0] 每轮变化，
                         // 其后全部历史前缀失配。工具证据本轮已在 tool_result 原文里，
                         // 跨压缩边界由 ConversationHistoryCompactor 的 post_compact_restore 兜底。
@@ -614,6 +625,10 @@ public class Agent implements AutoCloseable {
      * 清空对话历史（保留系统提示），不影响长期记忆
      */
     public void clearHistory() {
+        if (delegationState != null) {
+            delegationState.close();
+            delegationState = null;
+        }
         LlmClient.Message systemMsg = conversationHistory.get(0);
         conversationHistory.clear();
         conversationHistory.add(systemMsg);
@@ -829,6 +844,7 @@ public class Agent implements AutoCloseable {
      */
     @Override
     public void close() {
+        if (delegationState != null) delegationState.close();
         try {
             if (memoryManager != null) {
                 memoryManager.close();

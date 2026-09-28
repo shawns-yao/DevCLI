@@ -14,7 +14,7 @@ For the primary entry point, see `/AGENTS.md`.
 
 HITL 开启时，单次清单数量达到 `DEVCLI_DELETE_APPROVAL_THRESHOLD` / `devcli.delete.approval.threshold`（默认 50，范围 1–500），或任务写路径授权未覆盖清单，均逐次确认；不复用工具/服务器全部批准。审批展示完整目标、数量、非递归说明和恢复限制；审批修改参数时拒绝本次执行，要求重新提交清单。可识别 Shell 删除也逐次确认且不声称统计目标；此检测不是完整 Shell 解析。原 `apply_patch` 审批不变，数量阈值不覆盖补丁、不跨调用累计；关闭 HITL 仍保留路径硬拒绝。
 
-共享执行内核在可见工具超过 12 个且存在 `search_tools` 时，复用工具搜索排序，选择 5 个候选工具，并保留权限内的 `search_tools`、`read_tool_result`、`delegate_task` 及命名强制工具。搜索返回的结构化命中优先进入下一轮候选；候选只能来自当前可见定义，路由不是授权边界。排序目前基于名称、描述和 Schema 关键词，不保证自然语言语义召回率。显式并行 fork 的冻结定义保持不变，不进行逐任务路由，以维持已有缓存约定。
+共享执行内核在可见工具超过 12 个且存在 `search_tools` 时，复用工具搜索排序，选择 5 个候选工具，并保留权限内的 `search_tools`、`read_tool_result`、`delegate_task`、`delegate_control` 及命名强制工具。搜索返回的结构化命中优先进入下一轮候选；候选只能来自当前可见定义，路由不是授权边界。排序目前基于名称、描述和 Schema 关键词，不保证自然语言语义召回率。显式并行 fork 的冻结定义保持不变，不进行逐任务路由，以维持已有缓存约定。
 
 工具发现与执行同时检查能力范围、显式工具白名单和 Skill 权限。权限拒绝返回当前允许的工具示例；未知工具返回 `UNKNOWN_TOOL` 并提示搜索，不再把不存在的工具误报为快照失效。Schema、业务校验和审批继续走原管线。失败消息附带状态、错误码、retryable 和分类处理建议；不自动修参、不自动重放副作用操作。现有执行范围承担权限约束，尚未新增 diagnosis/repair 业务阶段状态机，也没有以任务关键词推断授权。
 
@@ -40,7 +40,7 @@ HITL 开启时，单次清单数量达到 `DEVCLI_DELETE_APPROVAL_THRESHOLD` / `
 | worker | 以上能力，加隔离项目修改和受限命令 | 同上；不自动继承父会话或长期记忆 |
 | 主 Agent | 保留原有工具及委派能力，负责最终验收 | 自己的会话、子任务有界报告和已归并文件清单 |
 
-子 Agent 不能递归委派、直接读写长期记忆或执行外部副作用。`search_tools` 与最终执行管线同时过滤权限，不能通过猜测工具名绕过；MCP 继续使用已有信任策略。项目内代码可读取，不将任务描述中的文件范围冒充操作系统级访问隔离。`read_tool_result` 仅允许受限运行读取本运行生成的结果，主 Agent 可以恢复历史结果。子任务的完整消息不混入父历史，不另存为可恢复 checkpoint。
+子 Agent 不能递归委派、控制其他子任务、直接读写长期记忆或执行外部副作用。`search_tools` 与最终执行管线同时过滤权限，不能通过猜测工具名绕过；MCP 继续使用已有信任策略。项目内代码可读取，不将任务描述中的文件范围冒充操作系统级访问隔离。`read_tool_result` 仅允许受限运行读取本运行生成的结果，主 Agent 可以恢复历史结果。子任务消息不混入父历史；可恢复记录只保存子任务自身历史，不保存父会话、system 消息、reasoning 或图片。
 
 主 Agent 可通过现有 `context` 与 `constraints` 显式投影必要记忆及约束；这不是自动继承，也不授予子 Agent 长期记忆读取权限。报告中的 `summary` 仍是模型陈述，`evidence` 是 Runtime 捕获的最多 64 条近期工具观察，附调用标识、工具状态、错误码、各最多 512 字符的脱敏参数与输出摘录，以及已有 `result_ref`。`dead_ends` 保留最多 32 条失败尝试；失败不代表该方案永久不可行。`unresolved_mutations` 与 `open_questions` 标明未解决问题，不自动把模型总结填入 `facts_discovered`。
 
@@ -48,9 +48,13 @@ HITL 开启时，单次清单数量达到 `DEVCLI_DELETE_APPROVAL_THRESHOLD` / `
 
 模型错误、预算或轮数退出、取消、未解决副作用失败、独立 Reviewer 拒绝和提交冲突均保留已有证据。`knowledge_outcome=PARTIAL` 只表示曾取得成功工具观察，不证明任务验收通过。`patch_status` 区分 `NOT_APPLICABLE`、`NOT_APPLIED`、`NO_CHANGES`、`APPLIED`、`COMMIT_UNKNOWN` 和 `ROLLBACK_INCOMPLETE`；清理失败不能把已确认提交的文件改报为未提交。未提交候选不进入 `modified_resources`，候选哈希在已生成的 `patches` 中保留。
 
-报告仓库仍最多 64 条，优先保留未解决问题、已提交产物、工具证据，再保留普通报告；同等价值按最近写入或引用淘汰。上游引用准入时固定不可变快照，不因随后并发淘汰而丢失该次子任务输入。此策略不是语义相关性评分或永久保护，仍未实现依赖图保留及向工作记忆的独立结构化晋升；父会话继续消费委派工具回报。
+`DelegationState` 由主 Agent 持有，不随用户回合重建。当前会话报告缓存最多 64 条、已知记录合计最多 64MB，优先保留未解决问题、已提交产物、工具证据，再保留普通报告；同等价值按最近写入或引用淘汰。项目私有 JSON 记录原子写入 `~/.devcli/delegations/<projectHash>/`，新 Agent 可凭原报告 ID 读取同项目记录；缓存淘汰同时尝试删除对应文件，不扫描或自动清理其他进程的全部历史。单记录最多 32MB，子任务历史正文最多 400000 字符，恢复补丁最多 500 个文件、20MB，单文件最多 5MB。上游引用准入时固定不可变快照；仍未实现依赖图保留及向工作记忆的独立结构化晋升。
 
-Worker 完成正常工具循环后才生成 PatchSet；未解决的写入/命令失败、模型失败、预算退出、超时和提交前取消均不应用产物。版本冲突返回结构化失败，不覆盖主项目的并发修改。修改已开始原子提交后，取消不自动撤销已提交补丁；父任务可使用既有快照回滚。成功报告只代表委派执行和归并成功，不等于业务验收通过。默认委派不强制运行 `/plan` 的 Pre-Review/Reviewer 门禁，主 Agent 必须检查实际产物和验证证据。
+`delegate_task` 提供 `resume_report_id`，须重新声明角色、任务契约和交付物；角色不变，工具白名单及写入 glob 条目只能保持或收窄。程序重新绑定当前规则、模型、预算和工作区，恢复自身历史中的工具调用配对；缺失结果标为未知，不自动重放副作用。Worker 未提交补丁只有 beforeHash 和文件权限匹配时才恢复至新隔离工作区，随后照常验证和归并。`resume_available` / `pending_patch_files` 表明恢复能力和候选数量；提交状态不明或回滚不完整时拒绝续接。历史与补丁分别在子循环退出、工作区清理前保存，不能保证进程被强制终止时保存正在进行的修改；图片、旧运行工具附件与非 UTF-8 二进制编辑不保证续接。
+
+`run_in_background=true` 可立即返回 `status=running` 与报告 ID。后台复用有界 Worker 池（2 个线程、8 个排队位置）及现有取消原语；主 Agent 后续回合使用 `delegate_control(action=status|wait|cancel, report_id, wait_seconds)` 查询，等待默认 30 秒、最多 30 秒。完成通知仅携带 ID，报告仍是不可信数据。后台沿用启动回合的共享预算、系统和 Skill 快照、工具与写入范围及冻结的审批意图；后续用户输入不会扩大该子任务权限。取消请求只表示已发送，须查询终态。主 Agent 中止、清空历史、切换项目或关闭时取消后台任务；进程重启后不会自动启动旧后台任务，遗留 running 报告按 interrupted 返回。
+
+Worker 完成正常工具循环后才归并 PatchSet；未解决的写入/命令失败、模型失败、预算退出、超时和提交前取消均保留未提交产物。修改涉及 `.java` 或根级 `pom.xml` 时复用 `PreReviewVerifier`：Maven 执行 test-compile，无 Maven 且存在 `src/main/java` 时使用 javac。检查经过现有命令沙箱与主机审批；不支持的布局、编译或环境失败、检查期间修改及提交重绑定造成候选变化均拒绝归并。`hard_check` 返回 NOT_REQUIRED/PASSED/FAILED/NOT_SUPPORTED。独立 Reviewer 仍按现有风险信号触发；编译通过不替代业务验收。版本冲突不覆盖主项目的并发修改；修改已开始原子提交后，取消不自动撤销已提交补丁，父任务可使用既有快照回滚。
 
 所有新参数按系统属性 > 进程环境变量 > 默认值读取；不自动导出 `.env`：
 
@@ -58,7 +62,8 @@ Worker 完成正常工具循环后才生成 PatchSet；未解决的写入/命令
 - `devcli.delegate.max.iterations` / `DEVCLI_DELEGATE_MAX_ITERATIONS`：每个子循环默认 32 轮，范围 `[1,100]`。
 - `devcli.delegate.timeout.seconds` / `DEVCLI_DELEGATE_TIMEOUT_SECONDS`：每次委派默认 300 秒，范围 `[1,3600]`，从工具批次提交时开始计算，包含排队。只延长委派调用，不改变同批普通工具的时限。
 - `devcli.delegation.report.sanitization.enabled` / `DEVCLI_DELEGATION_REPORT_SANITIZATION_ENABLED`：委派报告指令形态净化，默认开启；关闭后仍保留 `content_trust=UNTRUSTED`。
-- 父子共享 `devcli.react.token.budget` 和 `devcli.react.hard.max.iterations`；子上下文摘要调用同样计入 Token 和总调用轮数。每个循环独立检测重复工具和重复错误，重新委派不能重置总预算。并行中的模型响应可能让 Token 使用超出阈值，后续调用会停止；不是按最坏响应预扣费的硬成本配额。
+- `devcli.delegation.dir` / `DEVCLI_DELEGATION_DIR`：委派记录根目录，默认 `~/.devcli/delegations/`，其下按当前项目路径散列隔离。
+- 父子共享启动回合的 `devcli.react.token.budget` 和 `devcli.react.hard.max.iterations`；子上下文摘要调用同样计入 Token 和总调用轮数。同一回合重新委派不能重置总预算，下一用户回合按现有 Agent 规则创建新预算；后台仍使用原预算。每个循环独立检测重复工具和重复错误。并行中的模型响应可能让 Token 使用超出阈值，后续调用会停止；不是按最坏响应预扣费的硬成本配额。
 
 子取消令牌连接父工具调用；Anthropic 和全部 OpenAI-compatible 客户端在取消时关闭底层 HTTP Call，不仅依赖线程中断。外部不合作的工具仍须等待其清理结束，不能将超时描述为能强杀任意主机代码。生命周期以 `delegation.started/tools/completed` 事件及 `child_id` 记录，子执行终态不覆盖父运行终态。
 

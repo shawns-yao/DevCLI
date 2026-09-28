@@ -234,6 +234,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         toolSearchProvider.register(this);
         new SnapshotToolProvider().register(this);
         registerTool(DelegateTaskTool.definition(this));
+        registerTool(DelegateTaskTool.controlDefinition(this));
         builtInSemanticToolNames.addAll(tools.keySet());
     }
 
@@ -572,13 +573,24 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                 : handler.execute(arguments, context);
     }
 
+    ToolOutput executeDelegationControl(Map<String, String> arguments, ToolExecutionContext context) {
+        DelegateTaskTool.Handler handler = delegationHandler.get();
+        return handler == null || currentToolAccessScope() != ToolAccessScope.FULL
+                ? ToolOutput.rejected(ToolErrorCode.CAPABILITY_DENIED, "只有主 Agent 可以控制委派任务")
+                : handler.control(arguments, context);
+    }
+
+    private static boolean isDelegationTool(String name) {
+        return DelegateTaskTool.NAME.equals(name) || "delegate_control".equals(name);
+    }
+
     /** 子 Agent 只能接收父 Agent 显式传递的记忆，不能遍历父会话的记忆或继续派生。 */
     public void restrictForDelegation() {
         delegatedChild = true;
     }
 
     private boolean restrictedInDelegation(String toolName) {
-        return delegatedChild && (DelegateTaskTool.NAME.equals(toolName) || "list_memory".equals(toolName));
+        return delegatedChild && (isDelegationTool(toolName) || "list_memory".equals(toolName));
     }
 
     public <T> T runWithResourceLease(String stepId, java.util.function.Supplier<T> action) {
@@ -977,7 +989,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public List<Tool> searchableTools() {
         ToolAccessScope scope = currentToolAccessScope();
         return tools.values().stream()
-                .filter(tool -> !DelegateTaskTool.NAME.equals(tool.name()) || delegationHandler.get() != null)
+                .filter(tool -> !isDelegationTool(tool.name()) || delegationHandler.get() != null)
                 .filter(tool -> !restrictedInDelegation(tool.name()))
                 .filter(tool -> scope.permits(tool.effect()))
                 .filter(tool -> allowedToolNames.get() == null || allowedToolNames.get().contains(tool.name()))
@@ -1122,7 +1134,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     private boolean isToolDefinitionVisible(String toolName) {
         if (restrictedInDelegation(toolName)) return false;
-        if (DelegateTaskTool.NAME.equals(toolName)) return delegationHandler.get() != null;
+        if (isDelegationTool(toolName)) return delegationHandler.get() != null;
         return !mcpTools.containsKey(toolName) || activatedMcpToolDefinitions.contains(toolName);
     }
 
@@ -1924,7 +1936,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     private boolean isSerializedSideEffect(String toolName, ToolSnapshot snapshot) {
-        if (DelegateTaskTool.NAME.equals(toolName)) {
+        if (isDelegationTool(toolName)) {
             return false;
         }
         ToolBinding binding = snapshot == null ? null : snapshot.binding(toolName);

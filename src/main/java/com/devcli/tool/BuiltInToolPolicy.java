@@ -108,7 +108,7 @@ public final class BuiltInToolPolicy {
                 "web_fetch");
         register(values, ToolEffect.LOCAL_CONTEXT, false, false,
                 Destructiveness.NONE, Idempotency.IDEMPOTENT, false,
-                "load_skill");
+                "load_skill", "delegate_control");
         register(values, ToolEffect.PROJECT_MUTATION, true, true,
                 Destructiveness.STRUCTURAL, Idempotency.IDEMPOTENT, false,
                 "write_file");

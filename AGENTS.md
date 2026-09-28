@@ -65,6 +65,8 @@ Windows + Git Bash 下必须调用 `mvn.cmd`，不要用 `bin/mvn` 这个 shell 
 
 默认 ReAct 是主 Agent 按需委派模式：`delegate_task(role, task, context)` 由 `DelegationSession` 装配独立 `AgentExecutionEngine` 循环，不进入固定 DAG。explorer/planner/reviewer 只读，worker 使用已有 `WorkspaceExecutionSession`、命令沙箱、资源租约和 PatchSet 版本检查；工作循环正常结束且没有未解决的副作用工具失败后归并，主 Agent 负责最终验收。显式 `/plan` 的既有计划评审、硬检查和 checkpoint 流程保持不变。
 
+`DelegationState` 按项目保存跨回合报告、子任务自身历史和未提交补丁，默认目录 `~/.devcli/delegations/<projectHash>/`，可用 `DEVCLI_DELEGATION_DIR` / `-Ddevcli.delegation.dir` 调整。`resume_report_id` 续接时重新绑定当前规则、模型和预算，不允许扩大角色、工具与写入范围；待提交补丁仅在原文件基线匹配时恢复到新隔离工作区。`run_in_background=true` 立即返回报告 ID，`delegate_control` 提供 status/wait/cancel；后台使用有界队列，继续消耗启动回合共享预算，取消和超时向 HTTP 与工具传递。Java 或根级 `pom.xml` 修改在归并前必须通过现有 PreReviewVerifier 硬检查；不支持的布局、检查失败或候选变化均保留产物并拒绝归并。详见 `docs/adr/0017-委派跨回合恢复与后台执行.md`。
+
 委派只继承冻结的 system 规则与 Skill 快照、显式 task/context，不复制父会话、长期记忆召回或兄弟消息。子 Agent 不能委派、遍历长期记忆、访问外部副作用工具或恢复其他运行的工具结果；其工具定义快照按 `READ_ONLY` / `ISOLATED_PROJECT` 能力范围生成，不向模型暴露无权调用的工具。父子共享 Token 和总轮数预算，重复动作/错误按各自循环检测。每批最多并行 10 个工具，子任务默认 32 轮/300 秒，支持 `DEVCLI_DELEGATE_MAX_ITERATIONS` / `DEVCLI_DELEGATE_TIMEOUT_SECONDS`。取消向下传递到工具与 Anthropic/OpenAI-compatible HTTP 请求；未提交的子工作区产物不应用，已越过提交检查点的原子补丁不因取消自动回滚。
 
 `DEVCLI_DELEGATE_<ROLE>_PROVIDER/MODEL` 可配置四类角色的独立模型；未配置时复用当前主模型，显式配置不可用则返回失败，不静默替换。角色指引复用 `PromptRepository`，路径 `modes/delegate-<role>.md`，允许用户和项目级覆盖，但提示词不能放宽工具权限。详见 `docs/agents-reference.md`。

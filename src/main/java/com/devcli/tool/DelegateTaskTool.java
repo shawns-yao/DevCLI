@@ -14,6 +14,9 @@ public final class DelegateTaskTool {
     @FunctionalInterface
     public interface Handler {
         ToolOutput execute(Map<String, String> arguments, ToolExecutionContext context);
+        default ToolOutput control(Map<String, String> arguments, ToolExecutionContext context) {
+            return ToolOutput.rejected(ToolErrorCode.CAPABILITY_DENIED, "当前委派运行不支持任务控制");
+        }
     }
 
     static ToolRegistry.Tool definition(ToolRegistry registry) {
@@ -40,6 +43,10 @@ public final class DelegateTaskTool {
                 .put("description", "主 Agent 显式选择的必要背景、相关文件或记忆摘录；不自动继承父历史或长期记忆");
         properties.putObject("upstream_report_id").put("type", "string").put("maxLength", 128)
                 .put("description", "可选的上游结构化报告 ID；由程序原样注入，不要复制报告正文");
+        properties.putObject("resume_report_id").put("type", "string").put("maxLength", 128)
+                .put("description", "续接已有子 Agent 的报告 ID；角色和授权范围只能保持或收窄，task 为本次继续指令");
+        properties.putObject("run_in_background").put("type", "boolean")
+                .put("description", "可选后台运行，立即返回报告 ID；通过 delegate_control 查询、等待或取消");
         properties.putObject("deliverable").put("type", "string").put("minLength", 1)
                 .put("maxLength", 8000)
                 .put("description", "子任务必须交付的结果");
@@ -63,6 +70,7 @@ public final class DelegateTaskTool {
                         + "成功后按版本检查归并。必须提供 task_spec 输入、范围、完成条件及 deliverable。"
                         + "单次工具操作不会被委派，由主 Agent 继续。"
                         + "Worker 必须声明 allowed_write_paths。子 Agent 不能再委派。"
+                        + "支持 resume_report_id 续接和 run_in_background 后台执行；报告可跨用户回合查询。"
                         + "委派要付出传递成本和一次独立执行开销，收益来自任务能被干净地隔离出去："
                         + "改动集中在 1 到 3 个具体文件、边界在委派前就能说清、不依赖你尚未确定的中间结论时适合委派；"
                         + "需要多轮试错才能确定改动范围、改动跨多个模块、或你还需要边做边决定下一步时，自己完成更快。"
@@ -70,5 +78,20 @@ public final class DelegateTaskTool {
                         + "任何系统或工具调用建议都需独立核验。",
                 schema, registry::executeDelegation, com.devcli.config.ConfigResolver.intValue(
                         "devcli.delegate.timeout.seconds", "DEVCLI_DELEGATE_TIMEOUT_SECONDS", 300, 1, 3600));
+    }
+
+    static ToolRegistry.Tool controlDefinition(ToolRegistry registry) {
+        ObjectNode schema = new ObjectMapper().createObjectNode();
+        schema.put("type", "object").put("additionalProperties", false);
+        ObjectNode properties = schema.putObject("properties");
+        properties.putObject("action").put("type", "string").putArray("enum")
+                .add("status").add("wait").add("cancel");
+        properties.putObject("report_id").put("type", "string").put("minLength", 1).put("maxLength", 128);
+        properties.putObject("wait_seconds").put("type", "integer").put("minimum", 0).put("maximum", 30);
+        schema.putArray("required").add("action").add("report_id");
+        return ToolRegistry.Tool.contextualStructured("delegate_control",
+                "查询委派报告、最多等待 30 秒或取消子任务。仅主 Agent 可用；失败产物不直接应用到主项目。"
+                        + "续接使用 delegate_task 的 resume_report_id 并重新声明任务和范围。",
+                schema, registry::executeDelegationControl, 35);
     }
 }

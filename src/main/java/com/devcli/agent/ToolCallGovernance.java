@@ -20,7 +20,7 @@ import java.util.Set;
 /** Task-local visibility and observation tracking for the shared execution loop. */
 final class ToolCallGovernance {
     private static final Set<String> CONTROL_TOOLS = Set.of(
-            "search_tools", "read_tool_result", "delegate_task");
+            "search_tools", "read_tool_result", "delegate_task", "delegate_control");
     private final Deque<String> observations = new ArrayDeque<>();
     private List<String> discovered = List.of();
 

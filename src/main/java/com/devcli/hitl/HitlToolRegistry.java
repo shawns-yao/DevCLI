@@ -135,6 +135,12 @@ public class HitlToolRegistry extends ToolRegistry {
         return this;
     }
 
+    /** 后台子任务只使用派发时的可信意图，后续用户回合不会扩大其授权。 */
+    public void freezeTrustedIntentContext() {
+        String snapshot = trustedIntentContext.get();
+        trustedIntentContext = () -> snapshot;
+    }
+
     private HitlToolRegistry(HitlHandler hitlHandler, ReentrantLock approvalLock) {
         super();
         this.hitlHandler = hitlHandler;

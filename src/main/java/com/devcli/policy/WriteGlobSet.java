@@ -74,7 +74,7 @@ public final class WriteGlobSet {
         }
         try {
             return FileSystems.getDefault()
-                    .getPathMatcher("glob:" + pattern.replace('/', java.io.File.separatorChar))
+                    .getPathMatcher("glob:" + pattern)
                     .matches(relativePath);
         } catch (RuntimeException ignored) {
             return false;
