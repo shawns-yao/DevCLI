@@ -41,6 +41,8 @@ public class LongTermMemory implements Memory, AutoCloseable {
     private final LegacyMemoryImporter.ImportResult legacyImportResult;
     private final Set<String> surfacedInSession = ConcurrentHashMap.newKeySet();
     private volatile String activeProjectPath = "";
+    private volatile LegacyMemoryImporter.ProjectImportResult projectImportResult =
+            LegacyMemoryImporter.ProjectImportResult.EMPTY;
 
     public enum SaveStatus {
         CREATED,
@@ -97,7 +99,16 @@ public class LongTermMemory implements Memory, AutoCloseable {
     }
 
     public void setActiveProjectPath(String projectPath) {
-        this.activeProjectPath = projectPath == null ? "" : projectPath.trim();
+        String requested = projectPath == null ? "" : projectPath.trim();
+        if (requested.isBlank()) {
+            activeProjectPath = "";
+            projectImportResult = LegacyMemoryImporter.ProjectImportResult.EMPTY;
+            return;
+        }
+        Path projectRoot = MemoryPaths.resolveProjectRoot(requested);
+        activeProjectPath = projectRoot.toString();
+        Path source = MemoryPaths.pathProjectMemoryDir(memoryRoot, requested);
+        projectImportResult = LegacyMemoryImporter.importProjectTopics(source, projectDir());
     }
 
     public String activeProjectPath() {
@@ -109,7 +120,8 @@ public class LongTermMemory implements Memory, AutoCloseable {
     }
 
     public Path projectDir() {
-        return MemoryPaths.projectMemoryDir(memoryRoot, activeProjectPath);
+        return activeProjectPath.isBlank() ? null
+                : MemoryPaths.pathProjectMemoryDir(memoryRoot, activeProjectPath);
     }
 
     public List<Path> visibleDirs() {
@@ -125,7 +137,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
     }
 
     public Path writeTargetDir() {
-        return defaultScope().dir(memoryRoot, activeProjectPath);
+        return defaultScope() == MemoryScope.PROJECT ? projectDir() : globalDir();
     }
 
     public String indexContext() {
@@ -242,7 +254,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
         if (expiresAt != null && !expiresAt.isAfter(now)) {
             return rejected("有效期必须晚于当前时间");
         }
-        Path dir = scope.dir(memoryRoot, activeProjectPath);
+        Path dir = scope == MemoryScope.PROJECT ? projectDir() : globalDir();
         if (dir == null) {
             return rejected("写入项目记忆前必须绑定项目路径");
         }
@@ -316,7 +328,7 @@ public class LongTermMemory implements Memory, AutoCloseable {
      */
     public int clearScope(MemoryScope scope) {
         if (scope == null) return 0;
-        Path dir = scope.dir(memoryRoot, activeProjectPath);
+        Path dir = scope == MemoryScope.PROJECT ? projectDir() : globalDir();
         if (dir == null || !Files.isDirectory(dir)) return 0;
         int removed = 0;
         try (Stream<Path> stream = Files.list(dir)) {
@@ -453,6 +465,12 @@ public class LongTermMemory implements Memory, AutoCloseable {
                 : legacyImportResult.failed() > 0
                 ? " · 旧记忆迁移失败 " + legacyImportResult.failed() + " 条"
                 : "";
+        if (projectImportResult.imported() > 0 || projectImportResult.conflicts() > 0
+                || projectImportResult.failed() > 0) {
+            migration += " · 旧项目记忆迁入 " + projectImportResult.imported()
+                    + " 条 / 冲突保留 " + projectImportResult.conflicts()
+                    + " 条 / 迁移失败 " + projectImportResult.failed() + " 条";
+        }
         return "长期记忆: %d 条（全局 %d / 项目 %d / 已过期 %d / 作用域冲突 %d）· 根目录 %s · 本会话已注入全文 %d 条%s"
                 .formatted(globalCount + projectCount, globalCount, projectCount, expired,
                         detectScopeConflicts().size(), memoryRoot, surfacedInSession.size(), migration);

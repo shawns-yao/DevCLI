@@ -124,6 +124,8 @@ Code RAG 检索链路当前为 keyword + semantic + bounded graph → `RRF（倒
 
 长期记忆以主题 Markdown 为**唯一权威存储**：全局记忆位于 `~/.devcli/memory/global/`，项目记忆位于 `~/.devcli/memory/projects/<projectKey>/memory/`。每个作用域的 `MEMORY.md` 可从主题文件重建，不是第二权威。frontmatter 承载 `name` / `description` / `type` / `created_at` / `updated_at` / `expires_at` / `revision`，正文在 body。
 
+项目记忆在绑定时解析 Git 主工作区根路径，关联工作树和仓库子目录共享作用域，嵌套独立仓库保持隔离；普通目录或 Git 元数据不可用时沿用请求路径。旧路径主题只在绑定该路径时复制到共享目录，源文件保留、同名冲突不覆盖，状态显示迁入、冲突与失败数量。每个旧来源有独立完成标记，删除或清空主题不重置标记；失败修复后重试。详见 `docs/adr/0016-Git工作树共享项目记忆.md`。
+
 `LongTermMemory` 按作用域目录扫描最多 200 个主题；`MEMORY.md` 最多注入前 200 行或 25000 字节。LLM 相关性选择器默认开启，通过 `DEVCLI_MEMORY_RELEVANCE_SELECTION=false` / `-Ddevcli.memory.relevanceSelection=false` 关闭；选择失败时只保留索引，不猜测全文。项目与全局同名时召回项目版本，同时显示作用域冲突。
 
 过期记忆仍保留用于审计，但不进入索引、候选或检索。同作用域同主题的自动冲突保留原文，用户显式保存才覆盖并增加修订号。Curator、晋升/确认队列、Evidence 审核态、旁路计数和旧关键词打分器已移除。详见 `docs/adr/0007-长期记忆对齐-workbuddy.md`。

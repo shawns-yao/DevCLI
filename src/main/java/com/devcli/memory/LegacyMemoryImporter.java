@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
@@ -18,7 +19,7 @@ import java.util.HexFormat;
 import java.util.Locale;
 import java.util.stream.Stream;
 
-/** 把旧版 {@code records/} 记忆卡无损复制到新的全局主题目录。 */
+/** 保留旧源文件，将记忆卡与项目主题复制到当前作用域目录。 */
 final class LegacyMemoryImporter {
 
     private static final Logger log = LoggerFactory.getLogger(LegacyMemoryImporter.class);
@@ -26,6 +27,67 @@ final class LegacyMemoryImporter {
     private static final String COMPLETION_MARKER = ".legacy-memory-import-v1.done";
 
     private LegacyMemoryImporter() {
+    }
+
+    record ProjectImportResult(int imported, int conflicts, int failed) {
+        static final ProjectImportResult EMPTY = new ProjectImportResult(0, 0, 0);
+    }
+
+    /** 只复制缺少的旧项目主题；源文件保留，已存在的共享主题不覆盖。 */
+    static ProjectImportResult importProjectTopics(Path sourceDir, Path targetDir) {
+        if (sourceDir.equals(targetDir)
+                || !Files.isDirectory(sourceDir, LinkOption.NOFOLLOW_LINKS)) {
+            return ProjectImportResult.EMPTY;
+        }
+        Path marker = targetDir.resolve(".project-memory-import-"
+                + shortDigest(sourceDir.toString()) + ".done");
+        if (Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS)) {
+            try {
+                int conflicts = Integer.parseInt(Files.readString(marker).trim());
+                return new ProjectImportResult(0, Math.max(0, conflicts), 0);
+            } catch (IOException | NumberFormatException e) {
+                return new ProjectImportResult(0, 0, 1);
+            }
+        }
+        int imported = 0;
+        int conflicts = 0;
+        int failed = 0;
+        try (Stream<Path> files = Files.walk(sourceDir, MemoryScanner.MAX_DEPTH)) {
+            Files.createDirectories(targetDir);
+            for (Path source : files.filter(path -> Files.isRegularFile(path,
+                            LinkOption.NOFOLLOW_LINKS))
+                    .filter(MemoryScanner::isTopicFile)
+                    .sorted().toList()) {
+                Path target = targetDir.resolve(sourceDir.relativize(source));
+                try {
+                    if (TopicMemory.read(source) == null) {
+                        failed++;
+                    } else if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+                        if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)
+                                || Files.mismatch(source, target) != -1) conflicts++;
+                    } else {
+                        Files.createDirectories(target.getParent());
+                        Path temp = Files.createTempFile(target.getParent(), ".project-memory-", ".tmp");
+                        try {
+                            Files.copy(source, temp, StandardCopyOption.REPLACE_EXISTING,
+                                    StandardCopyOption.COPY_ATTRIBUTES);
+                            Files.move(temp, target);
+                            imported++;
+                        } finally {
+                            Files.deleteIfExists(temp);
+                        }
+                    }
+                } catch (IOException | RuntimeException e) {
+                    failed++;
+                    log.warn("旧项目主题迁移失败 {}: {}", source, e.getMessage());
+                }
+            }
+            if (failed == 0) writeAtomically(marker, Integer.toString(conflicts));
+        } catch (IOException e) {
+            failed++;
+            log.warn("旧项目记忆迁移失败 {}: {}", sourceDir, e.getMessage());
+        }
+        return new ProjectImportResult(imported, conflicts, failed);
     }
 
     /**

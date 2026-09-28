@@ -1,5 +1,9 @@
 package com.devcli.memory;
 
+import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
+
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Locale;
 
@@ -78,13 +82,42 @@ public final class MemoryPaths {
     }
 
     /**
-     * 项目键：由项目绝对路径压缩而来，作为目录名。
+     * 项目键：Git 主工作区与关联工作树共用仓库根路径，普通目录沿用绝对路径。
      *
      * @return 压缩后的键；输入为空时返回空串
      */
     public static String projectKey(String projectPath) {
         if (projectPath == null || projectPath.isBlank()) return "";
-        return compressPath(Path.of(projectPath.trim()).toAbsolutePath().normalize().toString());
+        return compressPath(resolveProjectRoot(projectPath).toString());
+    }
+
+    static Path resolveProjectRoot(String projectPath) {
+        Path original = Path.of(projectPath.trim()).toAbsolutePath().normalize();
+        try {
+            FileRepositoryBuilder builder = new FileRepositoryBuilder().findGitDir(original.toFile());
+            if (builder.getGitDir() == null) return original;
+            try (Repository repository = builder.setMustExist(true).build()) {
+                if (repository.isBare()) return original;
+                Path root = repository.getWorkTree().toPath();
+                if (!repository.getCommonDirectory().equals(repository.getDirectory())) {
+                    try (Repository common = new FileRepositoryBuilder()
+                            .setGitDir(repository.getCommonDirectory()).setMustExist(true).build()) {
+                        if (!common.isBare()) root = common.getWorkTree().toPath();
+                    }
+                }
+                return root.toRealPath();
+            }
+        } catch (IOException | RuntimeException ignored) {
+            // 仓库缺失、元数据损坏或不可访问时，不能借此扩大项目记忆作用域。
+            return original;
+        }
+    }
+
+    /** 已解析的项目路径或旧版路径对应的目录，不再查找 Git 根目录。 */
+    static Path pathProjectMemoryDir(Path root, String projectPath) {
+        Path original = Path.of(projectPath.trim()).toAbsolutePath().normalize();
+        return root.resolve(PROJECTS_DIR_NAME).resolve(compressPath(original.toString()))
+                .resolve(PROJECT_MEMORY_DIR_NAME);
     }
 
     /**
