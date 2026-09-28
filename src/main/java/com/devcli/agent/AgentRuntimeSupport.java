@@ -53,6 +53,8 @@ final class AgentRuntimeSupport {
         compactor.setPostCompactContextSupplier(restoreSectionSupplier);
         compactor.setCompactBoundaryRuntimeStateSupplier(runtimeStateSupplier);
         compactor.setMicrocompactOutputRoot(Path.of(toolRegistry.getProjectPath()));
+        compactor.setSummaryToolsSupplier(toolRegistry::getToolDefinitions);
+        memoryManager.setSummaryToolsSupplier(toolRegistry::getToolDefinitions);
     }
 
     static void bindCompactionBudget(ConversationHistoryCompactor compactor,

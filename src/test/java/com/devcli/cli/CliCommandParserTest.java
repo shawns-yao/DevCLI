@@ -9,6 +9,22 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 class CliCommandParserTest {
 
     @Test
+    void parsesManualCompactionAndRejectsInvalidRetentionOptions() {
+        var plain = CliCommandParser.parse("/compact");
+        assertEquals(CliCommandParser.CommandType.COMPACT, plain.type());
+        assertEquals(1, CliCommandParser.compactKeepRounds(plain.payload()));
+        var partial = CliCommandParser.parse("/COMPACT --keep 3");
+        assertEquals(CliCommandParser.CommandType.COMPACT, partial.type());
+        assertEquals(3, CliCommandParser.compactKeepRounds(partial.payload()));
+        assertEquals(0, CliCommandParser.compactKeepRounds("--keep 0"));
+        for (String invalid : new String[]{"--keep -1", "--keep", "--keep 1 extra", "--keep 99999999999", "--unknown"}) {
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                    () -> CliCommandParser.compactKeepRounds(invalid));
+        }
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, CliCommandParser.parse("/compactly").type());
+    }
+
+    @Test
     void parsesPlanSlashCommandWithoutPayload() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/plan");
 

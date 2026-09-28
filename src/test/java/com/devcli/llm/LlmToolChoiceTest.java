@@ -45,6 +45,21 @@ class LlmToolChoiceTest {
     }
 
     @Test
+    void anthropicPromptCachingCanBeDisabledForCompatibleEndpoints() {
+        String previous = System.getProperty("devcli.anthropic.promptCaching");
+        try {
+            System.setProperty("devcli.anthropic.promptCaching", "false");
+            AnthropicClient client = new AnthropicClient("test-key", "claude-sonnet-4-20250514", "https://example.com");
+            assertTrue(client.buildRequestBody(MESSAGES, TOOLS, LlmClient.ToolChoice.AUTO)
+                    .path("cache_control").isMissingNode());
+            org.junit.jupiter.api.Assertions.assertFalse(client.supportsPromptCaching());
+        } finally {
+            if (previous == null) System.clearProperty("devcli.anthropic.promptCaching");
+            else System.setProperty("devcli.anthropic.promptCaching", previous);
+        }
+    }
+
+    @Test
     void openAiRequiredChoiceUsesRequiredPolicy() {
         TestOpenAiClient client = new TestOpenAiClient();
 

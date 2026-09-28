@@ -544,6 +544,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             // 压缩沿用现有实现；摘要模型调用也计入共享预算。
             compactor = new ConversationHistoryCompactor(new BudgetedSummaryClient(client, budget.fork(), events));
             compactor.setMicrocompactOutputRoot(Path.of(registry.getProjectPath()));
+            compactor.setSummaryToolsSupplier(() -> tools);
             compactor.setPostCompactContextSupplier(() -> AgentRuntimeSupport.buildPostCompactRestoreSection(
                     "", registry, registry.getSkillContextBuffer()));
         }

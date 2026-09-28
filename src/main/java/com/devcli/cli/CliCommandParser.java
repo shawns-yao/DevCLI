@@ -34,6 +34,7 @@ final class CliCommandParser {
         SEARCH_CODE,
         GRAPH_QUERY,
         CONTEXT_STATUS,
+        COMPACT,
         POLICY_STATUS,
         AUDIT_TAIL,
         SNAPSHOT,
@@ -278,6 +279,12 @@ final class CliCommandParser {
             return new ParsedCommand(CommandType.GRAPH_QUERY, trimmed.substring(7).trim());
         }
 
+        if (trimmed.equalsIgnoreCase("/compact")) {
+            return new ParsedCommand(CommandType.COMPACT, null);
+        }
+        if (trimmed.regionMatches(true, 0, "/compact ", 0, 9)) {
+            return new ParsedCommand(CommandType.COMPACT, trimmed.substring("/compact ".length()).trim());
+        }
         if (trimmed.equalsIgnoreCase("/context") || trimmed.equalsIgnoreCase("/ctx")) {
             return new ParsedCommand(CommandType.CONTEXT_STATUS, null);
         }
@@ -413,5 +420,19 @@ final class CliCommandParser {
         }
 
         return ParsedCommand.none();
+    }
+
+    static int compactKeepRounds(String payload) {
+        if (payload == null || payload.isBlank()) return 1;
+        String[] arguments = payload.trim().split("\\s+");
+        if (arguments.length == 2 && "--keep".equals(arguments[0])
+                && arguments[1].matches("[0-9]+")) {
+            try {
+                return Integer.parseInt(arguments[1]);
+            } catch (NumberFormatException ignored) {
+                // 超出整数范围时与其他非法参数使用同一条用法提示。
+            }
+        }
+        throw new IllegalArgumentException("用法：/compact [--keep N]，N 为保留的最近用户轮次，默认 1，可为 0");
     }
 }

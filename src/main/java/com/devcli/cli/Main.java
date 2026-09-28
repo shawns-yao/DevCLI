@@ -484,6 +484,26 @@ public class Main {
                         ui.println();
                         continue;
                     }
+                    case COMPACT -> {
+                        try {
+                            int keep = CliCommandParser.compactKeepRounds(command.payload());
+                            ui.println("正在压缩历史上下文……");
+                            com.devcli.memory.CompactionResult result = reactAgent.compactHistoryNow(keep);
+                            if (result.compacted()) {
+                                String report = "上下文已压缩：" + result.beforeTokens() + " → "
+                                        + result.afterTokens() + " Token，保留最近 " + keep + " 轮原文";
+                                ui.println(report);
+                                sessionTree.recordTurn("react", input, input, report,
+                                        reactAgent.getConversationHistory()).ifPresent(ui::println);
+                            } else {
+                                ui.println("压缩未应用，原始上下文已保留；可能没有可压缩的旧轮次、摘要校验失败或空间收益不足。");
+                            }
+                        } catch (IllegalArgumentException invalid) {
+                            ui.println(invalid.getMessage());
+                        }
+                        ui.println();
+                        continue;
+                    }
                     case MEMORY_EXPORT -> {
                         com.devcli.memory.LongTermMemory longTermMemory =
                                 reactAgent.getMemoryManager().getLongTermMemory();
@@ -1796,6 +1816,8 @@ public class Main {
                 new SlashCommandHint("/clear", "/clear", "清空当前对话历史"),
                 new SlashCommandHint("/history clear", "/history clear", "清空本机输入历史和会话归档"),
                 new SlashCommandHint("/context", "/context", "查看上下文和记忆状态"),
+                new SlashCommandHint("/compact", "/compact", "压缩旧对话，保留最近 1 轮原文"),
+                new SlashCommandHint("/compact --keep ", "/compact --keep <N>", "压缩旧对话，保留最近 N 轮原文"),
                 new SlashCommandHint("/memory", "/memory", "查看记忆状态"),
                 new SlashCommandHint("/memory export", "/memory export", "导出可读 Markdown 记忆审计快照"),
                 new SlashCommandHint("/memory organize", "/memory organize", "查看过期项与作用域冲突统计"),

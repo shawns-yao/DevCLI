@@ -809,6 +809,13 @@ public class Agent implements AutoCloseable {
                 conversationHistory, compactionContext(triggerTokens)).compacted();
     }
 
+    public com.devcli.memory.CompactionResult compactHistoryNow(int keepRecentTurns) {
+        AgentRuntimeSupport.bindCompactionBudget(historyCompactor, AgentBudget.fromLlmClient(llmClient), memoryManager);
+        int toolTokens = TokenBudget.estimateToolDefinitionsTokens(toolRegistry.getToolDefinitions());
+        int trigger = memoryManager.getContextProfile().historyTriggerTokens(toolTokens);
+        return historyCompactor.compactNow(conversationHistory, compactionContext(trigger), keepRecentTurns);
+    }
+
     /**
      * 获取记忆管理器
      */

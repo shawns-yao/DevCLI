@@ -593,6 +593,7 @@ public class SubAgent {
                         // 不在迭代内重建 system prompt：messages[0] 每轮变化会让其后全部历史
                         // 前缀失配。它现在只含会话级稳定内容，任务级内容已在任务消息的当轮快照里。
                         injectPendingLspDiagnostics(history, out);
+                        historyCompactor.setSummaryToolsSupplier(() -> toolDefinitionsFor(forkContext));
                         maybeCompactHistory(history, out);
                         if (toolsEnabled && isReviewerFinalIteration(iteration)) {
                             history.add(LlmClient.Message.internalUser(

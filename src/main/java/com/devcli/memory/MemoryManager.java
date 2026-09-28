@@ -73,6 +73,10 @@ public class MemoryManager implements AutoCloseable {
     private volatile boolean memoryIgnored = false;
     private volatile Supplier<String> ruleContextSupplier = () -> "";
 
+    public void setSummaryToolsSupplier(java.util.function.Supplier<List<LlmClient.Tool>> supplier) {
+        sessionPreSummaryCompactor.setSummaryToolsSupplier(supplier);
+    }
+
     public MemoryManager(LlmClient llmClient) {
         this(llmClient, ContextProfile.from(llmClient), null);
     }
@@ -777,7 +781,7 @@ public class MemoryManager implements AutoCloseable {
                     recordPreSummaryFailure(coveredFingerprint, true);
                     return SessionPreSummaryMaintenanceResult.SKIPPED_INPUT_TOO_LARGE;
                 }
-                summary = sessionPreSummaryCompactor.summarizePrefix(coveredMessages);
+                summary = sessionPreSummaryCompactor.summarizePrefix(history);
             }
             if (summary == null || summary.isBlank()) {
                 recordPreSummaryFailure(coveredFingerprint, true);

@@ -1,6 +1,7 @@
 package com.devcli.llm;
 
 import com.devcli.config.DevCliConfig;
+import com.devcli.config.ConfigResolver;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -38,6 +39,7 @@ public class AnthropicClient implements LlmClient {
     private final String model;
     private final String apiUrl;
     private final int maxOutputTokens;
+    private final boolean promptCaching;
 
     public AnthropicClient(String apiKey) {
         this(apiKey, DEFAULT_MODEL, DEFAULT_BASE_URL);
@@ -52,10 +54,17 @@ public class AnthropicClient implements LlmClient {
         this.model = model != null && !model.isBlank() ? model : DEFAULT_MODEL;
         this.apiUrl = toMessagesUrl(baseUrl);
         this.maxOutputTokens = Math.max(1, Math.min(65_536, maxOutputTokens));
+        this.promptCaching = ConfigResolver.booleanValue("devcli.anthropic.promptCaching",
+                "DEVCLI_ANTHROPIC_PROMPT_CACHING", true);
     }
 
     String getApiUrl() {
         return apiUrl;
+    }
+
+    @Override
+    public boolean supportsPromptCaching() {
+        return promptCaching && LlmClient.super.supportsPromptCaching();
     }
 
     @Override
@@ -144,6 +153,9 @@ public class AnthropicClient implements LlmClient {
         requestBody.put("model", model);
         requestBody.put("max_tokens", maxOutputTokens());
         requestBody.put("stream", true);
+        if (promptCaching) {
+            requestBody.putObject("cache_control").put("type", "ephemeral");
+        }
 
         String systemPrompt = collectSystemPrompt(messages);
         if (!systemPrompt.isBlank()) {
@@ -291,6 +303,7 @@ public class AnthropicClient implements LlmClient {
         List<ToolUseAccumulator> toolAccumulators = new ArrayList<>();
         int inputTokens = 0;
         int outputTokens = 0;
+        int cachedInputTokens = 0;
 
         while (!source.exhausted()) {
             String line = source.readUtf8Line();
@@ -315,8 +328,11 @@ public class AnthropicClient implements LlmClient {
             }
             String type = root.path("type").asText("");
             if ("message_start".equals(type)) {
-                inputTokens = root.path("message").path("usage").path("input_tokens").asInt(inputTokens);
-                outputTokens = root.path("message").path("usage").path("output_tokens").asInt(outputTokens);
+                JsonNode usage = root.path("message").path("usage");
+                cachedInputTokens = usage.path("cache_read_input_tokens").asInt(0);
+                inputTokens = usage.path("input_tokens").asInt(0)
+                        + usage.path("cache_creation_input_tokens").asInt(0) + cachedInputTokens;
+                outputTokens = usage.path("output_tokens").asInt(outputTokens);
             } else if ("message_delta".equals(type)) {
                 outputTokens = root.path("usage").path("output_tokens").asInt(outputTokens);
             } else if ("content_block_start".equals(type)) {
@@ -348,7 +364,7 @@ public class AnthropicClient implements LlmClient {
                 toolCalls,
                 inputTokens,
                 outputTokens,
-                0
+                cachedInputTokens
         );
     }
 
