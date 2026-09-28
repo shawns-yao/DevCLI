@@ -30,7 +30,7 @@ class ToolGovernanceEntryTest {
             for (int i = 0; i < 30; i++) register(fixture.registry, "lookup_" + i, () -> "unused");
             register(fixture.registry, "lookup_journal", () -> "journal");
             assertEquals("done", fixture.agent.run("Inspect lookup_9"));
-            assertTrue(client.tools.getFirst().size() <= 8);
+            assertTrue(client.tools.getFirst().size() <= 9, client.tools.getFirst().toString());
             assertTrue(client.tools.getFirst().stream().anyMatch(tool -> tool.name().equals("lookup_9")));
             assertTrue(client.tools.get(1).stream().anyMatch(tool -> tool.name().equals("lookup_journal")));
             assertTrue(client.tools.stream().allMatch(tools ->

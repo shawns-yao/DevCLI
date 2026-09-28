@@ -27,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
@@ -76,6 +77,147 @@ class AgentDelegationLifecycleTest {
                 assertTrue(fixture.childRequests.get(1).toString().contains("original bounded findings"));
                 assertFalse(fixture.childRequests.getFirst().toString().contains("private parent first instruction"));
                 assertEquals("UNTRUSTED", fixture.lastReport.path("report_security").path("content_trust").asText());
+            }
+        }
+    }
+
+    @Test void mixedBatchPreservesFileWriteAndReadOrder() throws Exception {
+        Path project = Files.createDirectory(temp.resolve("project"));
+        Files.writeString(project.resolve("state.txt"), "original");
+        try (Fixture fixture = new Fixture(); ToolRegistry registry = new NoIndexRegistry()) {
+            registry.setWriteFileObserver((path, contents) -> {
+                if ("first".equals(contents[1])) {
+                    try { Thread.sleep(200); }
+                    catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                }
+            });
+            fixture.parent(request -> fixture.batch(
+                    "write_file", JSON.valueToTree(Map.of("path", "state.txt", "content", "first")),
+                    "read_file", JSON.valueToTree(Map.of("path", "state.txt")),
+                    "write_file", JSON.valueToTree(Map.of("path", "state.txt", "content", "second")),
+                    "read_file", JSON.valueToTree(Map.of("path", "state.txt"))));
+            fixture.parent(request -> fixture.answer("verified order"));
+            try (Agent agent = agent(fixture, registry, project)) {
+                agent.run("Update state.txt and verify each write");
+                List<JsonNode> results = toolMessages(fixture.parentRequests.getLast());
+                assertEquals(4, results.size());
+                assertTrue(results.get(1).path("content").asText().contains("first"), results.toString());
+                assertTrue(results.get(3).path("content").asText().contains("second"), results.toString());
+                assertEquals("second", Files.readString(project.resolve("state.txt")));
+                assertEquals(List.of("call-1", "call-2", "call-3", "call-4"), results.stream()
+                        .map(result -> result.path("tool_call_id").asText()).toList());
+            }
+        }
+    }
+
+    @Test void consecutiveReadsRemainParallel() throws Exception {
+        Path project = Files.createDirectory(temp.resolve("project"));
+        CyclicBarrier ready = new CyclicBarrier(2);
+        try (Fixture fixture = new Fixture(); ToolRegistry registry = new NoIndexRegistry()) {
+            for (String name : List.of("parallel_left", "parallel_right")) {
+                registry.registerTool(new ToolRegistry.Tool(name, "Read " + name,
+                    JSON.readTree("{\"type\":\"object\"}"), args -> {
+                    try { ready.await(3, TimeUnit.SECONDS); }
+                    catch (Exception e) { throw new IllegalStateException(e); }
+                    return "completed " + name;
+                }, ToolRegistry.ToolEffect.READ_ONLY));
+            }
+            fixture.parent(request -> fixture.batch("parallel_left", JSON.createObjectNode(),
+                    "parallel_right", JSON.createObjectNode()));
+            fixture.parent(request -> fixture.answer("parallel reads finished"));
+            try (Agent agent = agent(fixture, registry, project)) {
+                agent.run("Use parallel_left and parallel_right");
+                List<JsonNode> results = toolMessages(fixture.parentRequests.getLast());
+                assertTrue(results.get(0).path("content").asText().contains("completed parallel_left"));
+                assertTrue(results.get(1).path("content").asText().contains("completed parallel_right"));
+            }
+        }
+    }
+
+    @Test void localContextChangeCompletesBeforeFollowingRead() throws Exception {
+        Path project = Files.createDirectory(temp.resolve("project"));
+        AtomicInteger revision = new AtomicInteger();
+        try (Fixture fixture = new Fixture(); ToolRegistry registry = new NoIndexRegistry()) {
+            registry.registerTool(new ToolRegistry.Tool("update_revision", "Update revision",
+                    JSON.readTree("{\"type\":\"object\"}"), args -> {
+                try { Thread.sleep(200); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new IllegalStateException(e); }
+                return Integer.toString(revision.incrementAndGet());
+            }, ToolRegistry.ToolEffect.LOCAL_CONTEXT));
+            registry.registerTool(new ToolRegistry.Tool("read_revision", "Read revision",
+                    JSON.readTree("{\"type\":\"object\"}"), args -> Integer.toString(revision.get()),
+                    ToolRegistry.ToolEffect.READ_ONLY));
+            fixture.parent(request -> fixture.batch("update_revision", JSON.createObjectNode(),
+                    "read_revision", JSON.createObjectNode()));
+            fixture.parent(request -> fixture.answer("revision verified"));
+            try (Agent agent = agent(fixture, registry, project)) {
+                agent.run("Use update_revision then read_revision");
+                assertEquals("1", toolMessages(fixture.parentRequests.getLast()).get(1).path("content").asText());
+            }
+        }
+    }
+
+    @Test void parallelDelegationFinishesBeforeParentReadsMergedPatch() throws Exception {
+        Path project = Files.createDirectory(temp.resolve("project"));
+        CyclicBarrier ready = new CyclicBarrier(2);
+        try (Fixture fixture = new Fixture(); ToolRegistry registry = new NoIndexRegistry()) {
+            fixture.parent(request -> fixture.batch(
+                    "delegate_task", brief("worker", "Write first.txt", List.of("first.txt")),
+                    "delegate_task", brief("planner", "Inspect project structure", List.of()),
+                    "read_file", JSON.valueToTree(Map.of("path", "first.txt"))));
+            fixture.parent(request -> fixture.answer("merged result verified"));
+            Function<JsonNode, MockResponse> child = request -> {
+                try { ready.await(3, TimeUnit.SECONDS); }
+                catch (Exception e) { throw new IllegalStateException(e); }
+                return request.toString().contains("Write first.txt")
+                        ? fixture.tool("write_file", JSON.valueToTree(Map.of("path", "first.txt", "content", "child result")))
+                        : fixture.answer("structure inspected");
+            };
+            fixture.child(child);
+            fixture.child(child);
+            fixture.child(request -> fixture.answer("worker finished"));
+            try (Agent agent = agent(fixture, registry, project)) {
+                agent.run("Delegate the write and planning, then read first.txt");
+                assertEquals("child result", Files.readString(project.resolve("first.txt")));
+                List<JsonNode> results = toolMessages(fixture.parentRequests.getLast());
+                assertEquals(3, results.size());
+                assertTrue(results.get(2).path("content").asText().contains("child result"), results.toString());
+                assertEquals("APPLIED", JSON.readTree(results.get(0).path("content").asText()).path("patch_status").asText());
+            }
+        }
+    }
+
+    @Test void cancelledBatchPreventsLaterWrite() throws Exception {
+        Path project = Files.createDirectory(temp.resolve("project"));
+        CountDownLatch started = new CountDownLatch(1);
+        try (Fixture fixture = new Fixture(); ToolRegistry registry = new NoIndexRegistry()) {
+            registry.registerTool(new ToolRegistry.Tool("wait_probe", "Wait for observation",
+                    JSON.readTree("{\"type\":\"object\"}"), args -> {
+                started.countDown();
+                try { Thread.sleep(2_000); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                return "wait ended";
+            }, ToolRegistry.ToolEffect.READ_ONLY));
+            fixture.parent(request -> fixture.batch("wait_probe", JSON.createObjectNode(),
+                    "write_file", JSON.valueToTree(Map.of("path", "late.txt", "content", "must not be written"))));
+            try (Agent agent = agent(fixture, registry, project)) {
+                var events = new CopyOnWriteArrayList<com.devcli.event.RunEvent>();
+                agent.setRunEventSink(events::add);
+                var cancellation = java.util.concurrent.CompletableFuture.runAsync(() -> {
+                    try { assertTrue(started.await(3, TimeUnit.SECONDS)); }
+                    catch (InterruptedException e) { throw new IllegalStateException(e); }
+                    agent.abort();
+                });
+                try (var run = com.devcli.concurrent.CancellationContext.startRunContext(project)) {
+                    agent.run("Wait, then write late.txt");
+                }
+                cancellation.get(3, TimeUnit.SECONDS);
+                assertFalse(Files.exists(project.resolve("late.txt")));
+                var results = events.stream().filter(com.devcli.event.RunEvent.ToolResults.class::isInstance)
+                        .map(com.devcli.event.RunEvent.ToolResults.class::cast).findFirst().orElseThrow().results();
+                assertEquals(2, results.size());
+                assertTrue(results.stream().allMatch(result -> "CANCELLED".equals(result.status())), results.toString());
+                assertEquals(1, fixture.parentRequests.size());
             }
         }
     }
@@ -403,6 +545,20 @@ class AgentDelegationLifecycleTest {
         return new Agent(client, registry, memory);
     }
 
+    private static List<JsonNode> toolMessages(JsonNode request) {
+        return java.util.stream.StreamSupport.stream(request.path("messages").spliterator(), false)
+                .filter(message -> "tool".equals(message.path("role").asText())).toList();
+    }
+
+    private static final class NoIndexRegistry extends ToolRegistry {
+        NoIndexRegistry() { super(); }
+        NoIndexRegistry(com.devcli.tool.ResourceLeaseMaintenance maintenance) { super(maintenance); }
+        @Override public void markRagIndexDirty(java.util.Collection<String> paths) { }
+        @Override protected ToolRegistry createProjectForkRegistry(com.devcli.tool.ResourceLeaseMaintenance maintenance) {
+            return new NoIndexRegistry(maintenance);
+        }
+    }
+
     private static ObjectNode brief(String role, String task, List<String> paths) {
         ObjectNode args = JSON.createObjectNode().put("role", role).put("task", task).put("deliverable", "Verified task result");
         args.putObject("task_spec").put("execution_kind", "agent_loop").put("inputs", "Provided task and project files")
@@ -462,6 +618,16 @@ class AgentDelegationLifecycleTest {
             ObjectNode delta = JSON.createObjectNode().put("role", "assistant");
             delta.putArray("tool_calls").addObject().put("index", 0).put("id", "call-" + calls.incrementAndGet())
                     .put("type", "function").putObject("function").put("name", name).put("arguments", args.toString());
+            return stream(delta);
+        }
+        MockResponse batch(Object... entries) {
+            ObjectNode delta = JSON.createObjectNode().put("role", "assistant");
+            var batch = delta.putArray("tool_calls");
+            for (int index = 0; index < entries.length / 2; index++) {
+                batch.addObject().put("index", index).put("id", "call-" + calls.incrementAndGet())
+                        .put("type", "function").putObject("function")
+                        .put("name", (String) entries[index * 2]).put("arguments", entries[index * 2 + 1].toString());
+            }
             return stream(delta);
         }
         MockResponse stream(ObjectNode delta) {

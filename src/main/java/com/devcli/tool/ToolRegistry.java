@@ -1954,9 +1954,20 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                 && idempotency == Idempotency.IDEMPOTENT;
     }
 
+    private enum ToolBatchKind { READ_ONLY, DELEGATION, SERIAL }
+
+    private ToolBatchKind toolBatchKind(ToolInvocation invocation, ToolSnapshot snapshot) {
+        ToolBinding binding = snapshot == null ? null : snapshot.binding(invocation.name());
+        Tool tool = binding == null ? activeTool(invocation.name()) : binding.tool();
+        if (tool == null) return ToolBatchKind.SERIAL;
+        if (DelegateTaskTool.NAME.equals(invocation.name())) return ToolBatchKind.DELEGATION;
+        return tool.effect() == ToolEffect.READ_ONLY && tool.idempotency() == Idempotency.IDEMPOTENT
+                ? ToolBatchKind.READ_ONLY : ToolBatchKind.SERIAL;
+    }
+
     /**
      * 并行执行同一轮 LLM 返回的多个工具调用。
-     * 只读工具并行，叶子副作用工具在当前 ToolRegistry 内串行；结果保持原始顺序。
+     * 连续只读调用和连续委派各自并行，其他调用按原顺序执行；结果保持原始顺序。
      */
 
     public List<ToolExecutionResult> executeTools(List<ToolInvocation> invocations) {
@@ -2024,57 +2035,63 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         boolean restoreInterrupt = false;
 
         try {
-            List<Future<ToolExecutionResult>> futures = new ArrayList<>(invocations.size());
-            for (int i = 0; i < invocations.size(); i++) {
-                ToolInvocation invocation = invocations.get(i);
-                CancellationToken callToken = callTokens.get(i);
-                long invocationDeadline = activeDelegation != null && DelegateTaskTool.NAME.equals(invocation.name())
-                        ? deadlineAfterSeconds(batchStartedAt,
-                                Math.max(toolBatchTimeoutSeconds,
-                                        toolTimeoutSeconds(invocation.name(), snapshot)))
-                        : batchDeadlineNanos;
-                futures.add(executor.submit(() -> runWithToolTask(activeToolTask, () -> runWithDelegation(activeDelegation, () ->
-                        runWithAllowedTools(activeAllowedTools, () ->
-                                runWithGrantScope(activeTaskGrant, () ->
-                                        runWithAllowedWritePaths(activeAllowedWriteGlobs, () -> executeInvocation(
-                                                invocation,
-                                                callToken,
-                                                invocationDeadline,
-                                                deadlineExecutor,
-                                                activeSkillBuffer,
-                                                activeAccessScope,
-                                                activeResourceLeaseStep,
-                                                snapshot))))))));
-            }
-
-            List<ToolExecutionResult> results = new ArrayList<>();
-            for (int i = 0; i < futures.size(); i++) {
-                ToolInvocation invocation = invocations.get(i);
-                Future<ToolExecutionResult> future = futures.get(i);
-                while (true) {
-                    try {
-                        results.add(future.get());
-                        break;
-                    } catch (CancellationException e) {
-                        results.add(resultForCancellation(
-                                invocation, callTokens.get(i), 0, snapshot));
-                        break;
-                    } catch (InterruptedException e) {
-                        restoreInterrupt = true;
-                        cancelAll(callTokens, CancellationToken.Reason.UPSTREAM,
-                                "等待工具结果时收到上游中断");
-                    } catch (ExecutionException e) {
-                        CancellationToken token = callTokens.get(i);
-                        results.add(token.cancellation().isPresent()
-                                ? resultForCancellation(invocation, token, 0, snapshot)
-                                : ToolExecutionResult.failed(
-                                        invocation, causeMessage(e), 0,
-                                        snapshot == null
-                                                ? toolPresentation(invocation.name())
-                                                : snapshot.presentation(invocation.name())));
-                        break;
+            List<ToolExecutionResult> results = new ArrayList<>(invocations.size());
+            for (int start = 0; start < invocations.size();) {
+                ToolBatchKind kind = toolBatchKind(invocations.get(start), snapshot);
+                int end = start + 1;
+                while (kind != ToolBatchKind.SERIAL && end < invocations.size()
+                        && toolBatchKind(invocations.get(end), snapshot) == kind) end++;
+                List<Future<ToolExecutionResult>> futures = new ArrayList<>(end - start);
+                for (int i = start; i < end; i++) {
+                    ToolInvocation invocation = invocations.get(i);
+                    CancellationToken callToken = callTokens.get(i);
+                    long invocationDeadline = activeDelegation != null && DelegateTaskTool.NAME.equals(invocation.name())
+                            ? deadlineAfterSeconds(batchStartedAt,
+                                    Math.max(toolBatchTimeoutSeconds,
+                                            toolTimeoutSeconds(invocation.name(), snapshot)))
+                            : batchDeadlineNanos;
+                    futures.add(executor.submit(() -> runWithToolTask(activeToolTask, () -> runWithDelegation(activeDelegation, () ->
+                            runWithAllowedTools(activeAllowedTools, () ->
+                                    runWithGrantScope(activeTaskGrant, () ->
+                                            runWithAllowedWritePaths(activeAllowedWriteGlobs, () -> executeInvocation(
+                                                    invocation,
+                                                    callToken,
+                                                    invocationDeadline,
+                                                    deadlineExecutor,
+                                                    activeSkillBuffer,
+                                                    activeAccessScope,
+                                                    activeResourceLeaseStep,
+                                                    snapshot))))))));
+                }
+                for (int i = start; i < end; i++) {
+                    ToolInvocation invocation = invocations.get(i);
+                    Future<ToolExecutionResult> future = futures.get(i - start);
+                    while (true) {
+                        try {
+                            results.add(future.get());
+                            break;
+                        } catch (CancellationException e) {
+                            results.add(resultForCancellation(
+                                    invocation, callTokens.get(i), 0, snapshot));
+                            break;
+                        } catch (InterruptedException e) {
+                            restoreInterrupt = true;
+                            cancelAll(callTokens, CancellationToken.Reason.UPSTREAM,
+                                    "等待工具结果时收到上游中断");
+                        } catch (ExecutionException e) {
+                            CancellationToken token = callTokens.get(i);
+                            results.add(token.cancellation().isPresent()
+                                    ? resultForCancellation(invocation, token, 0, snapshot)
+                                    : ToolExecutionResult.failed(
+                                            invocation, causeMessage(e), 0,
+                                            snapshot == null
+                                                    ? toolPresentation(invocation.name())
+                                                    : snapshot.presentation(invocation.name())));
+                            break;
+                        }
                     }
                 }
+                start = end;
             }
             return results;
         } finally {
