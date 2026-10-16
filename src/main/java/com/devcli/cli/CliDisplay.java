@@ -94,8 +94,7 @@ final class CliDisplay {
                 new SlashCommandHint("/grant write", "/grant write", "本轮追加授权写入项目内文件"),
                 new SlashCommandHint("/grant write ", "/grant write <路径 glob>", "本轮追加授权给定项目相对路径"),
                 new SlashCommandHint("/grant net ", "/grant net <域名>", "本轮追加授权访问该域名及其子域"),
-                new SlashCommandHint("/grant commands", "/grant commands", "本轮追加授权运行项目构建/测试命令"),
-                new SlashCommandHint("/grant all", "/grant all", "本轮追加授权项目内写入与构建测试命令"),
+                new SlashCommandHint("/grant all", "/grant all", "本轮追加授权项目内写入"),
                 new SlashCommandHint("/grant status", "/grant status", "查看基线、本轮例外与放行缓存"),
                 new SlashCommandHint("/grant off", "/grant off", "取消本轮例外并清空放行缓存"),
                 new SlashCommandHint("/browser", "/browser", "查看浏览器会话状态"),
@@ -178,8 +177,7 @@ final class CliDisplay {
         ui.println("   /grant write             - 本轮追加授权写入项目内任意文件");
         ui.println("   /grant write src/** ...  - 本轮追加授权给定项目相对路径");
         ui.println("   /grant net github.com    - 本轮追加授权访问该域名及其子域");
-        ui.println("   /grant commands          - 本轮追加授权运行项目构建/测试命令");
-        ui.println("   /grant all               - 本轮追加授权写入与命令");
+        ui.println("   /grant all               - 本轮追加授权项目内写入");
         ui.println("   /grant status            - 查看本轮例外、规则层与放行缓存");
         ui.println("   /grant off               - 取消本轮例外并清空放行缓存");
         ui.println("   只作用于下一条任务；跨会话的持久授权请改用 permissions.allow 规则。\n");

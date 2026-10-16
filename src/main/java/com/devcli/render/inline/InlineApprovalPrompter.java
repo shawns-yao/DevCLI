@@ -67,7 +67,7 @@ public final class InlineApprovalPrompter {
 
         for (int attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
             String optionsLine = request.hostExecution()
-                    ? "请选择：[y] 单次允许执行  [n/Enter] 拒绝"
+                    ? request.hostConfirmationOptions()
                     : request.singleDecisionOnly()
                     ? (request.redactionAllowed()
                     ? "[y] 单次允许原文  [r] 脱敏后继续  [n/Enter] 拒绝"
@@ -90,6 +90,7 @@ public final class InlineApprovalPrompter {
             out.flush();
 
             if (request.singleDecisionOnly()) {
+                if (ch == 'p' && request.commandAllowRule() != null) return ApprovalResult.approvePrefix();
                 if (ch == 'y') return ApprovalResult.approve();
                 if (ch == 'r' && request.redactionAllowed()) return ApprovalResult.redact();
                 if (ch == 'n' || ch == '\n' || ch == '\r') return ApprovalResult.reject("用户拒绝本次操作");

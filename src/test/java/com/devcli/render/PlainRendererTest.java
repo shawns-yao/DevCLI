@@ -25,6 +25,16 @@ import static org.mockito.Mockito.when;
 class PlainRendererTest {
 
     @Test
+    void commandPrefixChoiceIsAvailableOnlyWhenSuppliedByApprovalPolicy() {
+        var sink = new ByteArrayOutputStream();
+        var renderer = new PlainRenderer(new PrintStream(sink, true, StandardCharsets.UTF_8),
+                new BufferedReader(new StringReader("p\n")));
+        var request = ApprovalRequest.hostCommand("{\"command\":\"mvn test\"}", "test", null, "execute_command(mvn test:*)");
+        assertEquals(ApprovalResult.Decision.APPROVED_PREFIX, renderer.promptApproval(request).decision());
+        assertTrue(sink.toString(StandardCharsets.UTF_8).contains("总是允许此命令前缀"));
+    }
+
+    @Test
     void hostCommandDefaultsToRejectionWithoutBulkModifyOrRedactOptions() {
         ByteArrayOutputStream sink = new ByteArrayOutputStream();
         PlainRenderer renderer = new PlainRenderer(new PrintStream(sink),

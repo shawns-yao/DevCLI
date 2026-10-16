@@ -378,7 +378,7 @@ class CliCommandParserTest {
         assertNull(CliCommandParser.parse("/grant").payload());
         assertEquals(CliCommandParser.CommandType.GRANT, CliCommandParser.parse("/grant").type());
         assertEquals("write", CliCommandParser.parse("/grant write").payload());
-        assertEquals("commands", CliCommandParser.parse("/grant commands").payload());
+        assertEquals(CliCommandParser.CommandType.UNKNOWN_COMMAND, CliCommandParser.parse("/grant commands").type());
         assertEquals("all", CliCommandParser.parse("/grant all").payload());
         assertEquals("off", CliCommandParser.parse("/GRANT OFF").payload());
     }

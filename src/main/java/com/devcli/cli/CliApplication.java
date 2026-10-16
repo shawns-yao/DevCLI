@@ -615,15 +615,10 @@ final class CliApplication {
                                             java.util.List.copyOf(arguments));
                                     printGrant(nextTaskGrant, ui);
                                 }
-                                case "commands" -> {
-                                    nextTaskGrant = new com.devcli.policy.TaskGrant(
-                                            nextTaskGrant.writeGlobs(), nextTaskGrant.networkHosts(), true);
-                                    printGrant(nextTaskGrant, ui);
-                                }
                                 default -> {
                                     nextTaskGrant = new com.devcli.policy.TaskGrant(
                                             java.util.List.of(com.devcli.policy.WriteGlobSet.WHOLE_PROJECT),
-                                            nextTaskGrant.networkHosts(), true);
+                                            nextTaskGrant.networkHosts(), false);
                                     printGrant(nextTaskGrant, ui);
                                 }
                             }

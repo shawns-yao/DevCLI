@@ -21,6 +21,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class InlineApprovalPrompterTest {
 
     @Test
+    void prefixChoiceReturnsPersistentDecision() throws Exception {
+        var sink = new ByteArrayOutputStream();
+        var prompt = new InlineApprovalPrompter(new PrintStream(sink, true, StandardCharsets.UTF_8),
+                mockTerminalReturning('p'), new BufferedReader(new StringReader("")));
+        var request = ApprovalRequest.hostCommand("{\"command\":\"npm test\"}", "test", null, "execute_command(npm test:*)");
+        assertEquals(ApprovalResult.Decision.APPROVED_PREFIX, prompt.prompt(request).decision());
+        assertTrue(sink.toString(StandardCharsets.UTF_8).contains("总是允许此命令前缀"));
+    }
+
+    @Test
     void sensitiveContentCanRedactAndEnterRejects() throws Exception {
         ApprovalRequest request = ApprovalRequest.content("read_file", "凭据", "读取", "模型", true);
         for (char key : new char[] {'r', '\r'}) {

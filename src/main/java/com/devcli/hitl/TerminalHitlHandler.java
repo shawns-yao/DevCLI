@@ -100,7 +100,7 @@ public class TerminalHitlHandler implements HitlHandler {
             out.println();
             boolean sensitivePerCall = request.sensitiveNotice() != null && !request.sensitiveNotice().isBlank();
             if (request.hostExecution()) {
-                out.println("请选择：[y] 单次允许执行  [n/Enter] 拒绝");
+                out.println(request.hostConfirmationOptions());
             } else if (request.singleDecisionOnly()) {
                 out.println(request.redactionAllowed()
                         ? "请选择：[y] 单次允许原文  [r] 脱敏后继续  [n/Enter] 拒绝"
@@ -127,6 +127,7 @@ public class TerminalHitlHandler implements HitlHandler {
 
             String normalized = input.trim().toLowerCase();
             if (request.singleDecisionOnly()) {
+                if ("p".equals(normalized) && request.commandAllowRule() != null) return ApprovalResult.approvePrefix();
                 if ("y".equals(normalized)) return ApprovalResult.approve();
                 if ("r".equals(normalized) && request.redactionAllowed()) return ApprovalResult.redact();
                 if (normalized.isEmpty() || "n".equals(normalized)) return ApprovalResult.reject("用户拒绝本次操作");

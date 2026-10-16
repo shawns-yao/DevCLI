@@ -149,12 +149,12 @@ final class CliCommandParser {
         }
 
         // /grant：下一条任务的任务级授权范围。只接受用户显式选择，不接受模型推断。
-        // 形如 /grant [write [glob...]|commands|all|off]，未知子命令继续走未识别命令。
+        // 命令权限统一使用 permissions.allow；这里仅保留写入与网络的本轮授权。
         if (trimmed.regionMatches(true, 0, "/grant ", 0, 7)) {
             String arguments = trimmed.substring(7).trim();
             String[] parts = arguments.isEmpty() ? new String[0] : arguments.split("\\s+");
             String mode = parts.length == 0 ? "" : parts[0].toLowerCase(java.util.Locale.ROOT);
-            if ("write".equals(mode) || "net".equals(mode) || "commands".equals(mode)
+            if ("write".equals(mode) || "net".equals(mode)
                     || "all".equals(mode) || "off".equals(mode)) {
                 // 子命令统一小写，后续 glob 保持原样（路径大小写敏感）
                 String payload = mode + arguments.substring(parts[0].length());

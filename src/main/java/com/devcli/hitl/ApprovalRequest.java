@@ -44,6 +44,12 @@ public record ApprovalRequest(
         return contentReview || hostExecution || "save_memory".equals(toolName);
     }
 
+    public String hostConfirmationOptions() {
+        if ("project_trust".equals(toolName)) return "请选择：[y] 信任此项目  [n/Enter] 不信任";
+        return commandAllowRule == null ? "请选择：[y] 允许本次  [n/Enter] 拒绝"
+                : "请选择：[y] 允许本次  [p] 总是允许此命令前缀  [n/Enter] 拒绝";
+    }
+
     public ApprovalRequest {
         arguments = com.devcli.policy.SensitiveContentPolicy.safeDisplayArguments(arguments);
     }

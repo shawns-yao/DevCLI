@@ -31,6 +31,24 @@ class TerminalHitlHandlerTest {
     }
 
     @Test
+    void prefixChoiceIsExplicitAndDoesNotBecomeToolWideApproval() {
+        Harness h = Harness.withInput("p\n");
+        var request = ApprovalRequest.hostCommand("{\"command\":\"mvn test\"}", "test", null, "execute_command(mvn test:*)");
+        assertEquals(ApprovalResult.Decision.APPROVED_PREFIX, h.handler.requestApproval(request).decision());
+        assertFalse(h.handler.isApprovedAllByTool("execute_command"));
+        assertTrue(h.output().contains("execute_command(mvn test:*)"));
+    }
+
+    @Test
+    void trustDecisionLabelsItsPersistentScope() {
+        Harness h = Harness.withInput("y\n");
+        assertEquals(ApprovalResult.Decision.APPROVED,
+                h.handler.requestApproval(ApprovalRequest.projectTrust("project")).decision());
+        assertTrue(h.output().contains("[y] 信任此项目"));
+        assertFalse(h.output().contains("[y] 允许本次"));
+    }
+
+    @Test
     void enterAloneApproves() {
         Harness h = Harness.withInput("\n");
         assertEquals(ApprovalResult.Decision.APPROVED,
