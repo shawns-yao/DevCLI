@@ -272,7 +272,7 @@ public final class ToolSemanticValidator {
             return result;
         }
         String denyReason = CommandGuard.check(args.path("command").asText());
-        return denyReason == null ? ValidationResult.ok() : policy(denyReason);
+        return denyReason == null ? validateOptionalInteger(args, "timeout", 1, 86400) : policy(denyReason);
     }
 
     private static ValidationResult validateSearchCode(JsonNode args) {

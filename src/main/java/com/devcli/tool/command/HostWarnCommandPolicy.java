@@ -84,7 +84,7 @@ public final class HostWarnCommandPolicy {
     }
 
     private static boolean containsShellControlOperator(String command) {
-        return command.contains(";") || command.contains("&&") || command.contains("||")
+        return command.contains(";") || command.contains("&") || command.contains("||")
                 || command.contains("|") || command.contains(">") || command.contains("<")
                 || command.contains("`") || command.contains("$(")
                 || command.contains("\n") || command.contains("\r");

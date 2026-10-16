@@ -129,10 +129,12 @@ final class ToolBatchExecution {
                 for (int i = start; i < end; i++) {
                     ToolInvocation invocation = invocations.get(i);
                     CancellationToken callToken = callTokens.get(i);
-                    long invocationDeadline = activeDelegation != null && DelegateTaskTool.NAME.equals(invocation.name())
+                    long timeout = toolTimeoutSeconds(invocation, snapshot);
+                    long invocationDeadline = timeout > registry.toolBatchTimeoutSeconds
+                            || activeDelegation != null && DelegateTaskTool.NAME.equals(invocation.name())
                             ? deadlineAfterSeconds(batchStartedAt,
                                     Math.max(registry.toolBatchTimeoutSeconds,
-                                            toolTimeoutSeconds(invocation.name(), snapshot)))
+                                            timeout))
                             : batchDeadlineNanos;
                     futures.add(executor.submit(() -> ToolRegistry.runWithToolTask(activeToolTask, () -> registry.runWithDelegation(activeDelegation, () ->
                             registry.runWithAllowedTools(activeAllowedTools, () ->
@@ -220,7 +222,7 @@ final class ToolBatchExecution {
         if (snapshot != null && !registry.isSnapshotCurrent(snapshot)) {
             return staleToolSnapshotResult(invocation, snapshot);
         }
-        long timeoutSeconds = toolTimeoutSeconds(invocation.name(), snapshot);
+        long timeoutSeconds = toolTimeoutSeconds(invocation, snapshot);
         long invocationDeadline = Math.min(
                 batchDeadlineNanos, deadlineAfterSeconds(startedAt, timeoutSeconds));
         ToolExecutionContext executionContext = new ToolExecutionContext(
@@ -330,7 +332,7 @@ final class ToolBatchExecution {
         if (cancellation.reason() == CancellationToken.Reason.TIMEOUT) {
             return ToolExecutionResult.timedOut(
                     invocation,
-                    toolTimeoutSeconds(invocation.name(), snapshot),
+                    toolTimeoutSeconds(invocation, snapshot),
                     elapsedMillis,
                     presentation);
         }
@@ -367,23 +369,16 @@ final class ToolBatchExecution {
     }
 
     /** 单个工具的执行上限：声明过独立超时用声明值，否则继承批次超时。 */
-    long toolTimeoutSeconds(String toolName) {
-        return toolTimeoutSeconds(toolName, null);
-    }
-
-    long toolTimeoutSeconds(String toolName, ToolSnapshot snapshot) {
+    long toolTimeoutSeconds(ToolInvocation invocation, ToolSnapshot snapshot) {
         Tool tool;
-        if (toolName == null) {
-            tool = null;
-        } else if (snapshot == null) {
-            tool = registry.activeTool(toolName);
+        if (snapshot == null) {
+            tool = registry.activeTool(invocation.name());
         } else {
-            ToolBinding binding = snapshot.binding(toolName);
+            ToolBinding binding = snapshot.binding(invocation.name());
             tool = binding == null ? null : binding.tool();
         }
-        if (tool != null && tool.hasOwnTimeout()) {
-            return tool.timeoutSeconds();
-        }
-        return registry.toolBatchTimeoutSeconds;
+        if (tool == null) return registry.toolBatchTimeoutSeconds;
+        long configured = tool.hasOwnTimeout() ? tool.timeoutSeconds() : registry.toolBatchTimeoutSeconds;
+        return tool.executor().executionTimeoutSeconds(invocation.argumentsJson(), configured);
     }
 }

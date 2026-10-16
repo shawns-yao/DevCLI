@@ -116,10 +116,8 @@ public interface ToolProvider {
 
         ToolOutput executeCommandOutput(String command);
 
-        default ToolOutput executeCommandOutput(
-                String command, ToolExecutionContext executionContext) {
-            return executeCommandOutput(command);
-        }
+        ToolOutput executeCommandOutput(String command, long timeoutSeconds,
+                                        ToolExecutionContext executionContext);
 
         Consumer<String> memorySaver();
 

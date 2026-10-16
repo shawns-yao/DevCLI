@@ -599,9 +599,13 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         return executionCore.executeCommandOutput(command);
     }
 
-    @Override
     public ToolOutput executeCommandOutput(String command, ToolExecutionContext executionContext) {
-        return executionCore.executeCommandOutput(command, executionContext);
+        return executeCommandOutput(command, commandTimeoutSeconds, executionContext);
+    }
+
+    @Override
+    public ToolOutput executeCommandOutput(String command, long timeoutSeconds, ToolExecutionContext executionContext) {
+        return executionCore.executeCommandOutput(command, timeoutSeconds, executionContext);
     }
 
     protected final boolean commandExecutesOnHost() {

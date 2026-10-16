@@ -257,7 +257,9 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
             cancellationRegistration = request.executionContext().cancellationToken()
                     .onCancel(ignored -> signalProcessTree(running));
             Future<CapturedOutput> output = outputReader.submit(() -> readOutput(running));
-            if (!process.waitFor(request.timeoutSeconds(), TimeUnit.SECONDS)) {
+            long remaining = Math.min(TimeUnit.SECONDS.toNanos(request.timeoutSeconds()),
+                    request.executionContext().remainingNanos());
+            if (!process.waitFor(remaining, TimeUnit.NANOSECONDS)) {
                 termination.run();
                 output.cancel(true);
                 return Result.timedOut("命令执行超时（" + request.timeoutSeconds()

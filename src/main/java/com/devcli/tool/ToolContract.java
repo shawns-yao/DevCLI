@@ -481,6 +481,11 @@ public final class ToolContract {
     public interface ToolExecutor {
         String execute(Map<String, String> args);
 
+        /** 工具显式声明的调用期限选择；参数不合法时仍由正常校验管线报告。 */
+        default long executionTimeoutSeconds(String argumentsJson, long configuredSeconds) {
+            return configuredSeconds;
+        }
+
         default ToolOutput executeOutput(Map<String, String> args) {
             return ToolOutput.success(execute(args));
         }

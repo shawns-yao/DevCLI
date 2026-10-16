@@ -70,11 +70,6 @@ final class CliSettings {
             com.devcli.policy.PermissionRuleSet parsed = com.devcli.policy.PermissionRuleSet.parse(
                     permissions.getHardDeny(), permissions.getSoftDeny(),
                     permissions.getAllow(), permissions.getEnvironment());
-            for (com.devcli.policy.PermissionRule rule : parsed.allowRulesForTool("execute_command")) {
-                System.err.println("⚠️ 放行规则 " + rule.raw()
-                        + " 在主机执行的命令上不生效：主机命令必须单次人工确认，不接受任何放宽。"
-                        + "要拦某条命令请改用 hard_deny");
-            }
             return parsed;
         } catch (IllegalArgumentException invalid) {
             System.err.println("⚠️ 权限规则非法，已按无规则处理: " + invalid.getMessage());

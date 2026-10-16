@@ -403,18 +403,23 @@ public class HitlToolRegistry extends ToolRegistry {
 
     @Override
     protected ToolOutput reviewHostCommand(com.devcli.tool.command.CommandExecutionService.Request request) {
-        // 主机命令同样是工具调用，规则层与模式层必须覆盖它——否则一条 deny 规则会挂在
-        // 「命令走哪条后端」这个与规则无关的分支后面而静默失效。
-        //
-        // 这里只吸收收紧方向的判定。allow 规则与 bypassPermissions 不参与：它们的方向是放宽，
-        // 会让主机命令绕过单次人工确认，而那是刻意不可免除的硬要求（见 docs/adr/0006「已知缺口」）。
-        String hostCommand = request.command() == null ? "" : request.command();
+        String hostCommand = request.command();
         PermissionEvaluator.Result hostRules = PermissionEvaluator.evaluate(
                 "execute_command", java.util.List.of(hostCommand), permissionRules);
         if (hostRules.outcome() == PermissionEvaluator.Outcome.HARD_DENY) {
             recordHostCommandDenial(request, hostRules.reason(), "host_rule");
             return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
-                    "[规则] 已拒绝：" + hostRules.reason() + "；主机执行不接受任何放宽");
+                    "[规则] 已拒绝：" + hostRules.reason());
+        }
+        if (hostRules.outcome() == PermissionEvaluator.Outcome.ALLOW
+                && com.devcli.tool.command.HostWarnCommandPolicy.isProjectBuildOrReadOnlyGit(hostCommand)
+                && !CommandGuard.containsDeletion(hostCommand)) {
+            getAuditLog().record(AuditLog.AuditEntry.allow("host_command_rule", hostRules.reason(), 0)
+                    .withIdentity(new AuditLog.ExecutionIdentity(null, currentResourceLeaseStep(), null,
+                            request.executionContext().invocationId(), null, "permission_rule"),
+                            AuditLog.APPROVER_POLICY));
+            if (hitlHandler != null) hitlHandler.onTaskGrantAllow("execute_command", hostRules.reason());
+            return null;
         }
         String modeDenial = currentPermissionMode().denyReason();
         if (!modeDenial.isEmpty()) {
@@ -459,7 +464,7 @@ public class HitlToolRegistry extends ToolRegistry {
                         request.executionContext().invocationId(), approvalId, "host_once"),
                         AuditLog.APPROVER_HITL));
         return approved ? null : ToolOutput.rejected(ToolErrorCode.HITL_REJECTED,
-                "主机执行仅接受单次明确批准；任务授权、全部批准、修改参数或关闭审批均不能放行");
+                "当前命令未命中可免确认的构建规则，必须单次明确批准；任务授权、全部批准或关闭审批不能代替确认");
     }
 
     @Override

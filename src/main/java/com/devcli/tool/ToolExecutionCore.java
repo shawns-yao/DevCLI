@@ -282,16 +282,19 @@ final class ToolExecutionCore {
         return registry.executeCommandOutput(command, ToolExecutionContext.current(""));
     }
 
-    ToolOutput executeCommandOutput(String command, ToolExecutionContext executionContext) {
+    ToolOutput executeCommandOutput(String command, long timeoutSeconds, ToolExecutionContext executionContext) {
         ToolAccessScope scope = registry.currentToolAccessScope();
         if (!scope.permits(ToolEffect.HOST_PROCESS)) {
             return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED, "当前能力范围不允许执行命令");
         }
         boolean sandboxRequired = scope == ToolAccessScope.ISOLATED_PROJECT;
         CommandExecutionService service = registry.commandExecutionService;
+        ToolExecutionContext timed = new ToolExecutionContext(executionContext.invocationId(),
+                executionContext.cancellationToken(), executionContext.startedAtNanos(),
+                Math.min(executionContext.deadlineNanos(), executionContext.startedAtNanos()
+                        + TimeUnit.SECONDS.toNanos(timeoutSeconds)));
         CommandExecutionService.Request request = new CommandExecutionService.Request(
-                command, Path.of(registry.projectPath), registry.commandTimeoutSeconds, sandboxRequired,
-                executionContext);
+                command, Path.of(registry.projectPath), timeoutSeconds, sandboxRequired, timed);
         service.validateRequest(request);
         if (service.executesOnHost(sandboxRequired)) {
             String denial = com.devcli.policy.CommandGuard.check(command);

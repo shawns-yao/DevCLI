@@ -410,7 +410,7 @@ class ToolRegistryTest {
 
     @Test
     void shouldRunCommandInProjectDirectory(@TempDir Path tempDir) {
-        ToolRegistry registry = new ToolRegistry();
+        ToolRegistry registry = approvedHostRegistry();
         registry.setProjectPath(tempDir.toString());
 
         String result = registry.executeTool("execute_command", "{\"command\":\"pwd\"}");
@@ -431,12 +431,22 @@ class ToolRegistryTest {
 
     @Test
     void shouldTimeoutLongRunningCommandWithoutHanging(@TempDir Path tempDir) {
-        ToolRegistry registry = new ToolRegistry(1);
+        ToolRegistry registry = approvedHostRegistry();
         registry.setProjectPath(tempDir.toString());
 
-        String result = registry.executeTool("execute_command", "{\"command\":\"sleep 2\"}");
+        String result = registry.executeTool("execute_command", "{\"command\":\"sleep 2\",\"timeout\":1}");
 
         assertTrue(result.contains("命令执行超时"));
+    }
+
+    private static ToolRegistry approvedHostRegistry() {
+        return new com.devcli.hitl.HitlToolRegistry(new com.devcli.hitl.HitlHandler() {
+            public com.devcli.hitl.ApprovalResult requestApproval(com.devcli.hitl.ApprovalRequest request) {
+                return com.devcli.hitl.ApprovalResult.approve();
+            }
+            public boolean isEnabled() { return true; }
+            public void setEnabled(boolean enabled) { }
+        });
     }
 
     @Test
