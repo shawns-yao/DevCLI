@@ -28,7 +28,7 @@ import java.util.UUID;
 final class AgentExecutionEngine<R> {
 
     interface Delegate<R> {
-        List<LlmClient.Message> history();
+        com.devcli.event.ConversationJournal history();
 
         List<LlmClient.Tool> toolDefinitions(int iteration);
 
@@ -185,7 +185,11 @@ final class AgentExecutionEngine<R> {
 
     R run(Delegate<R> delegate) {
         return ToolRegistry.runWithToolTask(UUID.randomUUID().toString(),
-                () -> ToolRegistry.runWithResultEvents(delegate.eventSink(), () -> runInToolTask(delegate)));
+                () -> ToolRegistry.runWithResultEvents(delegate.eventSink(), () -> {
+                    try (var recording = delegate.history().recordTo(delegate.eventSink())) {
+                        return runInToolTask(delegate);
+                    }
+                }));
     }
 
     private R runInToolTask(Delegate<R> delegate) {
@@ -229,17 +233,14 @@ final class AgentExecutionEngine<R> {
     }
 
     private R runLoop(Delegate<R> delegate) {
-        com.devcli.event.ModelContextView contextView = new com.devcli.event.ModelContextView();
-        delegate.eventSink().emit(RunEvent.ModelContext.from(0, delegate.history()));
         List<LlmClient.Tool> frozenDefinitions = null;
         boolean definitionsCaptured = false;
         ToolCallGovernance toolGovernance = new ToolCallGovernance();
         ContextReferenceGuard contextReferenceGuard = ContextReferenceGuard.fromHistory(
-                delegate.history(), contextReferenceRegistry);
+                delegate.history().messages(), contextReferenceRegistry);
         while (true) {
             RunEventSink eventSink = RunEventSink.composite(
                     delegate.eventSink(),
-                    contextView,
                     RunEventSink.fromStreamListener(delegate.streamListener()));
             if (delegate.isCancelled()) {
                 emitState(eventSink, RunEvent.ExecutionState.CANCELLED,
@@ -284,8 +285,6 @@ final class AgentExecutionEngine<R> {
                 ToolContract.ToolSnapshot toolSnapshot;
                 try (SamplingRequestCoordinator.RequestScope ignored =
                              samplingRequests.begin(samplingRequestId(iteration))) {
-                    eventSink.emit(RunEvent.ModelContext.from(
-                            iteration, List.copyOf(delegate.history())));
                     LlmClient.ToolChoice requestedToolChoice = delegate.toolChoice(iteration);
                     toolSnapshot = delegate.toolSnapshot(iteration);
                     List<LlmClient.Tool> originalDefinitions = toolSnapshot == null
@@ -296,6 +295,8 @@ final class AgentExecutionEngine<R> {
                         definitionsCaptured = true;
                     }
                     List<LlmClient.Tool> toolDefinitions = frozenDefinitions;
+                    eventSink.emit(RunEvent.ModelContext.from(
+                            iteration, delegate.history().messages(), toolDefinitions == null ? List.of() : toolDefinitions));
                     if (frozenDefinitions != null && !frozenDefinitions.isEmpty()
                             && (originalDefinitions == null || originalDefinitions.isEmpty())) {
                         // 显式的无工具收尾通过 tool_choice 表达，定义前缀继续保持原样。
@@ -306,7 +307,7 @@ final class AgentExecutionEngine<R> {
                     }
                     requestedToolChoice = contextReferenceGuard.toolChoice(requestedToolChoice);
                     response = llmClient.chat(
-                            contextView.messages(),
+                            delegate.history().messages(),
                             toolDefinitions,
                             streamListener,
                             requestedToolChoice);
@@ -346,7 +347,7 @@ final class AgentExecutionEngine<R> {
                             response.reasoningContent(),
                             response.content(),
                             response.toolCalls());
-                    eventSink.emit(RunEvent.ModelMessage.from(assistantMessage));
+
                     delegate.history().add(assistantMessage);
                     delegate.beforeToolExecution(response, iteration, budget);
                     eventSink.emit(RunEvent.ToolCalls.from(
@@ -370,7 +371,7 @@ final class AgentExecutionEngine<R> {
                                     response.toolCalls(), returnedResults, delegate::toolPresentation);
                     eventSink.emit(RunEvent.ToolResults.from(reconciliation.results()));
                     List<ToolContract.ToolExecutionResult> toolResults = ToolResultWindow.fit(
-                            reconciliation.results(), ToolResultWindow.available(llmClient, delegate.history(),
+                            reconciliation.results(), ToolResultWindow.available(llmClient, delegate.history().messages(),
                                     toolSnapshot == null ? delegate.toolDefinitions(iteration) : toolSnapshot.definitions()));
                     emitPairingIssues(eventSink, reconciliation.issues());
                     emitState(eventSink, RunEvent.ExecutionState.TOOL_RESULTS_PAIRED,
@@ -379,7 +380,7 @@ final class AgentExecutionEngine<R> {
                         budget.recordToolResult(toolResult);
                         LlmClient.Message toolMessage = LlmClient.Message.tool(
                                 toolResult.id(), toolResult.result());
-                        eventSink.emit(RunEvent.ModelMessage.from(toolMessage));
+
                         delegate.history().add(toolMessage);
                     }
                     budget.recordToolCycle(toolGovernance.observe(toolResults, toolSnapshot));
@@ -395,7 +396,7 @@ final class AgentExecutionEngine<R> {
                     if (toolResultInstruction != null && !toolResultInstruction.isBlank()) {
                         LlmClient.Message instructionMessage =
                                 LlmClient.Message.internalUser(toolResultInstruction.trim());
-                        eventSink.emit(RunEvent.ModelMessage.from(instructionMessage));
+
                         delegate.history().add(instructionMessage);
                     }
                     contextReferenceGuard.observe(toolResults);
@@ -426,8 +427,6 @@ final class AgentExecutionEngine<R> {
                     LlmClient.Message assistantMessage = LlmClient.Message.assistant(
                             response.reasoningContent(), response.content());
                     LlmClient.Message retryMessage = LlmClient.Message.internalUser(retryInstruction);
-                    eventSink.emit(RunEvent.ModelMessage.from(assistantMessage));
-                    eventSink.emit(RunEvent.ModelMessage.from(retryMessage));
                     delegate.history().add(assistantMessage);
                     delegate.history().add(retryMessage);
                     continue;
@@ -435,7 +434,7 @@ final class AgentExecutionEngine<R> {
 
                 LlmClient.Message assistantMessage = LlmClient.Message.assistant(
                         response.reasoningContent(), response.content());
-                eventSink.emit(RunEvent.ModelMessage.from(assistantMessage));
+
                 delegate.history().add(assistantMessage);
                 if (deliverQueuedMessages(delegate, eventSink, AgentTurnInbox.Channel.STEERING,
                         delegate.drainSteeringMessages())) {
@@ -483,7 +482,7 @@ final class AgentExecutionEngine<R> {
         if (salvaged == null) {
             return;
         }
-        eventSink.emit(RunEvent.ModelMessage.from(salvaged));
+
         delegate.history().add(salvaged);
     }
 
@@ -563,7 +562,7 @@ final class AgentExecutionEngine<R> {
         if (!reminders.isEmpty()) {
             String text = joinReminders(reminders);
             LlmClient.Message reminderMessage = LlmClient.Message.plugin(text);
-            eventSink.emit(RunEvent.ModelMessage.from(reminderMessage));
+
             delegate.history().add(reminderMessage);
             RepeatToolAdvisor.Reminder first = reminders.get(0);
             eventSink.emit(new RunEvent.CustomMessage(
@@ -653,7 +652,7 @@ final class AgentExecutionEngine<R> {
             LlmClient.Message message = channel == AgentTurnInbox.Channel.STEERING
                     ? LlmClient.Message.steering(item.text())
                     : LlmClient.Message.followUp(item.text());
-            eventSink.emit(RunEvent.ModelMessage.from(message));
+
             delegate.history().add(message);
         }
         delegate.queuedMessagesDelivered(channel, List.copyOf(items));

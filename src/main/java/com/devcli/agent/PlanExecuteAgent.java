@@ -194,7 +194,7 @@ public class PlanExecuteAgent {
         this.skillContextBuffer = skillContextBuffer;
     }
 
-    private void maybeCompactHistory(List<LlmClient.Message> messages, PrintStream out) {
+    private void maybeCompactHistory(com.devcli.event.ConversationJournal messages, PrintStream out) {
         if (historyCompactor == null) return;
         ContextProfile profile = memoryManager.getContextProfile();
         int toolDefinitionTokens = TokenBudget.estimateToolDefinitionsTokens(
@@ -202,9 +202,9 @@ public class PlanExecuteAgent {
         int trigger = profile.historyTriggerTokens(toolDefinitionTokens);
         try {
             historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(toolRegistry.getProjectPath()));
-            CompactionResult compaction = historyCompactor.compactIfNeeded(
-                    messages, AgentRuntimeSupport.buildCompactionContext(
-                            trigger, memoryManager, toolRegistry, currentSessionTaskId));
+            CompactionResult compaction = messages.revise("compaction", copy -> historyCompactor.compactIfNeeded(
+                    copy, AgentRuntimeSupport.buildCompactionContext(
+                            trigger, memoryManager, toolRegistry, currentSessionTaskId)));
             boolean compacted = compaction.compacted();
             if (compacted && out != null) {
                 out.println("📦 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
@@ -518,7 +518,7 @@ public class PlanExecuteAgent {
             taskInput = turnContext + "\n\n" + taskInput;
         }
 
-        List<LlmClient.Message> messages = new ArrayList<>(Arrays.asList(
+        var messages = new com.devcli.event.ConversationJournal(Arrays.asList(
                 LlmClient.Message.system(buildTaskSystemPrompt(task)),
                 ImageReferenceParser.userMessage(
                         taskInput,
@@ -540,7 +540,7 @@ public class PlanExecuteAgent {
                 llmClient, budget, HookLifecycle.load(activeTaskToolRegistry())).run(
                 new AgentExecutionEngine.Delegate<>() {
                     @Override
-                    public List<LlmClient.Message> history() {
+                    public com.devcli.event.ConversationJournal history() {
                         return messages;
                     }
 
@@ -774,7 +774,7 @@ public class PlanExecuteAgent {
         }
     }
 
-    private void injectPendingLspDiagnostics(List<LlmClient.Message> messages, PrintStream out) {
+    private void injectPendingLspDiagnostics(com.devcli.event.ConversationJournal messages, PrintStream out) {
         LspDiagnosticReport report = activeTaskToolRegistry().flushPendingLspDiagnostics();
         if (report == null || report.isEmpty()) {
             return;
@@ -822,7 +822,7 @@ public class PlanExecuteAgent {
         return results;
     }
 
-    private void appendImageToolMessages(List<LlmClient.Message> messages, List<ToolExecutionResult> toolResults) {
+    private void appendImageToolMessages(com.devcli.event.ConversationJournal messages, List<ToolExecutionResult> toolResults) {
         if (toolResults == null || toolResults.isEmpty()) {
             return;
         }

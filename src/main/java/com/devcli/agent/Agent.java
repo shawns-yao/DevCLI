@@ -35,11 +35,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.io.PrintStream;
 import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Supplier;
@@ -54,7 +50,7 @@ public class Agent implements AutoCloseable {
     private LlmClient llmClient;
     private final ToolRegistry toolRegistry;
     private final boolean ownsToolRegistry;
-    private final List<LlmClient.Message> conversationHistory;
+    private com.devcli.event.ConversationJournal conversation;
     private final List<LlmClient.Message> userIntentHistory = new ArrayList<>();
     private boolean userIntentIncomplete;
     private final MemoryManager memoryManager;
@@ -104,7 +100,7 @@ public class Agent implements AutoCloseable {
         this.llmClient = llmClient;
         this.toolRegistry = toolRegistry;
         this.ownsToolRegistry = ownsToolRegistry;
-        this.conversationHistory = new ArrayList<>();
+        this.conversation = new com.devcli.event.ConversationJournal(List.of());
         this.memoryManager = java.util.Objects.requireNonNull(memoryManager, "memoryManager");
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
         AgentRuntimeSupport.configureCompactor(
@@ -117,7 +113,7 @@ public class Agent implements AutoCloseable {
         if (toolRegistry instanceof com.devcli.hitl.HitlToolRegistry approvals) {
             approvals.withTrustedIntentContext(this::trustedIntentContext);
         }
-        conversationHistory.add(LlmClient.Message.system(buildSystemPrompt()));
+        conversation.add(LlmClient.Message.system(buildSystemPrompt()));
     }
 
     public void setLlmClient(LlmClient llmClient) {
@@ -141,11 +137,11 @@ public class Agent implements AutoCloseable {
         if (messages == null || messages.isEmpty()) {
             return;
         }
-        if (conversationHistory.size() > 1) {
-            log.warn("seedHistory ignored: conversation already has {} messages", conversationHistory.size());
+        if (conversation.size() > 1) {
+            log.warn("seedHistory ignored: conversation already has {} messages", conversation.size());
             return;
         }
-        conversationHistory.addAll(messages);
+        conversation.addAll(messages);
         memoryManager.beginTask(sessionTaskId);
         memoryManager.restoreWorkPlan(messages);
     }
@@ -158,7 +154,7 @@ public class Agent implements AutoCloseable {
      * <p>返回副本而不是内部列表，避免调用方修改模型窗口。</p>
      */
     public List<LlmClient.Message> conversationHistorySnapshot() {
-        return List.copyOf(conversationHistory);
+        return conversation.messages();
     }
 
     /** 仅接受宿主收到的用户原文；不从摘要、工具结果或历史投影恢复授权。 */
@@ -216,8 +212,24 @@ public class Agent implements AutoCloseable {
 
     /** 先追加消息事实，再推进可裁剪的模型窗口。 */
     public void appendConversationMessage(LlmClient.Message message) {
-        runEventSink.emit(RunEvent.ModelMessage.from(message));
-        conversationHistory.add(message);
+        conversation.add(message);
+    }
+
+    public com.devcli.event.ConversationJournal.Recording recordConversation() {
+        return conversation.recordTo(runEventSink);
+    }
+
+    public void restoreConversation(List<RunEvent> events, List<LlmClient.Message> imported) {
+        clearHistory();
+        if (events.isEmpty()) {
+            var initial = new ArrayList<>(imported);
+            if (initial.isEmpty() || !"system".equals(initial.get(0).role())) initial.add(0, conversation.get(0));
+            conversation = new com.devcli.event.ConversationJournal(initial);
+        } else {
+            conversation = com.devcli.event.ConversationJournal.restore(events);
+            conversation.revise("tool_pairing_recovery", messages -> { messages.clear(); messages.addAll(imported); return null; });
+        }
+        memoryManager.restoreWorkPlan(conversation.messages());
     }
 
     /** 绑定 Runtime 事件游标，使压缩边界可在重启后定位并校验。 */
@@ -309,7 +321,7 @@ public class Agent implements AutoCloseable {
         memoryManager.beginTask(sessionTaskId);
         memoryManager.setActiveProjectScope(toolRegistry.getProjectPath());
         String result = "";
-        try {
+        try (var recording = conversation.recordTo(runEventSink)) {
             result = runInternal(modelInput, initialToolChoice);
             return result;
         } finally {
@@ -322,7 +334,6 @@ public class Agent implements AutoCloseable {
     }
 
     private String runInternal(String userInput, LlmClient.ToolChoice initialToolChoice) {
-        runEventSink.emit(RunEvent.ModelContext.from(0, conversationHistory));
         LlmClient.ToolChoice effectiveInitialToolChoice = initialToolChoice == null
                 ? LlmClient.ToolChoice.AUTO
                 : initialToolChoice;
@@ -330,7 +341,7 @@ public class Agent implements AutoCloseable {
         currentSkillActivationText = userInput == null ? "" : userInput;
         pruneHistoricalImagePayloads();
         memoryManager.setActiveProjectScope(toolRegistry.getProjectPath());
-        // 写入当前会话工作记忆；真实 messages 由 conversationHistory 维护。
+        // 写入当前会话工作记忆；真实 messages 由 conversation 维护。
         memoryManager.addUserMessage(userInput);
         // system prompt 只放会话级稳定内容，仅在真变化时替换，保住前缀缓存
         refreshSystemPromptIfChanged();
@@ -347,7 +358,7 @@ public class Agent implements AutoCloseable {
                 Path.of(toolRegistry.getProjectPath()));
         appendConversationMessage(userMessage);
         StringBuilder reasoningTranscript = new StringBuilder();
-        StreamRenderer streamRenderer = new StreamRenderer(renderer());
+        AgentStreamPresenter streamRenderer = AgentStreamPresenter.react(renderer());
 
         long startNanos = System.nanoTime();
         AgentBudget budget = AgentBudget.fromLlmClient(llmClient);
@@ -370,13 +381,13 @@ public class Agent implements AutoCloseable {
         }
         DelegationSession delegation = new DelegationSession(toolRegistry,
                 role -> com.devcli.llm.LlmClientFactory.createDelegatedAgent(primaryClient, role),
-                budget, conversationHistory.get(0).content(), runEventSink, delegationSpawnCount, delegationState);
+                budget, conversation.get(0).content(), runEventSink, delegationSpawnCount, delegationState);
         return toolRegistry.runWithDelegation(delegation, () -> new AgentExecutionEngine<String>(
                 llmClient, budget, HookLifecycle.load(toolRegistry), contextReferenceRegistry).run(
                 new AgentExecutionEngine.Delegate<>() {
                     @Override
-                    public List<LlmClient.Message> history() {
-                        return conversationHistory;
+                    public com.devcli.event.ConversationJournal history() {
+                        return conversation;
                     }
 
                     @Override
@@ -388,7 +399,7 @@ public class Agent implements AutoCloseable {
                     public com.devcli.tool.ToolContract.ToolSnapshot toolSnapshot(int iteration) {
                         com.devcli.tool.ToolContract.ToolSnapshot snapshot =
                                 toolRegistry.snapshotForCurrentAccess();
-                        logRequestContext("react iteration=" + iteration, snapshot.definitions());
+                        contextDiagnostics().logRequestContext("react iteration=" + iteration, snapshot.definitions());
                         streamRenderer.beginThinking();
                         return snapshot;
                     }
@@ -446,7 +457,7 @@ public class Agent implements AutoCloseable {
                     public void beforeIteration(int iteration, AgentBudget currentBudget) {
                         String delegationNotice = delegationState.drainNotifications();
                         if (!delegationNotice.isBlank()) {
-                            conversationHistory.add(LlmClient.Message.internalUser(delegationNotice));
+                            conversation.add(LlmClient.Message.internalUser(delegationNotice));
                         }
                         // 不在这里重建 system prompt：迭代内重建会让 messages[0] 每轮变化，
                         // 其后全部历史前缀失配。工具证据本轮已在 tool_result 原文里，
@@ -646,9 +657,8 @@ public class Agent implements AutoCloseable {
             delegationState.close();
             delegationState = null;
         }
-        LlmClient.Message systemMsg = conversationHistory.get(0);
-        conversationHistory.clear();
-        conversationHistory.add(systemMsg);
+        LlmClient.Message systemMsg = conversation.get(0);
+        conversation.reset(List.of(systemMsg));
         synchronized (this) {
             userIntentHistory.clear();
             userIntentIncomplete = false;
@@ -662,7 +672,7 @@ public class Agent implements AutoCloseable {
     }
 
     /**
-     * 仅在 system prompt 内容真正变化时替换 conversationHistory[0]。
+     * 仅在 system prompt 内容真正变化时替换 conversation[0]。
      *
      * <p>prompt cache 契约：system prompt 是整个请求的 token 前缀，逐字节稳定才能让其后的
      * 全部对话历史命中自动前缀缓存。这里只包含会话级规则；Project Context、记忆与
@@ -670,11 +680,11 @@ public class Agent implements AutoCloseable {
      */
     private void refreshSystemPromptIfChanged() {
         String assembled = buildSystemPrompt();
-        LlmClient.Message current = conversationHistory.isEmpty() ? null : conversationHistory.get(0);
+        LlmClient.Message current = conversation.isEmpty() ? null : conversation.get(0);
         if (current != null && "system".equals(current.role()) && assembled.equals(current.content())) {
             return;
         }
-        conversationHistory.set(0, LlmClient.Message.system(assembled));
+        conversation.revise("session_rules", messages -> { messages.set(0, LlmClient.Message.system(assembled)); return null; });
     }
 
     /**
@@ -728,33 +738,28 @@ public class Agent implements AutoCloseable {
             if (projectPath != null) {
                 historyCompactor.setMicrocompactOutputRoot(Path.of(projectPath));
             }
-            CompactionResult compaction = historyCompactor.compactIfNeeded(
-                    conversationHistory, compactionContext(trigger));
+            CompactionResult compaction = conversation.revise("compaction", messages -> historyCompactor.compactIfNeeded(
+                    messages, compactionContext(trigger)));
             boolean compacted = compaction.compacted();
             if (compacted) {
                 renderer().stream().println("📦 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
             }
         } catch (Exception e) {
-            log.warn("conversationHistory compaction failed", e);
+            log.warn("conversation compaction failed", e);
         }
     }
 
     private void pruneHistoricalImagePayloads() {
-        int messageCount = 0;
-        int imageCount = 0;
-        for (int i = 0; i < conversationHistory.size(); i++) {
-            LlmClient.Message message = conversationHistory.get(i);
-            int images = message.imagePartCount();
-            if (images <= 0) {
-                continue;
+        int imageCount = conversation.revise("historical_images", messages -> {
+            int images = 0;
+            for (int i = 0; i < messages.size(); i++) {
+                images += messages.get(i).imagePartCount();
+                if (messages.get(i).hasImageContent()) messages.set(i, messages.get(i).withoutImageContent());
             }
-            conversationHistory.set(i, message.withoutImageContent());
-            messageCount++;
-            imageCount += images;
-        }
+            return images;
+        });
         if (imageCount > 0) {
-            log.info("Pruned historical image payloads before new ReAct turn: messages={}, images={}",
-                    messageCount, imageCount);
+            log.info("Pruned historical image payloads before new ReAct turn: images={}", imageCount);
         }
     }
 
@@ -763,7 +768,7 @@ public class Agent implements AutoCloseable {
         if (report == null || report.isEmpty()) {
             return;
         }
-        conversationHistory.add(LlmClient.Message.internalUser(report.promptText()));
+        conversation.add(LlmClient.Message.internalUser(report.promptText()));
         renderer().stream().println(report.displayText());
         log.info("Injected LSP diagnostics into ReAct conversation");
     }
@@ -797,7 +802,7 @@ public class Agent implements AutoCloseable {
         // 真正达到阈值时由 ConversationHistoryCompactor 自己负责有界重试/降级。
         java.util.concurrent.CompletableFuture<MemoryManager.SessionPreSummaryMaintenanceResult> future =
                 memoryManager.maintainSessionPreSummaryAfterTurnAsync(
-                        conversationHistory,
+                        conversation.messages(),
                         turnToolCalls,
                         largestToolResultChars,
                         memoryManager.getContextProfile().historyTriggerTokens(
@@ -832,20 +837,25 @@ public class Agent implements AutoCloseable {
      * 获取对话历史（用于调试）
      */
     public List<LlmClient.Message> getConversationHistory() {
-        return new ArrayList<>(conversationHistory);
+        return new ArrayList<>(conversation.messages());
     }
 
     public boolean compactHistoryForPersistence(int triggerTokens) {
         if (triggerTokens <= 0) return false;
-        return historyCompactor.compactIfNeeded(
-                conversationHistory, compactionContext(triggerTokens)).compacted();
+        try (var recording = recordConversation()) {
+            return conversation.revise("compaction", messages -> historyCompactor.compactIfNeeded(
+                    messages, compactionContext(triggerTokens))).compacted();
+        }
     }
 
     public com.devcli.memory.CompactionResult compactHistoryNow(int keepRecentTurns) {
         AgentRuntimeSupport.bindCompactionBudget(historyCompactor, AgentBudget.fromLlmClient(llmClient), memoryManager);
         int toolTokens = TokenBudget.estimateToolDefinitionsTokens(toolRegistry.getToolDefinitions());
         int trigger = memoryManager.getContextProfile().historyTriggerTokens(toolTokens);
-        return historyCompactor.compactNow(conversationHistory, compactionContext(trigger), keepRecentTurns);
+        try (var recording = recordConversation()) {
+            return conversation.revise("manual_compaction", messages ->
+                    historyCompactor.compactNow(messages, compactionContext(trigger), keepRecentTurns));
+        }
     }
 
     /**
@@ -873,173 +883,13 @@ public class Agent implements AutoCloseable {
         }
     }
 
-    public String getContextStatus() {
-        com.devcli.context.ContextProfile profile = memoryManager.getContextProfile();
-        int window = profile.maxContextWindow();
-        int triggerTokens = profile.compressionTriggerTokens();
+    public String getContextStatus() { return contextDiagnostics().status(); }
 
-        // 分类估算 token 占用
-        int systemTokens = 0, userTokens = 0, assistantTokens = 0, toolTokens = 0;
-        int systemCount = 0, userCount = 0, assistantCount = 0, toolCount = 0;
-        for (LlmClient.Message msg : conversationHistory) {
-            int t = com.devcli.memory.TokenBudget.estimateMessagesTokens(java.util.List.of(msg));
-            switch (msg.role()) {
-                case "system" -> { systemTokens += t; systemCount++; }
-                case "user" -> { userTokens += t; userCount++; }
-                case "assistant" -> { assistantTokens += t; assistantCount++; }
-                case "tool" -> { toolTokens += t; toolCount++; }
-            }
-        }
-        int messagesTokens = userTokens + assistantTokens + toolTokens;
-        int toolsSchemaTokens = estimateToolsSchemaTokens();
-        int total = systemTokens + messagesTokens + toolsSchemaTokens;
-        double ratio = window > 0 ? (double) total / window : 0;
-        int triggerRemaining = Math.max(0, triggerTokens - total);
-
-        StringBuilder sb = new StringBuilder();
-        sb.append(String.format("📊 Context Usage   %s   window: %s%n",
-                modelLabel(), formatTokens(window)));
-        sb.append("\n  ").append(progressBar(ratio, 30))
-                .append(String.format("  %d%%  (%s / %s)%n",
-                        (int) Math.round(ratio * 100), formatTokens(total), formatTokens(window)));
-        sb.append("\n  当前占用细分:\n");
-        sb.append(formatLine("System prompt",      systemTokens,    window, systemCount));
-        sb.append(formatLine("Tools schema",       toolsSchemaTokens, window, -1));
-        sb.append(formatLine("Conversation",       messagesTokens, window,
-                userCount + assistantCount + toolCount));
-        sb.append("    ─────────────────────────────────\n");
-        sb.append(String.format("    合计:              %8s  (%4.1f%%)%n",
-                formatTokens(total), ratio * 100));
-        sb.append(String.format("%n  压缩阈值: %s (%d%%)   距压缩还有: %s%n",
-                formatTokens(triggerTokens),
-                (int) (profile.compressionTriggerRatio() * 100),
-                formatTokens(triggerRemaining)));
-        sb.append("  MCP resources 自动索引: ")
-                .append(profile.mcpResourceIndexEnabled() ? "开启" : "关闭（window 不足 32k）")
-                .append("\n");
-        sb.append("  prompt cache: ").append(profile.promptCacheMode()).append("\n");
-        sb.append("\n");
-        sb.append(memoryManager.getSystemStatus());
-        return sb.toString();
+    private AgentContextDiagnostics contextDiagnostics() {
+        return new AgentContextDiagnostics(llmClient, toolRegistry, memoryManager, conversation.messages());
     }
 
-    private String modelLabel() {
-        if (llmClient == null) return "(no model)";
-        return llmClient.getModelName() + " (" + llmClient.getProviderName() + ")";
-    }
-
-    private int estimateToolsSchemaTokens() {
-        try {
-            return com.devcli.memory.MemoryEntry.estimateTokens(
-                    new ObjectMapper().writeValueAsString(toolRegistry.getToolDefinitions()));
-        } catch (Exception e) {
-            return 0;
-        }
-    }
-
-    private void logRequestContext(String scope, List<LlmClient.Tool> tools) {
-        if (!log.isInfoEnabled()) {
-            return;
-        }
-        int systemTokens = 0;
-        int userTokens = 0;
-        int assistantTokens = 0;
-        int toolMessageTokens = 0;
-        int imageParts = 0;
-        int messages = 0;
-        StringBuilder imageDetails = new StringBuilder();
-        for (int messageIndex = 0; messageIndex < conversationHistory.size(); messageIndex++) {
-            LlmClient.Message msg = conversationHistory.get(messageIndex);
-            messages++;
-            int tokens = com.devcli.memory.TokenBudget.estimateMessagesTokens(List.of(msg));
-            imageParts += msg.imagePartCount();
-            appendImageDetails(imageDetails, msg, messageIndex);
-            switch (msg.role()) {
-                case "system" -> systemTokens += tokens;
-                case "user" -> userTokens += tokens;
-                case "assistant" -> assistantTokens += tokens;
-                case "tool" -> toolMessageTokens += tokens;
-                default -> {
-                }
-            }
-        }
-        int toolsSchemaTokens = 0;
-        int toolCount = tools == null ? 0 : tools.size();
-        if (tools != null && !tools.isEmpty()) {
-            try {
-                toolsSchemaTokens = com.devcli.memory.MemoryEntry.estimateTokens(
-                        new ObjectMapper().writeValueAsString(tools));
-            } catch (Exception e) {
-                log.debug("Failed to estimate tools schema tokens", e);
-            }
-        }
-        int estimatedTotal = systemTokens + userTokens + assistantTokens + toolMessageTokens + toolsSchemaTokens;
-        log.info("LLM request context [{}]: messages={}, images={}, systemTokens={}, userTokens={}, assistantTokens={}, toolMessageTokens={}, tools={}, toolsSchemaTokens={}, estimatedTotal={}",
-                scope, messages, imageParts, systemTokens, userTokens, assistantTokens, toolMessageTokens,
-                toolCount, toolsSchemaTokens, estimatedTotal);
-        if (!imageDetails.isEmpty()) {
-            log.info("LLM request images [{}]: {}", scope, imageDetails);
-        }
-    }
-
-    private void appendImageDetails(StringBuilder sb, LlmClient.Message msg, int messageIndex) {
-        if (msg == null || !msg.hasContentParts()) {
-            return;
-        }
-        for (int partIndex = 0; partIndex < msg.contentParts().size(); partIndex++) {
-            LlmClient.ContentPart part = msg.contentParts().get(partIndex);
-            if (part == null || !part.isImage()) {
-                continue;
-            }
-            if (!sb.isEmpty()) {
-                sb.append("; ");
-            }
-            String payload = "image_url".equals(part.type()) ? part.imageUrl() : part.imageBase64();
-            sb.append("#").append(messageIndex)
-                    .append(".").append(partIndex)
-                    .append(" role=").append(msg.role())
-                    .append(" type=").append(part.type())
-                    .append(" mime=").append(part.mimeType() == null ? "-" : part.mimeType())
-                    .append(" payloadChars=").append(payload == null ? 0 : payload.length())
-                    .append(" sha256=").append(shortSha256(payload));
-        }
-    }
-
-    private String shortSha256(String value) {
-        if (value == null || value.isBlank()) {
-            return "-";
-        }
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest, 0, 6);
-        } catch (NoSuchAlgorithmException e) {
-            return "unavailable";
-        }
-    }
-
-    private static String formatLine(String label, int tokens, int window, int count) {
-        double pct = window > 0 ? (double) tokens / window * 100 : 0;
-        String countLabel = count >= 0 ? String.format("  [%d 条]", count) : "";
-        return String.format("    %-18s %8s  (%4.1f%%)%s%n",
-                label + ":", formatTokens(tokens), pct, countLabel);
-    }
-
-    private static String progressBar(double ratio, int width) {
-        ratio = Math.max(0, Math.min(1, ratio));
-        int filled = (int) Math.round(ratio * width);
-        StringBuilder bar = new StringBuilder("[");
-        for (int i = 0; i < width; i++) {
-            bar.append(i < filled ? '█' : '░');
-        }
-        bar.append("]");
-        return bar.toString();
-    }
-
-    private static String formatTokens(int tokens) {
-        if (tokens >= 1_000_000) return String.format("%.1fM", tokens / 1_000_000.0);
-        if (tokens >= 1_000)     return String.format("%.1fk", tokens / 1_000.0);
-        return String.valueOf(tokens);
-    }
+    private String modelLabel() { return llmClient.getModelName() + " (" + llmClient.getProviderName() + ")"; }
 
     /**
      * 获取工具注册表（用于同步项目路径等配置）
@@ -1159,7 +1009,7 @@ public class Agent implements AutoCloseable {
             List<LlmClient.ContentPart> parts = new ArrayList<>();
             parts.add(LlmClient.ContentPart.text("工具 " + result.name() + " 返回了图片内容，请结合上面的工具文本结果分析。"));
             parts.addAll(result.imageParts());
-            conversationHistory.add(LlmClient.Message.user(parts, LlmClient.MessageSource.TOOL));
+            conversation.add(LlmClient.Message.user(parts, LlmClient.MessageSource.TOOL));
         }
     }
 
@@ -1187,67 +1037,4 @@ public class Agent implements AutoCloseable {
         return normalized.substring(0, maxLength) + "...";
     }
 
-    /**
-     * 流式输出渲染器，将 reasoning_content 与 content 分区展示。
-     *
-     * 服务器可能把 reasoning_content 切成多段下发，甚至在 content 开始之后追加 reasoning；
-     * 终端是线性的，无法回头修改已写出的文字。渲染策略：
-     *
-     * 1. 在 content 出现之前，只要 reasoning 有实质内容（非空白），就立刻流式打印在"🧠 思考过程"下
-     *    同一次用户输入只打印一次"🧠 思考过程"标题；工具调用后的后续推理继续归在同一块下
-     * 2. 仅空白的 reasoning delta 会先暂存，不触发标题——避免出现"空的思考过程"
-     * 3. content 一出现就收尾 reasoning 区，用低调标记进入正文并流式输出 content
-     * 4. 如果 content 启动之后又收到 reasoning（服务器把思考内容追加在答案之后），
-     *    缓冲到 lateReasoning，最终在 finish() 用"🧠 补充思考"标题独立展示，不会污染回复区
-     */
-    private static final class StreamRenderer implements LlmClient.StreamListener, RunEventSink {
-        private final AgentStreamPresenter delegate;
-
-        StreamRenderer() {
-            this.delegate = AgentStreamPresenter.react();
-        }
-
-        StreamRenderer(PrintStream out) {
-            this.delegate = AgentStreamPresenter.react(out);
-        }
-
-        StreamRenderer(Renderer renderer) {
-            this.delegate = AgentStreamPresenter.react(renderer);
-        }
-
-        private void beginThinking() {
-            delegate.beginThinking();
-        }
-
-        private void clearThinkingPanel() {
-            delegate.clearThinkingPanel();
-        }
-
-        @Override
-        public void emit(RunEvent event) {
-            delegate.emit(event);
-        }
-
-        @Override
-        public void onReasoningDelta(String delta) {
-            delegate.onReasoningDelta(delta);
-        }
-
-        @Override
-        public void onContentDelta(String delta) {
-            delegate.onContentDelta(delta);
-        }
-
-        private boolean hasStreamedOutput() {
-            return delegate.hasStreamedOutput();
-        }
-
-        private void resetBetweenIterations() {
-            delegate.resetBetweenIterations();
-        }
-
-        private void finish() {
-            delegate.finish();
-        }
-    }
 }

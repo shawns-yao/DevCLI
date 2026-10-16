@@ -77,11 +77,11 @@ class AgentExecutionEngineHookTest {
     }
 
     private static final class RecordingDelegate implements AgentExecutionEngine.Delegate<String> {
-        private final List<LlmClient.Message> history = new ArrayList<>(
+        private final com.devcli.event.ConversationJournal history = new com.devcli.event.ConversationJournal(
                 List.of(LlmClient.Message.system("system")));
 
         @Override
-        public List<LlmClient.Message> history() {
+        public com.devcli.event.ConversationJournal history() {
             return history;
         }
 

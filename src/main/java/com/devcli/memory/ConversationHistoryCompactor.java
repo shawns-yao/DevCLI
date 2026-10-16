@@ -27,7 +27,7 @@ import static com.devcli.memory.CompactionSummarizer.*;
 import static com.devcli.memory.CompactionSummaryWorkflow.*;
 import static com.devcli.memory.HistoryWindow.*;
 
-/** 对话窗口压缩入口，拥有压缩生命周期、语义校验和历史提交状态。 */
+/** 对话窗口压缩入口；修改调用方提供的临时副本，由 ConversationJournal 追加投影后提交。 */
 public class ConversationHistoryCompactor {
     private final CompactionSummaryWorkflow summaryWorkflow = new CompactionSummaryWorkflow(this);
 

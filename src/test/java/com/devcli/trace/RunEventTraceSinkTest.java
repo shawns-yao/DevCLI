@@ -32,8 +32,8 @@ class RunEventTraceSinkTest {
 
         sink.emit(new RunEvent.ReasoningDelta("thinking"));
         sink.emit(new RunEvent.MessageDelta("answer"));
-        sink.emit(new RunEvent.ModelContext(1, List.of()));
-        sink.emit(new RunEvent.ModelMessage(
+        sink.emit(new RunEvent.ModelContext(1, List.of(), List.of()));
+        sink.emit(new RunEvent.ModelMessage("message",
                 new RunEvent.ModelMessageData("assistant", "MODEL", "x", "",
                         List.of(), "", 0, List.of())));
         var result = RunEvent.ToolResultRecorded.from("call", "read_file", "{}",

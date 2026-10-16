@@ -136,7 +136,7 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
             AgentSessionRuntime session = AgentSessionRuntime.create(
                     llmClient, memoryCuratorClientSupplier.get(), projectPath, RunEventSink.NO_OP);
             RuntimeThreadStore.ContextView view = store.contextView(id);
-            session.seedHistory(view.messages());
+            session.agent().restoreConversation(view.conversationEvents(), view.messages());
             view.userInputs().forEach(session.agent()::recordUserIntent);
             if (!view.messages().isEmpty()) session.agent().markTrustedIntentIncomplete();
             AgentTurnInbox.Snapshot queued = store.queueSnapshot(id);

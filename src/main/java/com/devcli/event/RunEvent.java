@@ -25,9 +25,24 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
         RunEvent.ToolResults, RunEvent.HookInvocationStarted, RunEvent.HookInvocationCompleted,
         RunEvent.TurnCompleted, RunEvent.TurnFailed,
         RunEvent.TurnRejected, RunEvent.CheckpointCreated, RunEvent.CheckpointFailed,
-        RunEvent.ContextCompacted, RunEvent.ToolResultRecorded, RunEvent.AgentEvent {
+        RunEvent.ContextCompacted, RunEvent.ToolResultRecorded, RunEvent.AgentEvent,
+        RunEvent.ContextSeed, RunEvent.ContextProjection {
 
     String type();
+
+    record ContextEntry(String id, ModelMessageData message) { }
+
+    /** 初始配置或显式导入的上下文；后续请求快照不参与上下文状态。 */
+    record ContextSeed(List<ContextEntry> entries) implements RunEvent {
+        public ContextSeed { entries = List.copyOf(entries); }
+        @Override public String type() { return "context.seed"; }
+    }
+
+    /** 保留消息的身份引用及新产生的摘要等派生内容。 */
+    record ContextProjection(String reason, List<ContextEntry> entries) implements RunEvent {
+        public ContextProjection { entries = List.copyOf(entries); }
+        @Override public String type() { return "context.projection"; }
+    }
 
     /** 子 Agent 的独立事件流；父上下文只消费委派工具的最终报告。 */
     record AgentEvent(String agentId, RunEvent event) implements RunEvent {
@@ -100,19 +115,24 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
         }
     }
 
-    record ModelContext(int iteration, List<ModelMessageData> messages) implements RunEvent {
+    record ModelContext(int iteration, List<ModelMessageData> messages, List<LlmClient.Tool> tools) implements RunEvent {
         public ModelContext {
             messages = messages == null ? List.of() : List.copyOf(messages);
+            tools = List.copyOf(tools);
         }
 
         public static ModelContext from(int iteration, List<LlmClient.Message> messages) {
+            return from(iteration, messages, List.of());
+        }
+
+        public static ModelContext from(int iteration, List<LlmClient.Message> messages, List<LlmClient.Tool> tools) {
             if (messages == null || messages.isEmpty()) {
-                return new ModelContext(iteration, List.of());
+                return new ModelContext(iteration, List.of(), tools);
             }
             return new ModelContext(iteration, messages.stream()
                     .filter(java.util.Objects::nonNull)
                     .map(ModelMessageData::from)
-                    .toList());
+                    .toList(), tools);
         }
 
         public List<LlmClient.Message> toLlmMessages() {
@@ -125,7 +145,7 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
         }
     }
 
-    record ModelMessage(ModelMessageData message) implements RunEvent {
+    record ModelMessage(String messageId, ModelMessageData message) implements RunEvent {
         public ModelMessage {
             message = message == null
                     ? ModelMessageData.from(LlmClient.Message.internalUser(""))
@@ -133,7 +153,7 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
         }
 
         public static ModelMessage from(LlmClient.Message message) {
-            return new ModelMessage(ModelMessageData.from(message));
+            return new ModelMessage(java.util.UUID.randomUUID().toString(), ModelMessageData.from(message));
         }
 
         @Override

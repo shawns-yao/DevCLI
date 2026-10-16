@@ -747,7 +747,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
         private final String id;
         private final ToolExecutionContext context;
         private final List<LlmClient.Tool> tools;
-        private final List<LlmClient.Message> history = new ArrayList<>();
+        private final com.devcli.event.ConversationJournal history = new com.devcli.event.ConversationJournal(List.of());
         private final List<String> evidence = new ArrayList<>();
         private final Deque<ObjectNode> observations = new ArrayDeque<>();
         private final Deque<ObjectNode> deadEnds = new ArrayDeque<>();
@@ -833,7 +833,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             } finally {
                 if (state.isActive(id)) {
                     try {
-                        state.saveRecovery(id, arguments, history, null);
+                        state.saveRecovery(id, arguments, history.messages(), null);
                     } catch (IOException e) {
                         recoveryError = e.getMessage();
                     }
@@ -850,7 +850,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             }
             return result;
         }
-        @Override public List<LlmClient.Message> history() { return history; }
+        @Override public com.devcli.event.ConversationJournal history() { return history; }
         @Override public List<LlmClient.Tool> toolDefinitions(int iteration) { return tools; }
         @Override public ToolContract.ToolSnapshot toolSnapshot(int iteration) {
             return registry.snapshotForCurrentAccess().withDefinitions(tools);
@@ -866,10 +866,10 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             };
         }
         @Override public void beforeIteration(int iteration, AgentBudget currentBudget) {
-            compactor.compactIfNeeded(history, AgentRuntimeSupport.buildCompactionContext(
+            history.revise("compaction", messages -> compactor.compactIfNeeded(messages, AgentRuntimeSupport.buildCompactionContext(
                     ContextProfile.from(client).historyTriggerTokens(
                             TokenBudget.estimateToolDefinitionsTokens(tools)),
-                    registry, id));
+                    registry, id)));
             if (registry.getSkillContextBuffer() != null) {
                 String pending = registry.getSkillContextBuffer().drain();
                 if (!pending.isBlank()) history.add(LlmClient.Message.internalUser(pending));

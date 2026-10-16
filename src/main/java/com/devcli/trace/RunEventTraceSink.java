@@ -54,6 +54,8 @@ public final class RunEventTraceSink implements RunEventSink {
                 || event instanceof RunEvent.MessageDelta
                 || event instanceof RunEvent.ModelContext
                 || event instanceof RunEvent.ModelMessage
+                || event instanceof RunEvent.ContextSeed
+                || event instanceof RunEvent.ContextProjection
                 || event instanceof RunEvent.ToolResultRecorded
                 || event instanceof RunEvent.AgentEvent child && isStreamNoise(child.event());
     }

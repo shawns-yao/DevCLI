@@ -84,11 +84,13 @@ public class RuntimeThreadStore implements RunStore {
     public record ContextView(
             List<LlmClient.Message> messages,
             List<String> userInputs,
+            List<RunEvent> conversationEvents,
             long lastCompletedEventId,
             Optional<RuntimeCheckpoint> checkpoint) {
         public ContextView {
             messages = List.copyOf(messages);
             userInputs = List.copyOf(userInputs);
+            conversationEvents = List.copyOf(conversationEvents);
             checkpoint = checkpoint == null ? Optional.empty() : checkpoint;
         }
     }
@@ -408,14 +410,16 @@ public class RuntimeThreadStore implements RunStore {
 
     public synchronized long appendEvent(String threadId, String branchId, String type, String data) {
         try (PreparedStatement ps = connection.prepareStatement("""
-                INSERT INTO runtime_events (thread_id, branch_id, type, data, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO runtime_events (thread_id, branch_id, type, data, created_at, run_id)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """, Statement.RETURN_GENERATED_KEYS)) {
             ps.setString(1, threadId);
             ps.setString(2, branchId);
             ps.setString(3, type);
             ps.setString(4, data == null ? "{}" : data);
             ps.setString(5, Instant.now().toString());
+            var run = com.devcli.concurrent.CancellationContext.currentRun();
+            ps.setString(6, run == null ? "" : run.runId());
             ps.executeUpdate();
             try (ResultSet keys = ps.getGeneratedKeys()) {
                 return keys.next() ? keys.getLong(1) : 0;
@@ -451,11 +455,12 @@ public class RuntimeThreadStore implements RunStore {
     private static Map<String, Long> messageEventIdsByFingerprint(
             List<RuntimeEvent> visible, long start, long end) {
         Map<String, Long> result = new LinkedHashMap<>();
+        boolean journal = visible.stream().anyMatch(event -> event.type().equals("context.seed"));
         for (RuntimeEvent event : visible) {
             if (event.id() <= start || event.id() > end) {
                 continue;
             }
-            if ("model.context".equals(event.type())) {
+            if (!journal && "model.context".equals(event.type())) {
                 RunEventJsonCodec.decodeModelContext(event.data()).ifPresent(context ->
                         context.messages().forEach(message -> result.put(
                                 com.devcli.memory.CompactionFactExtractor.messageKey(
@@ -464,6 +469,12 @@ public class RuntimeThreadStore implements RunStore {
                 RunEventJsonCodec.decodeModelMessage(event.data()).ifPresent(message ->
                         result.put(com.devcli.memory.CompactionFactExtractor.messageKey(
                                 message.message().toLlmMessage()), event.id()));
+            } else if (event.type().equals("context.seed") || event.type().equals("context.projection")) {
+                var fact = RunEventJsonCodec.decodeConversationEvent(event.type(), event.data()).orElseThrow();
+                var entries = fact instanceof RunEvent.ContextSeed seed ? seed.entries()
+                        : ((RunEvent.ContextProjection) fact).entries();
+                entries.stream().filter(entry -> entry.message() != null).forEach(entry -> result.put(
+                        com.devcli.memory.CompactionFactExtractor.messageKey(entry.message().toLlmMessage()), event.id()));
             }
         }
         return Map.copyOf(result);
@@ -522,6 +533,27 @@ public class RuntimeThreadStore implements RunStore {
         return filterVisibleEvents(threadId, allEvents);
     }
 
+    /** 按真实运行身份读取请求审计；不受当前活动分支影响。 */
+    public synchronized List<RuntimeEvent> contextEventsForRun(String runId) {
+        List<RuntimeEvent> result = new ArrayList<>();
+        try (PreparedStatement ps = connection.prepareStatement("""
+                SELECT id, thread_id, branch_id, type, data, created_at FROM runtime_events
+                WHERE run_id = ? AND (type IN ('model.context', 'model.usage')
+                    OR (type = 'agent.event' AND json_extract(data, '$.event_type') IN ('model.context', 'model.usage')))
+                ORDER BY id
+                """)) {
+            ps.setString(1, runId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) result.add(new RuntimeEvent(rs.getLong("id"), rs.getString("thread_id"),
+                        rs.getString("branch_id"), rs.getString("type"), rs.getString("data"),
+                        Instant.parse(rs.getString("created_at"))));
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("读取运行上下文失败", e);
+        }
+        return List.copyOf(result);
+    }
+
     /**
      * 按时间序返回指定 thread 已完成 turn 的输入/输出对（只取有 turn.completed 终态的完整 turn，
      * 失败/被拒的 turn 不进入历史）。事件 data 为写入端手拼 JSON，解析端容错：单条解析失败跳过并 warn。
@@ -576,6 +608,7 @@ public class RuntimeThreadStore implements RunStore {
         return new ContextView(
                 ConversationReplay.context(visible, checkpoint.map(RuntimeCheckpoint::messages).orElse(List.of()), coveredThrough),
                 ConversationReplay.userInputs(visible),
+                ConversationReplay.journalEvents(visible),
                 lastCompletedEventId,
                 checkpoint);
     }
@@ -987,6 +1020,8 @@ public class RuntimeThreadStore implements RunStore {
                     "TEXT NOT NULL DEFAULT 'main'");
             ensureColumn(stmt, "runtime_events", "branch_id",
                     "TEXT NOT NULL DEFAULT 'main'");
+            ensureColumn(stmt, "runtime_events", "run_id", "TEXT NOT NULL DEFAULT ''");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_runtime_events_run ON runtime_events(run_id, id)");
             ensureColumn(stmt, "runtime_checkpoints", "message_tree_json",
                     "TEXT NOT NULL DEFAULT '[]'");
             ensureColumn(stmt, "runtime_checkpoints", "branch_id",

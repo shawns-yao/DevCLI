@@ -105,7 +105,7 @@ public class SubAgent {
     private final AgentRole role;
     private final LlmClient llmClient;
     private final ToolRegistry toolRegistry;
-    private final List<LlmClient.Message> conversationHistory;
+    private final com.devcli.event.ConversationJournal conversationHistory;
     private Supplier<String> externalContextSupplier = () -> "";
     private Supplier<String> ruleContextSupplier = () -> "";
     private Supplier<String> memoryContextSupplier = () -> "";
@@ -128,7 +128,7 @@ public class SubAgent {
         this.role = role;
         this.llmClient = llmClient;
         this.toolRegistry = toolRegistry;
-        this.conversationHistory = new ArrayList<>();
+        this.conversationHistory = new com.devcli.event.ConversationJournal(List.of());
         this.historyCompactor = new ConversationHistoryCompactor(llmClient);
         this.historyCompactor.setPostCompactContextSupplier(this::buildPostCompactRestoreSection);
         this.historyCompactor.setCompactBoundaryRuntimeStateSupplier(this::buildCompactBoundaryRuntimeState);
@@ -326,7 +326,7 @@ public class SubAgent {
         maybeCompactHistory(conversationHistory, out);
     }
 
-    private void maybeCompactHistory(List<LlmClient.Message> history, PrintStream out) {
+    private void maybeCompactHistory(com.devcli.event.ConversationJournal history, PrintStream out) {
         if (historyCompactor == null) return;
         ContextProfile profile = toolRegistry == null ? null : toolRegistry.getContextProfile();
         if (profile == null) return;
@@ -334,10 +334,10 @@ public class SubAgent {
             historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(toolRegistry.getProjectPath()));
             int toolDefinitionTokens = TokenBudget.estimateToolDefinitionsTokens(
                     toolRegistry.getToolDefinitions());
-            CompactionResult compaction = historyCompactor.compactIfNeeded(
-                    history, AgentRuntimeSupport.buildCompactionContext(
+            CompactionResult compaction = history.revise("compaction", messages -> historyCompactor.compactIfNeeded(
+                    messages, AgentRuntimeSupport.buildCompactionContext(
                             profile.historyTriggerTokens(toolDefinitionTokens),
-                            toolRegistry, name));
+                            toolRegistry, name)));
             boolean compacted = compaction.compacted();
             if (compacted && out != null) {
                 out.println("📦 [" + name + "] 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
@@ -370,7 +370,7 @@ public class SubAgent {
 
     private void refreshSystemPrompt() {
         if (!conversationHistory.isEmpty()) {
-            conversationHistory.set(0, LlmClient.Message.system(getSystemPrompt()));
+            conversationHistory.revise("session_rules", messages -> { messages.set(0, LlmClient.Message.system(getSystemPrompt())); return null; });
         }
     }
 
@@ -421,20 +421,20 @@ public class SubAgent {
     public AgentMessage executeForked(AgentMessage task, ForkContext forkContext, PrintStream out) {
         currentSkillActivationText = task == null || task.content() == null ? "" : task.content();
         ForkContext context = forkContext == null ? createForkContext() : forkContext;
-        List<LlmClient.Message> forkedHistory = new ArrayList<>(context.sharedPrefix());
+        var forkedHistory = new com.devcli.event.ConversationJournal(context.sharedPrefix());
         return executeWithHistory(task, out, forkedHistory, context, true);
     }
 
     /** 使用独立、无工具上下文评审候选计划，不污染执行产物 Reviewer 的历史。 */
     AgentMessage executePlanReview(AgentMessage task, PrintStream out) {
         currentSkillActivationText = "";
-        List<LlmClient.Message> reviewHistory = new ArrayList<>();
+        var reviewHistory = new com.devcli.event.ConversationJournal(List.of());
         reviewHistory.add(LlmClient.Message.system(getSystemPrompt(PromptMode.TEAM_PLAN_REVIEWER)));
         return executeWithHistory(task, out, reviewHistory, null, false);
     }
 
     private AgentMessage executeWithHistory(AgentMessage task, PrintStream out,
-                                            List<LlmClient.Message> history,
+                                            com.devcli.event.ConversationJournal history,
                                             ForkContext forkContext,
                                             boolean toolsEnabled) {
         // 当轮上下文随任务追加；fork 路径使用冻结快照。
@@ -461,7 +461,7 @@ public class SubAgent {
                 llmClient, budget, HookLifecycle.load(toolRegistry)).run(
                 new AgentExecutionEngine.Delegate<>() {
                     @Override
-                    public List<LlmClient.Message> history() {
+                    public com.devcli.event.ConversationJournal history() {
                         return history;
                     }
 
@@ -679,26 +679,20 @@ public class SubAgent {
      */
     public void clearHistory() {
         LlmClient.Message systemMsg = conversationHistory.get(0);
-        conversationHistory.clear();
-        conversationHistory.add(systemMsg);
+        conversationHistory.reset(List.of(systemMsg));
     }
 
     private void pruneHistoricalImagePayloads() {
-        int messageCount = 0;
-        int imageCount = 0;
-        for (int i = 0; i < conversationHistory.size(); i++) {
-            LlmClient.Message message = conversationHistory.get(i);
-            int images = message.imagePartCount();
-            if (images <= 0) {
-                continue;
+        int imageCount = conversationHistory.revise("historical_images", messages -> {
+            int images = 0;
+            for (int i = 0; i < messages.size(); i++) {
+                images += messages.get(i).imagePartCount();
+                if (messages.get(i).hasImageContent()) messages.set(i, messages.get(i).withoutImageContent());
             }
-            conversationHistory.set(i, message.withoutImageContent());
-            messageCount++;
-            imageCount += images;
-        }
+            return images;
+        });
         if (imageCount > 0) {
-            log.info("[{}] pruned historical image payloads before sub-agent turn: messages={}, images={}",
-                    name, messageCount, imageCount);
+            log.info("[{}] pruned historical image payloads before sub-agent turn: images={}", name, imageCount);
         }
     }
 
@@ -754,7 +748,7 @@ public class SubAgent {
         injectPendingLspDiagnostics(conversationHistory, out);
     }
 
-    private void injectPendingLspDiagnostics(List<LlmClient.Message> history, PrintStream out) {
+    private void injectPendingLspDiagnostics(com.devcli.event.ConversationJournal history, PrintStream out) {
         LspDiagnosticReport report = toolRegistry.flushPendingLspDiagnostics();
         if (report == null || report.isEmpty()) {
             return;
@@ -813,7 +807,7 @@ public class SubAgent {
         appendImageToolMessages(conversationHistory, toolResults);
     }
 
-    private void appendImageToolMessages(List<LlmClient.Message> history, List<ToolExecutionResult> toolResults) {
+    private void appendImageToolMessages(com.devcli.event.ConversationJournal history, List<ToolExecutionResult> toolResults) {
         if (toolResults == null || toolResults.isEmpty()) {
             return;
         }

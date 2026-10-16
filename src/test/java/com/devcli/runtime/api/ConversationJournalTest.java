@@ -200,4 +200,44 @@ class ConversationJournalTest {
     private static LlmClient.ToolCall call(String id) {
         return new LlmClient.ToolCall(id, new LlmClient.ToolCall.Function("bulk_observation", "{}"));
     }
+
+    @Test
+    void renderingUsesFactsAndProjectionReferencesInsteadOfAuditSnapshots() throws Exception {
+        Path db = root.resolve("canonical.db");
+        String thread;
+        List<LlmClient.Message> expected;
+        try (RuntimeThreadStore store = new RuntimeThreadStore(db)) {
+            thread = store.createThread();
+            var events = new RuntimeEventPublisher(store, thread, "turn");
+            var journal = new com.devcli.event.ConversationJournal(List.of(LlmClient.Message.system("rules")));
+            try (var recording = journal.recordTo(events)) {
+                journal.add(LlmClient.Message.user("original question"));
+                journal.add(LlmClient.Message.assistant("original answer"));
+                journal.revise("compaction", copy -> {
+                    copy.subList(1, copy.size()).clear();
+                    copy.add(LlmClient.Message.internalUser("summary"));
+                    return null;
+                });
+                journal.add(LlmClient.Message.user("continue"));
+            }
+            expected = journal.messages();
+            events.emit(RunEvent.ModelContext.from(2, List.of(LlmClient.Message.user("audit is not authority"))));
+            var metadata = new com.devcli.memory.CompactBoundaryMetadata(
+                    "history", "token_threshold", "full", 40_000, 8_000, 30, 8, 4, 1_000);
+            store.saveCheckpoint(thread, store.events(thread, 0).getLast().id(), new TurnRunner.CheckpointCandidate(
+                    List.of(LlmClient.Message.internalUser("checkpoint is not authority")), "summary", metadata));
+            assertTrue(store.latestCheckpoint(thread).isPresent());
+            assertEquals(expected, store.contextView(thread).messages());
+            assertFalse(store.compactionSourceCursor(thread).messageEventIdsByFingerprint().containsKey(
+                    com.devcli.memory.CompactionFactExtractor.messageKey(LlmClient.Message.user("audit is not authority"))));
+            assertEquals(List.of("rules", "original question", "original answer", "continue"),
+                    store.originalConversationMessages(thread).stream().map(LlmClient.Message::content).toList());
+            var branch = store.createBranch(thread, "fork", 0);
+            store.activateBranch(thread, branch.id());
+            assertEquals(expected, store.contextView(thread).messages());
+        }
+        try (RuntimeThreadStore store = new RuntimeThreadStore(db)) {
+            assertEquals(expected, store.contextView(thread).messages());
+        }
+    }
 }

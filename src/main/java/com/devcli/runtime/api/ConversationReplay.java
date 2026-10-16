@@ -19,7 +19,32 @@ final class ConversationReplay {
 
     static List<LlmClient.Message> context(List<RuntimeEvent> events,
                                           List<LlmClient.Message> baseline, long after) {
+        var journal = journalEvents(events);
+        if (!journal.isEmpty()) {
+            Map<String, LlmClient.Message> results = new HashMap<>();
+            for (var event : events) {
+                if (event.type().equals("turn.started")) results.clear();
+                if (event.type().equals("tool.result.recorded")) {
+                    var root = data(event);
+                    var result = root.path("result");
+                    String id = result.path("id").asText();
+                    results.put(id, new LlmClient.Message("tool", result.path("result").asText(), null,
+                            null, id, RunEventJsonCodec.contentParts(root.path("images"))));
+                }
+            }
+            return completeToolPairs(com.devcli.event.ConversationJournal.restore(journal).messages(), results, false);
+        }
         return replay(events, baseline, after, false);
+    }
+
+    static List<RunEvent> journalEvents(List<RuntimeEvent> events) {
+        List<RunEvent> journal = new ArrayList<>();
+        boolean initialized = false;
+        for (var event : events) {
+            if (event.type().equals("context.seed")) initialized = true;
+            if (initialized) RunEventJsonCodec.decodeConversationEvent(event.type(), event.data()).ifPresent(journal::add);
+        }
+        return List.copyOf(journal);
     }
 
     static List<LlmClient.Message> original(List<RuntimeEvent> events) {
@@ -52,6 +77,12 @@ final class ConversationReplay {
         for (var event : events) {
             if (event.id() <= after) continue;
             switch (event.type()) {
+                case "context.seed" -> {
+                    if (original && messages.isEmpty()) {
+                        var seed = (RunEvent.ContextSeed) RunEventJsonCodec.decodeConversationEvent(event.type(), event.data()).orElseThrow();
+                        for (var value : seed.entries()) messages.add(value.message().toLlmMessage());
+                    }
+                }
                 case "turn.started" -> {
                     appendTextTurn(messages, input, output, recorded);
                     messages = new ArrayList<>(completeToolPairs(messages, results, original));

@@ -12,7 +12,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -175,21 +174,9 @@ public final class SessionTreeService {
     private void restoreActiveBranch() {
         agent.getTurnInbox().clear();
         RuntimeThreadStore.ContextView view = store.contextView(threadId);
-        replaceAgentHistory(view.messages());
+        agent.restoreConversation(view.conversationEvents(), view.messages());
         view.userInputs().forEach(agent::recordUserIntent);
         if (!view.messages().isEmpty()) agent.markTrustedIntentIncomplete();
-    }
-
-    private void replaceAgentHistory(List<LlmClient.Message> history) {
-        agent.clearHistory();
-        if (history == null || history.isEmpty()) {
-            return;
-        }
-        List<LlmClient.Message> seed = new ArrayList<>(history);
-        if (!seed.isEmpty() && "system".equals(seed.get(0).role())) {
-            seed.remove(0);
-        }
-        agent.seedHistory(seed);
     }
 
     private void persistPointer() {

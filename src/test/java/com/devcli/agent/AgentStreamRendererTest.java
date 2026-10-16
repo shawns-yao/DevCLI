@@ -9,7 +9,6 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
-import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -105,17 +104,11 @@ class AgentStreamRendererTest {
     }
 
     private LlmClient.StreamListener newStreamRenderer() throws Exception {
-        Class<?> rendererClass = Class.forName("com.devcli.agent.Agent$StreamRenderer");
-        Constructor<?> constructor = rendererClass.getDeclaredConstructor();
-        constructor.setAccessible(true);
-        return (LlmClient.StreamListener) constructor.newInstance();
+        return AgentStreamPresenter.react();
     }
 
     private LlmClient.StreamListener newStreamRenderer(Renderer renderer) throws Exception {
-        Class<?> rendererClass = Class.forName("com.devcli.agent.Agent$StreamRenderer");
-        Constructor<?> constructor = rendererClass.getDeclaredConstructor(Renderer.class);
-        constructor.setAccessible(true);
-        return (LlmClient.StreamListener) constructor.newInstance(renderer);
+        return AgentStreamPresenter.react(renderer);
     }
 
     private void invokeNoArg(Object target, String methodName) throws Exception {

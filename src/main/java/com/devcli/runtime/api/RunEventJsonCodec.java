@@ -23,10 +23,17 @@ public final class RunEventJsonCodec {
     public static String encode(RunEvent event, String turnId) {
         ObjectNode payload = MAPPER.createObjectNode();
         payload.put("schema_version", 2);
+        var run = com.devcli.concurrent.CancellationContext.currentRun();
+        if (run != null) payload.put("run_id", run.runId());
         if (turnId != null && !turnId.isBlank()) {
             payload.put("turn_id", turnId);
         }
-        if (event instanceof RunEvent.AgentEvent child) {
+        if (event instanceof RunEvent.ContextSeed seed) {
+            writeEntries(payload.putArray("entries"), seed.entries());
+        } else if (event instanceof RunEvent.ContextProjection projection) {
+            payload.put("reason", projection.reason());
+            writeEntries(payload.putArray("entries"), projection.entries());
+        } else if (event instanceof RunEvent.AgentEvent child) {
             payload.put("agent_id", child.agentId());
             payload.put("event_type", child.event().type());
             payload.set("event", parseArguments(encode(child.event(), turnId)));
@@ -45,9 +52,11 @@ public final class RunEventJsonCodec {
             payload.put("content", message.content());
         } else if (event instanceof RunEvent.ModelContext context) {
             payload.put("iteration", context.iteration());
+            payload.set("tools", MAPPER.valueToTree(context.tools()));
             ArrayNode messages = payload.putArray("messages");
             context.messages().forEach(message -> writeModelMessage(messages.addObject(), message));
         } else if (event instanceof RunEvent.ModelMessage message) {
+            payload.put("message_id", message.messageId());
             writeModelMessage(payload.putObject("message"), message.message());
         } else if (event instanceof RunEvent.ModelUsage usage) {
             payload.put("input_tokens", usage.inputTokens());
@@ -172,7 +181,9 @@ public final class RunEventJsonCodec {
                 messages.add(readModelMessage(value));
             }
             return Optional.of(new RunEvent.ModelContext(
-                    root.path("iteration").asInt(0), messages));
+                    root.path("iteration").asInt(0), messages,
+                    root.has("tools") ? MAPPER.convertValue(root.path("tools"),
+                            new com.fasterxml.jackson.core.type.TypeReference<List<com.devcli.llm.LlmClient.Tool>>() {}) : List.of()));
         } catch (Exception ignored) {
             return Optional.empty();
         }
@@ -186,10 +197,35 @@ public final class RunEventJsonCodec {
             JsonNode root = MAPPER.readTree(data);
             JsonNode value = root.path("message");
             return value.isObject()
-                    ? Optional.of(new RunEvent.ModelMessage(readModelMessage(value)))
+                    ? Optional.of(new RunEvent.ModelMessage(root.path("message_id").asText(""), readModelMessage(value)))
                     : Optional.empty();
         } catch (Exception ignored) {
             return Optional.empty();
+        }
+    }
+
+    private static void writeEntries(ArrayNode target, List<RunEvent.ContextEntry> entries) {
+        for (var entry : entries) {
+            var item = target.addObject();
+            item.put("id", entry.id());
+            if (entry.message() != null) writeModelMessage(item.putObject("message"), entry.message());
+        }
+    }
+
+    static Optional<RunEvent> decodeConversationEvent(String type, String data) {
+        if (type.equals("model.message")) return decodeModelMessage(data).map(value -> value);
+        if (!type.equals("context.seed") && !type.equals("context.projection")) return Optional.empty();
+        try {
+            var root = MAPPER.readTree(data);
+            List<RunEvent.ContextEntry> entries = new ArrayList<>();
+            for (var item : root.path("entries")) {
+                entries.add(new RunEvent.ContextEntry(item.path("id").asText(),
+                        item.has("message") ? readModelMessage(item.path("message")) : null));
+            }
+            return Optional.of(type.equals("context.seed") ? new RunEvent.ContextSeed(entries)
+                    : new RunEvent.ContextProjection(root.path("reason").asText(), entries));
+        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+            throw new IllegalArgumentException("无效的上下文事件", error);
         }
     }
 

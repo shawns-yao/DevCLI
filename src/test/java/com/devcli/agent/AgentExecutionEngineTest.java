@@ -603,8 +603,7 @@ class AgentExecutionEngineTest {
     }
 
     private static final class SequenceDelegate implements AgentExecutionEngine.Delegate<String> {
-        private final List<LlmClient.Message> history =
-                new ArrayList<>(List.of(LlmClient.Message.system("system")));
+        private final com.devcli.event.ConversationJournal history = new com.devcli.event.ConversationJournal(List.of(LlmClient.Message.system("system")));
         private final Iterator<ToolContract.ToolExecutionResult> results;
 
         private SequenceDelegate(List<ToolContract.ToolExecutionResult> results) {
@@ -612,7 +611,7 @@ class AgentExecutionEngineTest {
         }
 
         @Override
-        public List<LlmClient.Message> history() {
+        public com.devcli.event.ConversationJournal history() {
             return history;
         }
 
@@ -663,7 +662,7 @@ class AgentExecutionEngineTest {
     }
 
     private static class RecordingDelegate implements AgentExecutionEngine.Delegate<String> {
-        private final List<LlmClient.Message> history = new ArrayList<>(List.of(LlmClient.Message.system("system")));
+        private final com.devcli.event.ConversationJournal history = new com.devcli.event.ConversationJournal(List.of(LlmClient.Message.system("system")));
         private final List<String> events = new ArrayList<>();
         private final List<RunEvent> runEvents = new ArrayList<>();
         private final boolean completeAfterTools;
@@ -689,7 +688,7 @@ class AgentExecutionEngineTest {
         }
 
         @Override
-        public List<LlmClient.Message> history() {
+        public com.devcli.event.ConversationJournal history() {
             return history;
         }
 
@@ -782,12 +781,11 @@ class AgentExecutionEngineTest {
     }
 
     private static final class MalformedResultDelegate implements AgentExecutionEngine.Delegate<String> {
-        private final List<LlmClient.Message> history =
-                new ArrayList<>(List.of(LlmClient.Message.system("system")));
+        private final com.devcli.event.ConversationJournal history = new com.devcli.event.ConversationJournal(List.of(LlmClient.Message.system("system")));
         private final List<RunEvent> runEvents = new ArrayList<>();
 
         @Override
-        public List<LlmClient.Message> history() {
+        public com.devcli.event.ConversationJournal history() {
             return history;
         }
 

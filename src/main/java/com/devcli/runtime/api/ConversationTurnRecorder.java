@@ -26,17 +26,14 @@ public final class ConversationTurnRecorder {
         agent.setRunEventSink(RunEventSink.composite(journal, previous));
         agent.setOriginalHistorySupplier(() -> store.originalConversationMessages(threadId));
         agent.setCompactionSourceCursorSupplier(() -> store.compactionSourceCursor(threadId));
-        try {
+        try (var recording = agent.recordConversation()) {
             journal.emit(new RunEvent.TurnStarted(input));
             if (!"react".equals(mode)) {
-                journal.emit(RunEvent.ModelContext.from(0, agent.getConversationHistory()));
                 if (!"compact".equals(mode)) agent.appendConversationMessage(LlmClient.Message.user(modelInput));
             }
             T result = action.call();
             String response = output.apply(result);
-            if ("compact".equals(mode)) {
-                journal.emit(RunEvent.ModelContext.from(0, agent.getConversationHistory()));
-            } else if (!"react".equals(mode)) {
+            if (!"compact".equals(mode) && !"react".equals(mode)) {
                 agent.appendConversationMessage(LlmClient.Message.assistant(response));
             }
             RunEvent.ExecutionState state = journal.state();
