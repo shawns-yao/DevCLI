@@ -111,7 +111,7 @@ class SubAgentTest {
                 "{\"name\":\"write_file\",\"arguments\":{\"path\":\"A.java\",\"content\":\"class A {}\"}}",
                 null, null, 10, 5);
 
-        LlmClient.ChatResponse adapted = SubAgent.adaptRequiredToolEnvelope(
+        LlmClient.ChatResponse adapted = RequiredToolProtocol.adaptRequiredToolEnvelope(
                 response, LlmClient.ToolChoice.required("write_file"));
 
         assertTrue(adapted.hasToolCalls());
@@ -126,7 +126,7 @@ class SubAgentTest {
                 "```json\n{\"name\":\"write_file\",\"arguments\":{}}\n```",
                 null, null, 10, 5);
 
-        LlmClient.ChatResponse adapted = SubAgent.adaptRequiredToolEnvelope(
+        LlmClient.ChatResponse adapted = RequiredToolProtocol.adaptRequiredToolEnvelope(
                 response, LlmClient.ToolChoice.required("write_file"));
 
         assertFalse(adapted.hasToolCalls());

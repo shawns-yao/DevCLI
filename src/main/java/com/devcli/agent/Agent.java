@@ -464,7 +464,7 @@ public class Agent implements AutoCloseable {
                             LlmClient.ChatResponse response,
                             int iteration,
                             AgentBudget currentBudget) {
-                        return SubAgent.adaptRequiredToolEnvelope(
+                        return RequiredToolProtocol.adaptRequiredToolEnvelope(
                                 response, effectiveInitialToolChoice);
                     }
 
@@ -474,7 +474,7 @@ public class Agent implements AutoCloseable {
                             int iteration,
                             AgentBudget currentBudget) {
                         if (iteration == 1 && effectiveInitialToolChoice.hasSpecificTool()) {
-                            return TeamWorkerProtocol.buildToolEnvelopeRepairPrompt(
+                            return RequiredToolProtocol.buildToolEnvelopeRepairPrompt(
                                     effectiveInitialToolChoice.toolName());
                         }
                         return "";

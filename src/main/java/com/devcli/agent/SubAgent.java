@@ -2,7 +2,6 @@ package com.devcli.agent;
 
 import com.devcli.tool.ToolContract;
 import com.devcli.config.ConfigResolver;
-import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.hook.HookLifecycle;
@@ -22,7 +21,6 @@ import com.devcli.prompt.PromptMode;
 import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.tool.ToolRegistry;
-import com.devcli.tool.ToolStatus;
 import com.devcli.tool.ToolContract.ToolExecutionResult;
 import com.devcli.tool.ToolContract.ToolInvocation;
 import com.devcli.util.AnsiStyle;
@@ -37,18 +35,16 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
- * 子代理 - 可配置角色的轻量 Agent
+ * /plan 的计划生成与独立审查适配器。
  *
  * 每个 SubAgent 有独立的角色、系统提示词和对话历史，
  * 但共享 LLM 客户端和工具注册表。
@@ -69,7 +65,7 @@ public class SubAgent {
 
     /**
      * Forked SubAgent execution starts from a frozen shared prefix, then appends a task-specific suffix.
-     * Keeping this prefix immutable makes parallel worker requests cache-friendly at the prompt boundary.
+     * Keeping this prefix immutable preserves the prompt boundary for independent review requests.
      */
     public record ForkContext(List<LlmClient.Message> sharedPrefix,
                               List<LlmClient.Tool> toolDefinitions,
@@ -105,46 +101,6 @@ public class SubAgent {
         }
     }
 
-    record ToolEvidence(String name, ToolStatus status, String result) {
-        public ToolEvidence {
-            name = name == null ? "unknown" : name;
-            status = status == null ? ToolStatus.ERROR : status;
-            result = result == null ? "" : result;
-        }
-    }
-
-    record ExecutionEvidence(List<ToolEvidence> toolResults) {
-        public ExecutionEvidence {
-            toolResults = List.copyOf(toolResults == null ? List.of() : toolResults);
-        }
-
-        public static ExecutionEvidence empty() {
-            return new ExecutionEvidence(List.of());
-        }
-
-        public long successfulToolCalls() {
-            return toolResults.stream().filter(result -> result.status() == ToolStatus.SUCCESS).count();
-        }
-
-        public boolean hasSuccessfulToolCall() {
-            return successfulToolCalls() > 0;
-        }
-    }
-
-    private static final class ExecutionEvidenceAccumulator {
-        private final List<ToolEvidence> toolResults = new ArrayList<>();
-
-        private void add(ToolExecutionResult result) {
-            if (result != null) {
-                toolResults.add(new ToolEvidence(result.name(), result.status(), result.result()));
-            }
-        }
-
-        private ExecutionEvidence snapshot() {
-            return new ExecutionEvidence(toolResults);
-        }
-    }
-
     private final String name;
     private final AgentRole role;
     private final LlmClient llmClient;
@@ -162,8 +118,6 @@ public class SubAgent {
     private SkillContextBuffer skillContextBuffer;
     private final ConversationHistoryCompactor historyCompactor;
     private final PromptAssembler promptAssembler = PromptAssembler.createDefault();
-    private final AtomicReference<ExecutionEvidenceAccumulator> executionEvidence =
-            new AtomicReference<>(new ExecutionEvidenceAccumulator());
     private String currentSkillActivationText = "";
     private String recoveryContext = "";
     private volatile com.devcli.event.RunEventSink additionalEventSink =
@@ -269,7 +223,7 @@ public class SubAgent {
 
     /**
      * 组装按任务变化的上下文快照。fork 执行时由 {@link #createForkContext()} 冻结，
-     * 保证同批并行 Worker 看到同一份快照，同时不污染 system prompt 前缀。
+     * 供独立审查复用同一份快照，不污染 system prompt 前缀。
      */
     private String buildTurnContext() {
         return promptAssembler.assembleTurnContext(PromptContext.builder()
@@ -457,62 +411,33 @@ public class SubAgent {
      * 避免多个 Agent 同时写入 System.out 造成输出交错。
      */
     public AgentMessage execute(AgentMessage task, PrintStream out) {
-        return execute(task, out, LlmClient.ToolChoice.AUTO);
-    }
-
-    private AgentMessage execute(AgentMessage task, PrintStream out, LlmClient.ToolChoice toolChoice) {
-        return execute(task, out, toolChoice, "");
-    }
-
-    private AgentMessage execute(AgentMessage task, PrintStream out,
-                                 LlmClient.ToolChoice toolChoice,
-                                 String completionToolName) {
         log.info("[{}] executing task from {}: type={}", name, task.fromAgent(), task.type());
-        executionEvidence.set(new ExecutionEvidenceAccumulator());
         currentSkillActivationText = task == null || task.content() == null ? "" : task.content();
         pruneHistoricalImagePayloads();
         refreshSystemPrompt();
-        return executeWithHistory(task, out, conversationHistory, null, toolChoice,
-                completionToolName, true);
+        return executeWithHistory(task, out, conversationHistory, null, true);
     }
 
     public AgentMessage executeForked(AgentMessage task, ForkContext forkContext, PrintStream out) {
-        return executeForked(task, forkContext, out, LlmClient.ToolChoice.AUTO);
-    }
-
-    private AgentMessage executeForked(AgentMessage task, ForkContext forkContext, PrintStream out,
-                                       LlmClient.ToolChoice toolChoice) {
-        return executeForked(task, forkContext, out, toolChoice, "");
-    }
-
-    private AgentMessage executeForked(AgentMessage task, ForkContext forkContext, PrintStream out,
-                                       LlmClient.ToolChoice toolChoice,
-                                       String completionToolName) {
-        executionEvidence.set(new ExecutionEvidenceAccumulator());
         currentSkillActivationText = task == null || task.content() == null ? "" : task.content();
         ForkContext context = forkContext == null ? createForkContext() : forkContext;
         List<LlmClient.Message> forkedHistory = new ArrayList<>(context.sharedPrefix());
-        return executeWithHistory(task, out, forkedHistory, context, toolChoice,
-                completionToolName, true);
+        return executeWithHistory(task, out, forkedHistory, context, true);
     }
 
     /** 使用独立、无工具上下文评审候选计划，不污染执行产物 Reviewer 的历史。 */
     AgentMessage executePlanReview(AgentMessage task, PrintStream out) {
-        executionEvidence.set(new ExecutionEvidenceAccumulator());
         currentSkillActivationText = "";
         List<LlmClient.Message> reviewHistory = new ArrayList<>();
         reviewHistory.add(LlmClient.Message.system(getSystemPrompt(PromptMode.TEAM_PLAN_REVIEWER)));
-        return executeWithHistory(task, out, reviewHistory, null, LlmClient.ToolChoice.AUTO,
-                "", false);
+        return executeWithHistory(task, out, reviewHistory, null, false);
     }
 
     private AgentMessage executeWithHistory(AgentMessage task, PrintStream out,
                                             List<LlmClient.Message> history,
                                             ForkContext forkContext,
-                                            LlmClient.ToolChoice initialToolChoice,
-                                            String completionToolName,
                                             boolean toolsEnabled) {
-        // 当轮快照：非 fork 路径实时渲染，fork 路径用冻结快照（同批 Worker 一致且无并发读竞争）
+        // 当轮上下文随任务追加；fork 路径使用冻结快照。
         String turnContext = forkContext == null ? buildTurnContext() : forkContext.turnContextSnapshot();
         if (forkContext != null) {
             turnContext = "上下文快照：context_epoch=" + forkContext.contextEpoch()
@@ -528,7 +453,7 @@ public class SubAgent {
                 taskContent,
                 Path.of(toolRegistry.getProjectPath())));
 
-        SubAgentStreamRenderer streamRenderer = new SubAgentStreamRenderer(name, role, out);
+        AgentStreamPresenter streamRenderer = AgentStreamPresenter.subAgent(name, role, out);
 
         AgentBudget budget = createExecutionBudget();
         AgentRuntimeSupport.bindCompactionBudget(historyCompactor, budget, null);
@@ -578,13 +503,6 @@ public class SubAgent {
                     }
 
                     @Override
-                    public LlmClient.ToolChoice toolChoice(int iteration) {
-                        return iteration == 1 && initialToolChoice != null
-                                ? initialToolChoice
-                                : LlmClient.ToolChoice.AUTO;
-                    }
-
-                    @Override
                     public void beforeIteration(int iteration, AgentBudget currentBudget) {
                         // 不在迭代内重建 system prompt：messages[0] 每轮变化会让其后全部历史
                         // 前缀失配。它现在只含会话级稳定内容，任务级内容已在任务消息的当轮快照里。
@@ -606,27 +524,6 @@ public class SubAgent {
                                 llmClient,
                                 response.reasoningContent());
                         logPromptCacheDiagnostics(forkContext, response, currentBudget);
-                    }
-
-                    @Override
-                    public LlmClient.ChatResponse normalizeResponse(
-                            LlmClient.ChatResponse response,
-                            int iteration,
-                            AgentBudget currentBudget) {
-                        return adaptRequiredToolEnvelope(response, initialToolChoice);
-                    }
-
-                    @Override
-                    public String retryInstructionAfterResponseWithoutTools(
-                            LlmClient.ChatResponse response,
-                            int iteration,
-                            AgentBudget currentBudget) {
-                        if (iteration == 1 && initialToolChoice != null
-                                && initialToolChoice.hasSpecificTool()) {
-                            return TeamWorkerProtocol.buildToolEnvelopeRepairPrompt(
-                                    initialToolChoice.toolName());
-                        }
-                        return "";
                     }
 
                     @Override
@@ -655,7 +552,6 @@ public class SubAgent {
                                                  int iteration,
                                                  AgentBudget currentBudget) {
                         for (ToolExecutionResult toolResult : toolResults) {
-                            executionEvidence.get().add(toolResult);
                             toolResultConsumer.accept(
                                     toolResult.name(), toolResult.argumentsJson(), toolResult.result());
                             structuredToolResultConsumer.accept(toolResult);
@@ -684,32 +580,9 @@ public class SubAgent {
                     }
 
                     @Override
-                    public Optional<AgentMessage> completedAfterToolResults(
-                            LlmClient.ChatResponse response,
-                            List<ToolExecutionResult> toolResults,
-                            int iteration,
-                            AgentBudget currentBudget) {
-                        if (completionToolName == null || completionToolName.isBlank()) {
-                            return Optional.empty();
-                        }
-                        for (ToolExecutionResult toolResult : toolResults) {
-                            if (completionToolName.equals(toolResult.name())
-                                    && toolResult.status() == ToolStatus.SUCCESS) {
-                                streamRenderer.finish();
-                                return Optional.of(AgentMessage.result(name, role, ""));
-                            }
-                        }
-                        return Optional.empty();
-                    }
-
-                    @Override
                     public AgentMessage completed(LlmClient.ChatResponse response,
                                                   AgentBudget currentBudget) {
                         streamRenderer.finish();
-                        if (initialToolChoice != null && initialToolChoice.hasSpecificTool()
-                                && !executionEvidence.get().snapshot().hasSuccessfulToolCall()) {
-                            return AgentMessage.result(name, role, "");
-                        }
                         return AgentMessage.result(name, role, response.content());
                     }
 
@@ -770,111 +643,12 @@ public class SubAgent {
                 MAX_REVIEWER_MAX_ITERATIONS);
     }
 
-    static LlmClient.ChatResponse adaptRequiredToolEnvelope(
-            LlmClient.ChatResponse response, LlmClient.ToolChoice toolChoice) {
-        if (response == null || response.hasToolCalls() || toolChoice == null
-                || !toolChoice.hasSpecificTool() || response.content() == null
-                || response.content().isBlank()) {
-            return response;
-        }
-        try (JsonParser parser = JSON_MAPPER.getFactory().createParser(response.content().trim())) {
-            JsonNode root = JSON_MAPPER.readTree(parser);
-            if (root == null || !root.isObject() || parser.nextToken() != null) {
-                return response;
-            }
-            Iterator<String> fields = root.fieldNames();
-            while (fields.hasNext()) {
-                String field = fields.next();
-                if (!"name".equals(field) && !"tool".equals(field) && !"arguments".equals(field)) {
-                    return response;
-                }
-            }
-            boolean hasName = root.has("name");
-            boolean hasTool = root.has("tool");
-            if (hasName == hasTool) {
-                return response;
-            }
-            String name = hasName
-                    ? root.path("name").asText("")
-                    : root.path("tool").asText("");
-            JsonNode arguments = root.get("arguments");
-            if (!toolChoice.toolName().equals(name) || arguments == null || !arguments.isObject()) {
-                return response;
-            }
-            String callId = "fallback_" + Integer.toUnsignedString(
-                    response.content().hashCode(), 16);
-            LlmClient.ToolCall toolCall = new LlmClient.ToolCall(
-                    callId,
-                    new LlmClient.ToolCall.Function(name, JSON_MAPPER.writeValueAsString(arguments)));
-            return new LlmClient.ChatResponse(
-                    response.role(), "", response.reasoningContent(), List.of(toolCall),
-                    response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
-        } catch (IOException ignored) {
-            return response;
-        }
-    }
-
     static String describeLlmFailure(IOException error) {
         if (error instanceof LlmException llmError) {
             return "LLM 调用失败 [code=" + llmError.code()
                     + ",retryable=" + llmError.retryable() + "]: " + llmError.getMessage();
         }
         return "LLM 调用失败: " + (error == null ? "unknown" : error.getMessage());
-    }
-
-    /**
-     * 执行任务（带上下文注入），用于 Worker 接收额外上下文
-     */
-    public AgentMessage executeWithContext(AgentMessage task, String context) {
-        return executeWithContext(task, context, System.out);
-    }
-
-    public AgentMessage executeWithContext(AgentMessage task, String context, PrintStream out) {
-        return executeWithContext(task, context, out, LlmClient.ToolChoice.AUTO);
-    }
-
-    AgentMessage executeWithContext(AgentMessage task, String context, PrintStream out,
-                                    LlmClient.ToolChoice toolChoice) {
-        return executeWithContext(task, context, out, toolChoice, "");
-    }
-
-    AgentMessage executeWithContext(AgentMessage task, String context, PrintStream out,
-                                    LlmClient.ToolChoice toolChoice,
-                                    String completionToolName) {
-        String enrichedContent = task.content();
-        if (context != null && !context.isEmpty()) {
-            enrichedContent = context + "\n\n当前任务：" + task.content();
-        }
-        AgentMessage enrichedTask = new AgentMessage(task.fromAgent(), task.fromRole(),
-                enrichedContent, task.type());
-        return execute(enrichedTask, out, toolChoice,
-                completionToolName);
-    }
-
-    public AgentMessage executeForkedWithContext(AgentMessage task, String context,
-                                                 ForkContext forkContext, PrintStream out) {
-        return executeForkedWithContext(
-                task, context, forkContext, out, LlmClient.ToolChoice.AUTO);
-    }
-
-    AgentMessage executeForkedWithContext(AgentMessage task, String context,
-                                          ForkContext forkContext, PrintStream out,
-                                          LlmClient.ToolChoice toolChoice) {
-        return executeForkedWithContext(task, context, forkContext, out, toolChoice, "");
-    }
-
-    AgentMessage executeForkedWithContext(AgentMessage task, String context,
-                                          ForkContext forkContext, PrintStream out,
-                                          LlmClient.ToolChoice toolChoice,
-                                          String completionToolName) {
-        String enrichedContent = task.content();
-        if (context != null && !context.isEmpty()) {
-            enrichedContent = context + "\n\n当前任务：" + task.content();
-        }
-        AgentMessage enrichedTask = new AgentMessage(task.fromAgent(), task.fromRole(),
-                enrichedContent, task.type());
-        return executeForked(enrichedTask, forkContext, out, toolChoice,
-                completionToolName);
     }
 
     /**
@@ -1123,11 +897,6 @@ public class SubAgent {
         }
     }
 
-    ExecutionEvidence getLastExecutionEvidence() {
-        ExecutionEvidenceAccumulator accumulator = executionEvidence.get();
-        return accumulator == null ? ExecutionEvidence.empty() : accumulator.snapshot();
-    }
-
     public String getName() {
         return name;
     }
@@ -1186,46 +955,4 @@ public class SubAgent {
         void accept(A a, B b, C c);
     }
 
-    /**
-     * SubAgent 流式渲染器，分区展示 reasoning_content 与 content。
-     *
-     * 与 {@link com.devcli.agent.Agent.StreamRenderer} 使用同一策略应对
-     * "content 开始后又追加 reasoning"的场景：迟到的 reasoning 会被累积到 lateReasoning，
-     * 在 finish() 时以"🧠 补充思考"独立展示，避免混入结果区。
-     */
-    private static final class SubAgentStreamRenderer
-            implements LlmClient.StreamListener, com.devcli.event.RunEventSink {
-        private final AgentStreamPresenter delegate;
-
-        private SubAgentStreamRenderer(String agentName, AgentRole role, PrintStream out) {
-            this.delegate = AgentStreamPresenter.subAgent(agentName, role, out);
-        }
-
-        @Override
-        public void emit(com.devcli.event.RunEvent event) {
-            delegate.emit(event);
-        }
-
-        @Override
-        public void onReasoningDelta(String delta) {
-            delegate.onReasoningDelta(delta);
-        }
-
-        @Override
-        public void onContentDelta(String delta) {
-            delegate.onContentDelta(delta);
-        }
-
-        /**
-         * 在两次迭代（通常是 tool-call 分支）之间调用：收尾当前渲染器并重置状态，
-         * 让下一轮迭代的 reasoning/content 能重新打印各自的标题。
-         */
-        private void resetBetweenIterations() {
-            delegate.resetBetweenIterations();
-        }
-
-        private void finish() {
-            delegate.finish();
-        }
-    }
 }

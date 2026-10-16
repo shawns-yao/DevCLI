@@ -103,12 +103,6 @@ class AgentOrchestratorTest {
         orchestrator.setAdditionalEventSink(sink);
 
         assertSame(sink, additionalEventSink(field(orchestrator, "planner")));
-        @SuppressWarnings("unchecked")
-        List<SubAgent> workers = (List<SubAgent>) field(orchestrator, "workers");
-        assertFalse(workers.isEmpty());
-        for (SubAgent worker : workers) {
-            assertSame(sink, additionalEventSink(worker));
-        }
         assertSame(sink, additionalEventSink(field(orchestrator, "reviewer")));
     }
 
@@ -249,48 +243,10 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    void mandatoryWorkerRepairShouldChooseToolFromStepType() {
-        assertEquals("write_file", TeamWorkerProtocol.requiredToolChoice("FILE_WRITE").toolName());
-        assertEquals("write_file", TeamWorkerProtocol.requiredToolChoice("INTEGRATION").toolName());
-        assertEquals("execute_command", TeamWorkerProtocol.requiredToolChoice("COMMAND").toolName());
-        assertEquals("list_dir", TeamWorkerProtocol.requiredToolChoice("ANALYSIS").toolName());
-        assertEquals("write_file", TeamWorkerProtocol.completionToolName(
-                "FILE_WRITE", LlmClient.ToolChoice.AUTO));
-        assertEquals("", TeamWorkerProtocol.completionToolName(
-                "ANALYSIS", LlmClient.ToolChoice.AUTO));
-        assertEquals("list_dir", TeamWorkerProtocol.completionToolName(
-                "ANALYSIS", LlmClient.ToolChoice.required("list_dir")));
-    }
-
-    @Test
-    void mandatoryWorkerRepairShouldRejectTextWithoutToolEvidence() {
-        AgentMessage textOnly = AgentMessage.result(
-                "worker", AgentRole.WORKER, "已给出完整实现方案");
-
-        assertFalse(TeamWorkerProtocol.needsMandatoryToolRepair(
-                textOnly, SubAgent.ExecutionEvidence.empty()));
-        assertTrue(TeamWorkerProtocol.needsMandatoryToolRepair(
-                textOnly, SubAgent.ExecutionEvidence.empty(), true));
-        assertFalse(TeamWorkerProtocol.needsMandatoryToolRepair(
-                AgentMessage.error("worker", AgentRole.WORKER, "LLM 调用失败"),
-                SubAgent.ExecutionEvidence.empty(), true));
-    }
-
-    @Test
     void reviewerFailureDegradationShouldRequireHardCheckForEveryStep() {
         assertFalse(ReviewCoordinator.canDegradeReviewerFailure(true, false));
         assertTrue(ReviewCoordinator.canDegradeReviewerFailure(true, true));
         assertFalse(ReviewCoordinator.canDegradeReviewerFailure(false, true));
-    }
-
-    @Test
-    void mandatoryWorkerRepairShouldEndWithImmediateToolInstruction() {
-        String repairTask = TeamWorkerProtocol.buildMandatoryToolTask(
-                "实现功能", 1, "write_file");
-
-        assertTrue(repairTask.indexOf("原始步骤") < repairTask.indexOf("Worker 执行协议修复"));
-        assertTrue(repairTask.contains("\"name\":\"write_file\""), repairTask);
-        assertTrue(repairTask.strip().endsWith("现在立即调用工具。"), repairTask);
     }
 
     @Test
@@ -991,23 +947,6 @@ class AgentOrchestratorTest {
         assertEquals("我已经全部做好了", dependency.artifact().output());
     }
 
-    @Test
-    void trustedSummaryIsDerivedFromReviewerAndStructuredToolEvidence() {
-        AgentOrchestrator.ExecutionStep step = AgentOrchestrator.ExecutionStep
-                .pending("step_1", "写入订单服务", "FILE_WRITE", List.of());
-        SubAgent.ExecutionEvidence evidence = new SubAgent.ExecutionEvidence(List.of(
-                new SubAgent.ToolEvidence("write_file", com.devcli.tool.ToolStatus.SUCCESS,
-                        "已写入 src/OrderService.java")));
-
-        String summary = ReviewCoordinator.buildTrustedStepSummary(
-                step, evidence, new ReviewCoordinator.ReviewDecision(true, "", false, true));
-
-        assertTrue(summary.contains("summary_source=ORCHESTRATOR"), summary);
-        assertTrue(summary.contains("review=APPROVED"), summary);
-        assertTrue(summary.contains("hard_check=PASSED"), summary);
-        assertTrue(summary.contains("write_file"), summary);
-        assertTrue(summary.contains("OrderService.java"), summary);
-    }
 
     @Test
     void shouldNotAppendDuplicateFinalIntegrationStep() {
@@ -2075,18 +2014,18 @@ class AgentOrchestratorTest {
     }
 
     @SuppressWarnings("unchecked")
-    private static List<SubAgent> workersOf(AgentOrchestrator orchestrator) throws Exception {
-        Field field = AgentOrchestrator.class.getDeclaredField("workers");
+    private static List<String> workersOf(AgentOrchestrator orchestrator) throws Exception {
+        Field field = AgentOrchestrator.class.getDeclaredField("workerIds");
         field.setAccessible(true);
-        return (List<SubAgent>) field.get(orchestrator);
+        return (List<String>) field.get(orchestrator);
     }
 
-    private static SubAgent invokeResolveAssignedWorker(AgentOrchestrator orchestrator,
+    private static String invokeResolveAssignedWorker(AgentOrchestrator orchestrator,
                                                         String stepId, int preferredIndex) throws Exception {
         Method method = AgentOrchestrator.class.getDeclaredMethod(
                 "resolveAssignedWorker", String.class, int.class);
         method.setAccessible(true);
-        return (SubAgent) method.invoke(orchestrator, stepId, preferredIndex);
+        return (String) method.invoke(orchestrator, stepId, preferredIndex);
     }
 
     private static String findSystemByLastUser(List<List<LlmClient.Message>> calls, String userNeedle) {
@@ -2225,19 +2164,15 @@ class AgentOrchestratorTest {
                     new GLMClient("test-key"), new ToolRegistry(), mm);
 
             AgentCheckpoint.RecoveryState recovery = invokeRestoreAgentTopology(orchestrator, checkpoint);
-            List<SubAgent> restoredWorkers = workersOf(orchestrator);
-            SubAgent assigned = invokeResolveAssignedWorker(orchestrator, "step-1", 0);
+            List<String> restoredWorkers = workersOf(orchestrator);
+            String assigned = invokeResolveAssignedWorker(orchestrator, "step-1", 0);
 
             assertEquals(List.of("worker-1", "worker-2", "worker-3"),
-                    restoredWorkers.stream().map(SubAgent::getName).toList());
-            assertEquals("worker-3", assigned.getName());
+                    restoredWorkers);
+            assertEquals("worker-3", assigned);
             assertEquals("worker-3", recovery.stepAssignments().get("step-1").workerAgentId());
-            // 恢复状态属任务级内容，随当轮上下文快照注入，不再进 system prompt
-            Method turnContext = SubAgent.class.getDeclaredMethod("buildTurnContext");
-            turnContext.setAccessible(true);
-            String workerPrompt = (String) turnContext.invoke(assigned);
-            assertTrue(workerPrompt.contains("消息游标: 1"), workerPrompt);
-            assertTrue(workerPrompt.contains("上次执行已修改服务接口"), workerPrompt);
+            assertEquals(1, recovery.agentCursors().get(assigned).lastMessageSeq());
+            assertEquals("上次执行已修改服务接口", recovery.agentCursors().get(assigned).summary());
         }
     }
 

@@ -1,6 +1,5 @@
 package com.devcli.agent;
 
-import com.devcli.llm.LlmClient;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.trace.TraceContext;
 import com.devcli.trace.TraceRecorder;
@@ -28,11 +27,7 @@ class MultiAgentBatchExecutorTest {
     void runsIndependentStepsConcurrentlyAndFlushesByStepOrder() {
         assertTimeoutPreemptively(Duration.ofSeconds(3), () -> {
             try (ToolRegistry registry = new ToolRegistry()) {
-                LlmClient llmClient = stubLlmClient();
-                List<SubAgent> workers = List.of(
-                        new SubAgent("worker-1", AgentRole.WORKER, llmClient, registry),
-                        new SubAgent("worker-2", AgentRole.WORKER, llmClient, registry));
-                SubAgent reviewer = new SubAgent("reviewer", AgentRole.REVIEWER, llmClient, registry);
+                int parallelism = 2;
                 ByteArrayOutputStream output = new ByteArrayOutputStream();
                 AtomicInteger active = new AtomicInteger();
                 AtomicInteger peak = new AtomicInteger();
@@ -42,18 +37,13 @@ class MultiAgentBatchExecutorTest {
 
                 MultiAgentBatchExecutor executor = new MultiAgentBatchExecutor(
                         new PrintStream(output, true, StandardCharsets.UTF_8),
-                        workers,
-                        reviewer,
-                        llmClient,
+                        parallelism,
                         registry,
                         traceRecorder,
                         new MultiAgentBatchExecutor.Hooks(
-                                (stepId, index) -> workers.get(index % workers.size()),
-                                agent -> { },
-                                agent -> { },
+                                (stepId, index) -> { },
                                 AgentOrchestrator.ExecutionStep::id,
-                                (step, worker, localReviewer, context, stepOut,
-                                 workerForkContext, reviewerForkContext) -> {
+                                (step, context, stepOut) -> {
                                     int current = active.incrementAndGet();
                                     peak.accumulateAndGet(current, Math::max);
                                     bothStarted.countDown();
@@ -90,28 +80,19 @@ class MultiAgentBatchExecutorTest {
     @Test
     void serializesWriteStepsEvenWhenTheirResourcesDiffer() {
         try (ToolRegistry registry = new ToolRegistry()) {
-            LlmClient llmClient = stubLlmClient();
-            List<SubAgent> workers = List.of(
-                    new SubAgent("worker-1", AgentRole.WORKER, llmClient, registry),
-                    new SubAgent("worker-2", AgentRole.WORKER, llmClient, registry));
-            SubAgent reviewer = new SubAgent("reviewer", AgentRole.REVIEWER, llmClient, registry);
+            int parallelism = 2;
             AtomicInteger active = new AtomicInteger();
             AtomicInteger peak = new AtomicInteger();
 
             MultiAgentBatchExecutor executor = new MultiAgentBatchExecutor(
                     new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8),
-                    workers,
-                    reviewer,
-                    llmClient,
+                    parallelism,
                     registry,
                     new TraceRecorder(),
                     new MultiAgentBatchExecutor.Hooks(
-                            (stepId, index) -> workers.get(index % workers.size()),
-                            agent -> { },
-                            agent -> { },
+                            (stepId, index) -> { },
                             AgentOrchestrator.ExecutionStep::id,
-                            (step, worker, localReviewer, context, stepOut,
-                             workerForkContext, reviewerForkContext) -> {
+                            (step, context, stepOut) -> {
                                 int current = active.incrementAndGet();
                                 peak.accumulateAndGet(current, Math::max);
                                 LockSupport.parkNanos(Duration.ofMillis(40).toNanos());
@@ -131,27 +112,18 @@ class MultiAgentBatchExecutorTest {
     @Test
     void reportsUnexpectedStepFailureThroughHostCallback() {
         try (ToolRegistry registry = new ToolRegistry()) {
-            LlmClient llmClient = stubLlmClient();
-            List<SubAgent> workers = List.of(
-                    new SubAgent("worker-1", AgentRole.WORKER, llmClient, registry),
-                    new SubAgent("worker-2", AgentRole.WORKER, llmClient, registry));
-            SubAgent reviewer = new SubAgent("reviewer", AgentRole.REVIEWER, llmClient, registry);
+            int parallelism = 2;
             Map<String, String> failures = new ConcurrentHashMap<>();
 
             MultiAgentBatchExecutor executor = new MultiAgentBatchExecutor(
                     new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8),
-                    workers,
-                    reviewer,
-                    llmClient,
+                    parallelism,
                     registry,
                     new TraceRecorder(),
                     new MultiAgentBatchExecutor.Hooks(
-                            (stepId, index) -> workers.get(index % workers.size()),
-                            agent -> { },
-                            agent -> { },
+                            (stepId, index) -> { },
                             AgentOrchestrator.ExecutionStep::id,
-                            (step, worker, localReviewer, context, stepOut,
-                             workerForkContext, reviewerForkContext) -> {
+                            (step, context, stepOut) -> {
                                 if (step.id().equals("second")) {
                                     throw new IllegalStateException("执行失败");
                                 }
@@ -169,31 +141,6 @@ class MultiAgentBatchExecutorTest {
 
     private static AgentOrchestrator.ExecutionStep step(String id, String description, String type) {
         return AgentOrchestrator.ExecutionStep.pending(id, description, type, List.of());
-    }
-
-    private static LlmClient stubLlmClient() {
-        return new LlmClient() {
-            @Override
-            public ChatResponse chat(List<Message> messages, List<Tool> tools) {
-                return new ChatResponse("assistant", "", List.of(), 0, 0);
-            }
-
-            @Override
-            public ChatResponse chat(List<Message> messages, List<Tool> tools,
-                                     StreamListener listener) {
-                return chat(messages, tools);
-            }
-
-            @Override
-            public String getModelName() {
-                return "test-model";
-            }
-
-            @Override
-            public String getProviderName() {
-                return "test-provider";
-            }
-        };
     }
 
     private static void await(CountDownLatch latch) {

@@ -1,6 +1,5 @@
 package com.devcli.agent;
 
-import com.devcli.llm.LlmClient;
 import com.devcli.plan.ResourceConflictDetector;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.trace.TraceContext;
@@ -10,7 +9,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.PrintStream;
 import java.nio.file.Path;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -18,10 +16,7 @@ import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
-import java.util.function.BiFunction;
-import java.util.function.Consumer;
 import java.util.function.Function;
 
 /**
@@ -33,26 +28,18 @@ final class MultiAgentBatchExecutor {
     @FunctionalInterface
     interface StepRunner {
         void run(AgentOrchestrator.ExecutionStep step,
-                 SubAgent worker,
-                 SubAgent reviewer,
                  String context,
-                 PrintStream out,
-                 SubAgent.ForkContext workerForkContext,
-                 SubAgent.ForkContext reviewerForkContext);
+                 PrintStream out);
     }
 
     record Hooks(
-            BiFunction<String, Integer, SubAgent> workerResolver,
-            Consumer<SubAgent> subAgentConfigurer,
-            Consumer<SubAgent> recoveryConfigurer,
+            BiConsumer<String, Integer> assignWorker,
             Function<AgentOrchestrator.ExecutionStep, String> contextBuilder,
             StepRunner stepRunner,
             BiConsumer<AgentOrchestrator.ExecutionStep, String> failureHandler
     ) {
         Hooks {
-            Objects.requireNonNull(workerResolver, "workerResolver");
-            Objects.requireNonNull(subAgentConfigurer, "subAgentConfigurer");
-            Objects.requireNonNull(recoveryConfigurer, "recoveryConfigurer");
+            Objects.requireNonNull(assignWorker, "assignWorker");
             Objects.requireNonNull(contextBuilder, "contextBuilder");
             Objects.requireNonNull(stepRunner, "stepRunner");
             Objects.requireNonNull(failureHandler, "failureHandler");
@@ -60,27 +47,18 @@ final class MultiAgentBatchExecutor {
     }
 
     private final PrintStream out;
-    private final List<SubAgent> workers;
-    private final SubAgent reviewer;
-    private final LlmClient llmClient;
+    private final int parallelism;
     private final ToolRegistry toolRegistry;
     private final TraceRecorder traceRecorder;
     private final Hooks hooks;
 
     MultiAgentBatchExecutor(PrintStream out,
-                            List<SubAgent> workers,
-                            SubAgent reviewer,
-                            LlmClient llmClient,
+                            int parallelism,
                             ToolRegistry toolRegistry,
                             TraceRecorder traceRecorder,
                             Hooks hooks) {
-        if (workers == null || workers.isEmpty()) {
-            throw new IllegalArgumentException("Multi-Agent 并行执行至少需要一个 Worker");
-        }
         this.out = out;
-        this.workers = List.copyOf(workers);
-        this.reviewer = reviewer;
-        this.llmClient = llmClient;
+        this.parallelism = parallelism;
         this.toolRegistry = toolRegistry;
         this.traceRecorder = traceRecorder;
         this.hooks = Objects.requireNonNull(hooks, "hooks");
@@ -103,7 +81,7 @@ final class MultiAgentBatchExecutor {
                     "stepIds", wave.stream().map(AgentOrchestrator.ExecutionStep::id).toList().toString()
             ));
             out.println("⚡ 批次 #" + batchIndex + "：" + wave.size()
-                    + " 个独立步骤并行执行（最多 " + workers.size() + " 个并发 Worker）\n");
+                    + " 个独立步骤并行执行（最多 " + parallelism + " 个并发任务）\n");
             executeWave(batchIndex, wave, traceContext);
         }
     }
@@ -116,66 +94,37 @@ final class MultiAgentBatchExecutor {
         AtomicLong firstExecutionStarted = new AtomicLong(Long.MAX_VALUE);
         AtomicLong lastExecutionFinished = new AtomicLong();
         LongAdder aggregateExecutionNanos = new LongAdder();
-        Map<String, SubAgent> assignments = new LinkedHashMap<>();
-        Map<String, ReentrantLock> workerLocks = new HashMap<>();
-        workers.forEach(worker -> workerLocks.put(worker.getName(), new ReentrantLock(true)));
-        Map<SubAgent, SubAgent.ForkContext> workerContexts = new HashMap<>();
-        workers.forEach(worker -> workerContexts.put(worker, worker.createForkContext()));
-
         for (int index = 0; index < wave.size(); index++) {
             AgentOrchestrator.ExecutionStep step = wave.get(index);
-            assignments.put(step.id(), hooks.workerResolver().apply(step.id(), index));
+            hooks.assignWorker().accept(step.id(), index);
         }
         Map<String, String> contexts = new LinkedHashMap<>();
         for (AgentOrchestrator.ExecutionStep step : wave) {
             contexts.put(step.id(), hooks.contextBuilder().apply(step));
         }
 
-        SubAgent reviewerForkTemplate = new SubAgent(
-                reviewer.getName(), AgentRole.REVIEWER, llmClient, toolRegistry);
-        hooks.subAgentConfigurer().accept(reviewerForkTemplate);
-        hooks.recoveryConfigurer().accept(reviewerForkTemplate);
-        SubAgent.ForkContext reviewerForkContext = reviewerForkTemplate.createForkContext();
         OrchestrationWaveExecutor.execute(
                 OrchestrationProfile.TEAM,
                 out,
                 wave,
-                workers.size(),
+                parallelism,
                 step -> { },
                 (step, stepOut) -> {
-                    SubAgent worker = assignments.get(step.id());
-                    ReentrantLock workerLock = workerLocks.get(worker.getName());
-                    long executionStarted = 0L;
-                    boolean executionMeasured = false;
-                    SubAgent localReviewer = new SubAgent(
-                            reviewer.getName(), AgentRole.REVIEWER, llmClient, toolRegistry);
-                    hooks.subAgentConfigurer().accept(localReviewer);
-                    hooks.recoveryConfigurer().accept(localReviewer);
+                    long executionStarted = System.nanoTime();
+                    firstExecutionStarted.accumulateAndGet(executionStarted, Math::min);
+                    int active = activeExecutions.incrementAndGet();
+                    peakConcurrency.accumulateAndGet(active, Math::max);
                     try {
-                        workerLock.lockInterruptibly();
-                        executionStarted = System.nanoTime();
-                        executionMeasured = true;
-                        firstExecutionStarted.accumulateAndGet(executionStarted, Math::min);
-                        int active = activeExecutions.incrementAndGet();
-                        peakConcurrency.accumulateAndGet(active, Math::max);
-                        SubAgent.ForkContext workerForkContext = workerContexts.get(worker);
                         String context = contexts.get(step.id());
                         toolRegistry.runWithResourceLease(step.id(), () -> {
-                            hooks.stepRunner().run(step, worker, localReviewer, context, stepOut,
-                                    workerForkContext, reviewerForkContext);
+                            hooks.stepRunner().run(step, context, stepOut);
                             return null;
                         });
                     } finally {
-                        if (executionMeasured) {
-                            long executionFinished = System.nanoTime();
-                            aggregateExecutionNanos.add(executionFinished - executionStarted);
-                            lastExecutionFinished.accumulateAndGet(executionFinished, Math::max);
-                            activeExecutions.decrementAndGet();
-                        }
-                        worker.clearHistory();
-                        if (workerLock.isHeldByCurrentThread()) {
-                            workerLock.unlock();
-                        }
+                        long executionFinished = System.nanoTime();
+                        aggregateExecutionNanos.add(executionFinished - executionStarted);
+                        lastExecutionFinished.accumulateAndGet(executionFinished, Math::max);
+                        activeExecutions.decrementAndGet();
                         toolRegistry.releaseResourceLeases(step.id());
                     }
                     return null;
@@ -214,7 +163,7 @@ final class MultiAgentBatchExecutor {
         traceRecorder.record(traceContext, "batch.wave.completed", Map.of(
                 "batchIndex", batchIndex,
                 "stepCount", stepCount,
-                "workerCount", workers.size(),
+                "workerCount", parallelism,
                 "peakConcurrency", peakConcurrency,
                 "wallMillis", wallMillis,
                 "aggregateStepMillis", aggregateMillis,

@@ -30,20 +30,18 @@ import java.util.stream.Collectors;
  * 1. 用户提交任务 -> 编排器交给规划者
  * 2. 规划者拆解任务 -> 编排器解析计划
  * 3. 编排器按依赖顺序将子任务分配给执行者
- * 4. 执行者返回结果 -> 编排器交给检查者
- * 5. 检查者通过则完成，否则带上反馈重新分配给执行者
- * 6. 所有子任务完成后，编排器汇总返回最终结果
+ * 4. 统一委派返回工具证据和隔离产物，硬检查通过后提交
+ * 5. 最终集成审查全部验收点，编排器汇总终态
  *
  * 并行策略：
- * - 同一依赖批次内部 **并行** 执行（最多 Worker 池大小并发，默认 2）
+ * - 同一依赖批次的只读步骤有界并行，写步骤独占波次（默认并发上限 2）
  * - 多步批次委托 {@link MultiAgentBatchExecutor} 做资源分波、独立输出缓冲与稳定顺序归并
  * - 单步批次仍走直连流式路径，保持"实时打字"的观感
- * - Worker 通过公平锁串行化同一实例的任务，避免对话历史竞争
- * - Reviewer 在并行路径中按步骤即时创建独立实例
+ * - Worker 只保存 checkpoint 身份；每步由独立 DelegationSession 执行
  */
 public class AgentOrchestrator {
     private static final Logger log = LoggerFactory.getLogger(AgentOrchestrator.class);
-    /** Worker 默认数量；可经 -Ddevcli.team.workers / DEVCLI_TEAM_WORKERS 覆盖。 */
+    /** 计划任务默认并发数及 checkpoint 身份数；沿用既有 team.workers 配置。 */
     static final int DEFAULT_WORKER_COUNT = 2;
     /** Worker 数量保护上限：过多并发 Worker 会放大 LLM 限流与终端输出竞争。 */
     static final int MAX_WORKER_COUNT = OrchestrationProfile.TEAM.maxParallelism();
@@ -57,7 +55,7 @@ public class AgentOrchestrator {
     private final LlmClient llmClient;
     private final LlmClient reviewerLlmClient;
     private final SubAgent planner;
-    private List<SubAgent> workers;
+    private List<String> workerIds;
     private final SubAgent reviewer;
     private final MemoryManager memoryManager;
     private final ToolRegistry toolRegistry;
@@ -303,23 +301,23 @@ public class AgentOrchestrator {
                 });
         AgentRuntimeSupport.bindMemory(this.toolRegistry, this.memoryManager);
         this.planner = new SubAgent("planner", AgentRole.PLANNER, llmClient, toolRegistry);
-        this.workers = buildWorkers(resolveWorkerCount(), llmClient, toolRegistry);
+        this.workerIds = buildWorkerIds(resolveWorkerCount());
         this.reviewer = new SubAgent(
                 "reviewer", AgentRole.REVIEWER, this.reviewerLlmClient, toolRegistry);
         this.planCoordinator = new PlanCoordinator(
                 planner, reviewer, toolRegistry, runState, this.out, planSemanticReviewEnabled);
         this.orchestrationNarrative = new OrchestrationNarrative(runState, reviewCoordinator);
         this.stepExecutionCoordinator = new StepExecutionCoordinator(
-                this.out, () -> workers, reviewer, llmClient, this.reviewerLlmClient,
+                this.out, () -> workerIds, reviewer, llmClient, this.reviewerLlmClient,
                 toolRegistry, memoryManager, traceRecorder, runState, planCoordinator,
                 reviewCoordinator, checkpointCoordinator,
                 new StepExecutionCoordinator.Hooks(
-                        this::configureSubAgent,
-                        AgentOrchestrator::applyRecoveryContext,
                         orchestrationNarrative::buildStepContext,
-                        orchestrationNarrative::buildFinalResult), () -> additionalEventSink);
+                        orchestrationNarrative::buildFinalResult), () -> additionalEventSink,
+                () -> com.devcli.prompt.PromptAssembler.createDefault().assemble(
+                        com.devcli.prompt.PromptMode.AGENT,
+                        com.devcli.prompt.PromptContext.builder().ruleContext(ruleContextSupplier.get()).build()));
         configureSubAgent(planner);
-        workers.forEach(this::configureSubAgent);
         configureSubAgent(reviewer);
     }
 
@@ -333,28 +331,20 @@ public class AgentOrchestrator {
                 DEFAULT_WORKER_COUNT, 1, MAX_WORKER_COUNT);
     }
 
-    private static List<SubAgent> buildWorkers(int count, LlmClient llmClient, ToolRegistry toolRegistry) {
+    private static List<String> buildWorkerIds(int count) {
         List<String> names = new ArrayList<>(count);
         for (int i = 1; i <= count; i++) {
             names.add("worker-" + i);
         }
-        return buildWorkers(names, llmClient, toolRegistry);
-    }
-
-    private static List<SubAgent> buildWorkers(List<String> names, LlmClient llmClient,
-                                               ToolRegistry toolRegistry) {
-        List<SubAgent> built = new ArrayList<>(names.size());
-        for (String name : names) {
-            built.add(new SubAgent(name, AgentRole.WORKER, llmClient, toolRegistry));
-        }
-        return List.copyOf(built);
+        return List.copyOf(names);
     }
 
     private List<AgentCheckpoint.AgentIdentityRecord> currentAgentIdentities() {
         long now = System.currentTimeMillis();
         List<AgentCheckpoint.AgentIdentityRecord> identities = new ArrayList<>();
         identities.add(agentIdentity(planner, now));
-        workers.forEach(worker -> identities.add(agentIdentity(worker, now)));
+        workerIds.forEach(id -> identities.add(new AgentCheckpoint.AgentIdentityRecord(
+                id, "WORKER", id, SUBAGENT_CONTEXT_SCHEMA_VERSION, now, now)));
         identities.add(agentIdentity(reviewer, now));
         return List.copyOf(identities);
     }
@@ -392,15 +382,10 @@ public class AgentOrchestrator {
         if (new HashSet<>(workerIds).size() != workerIds.size()) {
             throw new IllegalStateException("checkpoint Worker 身份重复");
         }
-        List<String> currentWorkerIds = workers.stream().map(SubAgent::getName).toList();
-        if (!currentWorkerIds.equals(workerIds)) {
-            workers = buildWorkers(workerIds, llmClient, toolRegistry);
-            workers.forEach(this::configureSubAgent);
-        }
+        this.workerIds = workerIds;
         loaded.ensureAgentIdentities(currentAgentIdentities());
         AgentCheckpoint.RecoveryState restoredRecovery = recovery;
         applyRecoveryContext(planner, restoredRecovery);
-        workers.forEach(worker -> applyRecoveryContext(worker, restoredRecovery));
         applyRecoveryContext(reviewer, restoredRecovery);
         return restoredRecovery;
     }
@@ -433,7 +418,6 @@ public class AgentOrchestrator {
     public void setExternalContextSupplier(Supplier<String> externalContextSupplier) {
         this.externalContextSupplier = externalContextSupplier == null ? () -> "" : externalContextSupplier;
         planner.setExternalContextSupplier(this.externalContextSupplier);
-        workers.forEach(worker -> worker.setExternalContextSupplier(this.externalContextSupplier));
         reviewer.setExternalContextSupplier(this.externalContextSupplier);
     }
 
@@ -449,14 +433,12 @@ public class AgentOrchestrator {
     }
 
     /**
-     * 注入 Sticky Memory（PR-B）：把 supplier 同时下发到 planner / workers / reviewer，
-     * 让团队三角色都看到统一的稳定事实层。
+     * 向计划生成、委派执行和独立审查提供同一份会话规则。
      */
     public void setRuleContextSupplier(Supplier<String> ruleContextSupplier) {
         this.ruleContextSupplier = ruleContextSupplier == null ? () -> "" : ruleContextSupplier;
         memoryManager.setRuleContextSupplier(this.ruleContextSupplier);
         planner.setRuleContextSupplier(this.ruleContextSupplier);
-        workers.forEach(worker -> worker.setRuleContextSupplier(this.ruleContextSupplier));
         reviewer.setRuleContextSupplier(this.ruleContextSupplier);
     }
 
@@ -465,8 +447,7 @@ public class AgentOrchestrator {
     public void setStickyMemorySupplier(Supplier<String> supplier) { setRuleContextSupplier(supplier); }
 
     /**
-     * 把 Skill 系统下发给所有 SubAgent。Multi-Agent 三个角色共享同一 SkillRegistry（索引一致），
-     * 每个角色拿到 SkillContextBuffer 的独立副本，避免并行 Worker / Reviewer 互相消费 skill body。
+     * 计划生成和审查共享 SkillRegistry，各自持有独立 SkillContextBuffer。
      * SubAgent 调用 load_skill 时会通过 ToolRegistry 的线程本地覆盖写回自己的 buffer。
      */
     void setPreReviewVerifier(PreReviewVerifier preReviewVerifier) {
@@ -483,7 +464,6 @@ public class AgentOrchestrator {
         this.skillRegistry = skillRegistry;
         this.skillContextBuffer = skillContextBuffer;
         configureSubAgent(planner);
-        workers.forEach(this::configureSubAgent);
         configureSubAgent(reviewer);
     }
 
@@ -505,14 +485,13 @@ public class AgentOrchestrator {
     }
 
     /**
-     * 注入额外结构化事件出口（如 Execution Trace 落盘），透传给全部 Planner/Worker/Reviewer；
+     * 注入额外结构化事件出口，传给计划生成、统一委派和独立审查；
      * 与各 SubAgent 自身流式渲染 sink 并列，不替代渲染。
      */
     public void setAdditionalEventSink(com.devcli.event.RunEventSink sink) {
         this.additionalEventSink = sink == null
                 ? com.devcli.event.RunEventSink.NO_OP : sink;
         planner.setAdditionalEventSink(this.additionalEventSink);
-        workers.forEach(worker -> worker.setAdditionalEventSink(this.additionalEventSink));
         reviewer.setAdditionalEventSink(this.additionalEventSink);
     }
 
@@ -549,7 +528,7 @@ public class AgentOrchestrator {
         TraceContext traceContext = TraceContext.root("plan");
         traceRecorder.record(traceContext, "run.start", Map.of(
                 "inputChars", userInput == null ? 0 : userInput.length(),
-                "workers", workers.size()
+                "workers", workerIds.size()
         ));
         memoryManager.addUserMessage(userInput);
         runState.beginNew(userInput);
@@ -904,7 +883,7 @@ public class AgentOrchestrator {
         checkpointCoordinator.saveStrict();
     }
 
-    private synchronized SubAgent resolveAssignedWorker(String stepId, int preferredIndex) {
+    private synchronized String resolveAssignedWorker(String stepId, int preferredIndex) {
         return stepExecutionCoordinator.resolveAssignedWorker(stepId, preferredIndex);
     }
 

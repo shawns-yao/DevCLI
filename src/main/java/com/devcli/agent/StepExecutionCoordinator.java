@@ -28,8 +28,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.BiConsumer;
-import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /** 计划依赖调度与 checkpoint 投影；子任务统一经过 delegate_task 的执行原语。 */
@@ -48,20 +46,16 @@ final class StepExecutionCoordinator {
                      Map<String, Integer> retryCount);
     }
 
-    record Hooks(Consumer<SubAgent> configureAgent,
-                 BiConsumer<SubAgent, AgentCheckpoint.RecoveryState> applyRecovery,
-                 ContextBuilder buildContext,
+    record Hooks(ContextBuilder buildContext,
                  FinalResultBuilder buildFinalResult) {
         Hooks {
-            Objects.requireNonNull(configureAgent, "configureAgent");
-            Objects.requireNonNull(applyRecovery, "applyRecovery");
             Objects.requireNonNull(buildContext, "buildContext");
             Objects.requireNonNull(buildFinalResult, "buildFinalResult");
         }
     }
 
     private final PrintStream out;
-    private final Supplier<List<SubAgent>> workersSupplier;
+    private final Supplier<List<String>> workersSupplier;
     private final SubAgent reviewer;
     private final LlmClient llmClient;
     private final LlmClient reviewerLlmClient;
@@ -78,11 +72,13 @@ final class StepExecutionCoordinator {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final AtomicInteger spawnCounter = new AtomicInteger();
     private final Supplier<RunEventSink> events;
+    private final Supplier<String> systemPrompt;
     private DelegationState delegationState;
     private AgentBudget delegationBudget;
+    private String delegationSystemPrompt;
 
     StepExecutionCoordinator(PrintStream out,
-                             Supplier<List<SubAgent>> workersSupplier,
+                             Supplier<List<String>> workersSupplier,
                              SubAgent reviewer,
                              LlmClient llmClient,
                              LlmClient reviewerLlmClient,
@@ -93,7 +89,8 @@ final class StepExecutionCoordinator {
                              PlanCoordinator planCoordinator,
                              ReviewCoordinator reviewCoordinator,
                              CheckpointCoordinator checkpointCoordinator,
-                             Hooks hooks, Supplier<RunEventSink> events) {
+                             Hooks hooks, Supplier<RunEventSink> events, Supplier<String> systemPrompt) {
+        this.systemPrompt = systemPrompt;
         this.events = events;
         this.out = Objects.requireNonNull(out, "out");
         this.workersSupplier = Objects.requireNonNull(workersSupplier, "workersSupplier");
@@ -122,6 +119,7 @@ final class StepExecutionCoordinator {
 
     String execute(List<AgentOrchestrator.ExecutionStep> steps, TraceContext traceContext) {
         delegationBudget = AgentBudget.fromLlmClient(llmClient);
+        delegationSystemPrompt = systemPrompt.get();
         try (DelegationState state = new DelegationState(Path.of(toolRegistry.getProjectPath()))) {
             delegationState = state;
             syncWorkPlan(steps);
@@ -167,12 +165,10 @@ final class StepExecutionCoordinator {
             batchIndex++;
             if (executable.size() == 1) {
                 AgentOrchestrator.ExecutionStep step = executable.get(0);
-                SubAgent worker = resolveAssignedWorker(step.id(), singleStepCursor++);
-                runStep(step, steps, retryCount, worker, reviewer,
-                        hooks.buildContext().build(steps, step), out, null, null);
-                worker.clearHistory();
+                resolveAssignedWorker(step.id(), singleStepCursor++);
+                runStep(step, steps, hooks.buildContext().build(steps, step), out);
             } else {
-                runBatchParallel(batchIndex, executable, steps, retryCount, traceContext);
+                runBatchParallel(batchIndex, executable, steps, traceContext);
             }
         }
 
@@ -215,42 +211,31 @@ final class StepExecutionCoordinator {
         return anyReset;
     }
 
-    synchronized SubAgent resolveAssignedWorker(String stepId, int preferredIndex) {
-        List<SubAgent> workers = workersSupplier.get();
+    synchronized String resolveAssignedWorker(String stepId, int preferredIndex) {
+        List<String> workers = workersSupplier.get();
         String assignedWorkerId = checkpointCoordinator.assignedWorkerId(stepId);
         if (!assignedWorkerId.isBlank()) {
             return workers.stream()
-                    .filter(worker -> worker.getName().equals(assignedWorkerId))
+                    .filter(worker -> worker.equals(assignedWorkerId))
                     .findFirst()
                     .orElseThrow(() -> new IllegalStateException(
                             "checkpoint 步骤绑定的 Worker 不存在: " + assignedWorkerId));
         }
-        SubAgent worker = workers.get(Math.floorMod(preferredIndex, workers.size()));
-        checkpointCoordinator.assignStep(stepId, worker.getName(), reviewer.getName());
+        String worker = workers.get(Math.floorMod(preferredIndex, workers.size()));
+        checkpointCoordinator.assignStep(stepId, worker, reviewer.getName());
         return worker;
     }
 
     private void runBatchParallel(int batchIndex,
                                   List<AgentOrchestrator.ExecutionStep> executable,
                                   List<AgentOrchestrator.ExecutionStep> steps,
-                                  Map<String, Integer> retryCount,
                                   TraceContext traceContext) {
         MultiAgentBatchExecutor batchExecutor = new MultiAgentBatchExecutor(
-                out, workersSupplier.get(), reviewer, llmClient, toolRegistry, traceRecorder,
+                out, workersSupplier.get().size(), toolRegistry, traceRecorder,
                 new MultiAgentBatchExecutor.Hooks(
-                        this::resolveAssignedWorker,
-                        hooks.configureAgent(),
-                        agent -> {
-                            AgentCheckpoint checkpoint = runState.checkpoint();
-                            if (checkpoint != null) {
-                                hooks.applyRecovery().accept(agent, checkpoint.recoveryState());
-                            }
-                        },
+                        (id, index) -> resolveAssignedWorker(id, index),
                         step -> hooks.buildContext().build(steps, step),
-                        (step, worker, localReviewer, context, stepOut,
-                         workerForkContext, reviewerForkContext) ->
-                                runStep(step, steps, retryCount, worker, localReviewer, context,
-                                        stepOut, workerForkContext, reviewerForkContext),
+                        (step, context, stepOut) -> runStep(step, steps, context, stepOut),
                         (step, reason) -> commitStepUpdate(
                                 steps, step.id(), step.withFailed(reason))));
         batchExecutor.execute(batchIndex, executable, traceContext);
@@ -279,9 +264,7 @@ final class StepExecutionCoordinator {
 
     private void runStep(AgentOrchestrator.ExecutionStep step,
                          List<AgentOrchestrator.ExecutionStep> steps,
-                         Map<String, Integer> retryCount, SubAgent worker, SubAgent localReviewer,
-                         String context, PrintStream stepOut,
-                         SubAgent.ForkContext workerForkContext, SubAgent.ForkContext reviewerForkContext) {
+                         String context, PrintStream stepOut) {
         memoryManager.runWithEvidenceScope(step.id(), () -> {
             try {
                 boolean readOnly = switch (step.type().toUpperCase(Locale.ROOT)) {
@@ -295,7 +278,7 @@ final class StepExecutionCoordinator {
                     activeStepToolRegistry.set(workspace.toolRegistry());
                     try {
                         if (AgentOrchestrator.isFinalIntegrationStep(step)) {
-                            var review = reviewCoordinator.review(step, localReviewer, report.toString(), stepOut, null);
+                            var review = reviewCoordinator.review(step, reviewer, report.toString(), stepOut, null);
                             report.put("final_review", review.issues());
                             if (review.hardCheckExecuted()) report.put("final_hard_check", review.hardCheckFailureKind().name());
                             if (review.hardCheckFailureKind() != PreReviewVerifier.FailureKind.NONE) {
@@ -312,10 +295,9 @@ final class StepExecutionCoordinator {
                 }, artifact -> commitStepUpdate(steps, step.id(),
                         new AgentOrchestrator.ExecutionStep(step.id(), step.description(), step.type(),
                                 step.dependencies(), artifact)));
-                String system = worker.createForkContext().sharedPrefix().get(0).content();
                 DelegationSession delegation = new DelegationSession(toolRegistry,
                         role -> role.equals("reviewer") ? reviewerLlmClient : llmClient,
-                        delegationBudget, system, events.get(), spawnCounter, delegationState, checkpoint);
+                        delegationBudget, delegationSystemPrompt, events.get(), spawnCounter, delegationState, checkpoint);
                 Map<String, String> args = new HashMap<>();
                 args.put("role", readOnly ? "explorer" : "worker");
                 args.put("task", step.description());

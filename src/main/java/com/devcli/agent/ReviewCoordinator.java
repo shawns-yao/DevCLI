@@ -190,43 +190,6 @@ final class ReviewCoordinator {
                 || lower.contains("502");
     }
 
-    static String buildTrustedStepSummary(AgentOrchestrator.ExecutionStep step,
-                                          SubAgent.ExecutionEvidence evidence,
-                                          ReviewDecision review) {
-        StringBuilder summary = new StringBuilder("summary_source=ORCHESTRATOR")
-                .append("; step=").append(step == null ? "" : step.id())
-                .append("; review=")
-                .append(review != null && review.approved()
-                        ? (review.reviewerError() ? "DEGRADED" : "APPROVED")
-                        : (review != null
-                                && review.hardCheckFailureKind() == PreReviewVerifier.FailureKind.NONE
-                                ? "ADVISORY" : "REJECTED"))
-                .append("; hard_check=")
-                .append(review != null && review.hardCheckExecuted() ? "PASSED" : "NOT_RUN");
-        List<SubAgent.ToolEvidence> successful = evidence == null ? List.of() : evidence.toolResults().stream()
-                .filter(item -> item.status() == ToolStatus.SUCCESS)
-                .toList();
-        if (successful.isEmpty()) {
-            summary.append("; tools=none");
-        } else {
-            summary.append("; tools=");
-            for (int i = 0; i < successful.size(); i++) {
-                if (i > 0) {
-                    summary.append(", ");
-                }
-                SubAgent.ToolEvidence item = successful.get(i);
-                String evidencePreview = item.result().replace('\n', ' ').trim();
-                if (evidencePreview.length() > 160) {
-                    evidencePreview = evidencePreview.substring(0, 160) + "...";
-                }
-                summary.append(item.name());
-                if (!evidencePreview.isBlank()) {
-                    summary.append('(').append(evidencePreview).append(')');
-                }
-            }
-        }
-        return summary.toString();
-    }
 
     List<String> missingDeclaredVerifierTools(List<String> reviewToolCalls) {
         Set<String> used = reviewToolCalls == null ? Set.of() : new HashSet<>(reviewToolCalls);
