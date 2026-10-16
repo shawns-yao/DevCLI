@@ -16,6 +16,25 @@ import static com.devcli.agent.AgentDelegationTest.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 class DelegateRoleCatalogTest {
+    @Test
+    void concurrentLoadsKeepParserStateSeparate(@TempDir Path root) throws Exception {
+        var executor = java.util.concurrent.Executors.newFixedThreadPool(8);
+        var start = new java.util.concurrent.CountDownLatch(1);
+        try {
+            var loads = new java.util.ArrayList<java.util.concurrent.Future<com.devcli.tool.DelegateRoleCatalog>>();
+            for (int i = 0; i < 64; i++) {
+                loads.add(executor.submit(() -> {
+                    start.await();
+                    return com.devcli.tool.DelegateRoleCatalog.load(root.resolve("user"), root.resolve("project"));
+                }));
+            }
+            start.countDown();
+            for (var load : loads) assertEquals(3, load.get(10, java.util.concurrent.TimeUnit.SECONDS).roles().size());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
     @TempDir Path project;
 
     private static String definition(String name, String capability, String tools, String description) {

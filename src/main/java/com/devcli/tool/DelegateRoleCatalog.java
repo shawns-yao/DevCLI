@@ -25,8 +25,8 @@ public final class DelegateRoleCatalog {
     }
 
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final Load YAML = new Load(LoadSettings.builder().setAllowDuplicateKeys(false)
-            .setMaxAliasesForCollections(0).setCodePointLimit(64 * 1024).build());
+    private static final LoadSettings YAML_SETTINGS = LoadSettings.builder().setAllowDuplicateKeys(false)
+            .setMaxAliasesForCollections(0).setCodePointLimit(64 * 1024).build();
     private final Map<String, Role> roles;
 
     private DelegateRoleCatalog(Map<String, Role> roles) { this.roles = Map.copyOf(roles); }
@@ -67,7 +67,7 @@ public final class DelegateRoleCatalog {
         String text = document.replace("\r\n", "\n");
         int end = text.indexOf("\n---\n", 4);
         if (!text.startsWith("---\n") || end < 0) throw new IllegalArgumentException(filename + ": 缺少角色 frontmatter");
-        JsonNode metadata = JSON.valueToTree(YAML.loadFromString(text.substring(4, end)));
+        JsonNode metadata = JSON.valueToTree(new Load(YAML_SETTINGS).loadFromString(text.substring(4, end)));
         Set<String> fields = Set.of("name", "description", "capability", "allowed_tools", "provider", "model");
         if (!metadata.isObject()) throw new IllegalArgumentException(filename + ": 角色元数据必须是对象");
         metadata.fieldNames().forEachRemaining(field -> {
