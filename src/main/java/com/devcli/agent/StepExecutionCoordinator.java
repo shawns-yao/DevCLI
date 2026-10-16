@@ -1,6 +1,13 @@
 package com.devcli.agent;
 
-import com.devcli.config.ConfigResolver;
+import com.devcli.event.RunEventSink;
+import com.devcli.tool.ToolExecutionContext;
+import com.devcli.tool.ToolOutput;
+import com.devcli.plan.ExecutionArtifact;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.util.concurrent.atomic.AtomicInteger;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.MemoryManager;
 import com.devcli.concurrent.CancellationContext;
@@ -25,10 +32,9 @@ import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
-/** DAG 调度、Worker 重试、隔离工作区与 PatchSet 应用的执行策略。 */
+/** 计划依赖调度与 checkpoint 投影；子任务统一经过 delegate_task 的执行原语。 */
 final class StepExecutionCoordinator {
     private static final Logger log = LoggerFactory.getLogger(StepExecutionCoordinator.class);
-    private static final int MAX_RETRIES_PER_STEP = 2;
 
     @FunctionalInterface
     interface ContextBuilder {
@@ -54,16 +60,6 @@ final class StepExecutionCoordinator {
         }
     }
 
-    private static final class StepUpdateBuffer {
-        private final String stepId;
-        private AgentOrchestrator.ExecutionStep updated;
-        private boolean verificationInfrastructureFailure;
-
-        private StepUpdateBuffer(String stepId) {
-            this.stepId = stepId;
-        }
-    }
-
     private final PrintStream out;
     private final Supplier<List<SubAgent>> workersSupplier;
     private final SubAgent reviewer;
@@ -78,8 +74,12 @@ final class StepExecutionCoordinator {
     private final CheckpointCoordinator checkpointCoordinator;
     private final Hooks hooks;
     private final ThreadLocal<ToolRegistry> activeStepToolRegistry = new ThreadLocal<>();
-    private final ThreadLocal<StepUpdateBuffer> activeStepUpdate = new ThreadLocal<>();
     private boolean requireWorkerToolEvidence;
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private final AtomicInteger spawnCounter = new AtomicInteger();
+    private final Supplier<RunEventSink> events;
+    private DelegationState delegationState;
+    private AgentBudget delegationBudget;
 
     StepExecutionCoordinator(PrintStream out,
                              Supplier<List<SubAgent>> workersSupplier,
@@ -93,7 +93,8 @@ final class StepExecutionCoordinator {
                              PlanCoordinator planCoordinator,
                              ReviewCoordinator reviewCoordinator,
                              CheckpointCoordinator checkpointCoordinator,
-                             Hooks hooks) {
+                             Hooks hooks, Supplier<RunEventSink> events) {
+        this.events = events;
         this.out = Objects.requireNonNull(out, "out");
         this.workersSupplier = Objects.requireNonNull(workersSupplier, "workersSupplier");
         this.reviewer = Objects.requireNonNull(reviewer, "reviewer");
@@ -120,6 +121,15 @@ final class StepExecutionCoordinator {
     }
 
     String execute(List<AgentOrchestrator.ExecutionStep> steps, TraceContext traceContext) {
+        delegationBudget = AgentBudget.fromLlmClient(llmClient);
+        try (DelegationState state = new DelegationState(Path.of(toolRegistry.getProjectPath()))) {
+            delegationState = state;
+            syncWorkPlan(steps);
+            return executePlan(steps, traceContext);
+        }
+    }
+
+    private String executePlan(List<AgentOrchestrator.ExecutionStep> steps, TraceContext traceContext) {
         out.println(AnsiStyle.heading("⚡ 第二阶段：执行"));
         Map<String, String> restoredRedoFailures = new HashMap<>();
         OrchestrationRunState.RedoRecovery redoRecovery = runState.consumeRedoRecovery();
@@ -150,7 +160,7 @@ final class StepExecutionCoordinator {
                     && planCoordinator.shouldFuseFinalIntegration(steps)) {
                 AgentOrchestrator.ExecutionStep finalStep = executable.get(0);
                 String reason = "Final integration 熔断：失败步骤比例过高，停止让最终集成阶段强行修补。";
-                updateStep(steps, finalStep.id(), finalStep.withFailed(reason));
+                commitStepUpdate(steps, finalStep.id(), finalStep.withFailed(reason));
                 out.println("⛔ 步骤 [" + finalStep.id() + "] " + reason + "\n");
                 continue;
             }
@@ -241,445 +251,9 @@ final class StepExecutionCoordinator {
                          workerForkContext, reviewerForkContext) ->
                                 runStep(step, steps, retryCount, worker, localReviewer, context,
                                         stepOut, workerForkContext, reviewerForkContext),
-                        (step, reason) -> updateStep(
+                        (step, reason) -> commitStepUpdate(
                                 steps, step.id(), step.withFailed(reason))));
         batchExecutor.execute(batchIndex, executable, traceContext);
-    }
-
-    private void runStep(AgentOrchestrator.ExecutionStep step,
-                         List<AgentOrchestrator.ExecutionStep> steps,
-                         Map<String, Integer> retryCount,
-                         SubAgent worker,
-                         SubAgent localReviewer,
-                         String context,
-                         PrintStream stepOut,
-                         SubAgent.ForkContext workerForkContext,
-                         SubAgent.ForkContext reviewerForkContext) {
-        memoryManager.runWithEvidenceScope(step.id(), () -> {
-            try {
-                if (requiresIsolatedWorkspace(step)) {
-                    runStepInIsolatedWorkspace(step, steps, retryCount, worker, localReviewer,
-                            context, stepOut, workerForkContext, reviewerForkContext);
-                    return null;
-                }
-                try {
-                    toolRegistry.runWithToolAccess(ToolContract.ToolAccessScope.READ_ONLY, () -> {
-                        runStepWithLease(step, steps, retryCount, worker, localReviewer, context,
-                                stepOut, workerForkContext, reviewerForkContext);
-                        return null;
-                    });
-                } finally {
-                    toolRegistry.releaseResourceLeases(step.id());
-                }
-                return null;
-            } finally {
-                toolRegistry.forgetStaleWriteScope(step.id());
-            }
-        });
-    }
-
-    private void runStepInIsolatedWorkspace(
-            AgentOrchestrator.ExecutionStep step,
-            List<AgentOrchestrator.ExecutionStep> steps,
-            Map<String, Integer> retryCount,
-            SubAgent worker,
-            SubAgent localReviewer,
-            String context,
-            PrintStream stepOut,
-            SubAgent.ForkContext workerForkContext,
-            SubAgent.ForkContext reviewerForkContext) {
-        StepUpdateBuffer buffer = new StepUpdateBuffer(step.id());
-        try (WorkspaceExecutionSession session =
-                     WorkspaceExecutionSession.open(toolRegistry, step.id())) {
-            CheckpointCoordinator.DeferredPatchRestore deferredPatch =
-                    checkpointCoordinator.restoreDeferredPatch(step.id(), session.workspacePath());
-            if (deferredPatch.present() && !deferredPatch.restored()) {
-                String reason = "待验证 PatchSet 无法恢复到隔离工作区: " + deferredPatch.failure();
-                commitStepUpdate(steps, step.id(), step.withFailed(reason));
-                stepOut.println("❌ 步骤 [" + step.id() + "] " + reason + "\n");
-                return;
-            }
-            String effectiveContext = deferredPatch.present()
-                    ? context + "\n\n[恢复上下文] 上次因硬验证环境故障保留的 PatchSet"
-                    + " 已恢复到当前隔离工作区。请检查现有修改并继续验证，不要假设文件仍是原始状态。"
-                    : context;
-            ToolRegistry isolatedRegistry = session.toolRegistry();
-            SubAgent isolatedWorker = new SubAgent(
-                    worker.getName(), worker.getRole(), llmClient, isolatedRegistry);
-            SubAgent isolatedReviewer = new SubAgent(
-                    localReviewer.getName(), localReviewer.getRole(),
-                    reviewerLlmClient, isolatedRegistry);
-            hooks.configureAgent().accept(isolatedWorker);
-            hooks.configureAgent().accept(isolatedReviewer);
-            AgentCheckpoint checkpoint = runState.checkpoint();
-            if (checkpoint != null) {
-                AgentCheckpoint.RecoveryState recovery = checkpoint.recoveryState();
-                hooks.applyRecovery().accept(isolatedWorker, recovery);
-                hooks.applyRecovery().accept(isolatedReviewer, recovery);
-            }
-
-            activeStepToolRegistry.set(isolatedRegistry);
-            activeStepUpdate.set(buffer);
-            try {
-                isolatedRegistry.runWithToolAccess(
-                        ToolContract.ToolAccessScope.ISOLATED_PROJECT, () -> {
-                            runStepWithLease(step, steps, retryCount,
-                                    isolatedWorker, isolatedReviewer, effectiveContext, stepOut,
-                                    workerForkContext, reviewerForkContext);
-                            return null;
-                        });
-            } finally {
-                activeStepUpdate.remove();
-                activeStepToolRegistry.remove();
-                isolatedRegistry.releaseResourceLeases(step.id());
-                toolRegistry.releaseResourceLeases(step.id());
-                isolatedWorker.clearHistory();
-                isolatedReviewer.clearHistory();
-            }
-
-            AgentOrchestrator.ExecutionStep outcome = buffer.updated == null
-                    ? step.withFailed("隔离步骤未产生终态")
-                    : buffer.updated;
-            PatchSet patchSet = session.patchSet();
-            if (outcome.status() == AgentOrchestrator.StepStatus.COMPLETED) {
-                AgentOrchestrator.ExecutionStep workerOutcome = outcome;
-                checkpointCoordinator.commitWorkspace(
-                        session, patchSet, step.id(), Path.of(toolRegistry.getProjectPath()),
-                        workerOutcome.artifact(), applyResult -> {
-                            AgentOrchestrator.ExecutionStep decision;
-                            if (!applyResult.applied()) {
-                                String reason = applyResult.failureDescription();
-                                decision = step.withFailed(reason);
-                                stepOut.println("❌ 步骤 [" + step.id() + "] " + reason + "\n");
-                                commitStepUpdate(steps, step.id(), decision);
-                            } else {
-                                decision = workerOutcome.withModifiedFiles(
-                                        applyResult.modifiedResources());
-                                AgentOrchestrator.ExecutionStep terminalDecision = decision;
-                                checkpointCoordinator.persistTerminalClearingDeferredPatch(
-                                        step.id(), () -> commitStepUpdate(
-                                                steps, step.id(), terminalDecision));
-                            }
-                        });
-            } else if (buffer.verificationInfrastructureFailure && !patchSet.isEmpty()) {
-                checkpointCoordinator.preserveDeferredPatch(
-                        step.id(), patchSet, outcome.result());
-                String reason = outcome.result()
-                        + "\n未验证 PatchSet 已保存到 checkpoint；修复环境后可通过 resume 重新验证。";
-                commitStepUpdate(steps, step.id(), outcome.withFailed(reason)
-                        .withModifiedFiles(List.of()));
-                stepOut.println("💾 步骤 [" + step.id()
-                        + "] 未验证 PatchSet 已保存，未写入主项目\n");
-            } else {
-                commitStepUpdate(steps, step.id(), outcome.withModifiedFiles(List.of()));
-            }
-        } catch (Exception e) {
-            toolRegistry.releaseResourceLeases(step.id());
-            commitStepUpdate(steps, step.id(),
-                    step.withFailed("隔离工作区执行失败: " + e.getMessage()));
-            stepOut.println("❌ 步骤 [" + step.id() + "] 隔离工作区执行失败："
-                    + e.getMessage() + "\n");
-        }
-    }
-
-    private boolean requiresIsolatedWorkspace(AgentOrchestrator.ExecutionStep step) {
-        return ConfigResolver.booleanValue(
-                "devcli.workspace.isolation.enabled",
-                "DEVCLI_WORKSPACE_ISOLATION_ENABLED", true)
-                && reviewCoordinator.requiresConcreteVerification(step);
-    }
-
-    private void runStepWithLease(
-            AgentOrchestrator.ExecutionStep step,
-            List<AgentOrchestrator.ExecutionStep> steps,
-            Map<String, Integer> retryCount,
-            SubAgent worker,
-            SubAgent localReviewer,
-            String context,
-            PrintStream stepOut,
-            SubAgent.ForkContext workerForkContext,
-            SubAgent.ForkContext reviewerForkContext) {
-        stepOut.println("🛠️ " + worker.getName() + " 执行步骤 [" + step.id() + "]: "
-                + step.description());
-        if (CancellationContext.isCancelled()) {
-            failCancelled(steps, step, stepOut);
-            return;
-        }
-        AgentMessage taskMessage = AgentMessage.task("orchestrator", step.description());
-        AgentMessage result = executeWorkerWithTransientRetry(
-                step, worker, taskMessage, context, stepOut, workerForkContext, "");
-        if (CancellationContext.isCancelled()) {
-            failCancelled(steps, step, stepOut);
-            return;
-        }
-        if (result.type() == AgentMessage.Type.ERROR) {
-            updateStep(steps, step.id(), step.withFailed(result.content()));
-            stepOut.println("❌ 步骤 [" + step.id() + "] 执行失败：" + result.content() + "\n");
-            return;
-        }
-
-        SubAgent.ExecutionEvidence acceptedEvidence = worker.getLastExecutionEvidence();
-        String acceptedResult = resolveWorkerResultContent(result.content(), acceptedEvidence);
-        if (acceptedResult.isBlank()) {
-            updateStep(steps, step.id(), step.withFailed("执行结果为空"));
-            stepOut.println("❌ 步骤 [" + step.id() + "] 执行失败：结果为空\n");
-            return;
-        }
-        if (!requiresIsolatedWorkspace(step) && workerForkContext != null) {
-            long currentEpoch = toolRegistry.contextVersionLedger().currentGeneration();
-            if (workerForkContext.contextEpoch() != currentEpoch) {
-                String reason = "STALE_CONTEXT：步骤基于 context_epoch="
-                        + workerForkContext.contextEpoch() + "，当前为 " + currentEpoch;
-                updateStep(steps, step.id(), step.withFailed(reason));
-                stepOut.println("❌ 步骤 [" + step.id() + "] " + reason + "\n");
-                return;
-            }
-        }
-
-        ReviewCoordinator.ReviewDecision acceptedReview = reviewCoordinator.review(
-                step, localReviewer, acceptedResult, stepOut, reviewerForkContext);
-        boolean approved = acceptedReview.approved();
-        if (approved) {
-            acceptStep(steps, step, acceptedResult, acceptedEvidence, acceptedReview, stepOut,
-                    "审查通过");
-            return;
-        }
-
-        if (failOnVerificationInfrastructure(
-                steps, step, acceptedReview, stepOut)) {
-            return;
-        }
-        if (acceptReviewerAdvisory(
-                steps, step, acceptedResult, acceptedEvidence, acceptedReview, stepOut)) {
-            return;
-        }
-
-        int retries = retryCount.getOrDefault(step.id(), 0);
-        String issues = acceptedReview.issues();
-        if (acceptedReview.reviewerError()) {
-            if (acceptRecoverableReviewerFailure(
-                    steps, step, acceptedResult, acceptedEvidence, acceptedReview, stepOut)) {
-                return;
-            }
-            updateStep(steps, step.id(), step.withFailed(issues));
-            return;
-        }
-        log.info("Step {} rejected (retry {}/{}): {}",
-                step.id(), retries, MAX_RETRIES_PER_STEP, issues);
-
-        while (!approved && retries < MAX_RETRIES_PER_STEP) {
-            retryCount.put(step.id(), ++retries);
-            stepOut.println("⚠️ 步骤 [" + step.id() + "] 审查未通过，正在重新执行...");
-            stepOut.println("   反馈: " + issues + "\n");
-            AgentMessage retryResult = executeWorkerWithTransientRetry(
-                    step, worker, taskMessage, buildRetryContext(context, issues), stepOut,
-                    workerForkContext, "重试 ");
-            if (retryResult.type() == AgentMessage.Type.ERROR) {
-                issues = "重试时 LLM 调用失败：" + retryResult.content();
-                continue;
-            }
-            acceptedEvidence = worker.getLastExecutionEvidence();
-            acceptedResult = resolveWorkerResultContent(retryResult.content(), acceptedEvidence);
-            if (acceptedResult.isBlank()) {
-                issues = "执行结果为空";
-                continue;
-            }
-            ReviewCoordinator.ReviewDecision retryReview = reviewCoordinator.review(
-                    step, localReviewer, acceptedResult, stepOut, reviewerForkContext);
-            acceptedReview = retryReview;
-            issues = retryReview.issues();
-            if (failOnVerificationInfrastructure(steps, step, retryReview, stepOut)) {
-                return;
-            }
-            if (acceptReviewerAdvisory(
-                    steps, step, acceptedResult, acceptedEvidence, retryReview, stepOut)) {
-                return;
-            }
-            if (retryReview.reviewerError()) {
-                if (reviewCoordinator.shouldAcceptAfterRecoverableFailure(
-                        step, issues, retryReview.hardCheckExecuted())) {
-                    acceptedResult += "\n\nReviewer 可恢复故障；Pre-Review 硬检查已通过，按降级策略接受。\n"
-                            + issues;
-                    approved = true;
-                    acceptedReview = new ReviewCoordinator.ReviewDecision(
-                            true, issues, true, retryReview.hardCheckExecuted());
-                }
-                break;
-            }
-            approved = retryReview.approved();
-        }
-
-        if (approved) {
-            acceptStep(steps, step, acceptedResult, acceptedEvidence, acceptedReview, stepOut,
-                    "重试后审查通过");
-        } else {
-            updateStep(steps, step.id(), step.withFailed(issues));
-            stepOut.println("❌ 步骤 [" + step.id() + "] 审查未通过，阻止下游步骤继续执行\n");
-        }
-    }
-
-    private void failCancelled(List<AgentOrchestrator.ExecutionStep> steps,
-                               AgentOrchestrator.ExecutionStep step,
-                               PrintStream stepOut) {
-        updateStep(steps, step.id(), step.withFailed("用户取消"));
-        stepOut.println("⏹️ 步骤 [" + step.id() + "] 已取消\n");
-    }
-
-    private boolean failOnVerificationInfrastructure(
-            List<AgentOrchestrator.ExecutionStep> steps,
-            AgentOrchestrator.ExecutionStep step,
-            ReviewCoordinator.ReviewDecision review,
-            PrintStream stepOut) {
-        if (review.hardCheckFailureKind() != PreReviewVerifier.FailureKind.INFRASTRUCTURE) {
-            return false;
-        }
-        StepUpdateBuffer buffer = activeStepUpdate.get();
-        if (buffer != null && buffer.stepId.equals(step.id())) {
-            buffer.verificationInfrastructureFailure = true;
-        }
-        updateStep(steps, step.id(), step.withFailed(review.issues()));
-        stepOut.println("⏸️ 步骤 [" + step.id()
-                + "] 硬验证环境不可用，停止重复执行 Worker\n");
-        return true;
-    }
-
-    private void acceptStep(List<AgentOrchestrator.ExecutionStep> steps,
-                            AgentOrchestrator.ExecutionStep step,
-                            String result,
-                            SubAgent.ExecutionEvidence evidence,
-                            ReviewCoordinator.ReviewDecision review,
-                            PrintStream stepOut,
-                            String message) {
-        updateStep(steps, step.id(), step.withResult(result,
-                ReviewCoordinator.buildTrustedStepSummary(step, evidence, review)));
-        stepOut.println("✅ 步骤 [" + step.id() + "] " + message + "\n");
-    }
-
-    private boolean acceptRecoverableReviewerFailure(
-            List<AgentOrchestrator.ExecutionStep> steps,
-            AgentOrchestrator.ExecutionStep step,
-            String result,
-            SubAgent.ExecutionEvidence evidence,
-            ReviewCoordinator.ReviewDecision review,
-            PrintStream stepOut) {
-        if (!reviewCoordinator.shouldAcceptAfterRecoverableFailure(
-                step, review.issues(), review.hardCheckExecuted())) {
-            return false;
-        }
-        String degradedResult = result
-                + "\n\nReviewer 可恢复故障；Pre-Review 硬检查已通过，按降级策略接受。\n"
-                + review.issues();
-        ReviewCoordinator.ReviewDecision degradedReview = new ReviewCoordinator.ReviewDecision(
-                true, review.issues(), true, review.hardCheckExecuted());
-        acceptStep(steps, step, degradedResult, evidence, degradedReview, stepOut,
-                "Pre-Review 硬检查已通过，Reviewer 可恢复故障降级接受");
-        return true;
-    }
-
-    private boolean acceptReviewerAdvisory(
-            List<AgentOrchestrator.ExecutionStep> steps,
-            AgentOrchestrator.ExecutionStep step,
-            String result,
-            SubAgent.ExecutionEvidence evidence,
-            ReviewCoordinator.ReviewDecision review,
-            PrintStream stepOut) {
-        if (!ReviewCoordinator.isReviewerAdvisory(review)) {
-            return false;
-        }
-        String advisoryResult = result + "\n\nReviewer 建议（不阻断）：\n" + review.issues();
-        acceptStep(steps, step, advisoryResult, evidence, review, stepOut,
-                "确定性检查通过，Reviewer 建议已记录（不阻断）");
-        return true;
-    }
-
-    private AgentMessage executeWorkerWithTransientRetry(
-            AgentOrchestrator.ExecutionStep step,
-            SubAgent worker,
-            AgentMessage taskMessage,
-            String context,
-            PrintStream stepOut,
-            SubAgent.ForkContext workerForkContext,
-            String label) {
-        AgentMessage result = executeWorkerOnce(
-                step, worker, taskMessage, context, stepOut, workerForkContext,
-                LlmClient.ToolChoice.AUTO);
-        int transientRetries = 0;
-        int protocolRepairs = 0;
-        while (true) {
-            if (result.type() == AgentMessage.Type.ERROR
-                    && isTransientLlmError(result.content())
-                    && transientRetries < MAX_RETRIES_PER_STEP) {
-                transientRetries++;
-                stepOut.println("⚠️ 步骤 [" + step.id() + "] " + label
-                        + "LLM 瞬时错误，正在重新调用 Worker (" + transientRetries
-                        + "/" + MAX_RETRIES_PER_STEP + ")...");
-                result = executeWorkerOnce(step, worker, taskMessage, context, stepOut,
-                        workerForkContext, LlmClient.ToolChoice.AUTO);
-                continue;
-            }
-            if (TeamWorkerProtocol.needsMandatoryToolRepair(
-                    result, worker.getLastExecutionEvidence(), requireWorkerToolEvidence)
-                    && protocolRepairs < TeamWorkerProtocol.MAX_MANDATORY_TOOL_REPAIRS) {
-                protocolRepairs++;
-                stepOut.println("⚠️ 步骤 [" + step.id() + "] " + label
-                        + "Worker 未产生成功工具证据，正在强制执行修复 ("
-                        + protocolRepairs + "/" + TeamWorkerProtocol.MAX_MANDATORY_TOOL_REPAIRS
-                        + ")...");
-                worker.clearHistory();
-                LlmClient.ToolChoice requiredToolChoice =
-                        TeamWorkerProtocol.requiredToolChoice(step.type());
-                AgentMessage repairTask = AgentMessage.task("orchestrator",
-                        TeamWorkerProtocol.buildMandatoryToolTask(
-                                step.description(), protocolRepairs,
-                                requiredToolChoice.toolName()));
-                result = executeWorkerOnce(step, worker, repairTask, context, stepOut,
-                        workerForkContext, requiredToolChoice);
-                continue;
-            }
-            return result;
-        }
-    }
-
-    private AgentMessage executeWorkerOnce(
-            AgentOrchestrator.ExecutionStep step,
-            SubAgent worker,
-            AgentMessage taskMessage,
-            String context,
-            PrintStream stepOut,
-            SubAgent.ForkContext workerForkContext,
-            LlmClient.ToolChoice toolChoice) {
-        try {
-            ToolRegistry registry = activeToolRegistry();
-            String completionToolName = TeamWorkerProtocol.completionToolName(
-                    step.type(), toolChoice);
-            long contextEpoch = workerForkContext == null
-                    ? registry.contextVersionLedger().currentGeneration()
-                    : workerForkContext.contextEpoch();
-            AgentMessage result = memoryManager.runWithEvidenceOrigin(
-                    worker.getName(), step.id(), contextEpoch,
-                    () -> registry.runWithResourceLease(step.id(), () -> workerForkContext == null
-                            ? worker.executeWithContext(taskMessage, context, stepOut, toolChoice,
-                                    completionToolName)
-                            : worker.executeForkedWithContext(taskMessage, context,
-                                    workerForkContext, stepOut, toolChoice, completionToolName)));
-            checkpointCoordinator.recordAgentMessage(
-                    worker.getName(), step.id(), "Worker 执行完成", result);
-            return result;
-        } finally {
-            activeToolRegistry().releaseResourceLeases(step.id());
-        }
-    }
-
-    private synchronized void updateStep(List<AgentOrchestrator.ExecutionStep> steps,
-                                         String stepId,
-                                         AgentOrchestrator.ExecutionStep updated) {
-        StepUpdateBuffer buffer = activeStepUpdate.get();
-        AgentOrchestrator.ExecutionStep effective = attachModifiedFiles(stepId, updated);
-        if (buffer != null && buffer.stepId.equals(stepId)) {
-            buffer.updated = effective;
-            return;
-        }
-        commitStepUpdate(steps, stepId, effective);
     }
 
     private synchronized void commitStepUpdate(List<AgentOrchestrator.ExecutionStep> steps,
@@ -690,6 +264,7 @@ final class StepExecutionCoordinator {
                 continue;
             }
             steps.set(index, updated);
+            syncWorkPlan(steps);
             if (!updated.modifiedFiles().isEmpty()) {
                 String source = updated.status() == AgentOrchestrator.StepStatus.COMPLETED
                         ? "Multi-Agent 步骤完成"
@@ -702,140 +277,113 @@ final class StepExecutionCoordinator {
         }
     }
 
-    private AgentOrchestrator.ExecutionStep attachModifiedFiles(
-            String stepId,
-            AgentOrchestrator.ExecutionStep updated) {
-        if (updated.status() != AgentOrchestrator.StepStatus.COMPLETED
-                && updated.status() != AgentOrchestrator.StepStatus.FAILED) {
-            return updated;
-        }
-        List<String> consumed = activeToolRegistry().consumeStepModifiedFiles(stepId);
-        return updated.withModifiedFiles(
-                consumed.isEmpty() ? updated.modifiedFiles() : consumed);
-    }
-
-    static String resolveWorkerResultContent(String content, SubAgent.ExecutionEvidence evidence) {
-        if (content != null && !content.isBlank()) {
-            return content;
-        }
-        if (evidence == null || !evidence.hasSuccessfulToolCall()) {
-            return "";
-        }
-        List<SubAgent.ToolEvidence> successful = evidence.toolResults().stream()
-                .filter(result -> result.status() == com.devcli.tool.ToolStatus.SUCCESS)
-                .toList();
-        List<SubAgent.ToolEvidence> unsuccessful = evidence.toolResults().stream()
-                .filter(result -> result.status() != com.devcli.tool.ToolStatus.SUCCESS)
-                .toList();
-        StringBuilder summary = new StringBuilder()
-                .append("Worker 未返回文字总结，但本轮存在结构化工具执行证据。\n")
-                .append("成功工具：").append(successful.size()).append('/')
-                .append(evidence.toolResults().size());
-        appendToolEvidence(summary, successful, 4, 600, "其余成功工具：");
-        appendToolEvidence(summary, unsuccessful, 2, 300, "其余未成功工具：");
-        return summary.toString();
-    }
-
-    private static void appendToolEvidence(StringBuilder summary,
-                                           List<SubAgent.ToolEvidence> evidence,
-                                           int previewLimit,
-                                           int textLimit,
-                                           String remainderLabel) {
-        int previewCount = Math.min(previewLimit, evidence.size());
-        for (int index = 0; index < previewCount; index++) {
-            SubAgent.ToolEvidence tool = evidence.get(index);
-            summary.append("\n- ");
-            if (tool.status() != com.devcli.tool.ToolStatus.SUCCESS) {
-                summary.append("未成功 ");
+    private void runStep(AgentOrchestrator.ExecutionStep step,
+                         List<AgentOrchestrator.ExecutionStep> steps,
+                         Map<String, Integer> retryCount, SubAgent worker, SubAgent localReviewer,
+                         String context, PrintStream stepOut,
+                         SubAgent.ForkContext workerForkContext, SubAgent.ForkContext reviewerForkContext) {
+        memoryManager.runWithEvidenceScope(step.id(), () -> {
+            try {
+                boolean readOnly = switch (step.type().toUpperCase(Locale.ROOT)) {
+                    case "FILE_READ", "ANALYSIS", "PLANNING" -> true;
+                    default -> false;
+                };
+                commitStepUpdate(steps, step.id(), step.started());
+                var checkpoint = new DelegationCheckpoint(checkpointCoordinator, step.id(),
+                        Path.of(toolRegistry.getProjectPath()), reviewCoordinator.verifier(),
+                        memoryManager::addToolResult, (workspace, report) -> {
+                    activeStepToolRegistry.set(workspace.toolRegistry());
+                    try {
+                        if (AgentOrchestrator.isFinalIntegrationStep(step)) {
+                            var review = reviewCoordinator.review(step, localReviewer, report.toString(), stepOut, null);
+                            report.put("final_review", review.issues());
+                            if (review.hardCheckExecuted()) report.put("final_hard_check", review.hardCheckFailureKind().name());
+                            if (review.hardCheckFailureKind() != PreReviewVerifier.FailureKind.NONE) {
+                                report.put("hard_check_failure_kind", review.hardCheckFailureKind().name());
+                            }
+                            if (!review.approved() && !ReviewCoordinator.isReviewerAdvisory(review)) {
+                                throw new IllegalStateException(review.issues());
+                            }
+                        }
+                        return artifact(step, report);
+                    } finally {
+                        activeStepToolRegistry.remove();
+                    }
+                }, artifact -> commitStepUpdate(steps, step.id(),
+                        new AgentOrchestrator.ExecutionStep(step.id(), step.description(), step.type(),
+                                step.dependencies(), artifact)));
+                String system = worker.createForkContext().sharedPrefix().get(0).content();
+                DelegationSession delegation = new DelegationSession(toolRegistry,
+                        role -> role.equals("reviewer") ? reviewerLlmClient : llmClient,
+                        delegationBudget, system, events.get(), spawnCounter, delegationState, checkpoint);
+                Map<String, String> args = new HashMap<>();
+                args.put("role", readOnly ? "explorer" : "worker");
+                args.put("task", step.description());
+                args.put("context", context + "\n\n" + memoryManager.workPlanForPrompt());
+                args.put("task_spec", "{\"execution_kind\":\"agent_loop\",\"inputs\":\"approved plan\",\"scope\":\"current step\",\"done_condition\":\"finish step and provide tool evidence\"}");
+                args.put("deliverable", "当前步骤的执行结果、工具证据和未解决项");
+                if (!readOnly) args.put("allowed_write_paths", "[\"**\"]");
+                ToolOutput output = delegation.execute(args, ToolExecutionContext.current(step.id()));
+                JsonNode report = JSON.readTree(output.text());
+                if (output.isSuccess()) {
+                    if (readOnly) commitStepUpdate(steps, step.id(), new AgentOrchestrator.ExecutionStep(
+                            step.id(), step.description(), step.type(), step.dependencies(), artifact(step, report)));
+                    stepOut.println("✅ 步骤 [" + step.id() + "] 委派完成");
+                } else {
+                    commitStepUpdate(steps, step.id(), step.withFailed(output.text()));
+                    stepOut.println("❌ 步骤 [" + step.id() + "] " + output.text());
+                }
+            } catch (Exception e) {
+                commitStepUpdate(steps, step.id(), step.withFailed(e.getMessage()));
+                stepOut.println("❌ 步骤 [" + step.id() + "] " + e.getMessage());
             }
-            summary.append(tool.name());
-            if (tool.status() != com.devcli.tool.ToolStatus.SUCCESS) {
-                summary.append(" [").append(tool.status()).append(']');
-            }
-            summary.append(": ").append(tool.result().isBlank()
-                    ? (tool.status() == com.devcli.tool.ToolStatus.SUCCESS
-                            ? "执行成功，无文本结果"
-                            : "无文本结果")
-                    : previewToolEvidence(tool.result(), textLimit));
-        }
-        if (evidence.size() > previewCount) {
-            summary.append("\n- ").append(remainderLabel)
-                    .append(evidence.size() - previewCount).append(" 个");
-        }
+            return null;
+        });
     }
 
-    private static String previewToolEvidence(String result, int maxLength) {
-        String normalized = result.replace("\r\n", "\n").replace('\r', '\n').trim();
-        return normalized.length() <= maxLength
-                ? normalized
-                : normalized.substring(0, maxLength) + "...";
-    }
-
-    private static boolean isTransientLlmError(String content) {
-        if (content == null) {
-            return false;
+    private ExecutionArtifact artifact(AgentOrchestrator.ExecutionStep step, JsonNode report) {
+        boolean successfulEvidence = false;
+        boolean mutationEvidence = false;
+        for (JsonNode evidence : report.path("evidence")) {
+            if (!"SUCCESS".equals(evidence.path("status").asText())) continue;
+            successfulEvidence = true;
+            var effect = toolRegistry.toolEffect(evidence.path("tool").asText());
+            mutationEvidence |= effect == com.devcli.tool.ToolContract.ToolEffect.PROJECT_MUTATION
+                    || effect == com.devcli.tool.ToolContract.ToolEffect.HOST_PROCESS;
         }
-        String lower = content.toLowerCase(Locale.ROOT);
-        return lower.contains("retryable=true")
-                || lower.contains("api请求失败: 500")
-                || lower.contains("server_error")
-                || lower.contains("internal_server_error")
-                || lower.contains("oauth2.googleapis.com/token")
-                || lower.contains(" eof")
-                || lower.contains("timeout")
-                || lower.contains("temporarily")
-                || lower.contains("rate limit")
-                || lower.contains("429")
-                || lower.contains("503")
-                || lower.contains("502");
-    }
-
-    private String buildRetryContext(String context, String issues) {
-        return new StringBuilder(context == null ? "" : context)
-                .append("\n\n上一次执行被拒绝。只做根因修复，不要重写无关代码。\n")
-                .append("必须保留原始任务指定的 class / method / signature、已通过行为和已有生产文件结构。\n")
-                .append("如果反馈来自 Pre-Review 编译失败，先读取报错文件和行号，再最小补丁修复。\n")
-                .append("拒绝原因摘要：\n").append(summarizeRetryIssues(issues)).append('\n')
-                .toString();
-    }
-
-    private String summarizeRetryIssues(String issues) {
-        if (issues == null || issues.isBlank()) {
-            return "未提供具体原因；请重新验证入口、编译和验收点。";
+        if (reviewCoordinator.requiresConcreteVerification(step) && !mutationEvidence
+                && !(AgentOrchestrator.isFinalIntegrationStep(step)
+                && (successfulEvidence || report.has("final_hard_check")))) {
+            throw new IllegalStateException("写入或命令步骤缺少成功执行证据，未提交候选补丁");
         }
-        String[] lines = issues.replace("\r", "").split("\n");
-        StringBuilder summary = new StringBuilder();
-        int kept = 0;
-        for (String line : lines) {
-            String trimmed = line.trim();
-            if (trimmed.isBlank()) {
-                continue;
-            }
-            boolean important = kept < 8 || trimmed.contains("error:")
-                    || trimmed.contains("错误") || trimmed.contains("failed")
-                    || trimmed.contains("missing") || trimmed.contains("expected=")
-                    || trimmed.contains("actual=") || trimmed.contains("Reviewer 未调用工具");
-            if (important) {
-                summary.append("- ").append(trimmed).append('\n');
-                kept++;
-            }
-            if (kept >= 14) {
-                break;
+        if (requireWorkerToolEvidence && report.path("evidence").isEmpty()) {
+            throw new IllegalStateException("步骤没有实际工具执行证据");
+        }
+        StringBuilder summary = new StringBuilder("summary_source=ORCHESTRATOR; report_id=")
+                .append(report.path("report_id").asText()).append("; hard_check=")
+                .append(report.path("hard_check").asText("NOT_REQUIRED"));
+        for (JsonNode evidence : report.path("evidence")) {
+            if ("SUCCESS".equals(evidence.path("status").asText())) {
+                summary.append("; tool=").append(evidence.path("tool").asText());
             }
         }
-        if (summary.isEmpty()) {
-            return abbreviate(issues, 1200);
-        }
-        if (lines.length > kept) {
-            summary.append("- ...<truncated>\n");
-        }
-        return summary.toString();
+        return step.artifact().complete(report.toString(), summary.toString(), List.of(), System.currentTimeMillis());
     }
 
-    private static String abbreviate(String text, int maxLength) {
-        if (text == null || text.length() <= maxLength) {
-            return text == null ? "" : text;
+    private void syncWorkPlan(List<AgentOrchestrator.ExecutionStep> steps) {
+        var planSteps = JSON.createArrayNode();
+        boolean focusAssigned = false;
+        for (var step : steps) {
+            String label = "[" + step.id() + "] " + step.description();
+            String status = "pending";
+            if (step.status() == AgentOrchestrator.StepStatus.COMPLETED) status = "completed";
+            else if (step.status() == AgentOrchestrator.StepStatus.RUNNING && !focusAssigned) {
+                status = "in_progress";
+                focusAssigned = true;
+            }
+            planSteps.addObject().put("step", label.substring(0, Math.min(300, label.length()))).put("status", status);
         }
-        return text.substring(0, maxLength) + "\n...<truncated>";
+        memoryManager.updateWorkPlan(Map.of("goal", runState.userTask().substring(0,
+                Math.min(1000, runState.userTask().length())), "steps", planSteps.toString()));
     }
 }

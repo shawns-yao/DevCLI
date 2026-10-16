@@ -2,7 +2,7 @@ package com.devcli.agent;
 
 import com.devcli.concurrent.CancellationToken;
 import com.devcli.llm.LlmClient;
-import com.devcli.runtime.task.DurableTaskManager;
+import com.devcli.concurrent.BackgroundWorkers;
 import com.devcli.tool.ToolOutput;
 import com.devcli.workspace.PatchSet;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -211,7 +211,7 @@ final class DelegationState implements AutoCloseable {
         synchronized (this) {
             task = active.get(id);
             if (task == null || closed) throw new IllegalStateException("委派任务已关闭");
-            if (workers == null) workers = DurableTaskManager.createWorkerPool("devcli-delegate", 2, 8);
+            if (workers == null) workers = BackgroundWorkers.create("devcli-delegate", 2, 8);
         }
         CancellationToken.Registration registration = parentToken.onCancel(
                 c -> task.token().cancel(c.reason(), c.message()));

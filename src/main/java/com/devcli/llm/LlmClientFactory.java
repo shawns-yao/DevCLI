@@ -105,10 +105,14 @@ public class LlmClientFactory {
         return client;
     }
 
+    public static LlmClient createDelegatedAgent(LlmClient primary, String provider, String model) {
+        String effectiveProvider = provider == null ? primary.getProviderName() : provider;
+        LlmClient client = create(effectiveProvider, DevCliConfig.load(), model);
+        if (client == null) throw new IllegalArgumentException("角色模型配置无效或缺少凭据: " + effectiveProvider);
+        return client;
+    }
+
     private static String delegationSetting(String role, String field) {
-        if (!java.util.Set.of("explorer", "planner", "worker", "reviewer").contains(role)) {
-            throw new IllegalArgumentException("未知子 Agent 角色: " + role);
-        }
         return ConfigResolver.optional("devcli.delegate." + role + "." + field,
                 "DEVCLI_DELEGATE_" + role.toUpperCase(java.util.Locale.ROOT) + "_" + field.toUpperCase(java.util.Locale.ROOT));
     }

@@ -108,20 +108,10 @@ public class DurableTaskManager implements Closeable {
             return;
         }
         running = true;
-        workers = createWorkerPool("devcli-task-worker", workerCount, workerCount);
+        workers = com.devcli.concurrent.BackgroundWorkers.create("devcli-task-worker", workerCount, workerCount);
         for (int index = 0; index < workerCount; index++) {
             workers.submit(this::workerLoop);
         }
-    }
-
-    /** 后台执行共用有界队列与线程命名；状态存储由各自生命周期管理。 */
-    public static ExecutorService createWorkerPool(String name, int workers, int queueCapacity) {
-        return new java.util.concurrent.ThreadPoolExecutor(workers, workers, 0L, TimeUnit.MILLISECONDS,
-                new java.util.concurrent.ArrayBlockingQueue<>(queueCapacity), runnable -> {
-            Thread thread = new Thread(null, runnable, name, 0, false);
-            thread.setDaemon(true);
-            return thread;
-        });
     }
 
     public synchronized DurableTask enqueue(String prompt) {

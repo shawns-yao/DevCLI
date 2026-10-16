@@ -89,43 +89,6 @@ class PlanTaskBatchExecutorTest {
     }
 
     @Test
-    void runsDifferentMethodsOfSameJavaFileInParallel(@TempDir Path project) throws Exception {
-        Path source = project.resolve("src/A.java");
-        Files.createDirectories(source.getParent());
-        Files.writeString(source, """
-                class A {
-                    int alpha() { return 1; }
-                    int beta() { return 2; }
-                }
-                """);
-        Task first = new Task("first", "修改 src/A.java 的 A.alpha()", Task.TaskType.FILE_WRITE);
-        Task second = new Task("second", "修改 src/A.java 的 A.beta()", Task.TaskType.FILE_WRITE);
-        AtomicInteger active = new AtomicInteger();
-        AtomicInteger maxActive = new AtomicInteger();
-        CountDownLatch bothStarted = new CountDownLatch(2);
-
-        PlanTaskBatchExecutor executor = new PlanTaskBatchExecutor(
-                new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8),
-                task -> { },
-                (task, taskOut) -> {
-                    int current = active.incrementAndGet();
-                    maxActive.accumulateAndGet(current, Math::max);
-                    bothStarted.countDown();
-                    await(bothStarted);
-                    active.decrementAndGet();
-                    return PlanTaskExecutionResult.success(task, task.getId(), false, List.of());
-                },
-                task -> List.of(),
-                project);
-
-        List<PlanTaskExecutionResult> results = executor.execute(List.of(first, second));
-
-        assertEquals(2, maxActive.get());
-        assertEquals(List.of("first", "second"),
-                results.stream().map(result -> result.task().getId()).toList());
-    }
-
-    @Test
     void associatesParallelFailureWithItsTaskAndModifiedFiles() {
         Task first = new Task("first", "分析模块 A", Task.TaskType.ANALYSIS);
         Task second = new Task("second", "分析模块 B", Task.TaskType.ANALYSIS);

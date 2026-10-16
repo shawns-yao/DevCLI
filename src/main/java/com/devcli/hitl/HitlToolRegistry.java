@@ -177,7 +177,8 @@ public class HitlToolRegistry extends ToolRegistry {
             // The exact final command is reviewed immediately before backend dispatch.
             return chain.proceed(context);
         }
-        if (!requiresApproval(name)) {
+        boolean approvalRequired = requiresApproval(name);
+        if (!approvalRequired && !isMcpTool(name)) {
             return chain.proceed(context);
         }
         // 这里曾经有 hitlHandler.isEnabled() 早退，已删除：策略硬边界与用户规则层必须无条件执行，
@@ -214,6 +215,10 @@ public class HitlToolRegistry extends ToolRegistry {
                     name, argumentsJson, rules.reason(), 0L), context);
             return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
                     "[规则] 已拒绝：" + rules.reason() + "；放行规则与任务授权都不能覆盖它");
+        }
+        // A locally trusted read is ordinary use, but explicit user deny/ask rules still apply.
+        if (!approvalRequired && rules.outcome() != PermissionEvaluator.Outcome.SOFT_DENY) {
+            return chain.proceed(context);
         }
         // auto 模式下规则层不短路：分类器是那个模式的判定者，用户规则作为它的输入参与同一次判定
         // （见 docs/adr/0013）。allow 与 soft_deny 若在此短路，注入提示词的规则就是死文本——
@@ -525,7 +530,7 @@ public class HitlToolRegistry extends ToolRegistry {
             approvalLock.lockInterruptibly();
             try {
                 result = hitlHandler.requestApproval(ApprovalRequest.content(tool,
-                        inspection.typeLabels(), purpose, target, redactionAllowed));
+                        inspection.typeLabels(), purpose, target, redactionAllowed, inspection.source()));
             } finally {
                 approvalLock.unlock();
             }

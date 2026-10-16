@@ -100,7 +100,7 @@ public final class BuiltInToolPolicy {
         register(values, ToolEffect.READ_ONLY, false, false,
                 Destructiveness.NONE, Idempotency.IDEMPOTENT, false,
                 "read_file", "list_dir", "search_code", "grep_code",
-                "web_search", "list_memory", "browser_status");
+                "web_search", "list_memory", "read_memory", "browser_status");
         // web_fetch 会把请求送到外部站点，是需要出口授权的只读工具：默认逐次确认，
         // 命中任务级域名授权时才自动放行；审计保留每次放行与拒绝记录。
         register(values, ToolEffect.READ_ONLY, true, true,
@@ -109,6 +109,12 @@ public final class BuiltInToolPolicy {
         register(values, ToolEffect.LOCAL_CONTEXT, false, false,
                 Destructiveness.NONE, Idempotency.IDEMPOTENT, false,
                 "load_skill", "delegate_control");
+        register(values, ToolEffect.LOCAL_CONTEXT, false, false,
+                Destructiveness.NONE, Idempotency.NON_IDEMPOTENT, false, "update_plan");
+        // 调度入口本身不授予权限；目标 MCP 工具重新进入完整执行管线。
+        register(values, ToolEffect.LOCAL_CONTEXT, false, false,
+                Destructiveness.NONE, Idempotency.NON_IDEMPOTENT, false,
+                "call_mcp_tool");
         register(values, ToolEffect.PROJECT_MUTATION, true, true,
                 Destructiveness.STRUCTURAL, Idempotency.IDEMPOTENT, false,
                 "write_file");

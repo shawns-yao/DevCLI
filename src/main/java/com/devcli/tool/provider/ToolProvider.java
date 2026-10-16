@@ -29,6 +29,14 @@ public interface ToolProvider {
             return content;
         }
 
+        /** Inspect against the full snapshot while approving only the requested page. */
+        default String reviewFileContent(com.devcli.policy.FileContentReview review) {
+            if (review.inspect().sensitive()) {
+                throw new com.devcli.policy.PolicyException("敏感文件内容需要单次审批");
+            }
+            return review.content();
+        }
+
         /**
          * 写入类工具使用的路径解析：在项目根围栏之外再拒绝受保护的凭据、私钥与版本库元数据。
          *
@@ -116,7 +124,6 @@ public interface ToolProvider {
         Consumer<String> memorySaver();
 
         ToolContract.MemorySaver memorySaveHandler();
-
 
         ToolContract.MemoryListHandler memoryListHandler();
 

@@ -29,8 +29,7 @@ class PromptAssemblerTest {
 
         assertTrue(prompt.contains("## Language"));
         assertTrue(prompt.contains("## Mode: ReAct Agent"));
-        // 会话级稳定内容留在 system prompt
-        assertTrue(prompt.contains("demo://resource"));
+        assertFalse(prompt.contains("demo://resource"));
         // 按轮次变化的内容不得进 system prompt，否则其后全部历史前缀失配
         assertFalse(prompt.contains("用户偏好中文"));
         assertFalse(prompt.contains("web-access"));
@@ -42,6 +41,7 @@ class PromptAssemblerTest {
         PromptAssembler assembler = PromptAssembler.createDefault();
 
         String turnContext = assembler.assembleTurnContext(PromptContext.builder()
+                .externalContext("demo://resource")
                 .memoryContext("## 相关记忆\n用户偏好中文。")
                 .skillIndex("## 可用 Skills\n- web-access")
                 .sessionMemory("## 证据\nWORKING_EVIDENCE")
@@ -53,6 +53,7 @@ class PromptAssemblerTest {
         assertTrue(turnContext.contains("用户偏好中文"));
         assertTrue(turnContext.contains("web-access"));
         assertTrue(turnContext.contains("WORKING_EVIDENCE"));
+        assertTrue(turnContext.contains("demo://resource"));
     }
 
     @Test
@@ -135,12 +136,9 @@ class PromptAssemblerTest {
         assertTrue(prompt.contains("用简体中文"));
         assertTrue(prompt.contains("不引入 SymbolSolver"));
 
-        // KV cache 顺序：Rule Context 应在 Project Context 之前（更稳定的层在前）
         int stickyIdx = prompt.indexOf("## Rule Context");
-        int projectIdx = prompt.indexOf("## Project Context");
-        assertTrue(stickyIdx > 0 && projectIdx > 0);
-        assertTrue(stickyIdx < projectIdx,
-                "KV cache 友好布局：Sticky 应在 Project Context 之前");
+        assertTrue(stickyIdx > 0);
+        assertFalse(prompt.contains("## Project Context"));
     }
 
     @Test
@@ -164,11 +162,13 @@ class PromptAssemblerTest {
         PromptAssembler assembler = PromptAssembler.createDefault();
 
         String withA = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
+                .externalContext("project_snapshot_A")
                 .memoryContext("MEMORY_TOKEN_AAA")
                 .sessionMemory("WORKING_TOKEN_AAA")
                 .skillIndex("SKILL_TOKEN_AAA")
                 .build());
         String withB = assembler.assemble(PromptMode.AGENT, PromptContext.builder()
+                .externalContext("project_snapshot_B")
                 .memoryContext("MEMORY_TOKEN_BBB_totally_different")
                 .sessionMemory("WORKING_TOKEN_BBB_totally_different")
                 .skillIndex("SKILL_TOKEN_BBB_totally_different")

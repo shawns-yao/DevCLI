@@ -20,6 +20,17 @@ class LlmToolChoiceTest {
             new LlmClient.Tool("write_file", "write", MAPPER.createObjectNode()));
 
     @Test
+    void disabledChoicePreservesDefinitionsForBothProviders() {
+        var anthropic = new AnthropicClient("test-key", "test-model", "https://example.com");
+        var body = anthropic.buildRequestBody(MESSAGES, TOOLS, LlmClient.ToolChoice.NONE);
+        assertEquals("none", body.path("tool_choice").path("type").asText());
+        assertEquals(anthropic.buildRequestBody(MESSAGES, TOOLS, LlmClient.ToolChoice.AUTO).path("tools"), body.path("tools"));
+        var openAi = new TestOpenAiClient();
+        assertEquals("none", openAi.requestBody(LlmClient.ToolChoice.NONE).path("tool_choice").asText());
+        assertEquals(openAi.requestBody(LlmClient.ToolChoice.AUTO).path("tools"), openAi.requestBody(LlmClient.ToolChoice.NONE).path("tools"));
+    }
+
+    @Test
     void defaultOverloadScopesChoiceWithoutBypassingExistingChatOverride() throws IOException {
         RecordingClient client = new RecordingClient();
 

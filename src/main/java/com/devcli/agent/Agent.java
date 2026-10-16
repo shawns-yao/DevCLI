@@ -146,6 +146,8 @@ public class Agent implements AutoCloseable {
             return;
         }
         conversationHistory.addAll(messages);
+        memoryManager.beginTask(sessionTaskId);
+        memoryManager.restoreWorkPlan(messages);
     }
 
     /**
@@ -298,7 +300,7 @@ public class Agent implements AutoCloseable {
         memoryManager.setActiveProjectScope(toolRegistry.getProjectPath());
         String result = "";
         try {
-            result = runInternal(modelInput, initialToolChoice, userInput);
+            result = runInternal(modelInput, initialToolChoice);
             return result;
         } finally {
             memoryManager.completeTask(sessionTaskId, userInput, result, toolRegistry.getProjectPath());
@@ -309,14 +311,12 @@ public class Agent implements AutoCloseable {
         }
     }
 
-    private String runInternal(String userInput, LlmClient.ToolChoice initialToolChoice, String routingInputText) {
-        AtomicReference<String> routingInput = new AtomicReference<>(routingInputText == null ? "" : routingInputText);
+    private String runInternal(String userInput, LlmClient.ToolChoice initialToolChoice) {
         LlmClient.ToolChoice effectiveInitialToolChoice = initialToolChoice == null
                 ? LlmClient.ToolChoice.AUTO
                 : initialToolChoice;
         log.info("ReAct run started: inputLength={}", userInput == null ? 0 : userInput.length());
         currentSkillActivationText = userInput == null ? "" : userInput;
-        toolRegistry.prefetchToolDefinitionsForInput(currentSkillActivationText);
         pruneHistoricalImagePayloads();
         memoryManager.setActiveProjectScope(toolRegistry.getProjectPath());
         // 写入当前会话工作记忆；真实 messages 由 conversationHistory 维护。
@@ -368,11 +368,6 @@ public class Agent implements AutoCloseable {
                     }
 
                     @Override
-                    public String toolRoutingInput() {
-                        return routingInput.get();
-                    }
-
-                    @Override
                     public List<LlmClient.Tool> toolDefinitions(int iteration) {
                         return toolSnapshot(iteration).definitions();
                     }
@@ -421,10 +416,11 @@ public class Agent implements AutoCloseable {
                     @Override
                     public void queuedMessagesDelivered(AgentTurnInbox.Channel channel,
                                                         List<AgentTurnInbox.Item> messages) {
+                        streamRenderer.resetBetweenIterations();
                         for (AgentTurnInbox.Item message : messages) {
+                            renderer().stream().println("> " + message.text());
                             memoryManager.addUserMessage(message.text());
                             recordUserIntent(message.text());
-                            routingInput.set(message.text());
                         }
                         AgentTurnInbox.Snapshot snapshot = turnInbox.snapshot();
                         runEventSink.emit(new RunEvent.QueueUpdated(
@@ -609,6 +605,7 @@ public class Agent implements AutoCloseable {
                     public String failed(IOException error, AgentBudget currentBudget) {
                         log.error("LLM call failed in ReAct loop", error);
                         streamRenderer.finish();
+                        pushStatus(currentBudget, startNanos, "idle");
                         return "❌ " + FailureFeedback.fromReason(
                                 "调用 LLM 失败: " + error.getMessage()).render();
                     }
@@ -656,8 +653,8 @@ public class Agent implements AutoCloseable {
      * 仅在 system prompt 内容真正变化时替换 conversationHistory[0]。
      *
      * <p>prompt cache 契约：system prompt 是整个请求的 token 前缀，逐字节稳定才能让其后的
-     * 全部对话历史命中自动前缀缓存。这里只包含会话级稳定内容（sticky / MCP 索引），
-     * 正常情况下每轮比较结果相同、不写入；只有 sticky 或 MCP 索引真变了才失配一次。
+     * 全部对话历史命中自动前缀缓存。这里只包含会话级规则；Project Context、记忆与
+     * Skill 索引进入当轮消息，只有会话规则实际变化时才重建此前缀。
      */
     private void refreshSystemPromptIfChanged() {
         String assembled = buildSystemPrompt();
@@ -674,7 +671,6 @@ public class Agent implements AutoCloseable {
      */
     private String buildSystemPrompt() {
         return promptAssembler.assemble(PromptMode.AGENT, PromptContext.builder()
-                .externalContext(buildExternalContext())
                 .ruleContext(buildRuleContext())
                 .build());
     }
@@ -685,6 +681,7 @@ public class Agent implements AutoCloseable {
      */
     private String buildTurnContext(String memoryContext) {
         return promptAssembler.assembleTurnContext(PromptContext.builder()
+                .externalContext(buildExternalContext())
                 .memoryContext(memoryContext)
                 .sessionMemory(memoryManager.buildSessionMemorySection())
                 .skillIndex(buildSkillIndex())

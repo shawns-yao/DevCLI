@@ -19,6 +19,7 @@ import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolExecutionContext;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
+import com.devcli.tool.DelegateRoleCatalog;
 import com.devcli.util.DelegationReportSanitizer;
 import com.devcli.workspace.PatchSet;
 import com.devcli.workspace.WorkspaceExecutionSession;
@@ -51,7 +52,6 @@ final class DelegationSession implements DelegateTaskTool.Handler {
     private final AgentBudget parentBudget;
     private final String systemPrompt;
     private final RunEventSink events;
-    private final PromptRepository prompts;
     private final int maxChildIterations;
     private final boolean reportSanitizationEnabled;
     private final DelegationState state;
@@ -59,6 +59,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
     /** 单会话派出量配额；计数器由 Agent 持有，跨用户轮次累计，不随单轮预算重置。 */
     private final AtomicInteger spawnCounter;
     private final int maxSpawnsPerSession;
+    private final DelegationCheckpoint checkpoint;
 
     DelegationSession(ToolRegistry parent, Function<String, LlmClient> modelResolver,
                       AgentBudget parentBudget, String systemPrompt, RunEventSink events) {
@@ -75,14 +76,19 @@ final class DelegationSession implements DelegateTaskTool.Handler {
     DelegationSession(ToolRegistry parent, Function<String, LlmClient> modelResolver,
                       AgentBudget parentBudget, String systemPrompt, RunEventSink events,
                       AtomicInteger spawnCounter, DelegationState state) {
+        this(parent, modelResolver, parentBudget, systemPrompt, events, spawnCounter, state, null);
+    }
+
+    DelegationSession(ToolRegistry parent, Function<String, LlmClient> modelResolver,
+                      AgentBudget parentBudget, String systemPrompt, RunEventSink events,
+                      AtomicInteger spawnCounter, DelegationState state, DelegationCheckpoint checkpoint) {
         this.parent = parent;
         this.modelResolver = modelResolver;
         this.parentBudget = parentBudget;
         this.systemPrompt = systemPrompt;
         this.events = events;
         this.state = state;
-        this.prompts = new PromptRepository(Path.of(System.getProperty("user.home"), ".devcli", "prompts"),
-                Path.of(parent.getProjectPath()).toAbsolutePath().resolve(".devcli/prompts"));
+        this.checkpoint = checkpoint;
         this.maxChildIterations = ConfigResolver.intValue("devcli.delegate.max.iterations",
                 "DEVCLI_DELEGATE_MAX_ITERATIONS", 32, 1, 100);
         this.reportSanitizationEnabled = ConfigResolver.booleanValue(
@@ -115,10 +121,24 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             return ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS, "无法读取子任务恢复记录: " + e.getMessage(), false);
         }
         String role = arguments.getOrDefault("role", "").toLowerCase(Locale.ROOT);
-        if (!java.util.Set.of("explorer", "planner", "worker", "reviewer").contains(role)
-                || arguments.getOrDefault("task", "").isBlank()) {
+        DelegateRoleCatalog.Role definition;
+        try {
+            definition = parent.delegateRoles().require(role);
+        } catch (IllegalArgumentException e) {
+            return reportFailure(id, ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS, e.getMessage(), false), "failed");
+        }
+        if (arguments.getOrDefault("task", "").isBlank()) {
             return reportFailure(id, ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS,
                     "需要有效角色和非空子任务", false), "failed");
+        }
+        if (definition.writes() && Boolean.parseBoolean(arguments.getOrDefault("run_in_background", "false"))) {
+            return reportFailure(id, ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
+                    "写角色仅支持同步执行；请等待子任务完成后继续写入", false), "blocked");
+        }
+        Set<String> requestedTools = parseStringSet(arguments.get("allowed_tools"));
+        if (requestedTools.stream().anyMatch(tool -> !definition.allows(tool))) {
+            return reportFailure(id, ToolOutput.rejected(ToolErrorCode.CAPABILITY_DENIED,
+                    "请求工具超出角色定义的 allowed_tools", false), "blocked");
         }
         DelegationPolicy.Decision policy = DelegationPolicy.evaluate(arguments);
         DelegationPolicy.Yield yield = policy.yield();
@@ -147,8 +167,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             return reportFailure(id, ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
                     budget.describeExit(budget.check()), false), "blocked");
         }
-        ToolContract.ToolAccessScope childScope = "worker".equals(role)
-                ? ToolContract.ToolAccessScope.ISOLATED_PROJECT : ToolContract.ToolAccessScope.READ_ONLY;
+        ToolContract.ToolAccessScope childScope = definition.capability();
         for (String tool : parseStringSet(arguments.get("allowed_tools"))) {
             if (!parent.hasTool(tool) || !childScope.permits(parent.toolEffect(tool))
                     || List.of("delegate_task", "delegate_control", "list_memory").contains(tool)) {
@@ -162,6 +181,22 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             return reportFailure(id, ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
                     "上游报告不存在或已过期，请补充输入后再委派", false), "blocked");
         }
+        if (!definition.writes()) {
+            return executeReserved(id, role, arguments, context, budget, upstreamSnapshot, resumed);
+        }
+        var writer = parent.tryEnterSynchronousWorker();
+        if (writer == null) {
+            return ToolOutput.rejected(ToolErrorCode.RESOURCE_CONFLICT,
+                    "已有写入任务正在执行；同步 worker 不能重叠运行，请等待后重试", true);
+        }
+        try (writer) {
+            return executeReserved(id, role, arguments, context, budget, upstreamSnapshot, resumed);
+        }
+    }
+
+    private ToolOutput executeReserved(String id, String role, Map<String, String> arguments,
+                                       ToolExecutionContext context, AgentBudget budget,
+                                       String upstreamSnapshot, DelegationState.Snapshot resumed) {
         if (!state.reserve(id)) {
             return ToolOutput.rejected(ToolErrorCode.RESOURCE_CONFLICT, "子任务正在执行或后台委派容量已满");
         }
@@ -240,13 +275,15 @@ final class DelegationSession implements DelegateTaskTool.Handler {
         ObjectNode candidateReport = null;
         try {
             context.throwIfCancelled();
-            String rolePrompt = prompts.loadRequired("modes/delegate-" + role + ".md");
-            LlmClient client = models.computeIfAbsent(role, modelResolver);
+            DelegateRoleCatalog.Role definition = parent.delegateRoles().require(role);
+            String rolePrompt = definition.prompt();
+            LlmClient client = models.computeIfAbsent(role, this::resolveModel);
             if (client == null) throw new IllegalArgumentException("子 Agent 模型不可用: " + role);
-            if (role.equals("worker")) {
+            if (definition.writes()) {
                 try (WorkspaceExecutionSession workspace = WorkspaceExecutionSession.open(
                         parent, id, parseStringList(arguments.get("allowed_write_paths")))) {
                     try {
+                        if (checkpoint != null) checkpoint.restore(workspace, id);
                         if (resumed != null && !resumed.changes().isEmpty()) restorePatch(workspace, resumed, arguments);
                         candidateReport = JSON.createObjectNode().put("report_id", id).put("child_id", id)
                                 .put("status", "failed").put("patch_status", "NOT_APPLIED");
@@ -284,15 +321,17 @@ final class DelegationSession implements DelegateTaskTool.Handler {
                             } else {
                                 report.put("independent_review", "NOT_REQUIRED");
                             }
-                            PatchSet.ApplyResult applied = workspace.commit(patch,
-                                    effective -> {
+                            WorkspaceExecutionSession.CommitPreparation validation = effective -> {
                                         context.throwIfCancelled();
                                         if ("PASSED".equals(report.path("hard_check").asText())
                                                 && !samePatch(patch, effective)) {
                                             throw new IOException("提交候选已经变化，必须重新执行代码硬检查");
                                         }
                                         report.put("patch_status", "COMMIT_UNKNOWN");
-                                    }, ignored -> { });
+                                    };
+                            PatchSet.ApplyResult applied = checkpoint == null
+                                    ? workspace.commit(patch, validation, ignored -> { })
+                                    : checkpoint.commit(workspace, patch, report, validation);
                             if (applied.applied()) {
                                 var files = report.putArray("modified_resources");
                                 applied.modifiedResources().forEach(files::add);
@@ -314,6 +353,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
                         }
                     } finally {
                         if (candidateReport != null) {
+                            if (checkpoint != null) checkpoint.retainFailure(workspace, candidateReport);
                             String patchStatus = candidateReport.path("patch_status").asText();
                             if (!List.of("COMMIT_UNKNOWN", "ROLLBACK_INCOMPLETE").contains(patchStatus)) {
                                 try {
@@ -430,21 +470,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
                 parseStringList(arguments.get("allowed_write_paths")), () -> resumed.changes().stream()
                         .allMatch(c -> workspace.toolRegistry().isWritePathAllowed(c.relativePath())));
         if (!allowed) throw new IOException("待恢复补丁超出本次写入范围");
-        Map<String, String> baselines = new java.util.LinkedHashMap<>();
-        for (PatchSet.FileChange change : resumed.changes()) {
-            Path target = workspace.toolRegistry().resolveSafePath(change.relativePath());
-            baselines.put(change.relativePath(), java.nio.file.Files.isRegularFile(target)
-                    ? java.nio.file.Files.readString(target) : null);
-        }
-        PatchSet.ApplyResult restored = resumed.patch().apply(workspace.workspacePath());
-        if (!restored.applied()) throw new IOException("恢复补丁与当前文件基线冲突: " + restored.failureDescription());
-        for (PatchSet.FileChange change : resumed.changes()) {
-            Path target = workspace.toolRegistry().resolveSafePath(change.relativePath());
-            workspace.toolRegistry().contextVersionLedger().recordLocalWrite(
-                    arguments.get("resume_report_id"), change.relativePath(), target, baselines.get(change.relativePath()),
-                    change.type() == PatchSet.ChangeType.DELETE ? null
-                            : new String(change.content(), java.nio.charset.StandardCharsets.UTF_8));
-        }
+        workspace.restorePatch(resumed.patch(), arguments.get("resume_report_id"));
     }
 
     private void verifyCodePatch(WorkspaceExecutionSession workspace, PatchSet patch, ObjectNode report,
@@ -455,7 +481,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             return;
         }
         context.throwIfCancelled();
-        PreReviewVerifier verifier = new PreReviewVerifier(60, request -> {
+        PreReviewVerifier verifier = checkpoint != null ? checkpoint.verifier() : new PreReviewVerifier(60, request -> {
             ToolExecutionContext checkContext = new ToolExecutionContext(context.invocationId() + "/verify",
                     context.cancellationToken(), System.nanoTime(), Math.min(context.deadlineNanos(),
                     System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(request.timeoutSeconds())));
@@ -630,12 +656,19 @@ final class DelegationSession implements DelegateTaskTool.Handler {
         }
     }
 
+    private LlmClient resolveModel(String role) {
+        var definition = parent.delegateRoles().require(role);
+        LlmClient primary = modelResolver.apply(role);
+        if (definition.provider() == null && definition.model() == null) return primary;
+        return com.devcli.llm.LlmClientFactory.createDelegatedAgent(primary, definition.provider(), definition.model());
+    }
+
     private ToolOutput runIndependentReview(String workerReport,
                                             Map<String, String> arguments,
                                             ToolExecutionContext context,
                                             ToolRegistry reviewBase) {
         try {
-            LlmClient reviewer = models.computeIfAbsent("reviewer", modelResolver);
+            LlmClient reviewer = models.computeIfAbsent("reviewer", this::resolveModel);
             if (reviewer == null) {
                 return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
                         "独立 Reviewer 模型不可用", false);
@@ -649,7 +682,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
                 return executeChild(reviewerRegistry, reviewer, parentBudget.fork(),
                         "delegate-reviewer-" + UUID.randomUUID().toString().substring(0, 8),
                         "reviewer",
-                        prompts.loadRequired("modes/delegate-reviewer.md"), reviewArguments,
+                        parent.delegateRoles().require("reviewer").prompt(), reviewArguments,
                         context, ToolContract.ToolAccessScope.READ_ONLY, "");
             }
         } catch (Exception e) {
@@ -669,10 +702,16 @@ final class DelegationSession implements DelegateTaskTool.Handler {
                                     String id, String role, String rolePrompt, Map<String, String> arguments,
                                     ToolExecutionContext context, ToolContract.ToolAccessScope scope,
                                     String upstreamReport, DelegationState.Snapshot resumed) {
-        return registry.runWithAllowedTools(parseStringSet(arguments.get("allowed_tools")),
-                () -> registry.runWithAllowedWritePaths(parseStringList(arguments.get("allowed_write_paths")),
+        var definition = parent.delegateRoles().require(role);
+        var narrowed = new java.util.HashMap<>(arguments);
+        if (parseStringSet(arguments.get("allowed_tools")).isEmpty() && !definition.allowedTools().contains("*")) {
+            narrowed.put("allowed_tools", JSON.valueToTree(definition.allowedTools()).toString());
+        }
+        Map<String, String> childArguments = Map.copyOf(narrowed);
+        return registry.runWithAllowedTools(parseStringSet(childArguments.get("allowed_tools")),
+                () -> registry.runWithAllowedWritePaths(parseStringList(childArguments.get("allowed_write_paths")),
                         () -> executeChildInternal(registry, client, budget, id, role, rolePrompt,
-                                arguments, context, scope, upstreamReport, resumed)));
+                                childArguments, context, scope, upstreamReport, resumed)));
     }
 
     private ToolOutput executeChildInternal(ToolRegistry registry, LlmClient client, AgentBudget budget,
@@ -685,7 +724,6 @@ final class DelegationSession implements DelegateTaskTool.Handler {
         registry.setContextProfile(ContextProfile.from(client));
         List<LlmClient.Tool> tools = registry.runWithToolAccess(scope,
                 () -> toolSnapshots.computeIfAbsent(role + "|" + String.join(",", parseStringSet(arguments.get("allowed_tools"))), ignored -> {
-                    registry.prefetchToolDefinitionsForInput(arguments.get("task"));
                     return List.copyOf(registry.getToolDefinitions());
                 }));
         try (RunContext run = CancellationContext.startRunContext(Path.of(registry.getProjectPath()));
@@ -813,7 +851,6 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             return result;
         }
         @Override public List<LlmClient.Message> history() { return history; }
-        @Override public String toolRoutingInput() { return arguments.get("task"); }
         @Override public List<LlmClient.Tool> toolDefinitions(int iteration) { return tools; }
         @Override public ToolContract.ToolSnapshot toolSnapshot(int iteration) {
             return registry.snapshotForCurrentAccess().withDefinitions(tools);
@@ -853,6 +890,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
         @Override public void afterToolResults(LlmClient.ChatResponse response,
                 List<ToolContract.ToolExecutionResult> results, int iteration, AgentBudget currentBudget) {
             for (var result : results) {
+                if (checkpoint != null) checkpoint.observeEvidence().accept(result);
                 if (evidence.size() == 64) evidence.remove(0);
                 evidence.add(result.name() + ":" + result.status() + ":" + result.errorCode());
                 ObjectNode observed = JSON.createObjectNode();

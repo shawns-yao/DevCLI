@@ -92,7 +92,7 @@ class ToolRegistryStructuredResultTest {
             assertEquals(ToolErrorCode.INVALID_ARGUMENTS, command.errorCode());
             assertEquals(ToolErrorCode.INVALID_ARGUMENTS, search.errorCode());
             assertEquals(ToolErrorCode.EXECUTION_FAILED, skill.errorCode());
-            assertEquals(ToolErrorCode.EXECUTION_FAILED, memory.errorCode());
+            assertEquals(ToolErrorCode.HITL_REJECTED, memory.errorCode());
         }
     }
 

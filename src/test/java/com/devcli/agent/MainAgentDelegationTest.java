@@ -19,7 +19,7 @@ class MainAgentDelegationTest {
     void defaultAgentDelegatesThenContinuesWithoutLeakingItsConversation() {
         var client = new AgentDelegationTest.ScriptedClient(
                 AgentDelegationTest.call("delegate_task", """
-                        {"role":"planner","task":"plan only","deliverable":"A bounded plan",
+                        {"role":"explorer","task":"inspect only","deliverable":"Bounded findings",
                          "task_spec":{"execution_kind":"agent_loop",
                          "inputs":"Requirements supplied in this task","scope":"Planning only",
                          "done_condition":"Return steps and acceptance criteria"}}

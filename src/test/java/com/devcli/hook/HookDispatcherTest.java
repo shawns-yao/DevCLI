@@ -1,7 +1,7 @@
 package com.devcli.hook;
 
-import com.devcli.tool.ToolContract;
 import static com.devcli.tool.ToolContract.*;
+import com.devcli.tool.ToolContract;
 import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.hitl.HitlHandler;

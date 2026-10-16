@@ -17,13 +17,15 @@ public interface LlmClient {
         return LlmToolChoiceContext.call(toolChoice, () -> chat(messages, tools, listener));
     }
 
-    record ToolChoice(boolean required, String toolName) {
-        public static final ToolChoice AUTO = new ToolChoice(false, "");
-        public static final ToolChoice REQUIRED = new ToolChoice(true, "");
+    record ToolChoice(Mode mode, String toolName) {
+        public enum Mode { AUTO, NONE, REQUIRED }
+        public static final ToolChoice AUTO = new ToolChoice(Mode.AUTO, "");
+        public static final ToolChoice NONE = new ToolChoice(Mode.NONE, "");
+        public static final ToolChoice REQUIRED = new ToolChoice(Mode.REQUIRED, "");
 
         public ToolChoice {
             toolName = toolName == null ? "" : toolName.trim();
-            if (!required) {
+            if (mode != Mode.REQUIRED) {
                 toolName = "";
             }
         }
@@ -32,12 +34,14 @@ public interface LlmClient {
             if (toolName == null || toolName.isBlank()) {
                 return REQUIRED;
             }
-            return new ToolChoice(true, toolName);
+            return new ToolChoice(Mode.REQUIRED, toolName);
         }
 
         public boolean hasSpecificTool() {
-            return required && !toolName.isBlank();
+            return required() && !toolName.isBlank();
         }
+
+        public boolean required() { return mode == Mode.REQUIRED; }
     }
 
     String getModelName();

@@ -1,7 +1,7 @@
 package com.devcli.agent;
 
-import com.devcli.tool.ToolContract;
 import static com.devcli.tool.ToolContract.*;
+import com.devcli.tool.ToolContract;
 import com.devcli.llm.GLMClient;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.LongTermMemory;

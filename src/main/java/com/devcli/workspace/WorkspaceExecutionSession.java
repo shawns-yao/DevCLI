@@ -62,6 +62,24 @@ public final class WorkspaceExecutionSession implements AutoCloseable {
         return workspace.createPatchSet();
     }
 
+    /** 恢复既有候选补丁，并把工作区局部修改登记到新执行作用域。 */
+    public void restorePatch(PatchSet patch, String scope) throws IOException {
+        java.util.Map<String, String> baselines = new java.util.LinkedHashMap<>();
+        for (var change : patch.changes()) {
+            Path target = toolRegistry.resolveSafePath(change.relativePath());
+            baselines.put(change.relativePath(), java.nio.file.Files.isRegularFile(target)
+                    ? java.nio.file.Files.readString(target) : null);
+        }
+        var applied = patch.apply(workspacePath());
+        if (!applied.applied()) throw new IOException("恢复补丁与当前文件基线冲突: " + applied.failureDescription());
+        for (var change : patch.changes()) {
+            Path target = toolRegistry.resolveSafePath(change.relativePath());
+            toolRegistry.contextVersionLedger().recordLocalWrite(scope, change.relativePath(), target,
+                    baselines.get(change.relativePath()), change.type() == PatchSet.ChangeType.DELETE ? null
+                            : new String(change.content(), java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+
     public PatchSet.ApplyResult apply(PatchSet patchSet) {
         try {
             return commit(patchSet, ignored -> { }, result -> { });

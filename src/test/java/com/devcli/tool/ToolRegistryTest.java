@@ -108,7 +108,7 @@ class ToolRegistryTest {
     }
 
     @Test
-    void mcpToolsAreDeferredFromDefinitionsUntilSearchActivatesThem() {
+    void mcpDiscoveryKeepsDefinitionsUnchanged() {
         ToolRegistry registry = new ToolRegistry();
         registry.registerMcpTool(new McpToolDescriptor(
                 "github",
@@ -123,14 +123,14 @@ class ToolRegistryTest {
         assertFalse(registry.getToolDefinitions().stream()
                 .anyMatch(tool -> "mcp__github__list_issues".equals(tool.name())));
 
+        var before = registry.getToolDefinitions();
         registry.executeTool("search_tools", "{\"query\":\"github issues\"}");
 
-        assertTrue(registry.getToolDefinitions().stream()
-                .anyMatch(tool -> "mcp__github__list_issues".equals(tool.name())));
+        assertEquals(before, registry.getToolDefinitions());
     }
 
     @Test
-    void prefetchToolDefinitionsForInputActivatesMatchingMcpTools() {
+    void discoveryDoesNotActivateMcpToolDefinitions() {
         ToolRegistry registry = new ToolRegistry();
         registry.registerMcpTool(new McpToolDescriptor(
                 "github",
@@ -140,10 +140,11 @@ class ToolRegistryTest {
                 JsonNodeFactory.instance.objectNode()
         ), args -> "ok");
 
-        registry.prefetchToolDefinitionsForInput("帮我查看 github issues");
+        String result = registry.executeTool("search_tools", "{\"query\":\"github issues\"}");
 
         assertTrue(registry.getToolDefinitions().stream()
-                .anyMatch(tool -> "mcp__github__list_issues".equals(tool.name())));
+                .noneMatch(tool -> "mcp__github__list_issues".equals(tool.name())));
+        assertTrue(result.contains("input_schema"));
     }
 
     @Test
@@ -214,7 +215,7 @@ class ToolRegistryTest {
     }
 
     @Test
-    void prefetchIgnoresSingleLetterPromptNoiseWhenSelectingMcpTools() {
+    void searchesMcpToolsWithoutChangingTopLevelDefinitions() {
         ToolRegistry registry = new ToolRegistry();
         for (String toolName : List.of(
                 "add_user_to_channel",
@@ -233,11 +234,11 @@ class ToolRegistryTest {
             ), args -> "ok");
         }
 
-        registry.prefetchToolDefinitionsForInput(
-                "Write the following message to the channel starting with External: Hi, i am a bot");
+        String result = registry.executeTool("search_tools", "{\"query\":\"get_channels\"}");
 
         assertTrue(registry.getToolDefinitions().stream()
-                .anyMatch(tool -> "mcp__agentdojo__get_channels".equals(tool.name())));
+                .noneMatch(tool -> "mcp__agentdojo__get_channels".equals(tool.name())));
+        assertTrue(result.contains("mcp__agentdojo__get_channels"));
     }
 
     @Test

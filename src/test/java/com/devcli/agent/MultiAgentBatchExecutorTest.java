@@ -88,7 +88,7 @@ class MultiAgentBatchExecutorTest {
     }
 
     @Test
-    void separatesStepsThatWriteTheSameResource() {
+    void serializesWriteStepsEvenWhenTheirResourcesDiffer() {
         try (ToolRegistry registry = new ToolRegistry()) {
             LlmClient llmClient = stubLlmClient();
             List<SubAgent> workers = List.of(
@@ -121,7 +121,7 @@ class MultiAgentBatchExecutorTest {
 
             executor.execute(2, List.of(
                             step("first", "修改 src/A.java", "FILE_WRITE"),
-                            step("second", "写入 src/A.java", "FILE_WRITE")),
+                            step("second", "写入 src/B.java", "FILE_WRITE")),
                     TraceContext.root("test"));
 
             assertEquals(1, peak.get());

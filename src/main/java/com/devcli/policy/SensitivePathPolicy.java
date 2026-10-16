@@ -25,7 +25,7 @@ public final class SensitivePathPolicy {
     /** 整棵目录受保护：任何写入都拒绝。 */
     private static final Set<String> PROTECTED_ROOTS = Set.of(".git", ".ssh");
     private static final Set<String> AGENT_CONFIG_NAMES = Set.of(
-            "hooks.json", "mcp.json", "config.json");
+            "hooks.json", "mcp.json", "config.json", "agents");
 
     /** 允许写入的模板文件：它们本来就是要提交的示例配置。 */
     private static final Set<String> TEMPLATE_NAMES = Set.of(

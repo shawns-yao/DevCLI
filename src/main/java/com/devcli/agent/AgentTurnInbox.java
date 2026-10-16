@@ -46,6 +46,11 @@ public final class AgentTurnInbox {
         return drain(followUp, followUpMode);
     }
 
+    /** Takes one pending CLI turn without discarding the rest of a batch. */
+    public synchronized Item pollNext() {
+        return steering.isEmpty() ? followUp.pollFirst() : steering.pollFirst();
+    }
+
     public synchronized Snapshot snapshot() {
         return new Snapshot(List.copyOf(steering), List.copyOf(followUp), capacity);
     }

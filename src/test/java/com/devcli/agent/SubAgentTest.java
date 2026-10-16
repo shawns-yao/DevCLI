@@ -68,7 +68,8 @@ class SubAgentTest {
                     new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
 
             assertEquals(5, llm.toolsByCall.size());
-            assertTrue(llm.toolsByCall.get(4) == null || llm.toolsByCall.get(4).isEmpty());
+            assertEquals(llm.toolsByCall.getFirst(), llm.toolsByCall.get(4));
+            assertEquals(LlmClient.ToolChoice.Mode.NONE, llm.choicesByCall.get(4).mode());
             String finalPrompt = llm.messagesByCall.get(4).stream()
                     .filter(message -> "user".equals(message.role()))
                     .reduce((first, second) -> second)
@@ -525,10 +526,18 @@ class SubAgentTest {
         private final java.util.Iterator<CallScript> iter;
         private final List<List<Message>> messagesByCall = new java.util.ArrayList<>();
         private final List<List<Tool>> toolsByCall = new java.util.ArrayList<>();
+        private final List<ToolChoice> choicesByCall = new java.util.ArrayList<>();
 
         private MultiCallStreamClient(List<CallScript> scripts) {
             super("test-key");
             this.iter = scripts.iterator();
+        }
+
+        @Override
+        public ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener,
+                                 ToolChoice choice) throws IOException {
+            choicesByCall.add(choice);
+            return chat(messages, tools, listener);
         }
 
         @Override

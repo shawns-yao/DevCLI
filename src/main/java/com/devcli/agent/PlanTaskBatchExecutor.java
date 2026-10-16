@@ -46,9 +46,11 @@ final class PlanTaskBatchExecutor {
     }
 
     List<PlanTaskExecutionResult> execute(List<Task> executableTasks) {
-        List<List<Task>> waves = ResourceConflictDetector.splitConflictFree(
+        List<List<Task>> resourceWaves = ResourceConflictDetector.splitConflictFree(
                 executableTasks, Task::getId, Task::getDescription,
                 task -> task.getType().name(), projectRoot);
+        List<List<Task>> waves = com.devcli.plan.SingleWriterScheduling.split(
+                resourceWaves, task -> task.getType().name());
         if (waves.size() <= 1) {
             return executeConflictFreeWave(executableTasks);
         }

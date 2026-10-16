@@ -88,12 +88,14 @@ final class MultiAgentBatchExecutor {
 
     void execute(int batchIndex, List<AgentOrchestrator.ExecutionStep> executable,
                  TraceContext traceContext) {
-        List<List<AgentOrchestrator.ExecutionStep>> waves = ResourceConflictDetector.splitConflictFree(
+        List<List<AgentOrchestrator.ExecutionStep>> resourceWaves = ResourceConflictDetector.splitConflictFree(
                 executable,
                 AgentOrchestrator.ExecutionStep::id,
                 AgentOrchestrator.ExecutionStep::description,
                 AgentOrchestrator.ExecutionStep::type,
                 Path.of(toolRegistry.getProjectPath()));
+        List<List<AgentOrchestrator.ExecutionStep>> waves = com.devcli.plan.SingleWriterScheduling.split(
+                resourceWaves, AgentOrchestrator.ExecutionStep::type);
         for (List<AgentOrchestrator.ExecutionStep> wave : waves) {
             traceRecorder.record(traceContext, "batch.wave", Map.of(
                     "batchIndex", batchIndex,

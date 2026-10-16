@@ -1,11 +1,8 @@
 package com.devcli.agent;
 
 import com.devcli.tool.ToolContract;
-import com.devcli.llm.LlmClient;
-import com.devcli.tool.ToolRegistry;
 import com.devcli.tool.ToolStatus;
 import com.devcli.tool.ToolInvocationFingerprint;
-import com.devcli.tool.provider.ToolSearchProvider;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -14,66 +11,14 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HexFormat;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 
-/** Task-local visibility and observation tracking for the shared execution loop. */
+/** Task-local repeated-observation detection and actionable tool errors. */
 final class ToolCallGovernance {
-    private static final Set<String> CONTROL_TOOLS = Set.of(
-            "search_tools", "read_tool_result", "delegate_task", "delegate_control");
-    private static final int MAX_RETAINED_TOOLS = 8;
     private final Deque<String> observations = new ArrayDeque<>();
-    private final Set<String> discovered = new LinkedHashSet<>();
 
-    List<LlmClient.Tool> route(List<LlmClient.Tool> available, List<LlmClient.Message> history,
-                               LlmClient.ToolChoice choice, String routingInput) {
-        if (available == null) {
-            discovered.clear();
-            return null;
-        }
-        Set<String> names = available.stream().map(LlmClient.Tool::name)
-                .collect(java.util.stream.Collectors.toSet());
-        discovered.retainAll(names);
-        if (available.size() <= 12
-                || available.stream().noneMatch(tool -> "search_tools".equals(tool.name()))) {
-            return available;
-        }
-        String query = routingInput == null ? "" : routingInput;
-        if (routingInput == null) {
-            for (LlmClient.Message message : history) {
-                if (message.source() == LlmClient.MessageSource.USER
-                        || message.source() == LlmClient.MessageSource.STEERING) {
-                    query = message.content();
-                }
-            }
-        }
-        Set<String> selected = new LinkedHashSet<>();
-        available.stream().filter(tool -> CONTROL_TOOLS.contains(tool.name()))
-                .forEach(tool -> selected.add(tool.name()));
-        if (choice != null && choice.hasSpecificTool()) selected.add(choice.toolName());
-        selected.addAll(discovered);
-        ToolSearchProvider.rankCandidates(available, query).stream()
-                .filter(tool -> !CONTROL_TOOLS.contains(tool.name())).limit(5)
-                .map(LlmClient.Tool::name).forEach(selected::add);
-        return available.stream().filter(tool -> selected.contains(tool.name())).toList();
-    }
 
     boolean observe(List<ToolContract.ToolExecutionResult> results, ToolContract.ToolSnapshot snapshot) {
-        for (var result : results) {
-            if ("search_tools".equals(result.name()) && result.status() == ToolStatus.SUCCESS) {
-                result.sideChannels().stream().filter(ToolSearchProvider.DiscoveredTools.class::isInstance)
-                        .map(ToolSearchProvider.DiscoveredTools.class::cast)
-                        .forEach(match -> {
-                            for (int index = match.names().size() - 1; index >= 0; index--) {
-                                retainTool(match.names().get(index));
-                            }
-                        });
-            } else if (result.status() == ToolStatus.SUCCESS && snapshot != null
-                    && snapshot.definitions().stream().anyMatch(tool -> tool.name().equals(result.name()))) {
-                retainTool(result.name());
-            }
-        }
         // Unknown effects, mutations and rich evidence are not proof of an unchanged observation.
         if (snapshot == null || results.isEmpty() || results.stream().anyMatch(result ->
                 snapshot.effect(result.name()) != ToolContract.ToolEffect.READ_ONLY
@@ -106,12 +51,6 @@ final class ToolCallGovernance {
         return false;
     }
 
-    private void retainTool(String name) {
-        if (CONTROL_TOOLS.contains(name)) return;
-        discovered.remove(name);
-        discovered.add(name);
-        while (discovered.size() > MAX_RETAINED_TOOLS) discovered.remove(discovered.iterator().next());
-    }
 
     static String modelResult(ToolContract.ToolExecutionResult result) {
         if (result.status() == ToolStatus.SUCCESS) return result.result();

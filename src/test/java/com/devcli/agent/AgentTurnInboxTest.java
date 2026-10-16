@@ -11,6 +11,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class AgentTurnInboxTest {
 
     @Test
+    void pollingNextTurnPreservesOtherMessagesInBatchMode() {
+        AgentTurnInbox inbox = new AgentTurnInbox();
+        inbox.setSteeringMode(AgentTurnInbox.QueueMode.ALL);
+        inbox.setFollowUpMode(AgentTurnInbox.QueueMode.ALL);
+        inbox.enqueueFollowUp("later one");
+        inbox.enqueueFollowUp("later two");
+        inbox.enqueueSteering("now one");
+        inbox.enqueueSteering("now two");
+        assertEquals("now one", inbox.pollNext().text());
+        assertEquals(3, inbox.snapshot().size());
+        assertEquals("now two", inbox.pollNext().text());
+        assertEquals("later one", inbox.pollNext().text());
+        assertEquals("later two", inbox.pollNext().text());
+        assertFalse(inbox.hasMessages());
+    }
+
+    @Test
     void prioritizesSteeringAndDrainsOneMessageByDefault() {
         AgentTurnInbox inbox = new AgentTurnInbox(4);
 

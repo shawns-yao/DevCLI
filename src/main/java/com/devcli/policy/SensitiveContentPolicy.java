@@ -10,17 +10,13 @@ import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.regex.Pattern;
 
 /** Deterministic content inspection; findings are hints, not a complete DLP guarantee. */
 public final class SensitiveContentPolicy {
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final Pattern PRIVATE_KEY = Pattern.compile(
-            "(?s)-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----.*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|\\z)");
-    private static final Pattern API_TOKEN = Pattern.compile(
-            "\\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|"
-                    + "github_pat_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16})\\b");
     private static final Pattern SECRET_FIELD = Pattern.compile(
             "(?i)(?:.*[_-])?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|"
                     + "passwd|secret|client[_-]?secret|authorization|cookie|set-cookie)");
@@ -29,9 +25,19 @@ public final class SensitiveContentPolicy {
 
     public enum Decision { ALLOW_ONCE, REDACT, REJECT }
 
-    public record Inspection(String sanitized, Set<String> types) {
+    public record Finding(String type, int start, int end, String rule) { }
+
+    public record Inspection(String sanitized, Set<String> types, List<Finding> findings, String source) {
+        public Inspection(String sanitized, Set<String> types) {
+            this(sanitized, types, List.of(), "");
+        }
+
         public Inspection {
             types = Set.copyOf(types);
+            findings = List.copyOf(findings);
+        }
+        public Inspection withSource(String location) {
+            return new Inspection(sanitized, types, findings, location);
         }
         public boolean sensitive() { return !types.isEmpty(); }
         public String typeLabels() {
@@ -52,15 +58,24 @@ public final class SensitiveContentPolicy {
 
     public static Inspection inspect(String text) {
         String raw = text == null ? "" : text;
+        return inspectRange(raw, 0, raw.length());
+    }
+
+    /** Scan the immutable full snapshot, then review only findings intersecting the returned range. */
+    public static Inspection inspectRange(String raw, int start, int end) {
+        java.util.Objects.checkFromToIndex(start, end, raw.length());
+        List<Finding> findings = start == end ? List.of() : SensitiveTextScanner.scan(raw).stream()
+                .filter(finding -> finding.start() < end && finding.end() > start).toList();
         Set<String> types = new LinkedHashSet<>();
-        var common = SensitiveDataRedactor.inspect(raw);
-        String sanitized = common.sanitizedText();
-        if (!raw.equals(sanitized)) types.addAll(common.removedTypes());
-        if (PRIVATE_KEY.matcher(raw).find()) types.add("private_key");
-        if (API_TOKEN.matcher(raw).find()) types.add("credential");
-        sanitized = PRIVATE_KEY.matcher(sanitized).replaceAll("[REDACTED_PRIVATE_KEY]");
-        sanitized = API_TOKEN.matcher(sanitized).replaceAll("[REDACTED_CREDENTIAL]");
-        return new Inspection(sanitized, types);
+        StringBuilder sanitized = new StringBuilder(raw.substring(start, end));
+        for (Finding finding : findings) {
+            types.add(finding.type());
+            for (int offset = Math.max(start, finding.start()); offset < Math.min(end, finding.end()); offset++) {
+                char character = raw.charAt(offset);
+                if (character != '\r' && character != '\n') sanitized.setCharAt(offset - start, '*');
+            }
+        }
+        return new Inspection(sanitized.toString(), types, findings, "");
     }
 
     public static Inspection inspectArguments(JsonNode arguments) {

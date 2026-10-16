@@ -263,7 +263,6 @@ public class SubAgent {
 
     private String getSystemPrompt(PromptMode mode) {
         return promptAssembler.assemble(mode, PromptContext.builder()
-                .externalContext(buildExternalContext())
                 .ruleContext(buildRuleContext())
                 .build());
     }
@@ -274,6 +273,7 @@ public class SubAgent {
      */
     private String buildTurnContext() {
         return promptAssembler.assembleTurnContext(PromptContext.builder()
+                .externalContext(buildExternalContext())
                 .memoryContext(buildMemoryContext())
                 .sessionMemory(buildSessionMemory())
                 .skillIndex(buildSkillIndex())
@@ -545,16 +545,6 @@ public class SubAgent {
                         return toolsEnabled && !isReviewerFinalIteration(iteration)
                                 ? toolDefinitionsFor(forkContext)
                                 : null;
-                    }
-
-                    @Override
-                    public boolean allowsToolRouting() {
-                        return forkContext == null;
-                    }
-
-                    @Override
-                    public String toolRoutingInput() {
-                        return task.content();
                     }
 
                     @Override

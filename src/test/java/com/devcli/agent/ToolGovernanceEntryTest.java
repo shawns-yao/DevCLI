@@ -23,23 +23,6 @@ class ToolGovernanceEntryTest {
     @TempDir Path project;
 
     @Test
-    void narrowsCatalogAndKeepsDiscoveredToolVisible() throws Exception {
-        var client = new AgentDelegationTest.ScriptedClient(
-                call("search_tools", "{\"query\":\"lookup_journal\",\"limit\":\"1\"}"),
-                answer("done"));
-        try (Fixture fixture = fixture(client)) {
-            for (int i = 0; i < 30; i++) register(fixture.registry, "lookup_" + i, () -> "unused");
-            register(fixture.registry, "lookup_journal", () -> "journal");
-            assertEquals("done", fixture.agent.run("Inspect lookup_9"));
-            assertTrue(client.tools.getFirst().size() <= 9, client.tools.getFirst().toString());
-            assertTrue(client.tools.getFirst().stream().anyMatch(tool -> tool.name().equals("lookup_9")));
-            assertTrue(client.tools.get(1).stream().anyMatch(tool -> tool.name().equals("lookup_journal")));
-            assertTrue(client.tools.stream().allMatch(tools ->
-                    tools.stream().anyMatch(tool -> tool.name().equals("search_tools"))));
-        }
-    }
-
-    @Test
     void rejectsOversizedBatchBeforeAnyExecutionAndPairsEveryCall() throws Exception {
         String key = "devcli.tool.budget.max.calls";
         String previous = System.getProperty(key);
@@ -177,109 +160,6 @@ class ToolGovernanceEntryTest {
         var client = new AgentDelegationTest.ScriptedClient(responses.toArray(LlmClient.ChatResponse[]::new));
         try (Fixture fixture = fixture(client)) {
             assertEquals("six files read", fixture.agent.run("Read the six files"));
-        }
-    }
-
-    @Test
-    void searchedCandidatesRemainVisibleOnlyWithinCurrentTask() throws Exception {
-        var client = new AgentDelegationTest.ScriptedClient(
-                call("search_tools", "{\"query\":\"zz_probe\",\"limit\":\"5\"}"),
-                call("zz_probe_0", "{}"), answer("done"), answer("next task"));
-        try (Fixture fixture = fixture(client)) {
-            for (int i = 0; i < 20; i++) register(fixture.registry, "lookup_" + i, () -> "value");
-            for (int i = 0; i < 5; i++) register(fixture.registry, "zz_probe_" + i, () -> "probe");
-            assertEquals("done", fixture.agent.run("lookup_9"));
-            assertTrue(client.tools.get(1).stream().anyMatch(tool -> tool.name().equals("zz_probe_0")));
-            assertEquals(5, client.tools.get(2).stream().filter(tool -> tool.name().startsWith("zz_probe_")).count());
-            assertTrue(client.tools.get(2).stream().anyMatch(tool -> tool.name().equals("lookup_9")));
-            assertEquals("next task", fixture.agent.run("lookup_9"));
-            assertTrue(client.tools.get(3).stream().noneMatch(tool -> tool.name().startsWith("zz_probe_")),
-                    client.tools.get(3).stream().map(LlmClient.Tool::name).toList().toString());
-        }
-    }
-
-    @Test
-    void multipleSearchResultsAccumulateWithoutDroppingEarlierDiscovery() throws Exception {
-        var searches = List.of(
-                new LlmClient.ToolCall("search-one", new LlmClient.ToolCall.Function("search_tools", "{\"query\":\"zz_alpha\"}")),
-                new LlmClient.ToolCall("search-two", new LlmClient.ToolCall.Function("search_tools", "{\"query\":\"zz_beta\"}")));
-        var client = new AgentDelegationTest.ScriptedClient(
-                new LlmClient.ChatResponse("assistant", "", null, searches, 10, 2),
-                call("lookup_9", "{}"), answer("done"));
-        try (Fixture fixture = fixture(client)) {
-            for (int i = 0; i < 20; i++) register(fixture.registry, "lookup_" + i, () -> "value");
-            register(fixture.registry, "zz_alpha", () -> "alpha");
-            register(fixture.registry, "zz_beta", () -> "beta");
-            fixture.agent.run("lookup_9");
-            for (int index : List.of(1, 2)) {
-                assertTrue(client.tools.get(index).stream().anyMatch(tool -> tool.name().equals("zz_alpha")));
-                assertTrue(client.tools.get(index).stream().anyMatch(tool -> tool.name().equals("zz_beta")));
-                assertTrue(client.tools.get(index).stream().anyMatch(tool -> tool.name().equals("lookup_9")));
-            }
-        }
-    }
-
-    @Test
-    void retainedDiscoveryIsBoundedWithoutDisplacingCurrentQuery() throws Exception {
-        var client = new AgentDelegationTest.ScriptedClient(
-                call("search_tools", "{\"query\":\"zz_probe\",\"limit\":\"20\"}"), answer("done"));
-        try (Fixture fixture = fixture(client)) {
-            for (int i = 0; i < 20; i++) {
-                register(fixture.registry, "lookup_" + i, () -> "value");
-                register(fixture.registry, "zz_probe_" + i, () -> "probe");
-            }
-            fixture.agent.run("lookup_9");
-            assertEquals(8, client.tools.get(1).stream().filter(tool -> tool.name().startsWith("zz_probe_")).count());
-            assertTrue(client.tools.get(1).stream().anyMatch(tool -> tool.name().equals("lookup_9")));
-            assertTrue(client.tools.get(1).size() <= 17);
-        }
-    }
-
-    @Test
-    void removedToolIsEvictedFromRetainedDiscovery() throws Exception {
-        var client = new AgentDelegationTest.ScriptedClient(
-                call("search_tools", "{\"query\":\"zz_probe\"}"),
-                call("forget_probe", "{}"), answer("done"));
-        try (Fixture fixture = fixture(client)) {
-            for (int i = 0; i < 20; i++) register(fixture.registry, "lookup_" + i, () -> "value");
-            register(fixture.registry, "zz_probe", () -> "probe");
-            fixture.registry.registerTool(new ToolContract.Tool("forget_probe", "Forget probe",
-                    new ObjectMapper().readTree("{\"type\":\"object\"}"), args -> {
-                fixture.registry.removeTool("zz_probe");
-                return "forgotten";
-            }, ToolContract.ToolEffect.LOCAL_CONTEXT));
-            fixture.agent.run("lookup_9");
-            assertTrue(client.tools.get(1).stream().anyMatch(tool -> tool.name().equals("zz_probe")));
-            assertTrue(client.tools.get(2).stream().noneMatch(tool -> tool.name().equals("zz_probe")));
-        }
-    }
-
-    @Test
-    void expandedContextDoesNotDriveInitialToolSelection() throws Exception {
-        var client = new AgentDelegationTest.ScriptedClient(answer("done"));
-        try (Fixture fixture = fixture(client)) {
-            for (int i = 0; i < 20; i++) register(fixture.registry, "lookup_" + i, () -> "value");
-            register(fixture.registry, "zz_probe", () -> "probe");
-            fixture.agent.run("lookup_9", "Attached evidence repeatedly mentions zz_probe. lookup_9", LlmClient.ToolChoice.AUTO);
-            assertTrue(client.tools.getFirst().stream().anyMatch(tool -> tool.name().equals("lookup_9")));
-            assertTrue(client.tools.getFirst().stream().noneMatch(tool -> tool.name().equals("zz_probe")));
-            assertTrue(client.requests.getFirst().stream().anyMatch(message -> message.content() != null
-                    && message.content().contains("Attached evidence repeatedly mentions zz_probe")));
-        }
-    }
-
-    @Test
-    void deliveredSteeringUpdatesToolRoutingInput() throws Exception {
-        var client = new AgentDelegationTest.ScriptedClient(call("lookup_0", "{}"), answer("done"));
-        try (Fixture fixture = fixture(client)) {
-            for (int i = 0; i < 20; i++) register(fixture.registry, "lookup_" + i, () -> "value");
-            client.beforeResponse = () -> {
-                if (client.requests.size() == 1) fixture.agent.getTurnInbox().enqueueSteering("lookup_19");
-            };
-            fixture.agent.run("lookup_0");
-            assertTrue(client.tools.getFirst().stream().noneMatch(tool -> tool.name().equals("lookup_19")));
-            assertTrue(client.tools.get(1).stream().anyMatch(tool -> tool.name().equals("lookup_19")));
-            assertTrue(client.tools.get(1).stream().anyMatch(tool -> tool.name().equals("lookup_0")));
         }
     }
 

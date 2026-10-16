@@ -242,7 +242,6 @@ public class PlanExecuteAgent {
         currentSessionTaskId = sessionTaskId;
         memoryManager.beginTask(sessionTaskId);
         memoryManager.setActiveProjectScope(toolRegistry.getProjectPath());
-        toolRegistry.prefetchToolDefinitionsForInput(userInput);
         memoryManager.addUserMessage(userInput);
         StreamState streamState = new StreamState();
         String resultForSummary = "";
@@ -546,11 +545,6 @@ public class PlanExecuteAgent {
                     }
 
                     @Override
-                    public String toolRoutingInput() {
-                        return task.getDescription();
-                    }
-
-                    @Override
                     public List<LlmClient.Tool> toolDefinitions(int iteration) {
                         return toolSnapshot(iteration).definitions();
                     }
@@ -743,7 +737,6 @@ public class PlanExecuteAgent {
         return promptAssembler.assemble(PromptMode.PLAN, PromptContext.builder()
                 .variable("taskType", task.getType())
                 .variable("taskDescription", task.getDescription())
-                .externalContext(buildExternalContext())
                 .ruleContext(buildRuleContext())
                 .build());
     }
@@ -751,6 +744,7 @@ public class PlanExecuteAgent {
     /** 组装当轮上下文快照（长期记忆检索结果 / skill 索引 / 工作记忆），前置到任务消息。 */
     private String buildTurnContext(String memoryContext, String activationText) {
         return promptAssembler.assembleTurnContext(PromptContext.builder()
+                .externalContext(buildExternalContext())
                 .memoryContext(memoryContext)
                 .sessionMemory(memoryManager.buildSessionMemorySection())
                 .skillIndex(buildSkillIndex(activationText))

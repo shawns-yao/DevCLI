@@ -74,8 +74,7 @@ public final class DelegationPolicy {
         // 它同时免疫误伤（不按文件数或输入长度推断）与刷分（改写成循环等于承诺多轮迭代）。
         if (!spec.path("execution_kind").asText().equals("agent_loop"))
             return deny("单次工具操作或未声明执行粒度，应由主 Agent 执行");
-        List<String> writePaths = "worker".equals(args.get("role"))
-                ? parseWritePaths(args) : List.of();
+        List<String> writePaths = parseWritePaths(args);
         return new Decision(true, "委派请求通过准入检查", Yield.of(args, spec, writePaths));
     }
 

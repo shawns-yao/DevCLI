@@ -321,7 +321,9 @@ public abstract class AbstractOpenAiCompatibleClient implements LlmClient {
                 functionNode.put("description", tool.description());
                 functionNode.set("parameters", tool.parameters());
             }
-            if (toolChoice != null && toolChoice.required()) {
+            if (ToolChoice.NONE.equals(toolChoice)) {
+                requestBody.put("tool_choice", "none");
+            } else if (toolChoice != null && toolChoice.required()) {
                 if (toolChoice.hasSpecificTool()) {
                     ObjectNode choiceNode = requestBody.putObject("tool_choice");
                     choiceNode.put("type", "function");

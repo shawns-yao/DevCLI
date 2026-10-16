@@ -1,7 +1,7 @@
 package com.devcli.agent;
 
-import com.devcli.tool.ToolContract;
 import static com.devcli.tool.ToolContract.*;
+import com.devcli.tool.ToolContract;
 import com.devcli.hook.HookDefinition;
 import com.devcli.hook.HookDispatcher;
 import com.devcli.hook.HookEvent;

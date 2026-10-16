@@ -15,6 +15,19 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 class AgentSessionRuntimeTest {
 
     @Test
+    void streamedAnswerIsArchivedWithoutBeingDisplayedTwice() {
+        com.devcli.agent.Agent agent = org.mockito.Mockito.mock(com.devcli.agent.Agent.class);
+        org.mockito.Mockito.when(agent.run("hello", "hello", LlmClient.ToolChoice.AUTO)).thenReturn("");
+        org.mockito.Mockito.when(agent.getConversationHistory()).thenReturn(List.of(
+                LlmClient.Message.user("hello"), LlmClient.Message.assistant("answer already streamed")));
+        try (AgentSessionRuntime session = AgentSessionRuntime.adopt(agent, Path.of("."))) {
+            var result = session.runInCurrentContext("hello");
+            assertEquals("answer already streamed", result.output());
+            assertEquals("", result.displayOutput());
+        }
+    }
+
+    @Test
     void synchronousCliEntryKeepsCallerRunContextAndClosesActiveState() {
         try (AgentSessionRuntime session = AgentSessionRuntime.create(
                 new NoopLlmClient(), Path.of("."), null)) {

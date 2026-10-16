@@ -25,7 +25,7 @@ public final class ToolSearchProvider implements ToolProvider {
     public void register(ToolContext context) {
         context.registerTool(ToolContract.Tool.structured(
                 "search_tools",
-                "Search currently available tools by name, description and parameter schema. Use this when the exact MCP or built-in tool name is unknown.",
+                "Search available tools by name, description and parameter schema. MCP results include input_schema and schema_fingerprint for call_mcp_tool; discovery never changes top-level tool definitions.",
                 context.createToolParameters(
                         new ToolParameter("query", "string", "keywords to search in tool name, description and parameter schema", true),
                         new ToolParameter("limit", "string", "maximum number of matches to return, default 10", false)
@@ -72,6 +72,12 @@ public final class ToolSearchProvider implements ToolProvider {
             context.activateToolDefinition(entry.name());
             sb.append("- ").append(entry.name()).append(": ")
                     .append(oneLine(entry.description())).append('\n');
+            if (entry.name().startsWith("mcp__")) {
+                context.searchableTools().stream().filter(tool -> tool.name().equals(entry.name()))
+                        .findFirst().ifPresent(tool -> sb.append("  schema_fingerprint: ")
+                                .append(ToolRegistry.toolDefinitionFingerprint(tool))
+                                .append("\n  input_schema: ").append(tool.parameters()).append('\n'));
+            }
         }
         return ToolOutput.success(sb.toString().stripTrailing())
                 .withSideChannel(new DiscoveredTools(matches.stream().map(match -> match.entry().name()).toList()));
@@ -93,38 +99,6 @@ public final class ToolSearchProvider implements ToolProvider {
                 .sorted(Comparator.comparingInt(RankedTool::score).reversed()
                         .thenComparing(ranked -> ranked.tool().name()))
                 .map(RankedTool::tool).toList();
-    }
-
-    public int prefetchToolDefinitionsForInput(ToolContext context, String input) {
-        String normalized = input == null ? "" : input.trim().toLowerCase(Locale.ROOT);
-        if (normalized.isBlank()) {
-            return 0;
-        }
-        List<String> terms = splitTerms(normalized).stream()
-                .filter(term -> !QUERY_STOP_WORDS.contains(term))
-                .filter(term -> !term.matches("[a-z]"))
-                .distinct()
-                .toList();
-        if (terms.isEmpty()) {
-            return 0;
-        }
-        int activated = 0;
-        List<ToolSearchMatch> matches = searchEntries(context).stream()
-                .filter(entry -> context.isMcpTool(entry.name()))
-                .map(entry -> new ToolSearchMatch(entry, scoreTool(entry, terms)))
-                .filter(match -> match.score() > 0)
-                .sorted(Comparator
-                        .comparingInt(ToolSearchMatch::score).reversed()
-                        .thenComparing(match -> match.entry().name()))
-                .limit(5)
-                .toList();
-        for (ToolSearchMatch match : matches) {
-            String name = match.entry().name();
-            if (context.activateToolDefinition(name)) {
-                activated++;
-            }
-        }
-        return activated;
     }
 
     public long buildCount() {

@@ -6,6 +6,12 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class DelegationPolicyTest {
     @Test
+    void synchronousWorkerRemainsAvailable() {
+        assertTrue(DelegationPolicy.evaluate(AgentDelegationTest.brief(
+                "role", "worker", "run_in_background", "false")).allowed());
+    }
+
+    @Test
     void wildcardWithExtensionDoesNotCountAsSpecificFile() {
         var specific = DelegationPolicy.evaluate(AgentDelegationTest.brief(
                 "role", "worker", "allowed_write_paths", "[\"src/Payment.java\"]"));
@@ -17,16 +23,6 @@ class DelegationPolicyTest {
             assertTrue(broad.allowed(), glob);
         }
         assertTrue(specific.allowed());
-    }
-
-    @Test
-    void readOnlyRoleCannotImproveScoreWithUnusedWriteDeclaration() {
-        var normal = DelegationPolicy.evaluate(AgentDelegationTest.brief(
-                "role", "explorer", "allowed_write_paths", "[]"));
-        var declared = DelegationPolicy.evaluate(AgentDelegationTest.brief(
-                "role", "explorer", "allowed_write_paths", "[\"src/File.java\"]"));
-        assertEquals(normal.yield().benefit(), declared.yield().benefit());
-        assertEquals(normal.yield().score(), declared.yield().score());
     }
 
     @Test

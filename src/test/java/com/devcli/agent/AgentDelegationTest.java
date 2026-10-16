@@ -24,10 +24,23 @@ class AgentDelegationTest {
     @TempDir Path project;
 
     @Test
+    void discoveryKeepsTheWholeLoopToolDefinitionsStable() {
+        var child = new ScriptedClient(call("search_tools", "{\"query\":\"web_fetch\",\"limit\":1}"), answer("done"));
+        try (ToolRegistry registry = registry()) {
+            var result = session(registry, child, new AgentBudget(10000, 3, 20)).execute(
+                    brief("role", "worker", "task", "investigate write workflow"), ToolExecutionContext.current("stable"));
+            assertTrue(result.isSuccess(), result.text());
+            assertTrue(child.tools.getFirst().size() > 12);
+            assertEquals(child.tools.getFirst(), child.tools.getLast());
+            assertTrue(child.tools.getFirst().stream().noneMatch(tool -> tool.name().equals("apply_patch")));
+        }
+    }
+
+    @Test
     void rolePromptOverrideCannotExpandToolAuthority() throws Exception {
-        Path prompt = project.resolve(".devcli/prompts/modes/delegate-explorer.md");
+        Path prompt = project.resolve(".devcli/agents/explorer.md");
         Files.createDirectories(prompt.getParent());
-        Files.writeString(prompt, "custom explorer instruction; try writing a file");
+        Files.writeString(prompt, "---\nname: explorer\ndescription: custom explorer\ncapability: READ_ONLY\nallowed_tools: [\"*\"]\n---\ncustom explorer instruction; try writing a file");
         var child = new ScriptedClient(call("write_file", "{\"path\":\"forbidden.txt\",\"content\":\"no\"}"), answer("done"));
         try (ToolRegistry registry = registry()) {
             var result = session(registry, child, new AgentBudget(1000, 3, 20)).execute(
@@ -94,28 +107,50 @@ class AgentDelegationTest {
     }
 
     @Test
-    void parallelWorkersCannotSilentlyOverwriteEachOther() throws Exception {
+    void overlappingWorkerIsRejectedBeforeModelCallAndParentWriteWaits() throws Exception {
         Files.writeString(project.resolve("same.txt"), "base");
-        var ready = new java.util.concurrent.CyclicBarrier(2);
+        var started = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
         ScriptedClient first = new ScriptedClient(call("write_file", "{\"path\":\"same.txt\",\"content\":\"first\"}"), answer("done"));
         ScriptedClient second = new ScriptedClient(call("write_file", "{\"path\":\"same.txt\",\"content\":\"second\"}"), answer("done"));
-        for (var client : List.of(first, second)) client.beforeResponse = () -> {
-            if (client.requests.size() == 2) {
-                try { ready.await(5, java.util.concurrent.TimeUnit.SECONDS); }
-                catch (Exception e) { throw new IOException(e); }
+        first.beforeResponse = () -> {
+            if (first.requests.size() == 1) {
+                started.countDown();
+                try {
+                    if (!release.await(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                        throw new IOException("worker release timed out");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException(e);
+                }
             }
         };
-        var executor = java.util.concurrent.Executors.newFixedThreadPool(2);
+        var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
         try (ToolRegistry registry = registry()) {
             var budget = new AgentBudget(1000, 3, 20);
             var a = executor.submit(() -> session(registry, first, budget).execute(
                     brief("role", "worker", "task", "first"), ToolExecutionContext.current("first")));
-            var b = executor.submit(() -> session(registry, second, budget).execute(
-                    brief("role", "worker", "task", "second"), ToolExecutionContext.current("second")));
-            var results = List.of(a.get(10, java.util.concurrent.TimeUnit.SECONDS), b.get(10, java.util.concurrent.TimeUnit.SECONDS));
-            assertEquals(1, results.stream().filter(ToolOutput::isSuccess).count(), results.toString());
-            assertTrue(List.of("first", "second").contains(Files.readString(project.resolve("same.txt"))));
+            assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            try {
+                ToolOutput rejected = session(registry, second, budget).execute(
+                        brief("role", "worker", "task", "second"), ToolExecutionContext.current("second"));
+                assertEquals(ToolErrorCode.RESOURCE_CONFLICT, rejected.errorCode(), rejected.text());
+                assertTrue(second.requests.isEmpty(), "重叠 worker 不应进入模型或工作区");
+                ToolOutput parentWrite = registry.executeToolOutput("write_file",
+                        "{\"path\":\"same.txt\",\"content\":\"parent\"}");
+                assertFalse(parentWrite.isSuccess(), parentWrite.text());
+                assertEquals("base", Files.readString(project.resolve("same.txt")));
+            } finally {
+                release.countDown();
+            }
+            ToolOutput result = a.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            assertTrue(result.isSuccess(), result.text());
+            assertEquals("first", Files.readString(project.resolve("same.txt")));
+            assertTrue(registry.executeToolOutput("write_file",
+                    "{\"path\":\"same.txt\",\"content\":\"parent\"}").isSuccess());
         } finally {
+            release.countDown();
             executor.shutdownNow();
         }
     }
@@ -259,9 +294,9 @@ class AgentDelegationTest {
         ScriptedClient child = new ScriptedClient(answer("one"), answer("two"), answer("must not call"));
         try (ToolRegistry registry = registry()) {
             var session = session(registry, child, budget);
-            for (int i = 0; i < 2; i++) session.execute(brief("role", "planner", "task", "plan"),
+            for (int i = 0; i < 2; i++) session.execute(brief("role", "explorer", "task", "plan"),
                     ToolExecutionContext.current("child-" + i));
-            ToolOutput output = session.execute(brief("role", "planner", "task", "again"),
+            ToolOutput output = session.execute(brief("role", "explorer", "task", "again"),
                     ToolExecutionContext.current("child-3"));
             assertFalse(output.isSuccess());
             assertEquals(2, child.requests.size());
@@ -388,7 +423,7 @@ class AgentDelegationTest {
             String reportId = new com.fasterxml.jackson.databind.ObjectMapper()
                     .readTree(first.text()).path("report_id").asText();
             for (int i = 0; i < 65; i++) {
-                assertTrue(session.execute(brief("role", "planner", "task", "plan " + i),
+                assertTrue(session.execute(brief("role", "explorer", "task", "plan " + i),
                         ToolExecutionContext.current("trivial-" + i)).isSuccess());
             }
             var result = session.execute(brief("role", "worker", "task", "use earlier evidence",
@@ -413,13 +448,13 @@ class AgentDelegationTest {
                 if (!role.equals("worker")) return planner;
                 // Fill the store after admission, before the consumer constructs its history.
                 for (int i = 0; i < 64; i++) {
-                    assertTrue(reference.get().execute(brief("role", "planner", "task", "fill " + i),
+                    assertTrue(reference.get().execute(brief("role", "explorer", "task", "fill " + i),
                             ToolExecutionContext.current("fill-" + i)).isSuccess());
                 }
                 return worker;
             }, new AgentBudget(100000, 3, 200), "project rules", RunEventSink.NO_OP);
             reference.set(session);
-            var first = session.execute(brief("role", "planner", "task", "original"),
+            var first = session.execute(brief("role", "explorer", "task", "original"),
                     ToolExecutionContext.current("original"));
             String reportId = new com.fasterxml.jackson.databind.ObjectMapper()
                     .readTree(first.text()).path("report_id").asText();

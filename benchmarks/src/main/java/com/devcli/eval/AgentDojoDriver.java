@@ -204,6 +204,7 @@ public final class AgentDojoDriver {
     static void retainBenchmarkTools(ToolRegistry registry, Set<String> allowedTools) {
         allowedTools.add("read_tool_result");
         allowedTools.add("search_tools");
+        allowedTools.add("call_mcp_tool");
         CONTROL_TOOLS.forEach(name -> registry.unregisterMcpTool("mcp__" + SERVER + "__" + name));
         registry.retainTools(allowedTools);
     }

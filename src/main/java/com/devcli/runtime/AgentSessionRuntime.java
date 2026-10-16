@@ -139,7 +139,7 @@ public final class AgentSessionRuntime implements AutoCloseable {
             try {
                 String output = agent.run(userInput, modelInput, LlmClient.ToolChoice.AUTO);
                 List<LlmClient.Message> history = agent.getConversationHistory();
-                RunResult result = new RunResult(resolveOutput(output, history), history, context.isCancelled());
+                RunResult result = new RunResult(resolveOutput(output, history), history, context.isCancelled(), output);
                 marker.complete(result);
                 return result;
             } catch (Throwable error) {
@@ -194,7 +194,7 @@ public final class AgentSessionRuntime implements AutoCloseable {
         try {
             String output = agent.run(prompt);
             List<LlmClient.Message> history = agent.getConversationHistory();
-            result.complete(new RunResult(resolveOutput(output, history), history, context.isCancelled()));
+            result.complete(new RunResult(resolveOutput(output, history), history, context.isCancelled(), output));
         } catch (Throwable error) {
             result.completeExceptionally(error);
         } finally {
@@ -242,10 +242,15 @@ public final class AgentSessionRuntime implements AutoCloseable {
         return output == null ? "" : output;
     }
 
-    public record RunResult(String output, List<LlmClient.Message> history, boolean cancelled) {
+    public record RunResult(String output, List<LlmClient.Message> history, boolean cancelled, String displayOutput) {
+        public RunResult(String output, List<LlmClient.Message> history, boolean cancelled) {
+            this(output, history, cancelled, output);
+        }
+
         public RunResult {
             output = output == null ? "" : output;
             history = history == null ? List.of() : List.copyOf(history);
+            displayOutput = displayOutput == null ? "" : displayOutput;
         }
     }
 }

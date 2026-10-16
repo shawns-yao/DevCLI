@@ -70,8 +70,12 @@ class AgentDojoDriverTest {
             assertTrue(registry.hasTool("read_tool_result"));
             assertFalse(registry.hasTool("execute_command"));
             assertFalse(registry.getToolDefinitions().stream().anyMatch(t -> t.name().equals(name)));
-            registry.executeTool("search_tools", "{\"query\":\"lookup\"}");
-            assertTrue(registry.getToolDefinitions().stream().anyMatch(t -> t.name().equals(name)));
+            var definitions = registry.getToolDefinitions();
+            String found = registry.executeTool("search_tools", "{\"query\":\"lookup\"}");
+            assertTrue(found.contains("input_schema"));
+            assertTrue(found.contains("schema_fingerprint"));
+            assertEquals(definitions, registry.getToolDefinitions());
+            assertTrue(definitions.stream().anyMatch(t -> t.name().equals("call_mcp_tool")));
         }
     }
 

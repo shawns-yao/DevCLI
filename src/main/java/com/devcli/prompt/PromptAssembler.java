@@ -14,7 +14,7 @@ public class PromptAssembler {
             ## Turn Context
 
             以下是本轮开始时的状态快照。历史消息中若出现多份快照，只有最后一份有效，更早的已被取代。
-            任务进度、当前工作和下一步只以最后一份 Session Memory 为准；压缩摘要中的同名段落不是状态来源。""";
+            目标、步骤、当前工作和下一步只以最后一份 agent_work_plan 为准，由 update_plan 维护；工具证据和执行产物另行判断。""";
 
     private final PromptRepository repository;
 
@@ -37,8 +37,8 @@ public class PromptAssembler {
      * <p>因此按轮次变化的内容（长期记忆检索结果 / skill 索引 / 工作记忆）不在这里，
      * 改由 {@link #assembleTurnContext(PromptContext)} 渲染并以 append-only 方式进入消息尾部。
      *
-     * <p>留在这里的动态段仅限会话级稳定项：{@code ruleContext}（启动加载，会话内极少变化）与
-     * {@code externalContext}（MCP resource 索引）。它们变化时前缀失配是正确且必要的。
+     * <p>会话规则 {@code ruleContext} 留在此前缀；Project Context 及 MCP resource 索引
+     * 随当轮上下文追加，不随外部资源发现重写 system。
      */
     public String assemble(PromptMode mode, PromptContext context) {
         Objects.requireNonNull(mode, "mode");
@@ -53,7 +53,6 @@ public class PromptAssembler {
         append(prompt, applyVariables(repository.loadRequired(mode.resourcePath()), ctx));
         append(prompt, repository.loadRequired("approvals/" + approvalMode(ctx) + ".md"));
         append(prompt, dynamicSection("Rule Context", ctx.ruleContext()));
-        append(prompt, dynamicSection("Project Context", ctx.externalContext()));
         append(prompt, repository.loadRequired("context/context-management.md"));
         append(prompt, repository.loadRequired("handoff.md"));
 
@@ -65,12 +64,13 @@ public class PromptAssembler {
     /**
      * 组装按轮次变化的上下文快照，由调用方前置到当轮 user 消息里（append-only，不改写既有消息）。
      *
-     * @return 快照文本；三段都为空时返回空串，调用方不应注入空块
+     * @return 快照文本；各段都为空时返回空串
      */
     public String assembleTurnContext(PromptContext context) {
         PromptContext ctx = context == null ? PromptContext.empty() : context;
 
         StringBuilder body = new StringBuilder();
+        append(body, dynamicSection("Project Context", ctx.externalContext()));
         append(body, dynamicSection("Retrieved Memory", ctx.memoryContext()));
         append(body, dynamicSection("Skills", ctx.skillIndex()));
         append(body, dynamicSection("Session Memory", ctx.sessionMemory()));

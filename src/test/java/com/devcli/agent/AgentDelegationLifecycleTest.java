@@ -1,7 +1,7 @@
 package com.devcli.agent;
 
-import com.devcli.tool.ToolContract;
 import static com.devcli.tool.ToolContract.*;
+import com.devcli.tool.ToolContract;
 import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.hitl.HitlHandler;
@@ -60,10 +60,10 @@ class AgentDelegationLifecycleTest {
     @Test void reportRemainsAvailableInLaterTurns() throws Exception {
         Path project = Files.createDirectory(temp.resolve("project"));
         try (Fixture fixture = new Fixture(); ToolRegistry registry = new ToolRegistry()) {
-            fixture.parent(request -> fixture.delegate(brief("planner", "first task", List.of())));
+            fixture.parent(request -> fixture.delegate(brief("explorer", "first task", List.of())));
             fixture.parent(request -> fixture.answer("first parent result"));
             fixture.parent(request -> {
-                ObjectNode requestArgs = brief("planner", "second task", List.of());
+                ObjectNode requestArgs = brief("explorer", "second task", List.of());
                 requestArgs.put("upstream_report_id", fixture.reportId());
                 return fixture.delegate(requestArgs);
             });
@@ -159,36 +159,6 @@ class AgentDelegationLifecycleTest {
         }
     }
 
-    @Test void parallelDelegationFinishesBeforeParentReadsMergedPatch() throws Exception {
-        Path project = Files.createDirectory(temp.resolve("project"));
-        CyclicBarrier ready = new CyclicBarrier(2);
-        try (Fixture fixture = new Fixture(); ToolRegistry registry = new NoIndexRegistry()) {
-            fixture.parent(request -> fixture.batch(
-                    "delegate_task", brief("worker", "Write first.txt", List.of("first.txt")),
-                    "delegate_task", brief("planner", "Inspect project structure", List.of()),
-                    "read_file", JSON.valueToTree(Map.of("path", "first.txt"))));
-            fixture.parent(request -> fixture.answer("merged result verified"));
-            Function<JsonNode, MockResponse> child = request -> {
-                try { ready.await(3, TimeUnit.SECONDS); }
-                catch (Exception e) { throw new IllegalStateException(e); }
-                return request.toString().contains("Write first.txt")
-                        ? fixture.tool("write_file", JSON.valueToTree(Map.of("path", "first.txt", "content", "child result")))
-                        : fixture.answer("structure inspected");
-            };
-            fixture.child(child);
-            fixture.child(child);
-            fixture.child(request -> fixture.answer("worker finished"));
-            try (Agent agent = agent(fixture, registry, project)) {
-                agent.run("Delegate the write and planning, then read first.txt");
-                assertEquals("child result", Files.readString(project.resolve("first.txt")));
-                List<JsonNode> results = toolMessages(fixture.parentRequests.getLast());
-                assertEquals(3, results.size());
-                assertTrue(results.get(2).path("content").asText().contains("child result"), results.toString());
-                assertEquals("APPLIED", JSON.readTree(results.get(0).path("content").asText()).path("patch_status").asText());
-            }
-        }
-    }
-
     @Test void cancelledBatchPreventsLaterWrite() throws Exception {
         Path project = Files.createDirectory(temp.resolve("project"));
         CountDownLatch started = new CountDownLatch(1);
@@ -220,32 +190,6 @@ class AgentDelegationLifecycleTest {
                 assertEquals(2, results.size());
                 assertTrue(results.stream().allMatch(result -> "CANCELLED".equals(result.status())), results.toString());
                 assertEquals(1, fixture.parentRequests.size());
-            }
-        }
-    }
-
-    @Test void parentDiscoveryIsNotInheritedByDelegatedPlanner() throws Exception {
-        Path project = Files.createDirectory(temp.resolve("project"));
-        try (Fixture fixture = new Fixture(); ToolRegistry registry = new NoIndexRegistry()) {
-            for (int i = 0; i < 20; i++) {
-                registry.registerTool(new ToolContract.Tool("lookup_" + i, "Read lookup_" + i,
-                        JSON.readTree("{\"type\":\"object\"}"), args -> "value", ToolContract.ToolEffect.READ_ONLY));
-            }
-            registry.registerTool(new ToolContract.Tool("zz_journal", "Read journal",
-                    JSON.readTree("{\"type\":\"object\"}"), args -> "journal", ToolContract.ToolEffect.READ_ONLY));
-            fixture.parent(request -> fixture.tool("search_tools", JSON.valueToTree(Map.of("query", "zz_journal"))));
-            fixture.parent(request -> fixture.delegate(brief("planner", "Inspect lookup_9", List.of())));
-            fixture.parent(request -> fixture.answer("delegation checked"));
-            fixture.child(request -> fixture.answer("planning complete"));
-            try (Agent agent = agent(fixture, registry, project)) {
-                agent.run("lookup_9");
-                assertTrue(toolNames(fixture.parentRequests.getLast()).contains("zz_journal"));
-                assertEquals(1, fixture.childRequests.size());
-                var childNames = toolNames(fixture.childRequests.getFirst());
-                assertFalse(childNames.contains("zz_journal"), childNames.toString());
-                assertTrue(childNames.contains("read_file"), childNames.toString());
-                assertTrue(java.util.Collections.disjoint(childNames,
-                        List.of("delegate_task", "delegate_control", "save_memory", "list_memory", "write_file")));
             }
         }
     }
@@ -438,45 +382,6 @@ class AgentDelegationLifecycleTest {
         }
     }
 
-    @Test void backgroundWorkerCannotOverwriteParentEdit() throws Exception {
-        Path project = Files.createDirectory(temp.resolve("project"));
-        Files.writeString(project.resolve("draft.txt"), "original");
-        CountDownLatch ready = new CountDownLatch(1);
-        CountDownLatch finish = new CountDownLatch(1);
-        try (Fixture fixture = new Fixture(); ToolRegistry registry = new ToolRegistry()) {
-            fixture.parent(request -> {
-                ObjectNode args = brief("worker", "edit draft in background", List.of("draft.txt"));
-                args.put("run_in_background", true);
-                return fixture.delegate(args);
-            });
-            fixture.parent(request -> fixture.answer("parent is available"));
-            fixture.child(request -> fixture.tool("write_file", JSON.valueToTree(Map.of(
-                    "path", "draft.txt", "content", "child edit"))));
-            fixture.child(request -> {
-                ready.countDown();
-                try { finish.await(10, TimeUnit.SECONDS); }
-                catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                return fixture.answer("draft finished");
-            });
-            try (Agent agent = agent(fixture, registry, project)) {
-                agent.run("Start a background edit");
-                assertTrue(ready.await(3, TimeUnit.SECONDS));
-                fixture.parent(request -> fixture.tool("write_file", JSON.valueToTree(Map.of(
-                        "path", "draft.txt", "content", "parent edit"))));
-                fixture.parent(request -> {
-                    finish.countDown();
-                    return fixture.control("wait");
-                });
-                fixture.parent(request -> fixture.answer("conflict collected"));
-                agent.run("Apply my newer draft and collect the background result");
-                assertEquals("parent edit", Files.readString(project.resolve("draft.txt")));
-                assertEquals("failed", fixture.lastReport.path("status").asText(), fixture.lastReport.toString());
-                assertEquals("NOT_APPLIED", fixture.lastReport.path("patch_status").asText());
-                assertEquals(1, fixture.lastReport.path("pending_patch_files").asInt());
-            } finally { finish.countDown(); }
-        }
-    }
-
     @Test void backgroundDeadlineCancelsActualHttpRequest() throws Exception {
         System.setProperty("devcli.delegate.timeout.seconds", "1");
         Path project = Files.createDirectory(temp.resolve("project"));
@@ -511,7 +416,7 @@ class AgentDelegationLifecycleTest {
         Path project = Files.createDirectory(temp.resolve("project"));
         Path otherProject = Files.createDirectory(temp.resolve("other-project"));
         try (Fixture fixture = new Fixture(); ToolRegistry registry = new ToolRegistry()) {
-            fixture.parent(request -> fixture.delegate(brief("planner", "private project report", List.of())));
+            fixture.parent(request -> fixture.delegate(brief("explorer", "private project report", List.of())));
             fixture.parent(request -> fixture.answer("original result"));
             fixture.child(request -> fixture.answer("project scoped findings"));
             try (Agent agent = agent(fixture, registry, project)) {

@@ -30,12 +30,6 @@ final class CheckpointCoordinator {
                         Set<String> ordinaryStepIds) {
     }
 
-    record DeferredPatchRestore(boolean present, boolean restored, String failure) {
-        static DeferredPatchRestore absent() {
-            return new DeferredPatchRestore(false, true, "");
-        }
-    }
-
     private final OrchestrationRunState runState;
     private final MemoryManager memoryManager;
     private final WorkspaceCommitCoordinator workspaceCommitCoordinator;
@@ -195,19 +189,8 @@ final class CheckpointCoordinator {
         }
     }
 
-    DeferredPatchRestore restoreDeferredPatch(String stepId, Path workspaceRoot) {
-        AgentCheckpoint checkpoint = runState.checkpoint();
-        if (checkpoint == null || !checkpoint.hasDeferredPatch(stepId)) {
-            return DeferredPatchRestore.absent();
-        }
-        try {
-            PatchSet.ApplyResult result = checkpoint.loadDeferredPatch(stepId).apply(workspaceRoot);
-            return new DeferredPatchRestore(true, result.applied(),
-                    result.applied() ? "" : result.failureDescription());
-        } catch (IOException e) {
-            return new DeferredPatchRestore(true, false,
-                    "待验证 PatchSet 读取失败: " + e.getMessage());
-        }
+    PatchSet loadDeferredPatch(String stepId) throws IOException {
+        return runState.checkpoint().loadDeferredPatch(stepId);
     }
 
     void persistTerminalClearingDeferredPatch(String stepId, Runnable terminalPersistence) {
@@ -292,10 +275,11 @@ final class CheckpointCoordinator {
                                          String stepId,
                                          Path projectRoot,
                                          ExecutionArtifact intendedArtifact,
+                                         WorkspaceExecutionSession.CommitPreparation validation,
                                          Consumer<PatchSet.ApplyResult> terminalPersistence)
             throws Exception {
         return workspaceCommitCoordinator.commit(session, patchSet, runState.checkpoint(), stepId,
-                projectRoot, intendedArtifact, terminalPersistence);
+                projectRoot, intendedArtifact, validation, terminalPersistence);
     }
 
     static List<AgentCheckpoint.PlanStep> toPlanSteps(

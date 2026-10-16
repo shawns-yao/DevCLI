@@ -317,7 +317,7 @@ public class AgentOrchestrator {
                         this::configureSubAgent,
                         AgentOrchestrator::applyRecoveryContext,
                         orchestrationNarrative::buildStepContext,
-                        orchestrationNarrative::buildFinalResult));
+                        orchestrationNarrative::buildFinalResult), () -> additionalEventSink);
         configureSubAgent(planner);
         workers.forEach(this::configureSubAgent);
         configureSubAgent(reviewer);
@@ -478,7 +478,6 @@ public class AgentOrchestrator {
         this.stepExecutionCoordinator.setRequireWorkerToolEvidence(requireWorkerToolEvidence);
     }
 
-
     public void setSkillSystem(com.devcli.skill.SkillRegistry skillRegistry,
                                com.devcli.skill.SkillContextBuffer skillContextBuffer) {
         this.skillRegistry = skillRegistry;
@@ -554,7 +553,6 @@ public class AgentOrchestrator {
         ));
         memoryManager.addUserMessage(userInput);
         runState.beginNew(userInput);
-        toolRegistry.prefetchToolDefinitionsForInput(runState.userTask());
         // 回收上一轮崩溃残留的超时租约，避免历史租约阻塞本轮写入
         toolRegistry.pruneExpiredLeases();
         memoryManager.setTaskState("context_epoch",
@@ -918,11 +916,6 @@ public class AgentOrchestrator {
     private synchronized void recordAgentEvent(String agentId, String stepId,
                                                String phase, String summary) {
         checkpointCoordinator.recordAgentEvent(agentId, stepId, phase, summary);
-    }
-
-    static String resolveWorkerResultContent(
-            String content, SubAgent.ExecutionEvidence evidence) {
-        return StepExecutionCoordinator.resolveWorkerResultContent(content, evidence);
     }
 
     List<String> missingDeclaredVerifierTools(List<String> reviewToolCalls) {

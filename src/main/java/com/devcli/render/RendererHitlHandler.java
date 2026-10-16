@@ -20,12 +20,19 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class RendererHitlHandler implements HitlHandler {
 
     private final Renderer renderer;
+    private final java.util.function.Function<ApprovalRequest, ApprovalResult> prompt;
     private volatile boolean enabled;
     private final Set<String> approvedAllByTool = ConcurrentHashMap.newKeySet();
     private final Set<String> approvedAllByServer = ConcurrentHashMap.newKeySet();
 
     public RendererHitlHandler(Renderer renderer, boolean enabled) {
+        this(renderer, enabled, renderer::promptApproval);
+    }
+
+    public RendererHitlHandler(Renderer renderer, boolean enabled,
+                               java.util.function.Function<ApprovalRequest, ApprovalResult> prompt) {
         this.renderer = Objects.requireNonNull(renderer, "renderer");
+        this.prompt = Objects.requireNonNull(prompt, "prompt");
         this.enabled = enabled;
     }
 
@@ -55,7 +62,7 @@ public final class RendererHitlHandler implements HitlHandler {
             return ApprovalResult.approveAllByServer();
         }
 
-        ApprovalResult result = renderer.promptApproval(request);
+        ApprovalResult result = prompt.apply(request);
         if (result == null) {
             return ApprovalResult.reject("渲染器返回 null");
         }

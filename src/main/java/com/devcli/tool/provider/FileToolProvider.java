@@ -284,11 +284,15 @@ public final class FileToolProvider implements ToolProvider {
             }
             String original = StandardCharsets.UTF_8.newDecoder().decode(
                     java.nio.ByteBuffer.wrap(snapshot)).toString();
-            String reviewed = context.reviewFileContent(original);
-            boolean redacted = !original.equals(reviewed);
             ReadPage page = explicitLines
-                    ? readLinePage(reviewed, args)
-                    : readCharacterPage(reviewed, args);
+                    ? readLinePage(original, args)
+                    : readCharacterPage(original, args);
+            int start = (int) Math.min(page.offset(), original.length());
+            String reviewed = context.reviewFileContent(new com.devcli.policy.FileContentReview(
+                    args.get("path"), original, start, start + page.content().length()));
+            boolean redacted = !page.content().equals(reviewed);
+            page = new ReadPage(page.mode(), reviewed, page.offset(), page.startLine(), page.endLine(),
+                    page.nextCursor(), page.hasMore(), page.completeFile());
             // 完整页继续保留 Java 符号级基线；分页页只登记磁盘整文件指纹。
             context.recordFileRead(safe, !redacted && page.completeFile() ? page.content() : null,
                     context.currentResourceLeaseStep());
@@ -297,7 +301,7 @@ public final class FileToolProvider implements ToolProvider {
                     page.content().length(), page.nextCursor(), page.hasMore(), snapshot.length);
             String rendered = renderReadPage(page);
             if (redacted) {
-                rendered = "已按本次选择脱敏；字符偏移对应脱敏文本，不能作为原文编辑基线。\n" + rendered;
+                rendered = "已按本次选择脱敏；分页游标仍对应原文，脱敏内容不能作为原文编辑基线。\n" + rendered;
             }
             if (ignoredCharWindow) {
                 rendered = "提示: 同时提供了行范围与 offset/limit，已优先使用 start_line/end_line 并忽略 offset/limit，后续请勿两组同传。\n"
@@ -371,6 +375,7 @@ public final class FileToolProvider implements ToolProvider {
         int effectiveEnd = Math.min(requestedEnd, startLine + MAX_LINE_WINDOW - 1);
         StringBuilder content = new StringBuilder();
         long globalOffset = 0L;
+        long pageOffset = text.length();
         int line = 1;
         int lastLine = 0;
         boolean hasMore = false;
@@ -397,6 +402,7 @@ public final class FileToolProvider implements ToolProvider {
                     next = "line:" + line;
                     break;
                 }
+                if (content.isEmpty()) pageOffset = globalOffset - 1;
                 content.append((char) current);
                 lastLine = line;
                 if (current == '\n') {
@@ -412,7 +418,7 @@ public final class FileToolProvider implements ToolProvider {
                 }
             }
         }
-        return new ReadPage("lines", content.toString(), 0L,
+        return new ReadPage("lines", content.toString(), pageOffset,
                 startLine, lastLine, next, hasMore, startLine == 1 && !hasMore);
     }
 

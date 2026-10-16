@@ -49,8 +49,13 @@ public record ApprovalRequest(
 
     public static ApprovalRequest content(String toolName, String types, String purpose,
                                           String target, boolean redactionAllowed) {
+        return content(toolName, types, purpose, target, redactionAllowed, null);
+    }
+
+    public static ApprovalRequest content(String toolName, String types, String purpose,
+                                          String target, boolean redactionAllowed, String source) {
         return new ApprovalRequest(toolName, "{}", "敏感内容",
-                "原文可能包含秘密或个人信息", null, null,
+                "原文可能包含秘密或个人信息", null, source,
                 "敏感类型: " + types + "\n操作目的: " + purpose + "\n发送目标: " + target
                         + "\n只对本次内容有效，不复用任务授权或全部放行；弹窗不展示原文。",
                 true, redactionAllowed);

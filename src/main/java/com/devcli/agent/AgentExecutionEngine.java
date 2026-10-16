@@ -37,14 +37,6 @@ final class AgentExecutionEngine<R> {
             return null;
         }
 
-        default boolean allowsToolRouting() {
-            return true;
-        }
-
-        default String toolRoutingInput() {
-            return null;
-        }
-
         LlmClient.StreamListener streamListener();
 
         default RunEventSink eventSink() {
@@ -236,6 +228,8 @@ final class AgentExecutionEngine<R> {
     }
 
     private R runLoop(Delegate<R> delegate) {
+        List<LlmClient.Tool> frozenDefinitions = null;
+        boolean definitionsCaptured = false;
         ToolCallGovernance toolGovernance = new ToolCallGovernance();
         ContextReferenceGuard contextReferenceGuard = ContextReferenceGuard.fromHistory(
                 delegate.history(), contextReferenceRegistry);
@@ -293,17 +287,20 @@ final class AgentExecutionEngine<R> {
                     List<LlmClient.Tool> originalDefinitions = toolSnapshot == null
                             ? delegate.toolDefinitions(iteration)
                             : toolSnapshot.definitions();
-                    List<LlmClient.Tool> toolDefinitions = originalDefinitions;
-                    requestedToolChoice = contextReferenceGuard.toolChoice(requestedToolChoice);
-                    if (delegate.allowsToolRouting()) {
-                        toolDefinitions = toolGovernance.route(toolDefinitions, delegate.history(),
-                                requestedToolChoice, delegate.toolRoutingInput());
+                    if (!definitionsCaptured) {
+                        frozenDefinitions = originalDefinitions;
+                        definitionsCaptured = true;
                     }
-                    // 只在路由真的改动了定义时才重建快照，保持「同一份定义同时用于模型与执行」的身份契约，
-                    // 避免每轮无条件新建快照破坏前缀缓存与身份断言。
-                    if (toolSnapshot != null && toolDefinitions != originalDefinitions) {
+                    List<LlmClient.Tool> toolDefinitions = frozenDefinitions;
+                    if (frozenDefinitions != null && !frozenDefinitions.isEmpty()
+                            && (originalDefinitions == null || originalDefinitions.isEmpty())) {
+                        // 显式的无工具收尾通过 tool_choice 表达，定义前缀继续保持原样。
+                        requestedToolChoice = LlmClient.ToolChoice.NONE;
+                    }
+                    if (toolSnapshot != null && toolSnapshot.definitions() != toolDefinitions) {
                         toolSnapshot = toolSnapshot.withDefinitions(toolDefinitions);
                     }
+                    requestedToolChoice = contextReferenceGuard.toolChoice(requestedToolChoice);
                     response = llmClient.chat(
                             delegate.history(),
                             toolDefinitions,

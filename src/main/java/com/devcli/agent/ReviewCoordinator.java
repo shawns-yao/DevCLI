@@ -74,6 +74,8 @@ final class ReviewCoordinator {
         this.preReviewVerifier = preReviewVerifier == null ? new PreReviewVerifier() : preReviewVerifier;
     }
 
+    PreReviewVerifier verifier() { return preReviewVerifier; }
+
     boolean parseApproval(String reviewContent) {
         return TeamReviewerProtocol.evaluate(reviewContent, reviewerCriteria(null)).approved();
     }

@@ -29,6 +29,7 @@ final class WorkspaceCommitCoordinator {
                                 String stepId,
                                 Path projectRoot,
                                 ExecutionArtifact intendedArtifact,
+                                WorkspaceExecutionSession.CommitPreparation validation,
                                 Consumer<PatchSet.ApplyResult> terminalPersistence) throws Exception {
         Objects.requireNonNull(session, "session");
         Objects.requireNonNull(patchSet, "patchSet");
@@ -40,6 +41,7 @@ final class WorkspaceCommitCoordinator {
 
         return session.commit(patchSet,
                 effectivePatchSet -> {
+                    validation.prepare(effectivePatchSet);
                     if (checkpoint != null) {
                         checkpoint.preparePatchCommit(
                                 stepId, projectRoot, effectivePatchSet, intendedArtifact);

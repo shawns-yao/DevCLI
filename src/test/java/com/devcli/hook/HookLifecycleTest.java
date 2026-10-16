@@ -1,7 +1,7 @@
 package com.devcli.hook;
 
-import com.devcli.tool.ToolContract;
 import static com.devcli.tool.ToolContract.*;
+import com.devcli.tool.ToolContract;
 import com.devcli.llm.LlmClient;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolOutput;

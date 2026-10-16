@@ -42,6 +42,7 @@ final class AgentRuntimeSupport {
             }
         });
         toolRegistry.setMemoryListHandler(memoryManager::listLongTermMemory);
+        toolRegistry.setAgentContextHandlers(memoryManager::updateWorkPlan, memoryManager::readMemory);
     }
 
     static void configureCompactor(ConversationHistoryCompactor compactor,
@@ -135,6 +136,8 @@ final class AgentRuntimeSupport {
     static String buildPostCompactRestoreSection(String workingMemory,
                                                  ToolRegistry toolRegistry,
                                                  SkillContextBuffer skillContextBuffer) {
+        String plan = com.devcli.memory.AgentWorkPlan.extract(workingMemory);
+        if (!plan.isEmpty()) workingMemory = workingMemory.replace(com.devcli.memory.AgentWorkPlan.render(plan), "");
         List<PostCompactRestoreContext.Section> sections = new ArrayList<>();
         if (workingMemory != null && !workingMemory.isBlank()) {
             sections.add(new PostCompactRestoreContext.Section(
@@ -150,8 +153,11 @@ final class AgentRuntimeSupport {
                 sections.add(new PostCompactRestoreContext.Section("已调用 Skill 恢复", skills));
             }
         }
-        return PostCompactRestoreContext.render(
+        String restored = PostCompactRestoreContext.render(
                 sections.toArray(PostCompactRestoreContext.Section[]::new));
+        if (plan.isEmpty()) return restored;
+        // 工作计划有独立的 schema 大小上限，必须原样恢复，不能随普通证据按行裁剪。
+        return restored.stripTrailing() + "\n\n" + com.devcli.memory.AgentWorkPlan.render(plan);
     }
 
     static String buildMcpPostCompactRestoreSection(ToolRegistry toolRegistry) {

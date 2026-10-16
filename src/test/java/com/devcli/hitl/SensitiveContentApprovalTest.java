@@ -127,6 +127,103 @@ class SensitiveContentApprovalTest {
     }
 
     @Test
+    void ordinarySourceVariablesDoNotPrompt() throws Exception {
+        Files.writeString(root.resolve("Example.java"),
+                "CancellationToken token = runContext.cancellationToken();\n"
+                        + "int key = terminal.reader().read();\nif (key == 27) return;\n");
+        Handler handler = new Handler();
+        try (var registry = registry(handler)) {
+            assertTrue(registry.executeToolOutput("read_file", "{\"path\":\"Example.java\"}").isSuccess());
+            assertEquals(0, handler.requests.size());
+        }
+    }
+
+    @Test
+    void cleanPageInSensitiveFileDoesNotPrompt() throws Exception {
+        source();
+        Handler handler = new Handler();
+        try (var registry = registry(handler)) {
+            ToolOutput result = registry.executeToolOutput("read_file",
+                    "{\"path\":\"Example.java\",\"start_line\":2,\"end_line\":2}");
+            assertTrue(result.isSuccess(), result.text());
+            assertTrue(result.text().contains("class Example"));
+            assertEquals(0, handler.requests.size());
+        }
+    }
+
+    @Test
+    void redactionKeepsOriginalCursorAndShowsSafeLocation() throws Exception {
+        String firstLine = "// OPENAI_API_KEY=" + SECRET + "\r\n";
+        Files.writeString(root.resolve("Example.java"), firstLine + "// 中文\r\nclass Example {}\r\n");
+        Handler handler = new Handler();
+        handler.answer = ignored -> ApprovalResult.redact();
+        try (var registry = registry(handler)) {
+            ToolOutput first = registry.executeToolOutput("read_file",
+                    "{\"path\":\"Example.java\",\"offset\":0,\"limit\":" + firstLine.length() + "}");
+            assertTrue(first.isSuccess(), first.text());
+            assertFalse(first.text().contains(SECRET));
+            assertTrue(first.text().contains("next_cursor=" + firstLine.length()), first.text());
+            String notice = handler.requests.get(0).toDisplayText();
+            assertTrue(notice.contains("Example.java"), notice);
+            assertTrue(notice.contains("1"), notice);
+            assertFalse(notice.contains(SECRET));
+            ToolOutput second = registry.executeToolOutput("read_file",
+                    "{\"path\":\"Example.java\",\"cursor\":\"" + firstLine.length() + "\"}");
+            assertTrue(second.isSuccess(), second.text());
+            assertTrue(second.text().contains("// 中文\r\nclass Example {}"), second.text());
+            assertEquals(1, handler.requests.size());
+        }
+    }
+
+    @Test
+    void privateKeyBodyPageStillRequiresApproval() throws Exception {
+        Files.writeString(root.resolve("Example.java"),
+                "-----BEGIN PRIVATE KEY-----\nabcdefghijk\n-----END PRIVATE KEY-----\nsafe\n");
+        Handler handler = new Handler();
+        try (var registry = registry(handler)) {
+            assertFalse(registry.executeToolOutput("read_file",
+                    "{\"path\":\"Example.java\",\"start_line\":2,\"end_line\":2}").isSuccess());
+            assertEquals(1, handler.requests.size());
+            assertTrue(registry.executeToolOutput("read_file",
+                    "{\"path\":\"Example.java\",\"start_line\":4,\"end_line\":4}").isSuccess());
+            assertEquals(1, handler.requests.size());
+        }
+    }
+
+    @Test
+    void invalidAndEmptyWindowsDoNotRequestApproval() throws Exception {
+        source();
+        Handler handler = new Handler();
+        try (var registry = registry(handler)) {
+            assertFalse(registry.executeToolOutput("read_file",
+                    "{\"path\":\"Example.java\",\"limit\":0}").isSuccess());
+            assertTrue(registry.executeToolOutput("read_file",
+                    "{\"path\":\"Example.java\",\"offset\":99999}").isSuccess());
+            assertEquals(0, handler.requests.size());
+        }
+    }
+
+    @Test
+    void longLineCanContinueIntoASecretWithoutLosingItsOriginalOffset() throws Exception {
+        String prefix = "// 中文\r\n";
+        String padding = "x".repeat(4100);
+        Files.writeString(root.resolve("Example.java"), prefix + padding + " password=" + SECRET + "\r\n");
+        Handler handler = new Handler();
+        try (var registry = registry(handler)) {
+            ToolOutput first = registry.executeToolOutput("read_file",
+                    "{\"path\":\"Example.java\",\"start_line\":2,\"end_line\":2}");
+            assertTrue(first.isSuccess(), first.text());
+            assertEquals(0, handler.requests.size());
+            int next = prefix.length() + 4000;
+            assertTrue(first.text().contains("next_cursor=" + next), first.text());
+            ToolOutput second = registry.executeToolOutput("read_file",
+                    "{\"path\":\"Example.java\",\"cursor\":\"" + next + "\"}");
+            assertFalse(second.isSuccess());
+            assertEquals(1, handler.requests.size());
+        }
+    }
+
+    @Test
     void domainGrantAndApproveAllDoNotBypassSensitiveUrl() {
         Handler handler = new Handler();
         handler.approvedAll = true;
