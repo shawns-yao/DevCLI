@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.llm.LlmClient;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.tool.ToolStatus;
@@ -58,7 +59,7 @@ final class ToolCallGovernance {
         return available.stream().filter(tool -> selected.contains(tool.name())).toList();
     }
 
-    boolean observe(List<ToolRegistry.ToolExecutionResult> results, ToolRegistry.ToolSnapshot snapshot) {
+    boolean observe(List<ToolContract.ToolExecutionResult> results, ToolContract.ToolSnapshot snapshot) {
         for (var result : results) {
             if ("search_tools".equals(result.name()) && result.status() == ToolStatus.SUCCESS) {
                 result.sideChannels().stream().filter(ToolSearchProvider.DiscoveredTools.class::isInstance)
@@ -75,7 +76,7 @@ final class ToolCallGovernance {
         }
         // Unknown effects, mutations and rich evidence are not proof of an unchanged observation.
         if (snapshot == null || results.isEmpty() || results.stream().anyMatch(result ->
-                snapshot.effect(result.name()) != ToolRegistry.ToolEffect.READ_ONLY
+                snapshot.effect(result.name()) != ToolContract.ToolEffect.READ_ONLY
                         || result.status() != ToolStatus.SUCCESS || !result.imageParts().isEmpty()
                         || result.sideChannels().stream().anyMatch(channel ->
                         !(channel instanceof com.devcli.tool.FileReadPage)))) {
@@ -112,7 +113,7 @@ final class ToolCallGovernance {
         while (discovered.size() > MAX_RETAINED_TOOLS) discovered.remove(discovered.iterator().next());
     }
 
-    static String modelResult(ToolRegistry.ToolExecutionResult result) {
+    static String modelResult(ToolContract.ToolExecutionResult result) {
         if (result.status() == ToolStatus.SUCCESS) return result.result();
         String action = switch (result.errorCode()) {
             case UNKNOWN_TOOL -> "Call search_tools to discover an available tool; do not repeat the unknown name.";

@@ -1,5 +1,6 @@
 package com.devcli.tool;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.hitl.ApprovalPolicy;
 import com.devcli.mcp.config.McpToolTrustPolicy;
 import com.devcli.mcp.protocol.McpToolDescriptor;
@@ -33,11 +34,11 @@ class ToolContractTest {
             registry.registerMcpToolOutput(descriptor, arguments -> ToolOutput.success("1 unread"));
             String name = descriptor.namespacedName();
 
-            assertEquals(ToolRegistry.ToolEffect.READ_ONLY, registry.toolEffect(name),
+            assertEquals(ToolContract.ToolEffect.READ_ONLY, registry.toolEffect(name),
                     "本地只读授权仍应允许在只读范围使用");
-            assertEquals(ToolRegistry.Destructiveness.BENIGN, registry.toolDestructiveness(name),
+            assertEquals(ToolContract.Destructiveness.BENIGN, registry.toolDestructiveness(name),
                     "已读标记这类状态流转不可逆但无资损，必须按 BENIGN 声明而不是 NONE");
-            assertEquals(ToolRegistry.Idempotency.NON_IDEMPOTENT, registry.toolIdempotency(name),
+            assertEquals(ToolContract.Idempotency.NON_IDEMPOTENT, registry.toolIdempotency(name),
                     "重复调用返回不同结果，不能并发也不能重试");
             assertFalse(registry.toolCacheable(name), "状态流转工具不得进入短期结果缓存");
         }
@@ -50,9 +51,9 @@ class ToolContractTest {
             registry.registerMcpToolOutput(descriptor, arguments -> ToolOutput.success("sent"));
             String name = descriptor.namespacedName();
 
-            assertEquals(ToolRegistry.ToolEffect.EXTERNAL_MUTATION, registry.toolEffect(name));
-            assertEquals(ToolRegistry.Destructiveness.STRUCTURAL, registry.toolDestructiveness(name));
-            assertEquals(ToolRegistry.Idempotency.NON_IDEMPOTENT, registry.toolIdempotency(name));
+            assertEquals(ToolContract.ToolEffect.EXTERNAL_MUTATION, registry.toolEffect(name));
+            assertEquals(ToolContract.Destructiveness.STRUCTURAL, registry.toolDestructiveness(name));
+            assertEquals(ToolContract.Idempotency.NON_IDEMPOTENT, registry.toolIdempotency(name));
             assertFalse(registry.toolCacheable(name));
         }
     }
@@ -62,13 +63,13 @@ class ToolContractTest {
         try (ToolRegistry registry = new ToolRegistry()) {
             ConcurrencyProbe probe = new ConcurrencyProbe();
             registerReadTool(registry, "stateful_read_a", probe,
-                    ToolRegistry.Destructiveness.BENIGN, ToolRegistry.Idempotency.NON_IDEMPOTENT);
+                    ToolContract.Destructiveness.BENIGN, ToolContract.Idempotency.NON_IDEMPOTENT);
             registerReadTool(registry, "stateful_read_b", probe,
-                    ToolRegistry.Destructiveness.BENIGN, ToolRegistry.Idempotency.NON_IDEMPOTENT);
+                    ToolContract.Destructiveness.BENIGN, ToolContract.Idempotency.NON_IDEMPOTENT);
 
-            List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
-                    new ToolRegistry.ToolInvocation("a", "stateful_read_a", "{}"),
-                    new ToolRegistry.ToolInvocation("b", "stateful_read_b", "{}")));
+            List<ToolContract.ToolExecutionResult> results = registry.executeTools(List.of(
+                    new ToolContract.ToolInvocation("a", "stateful_read_a", "{}"),
+                    new ToolContract.ToolInvocation("b", "stateful_read_b", "{}")));
 
             assertTrue(results.stream().allMatch(result -> result.status() == ToolStatus.SUCCESS));
             assertEquals(1, probe.peak.get(), "非幂等只读工具不得同批并行执行");
@@ -80,13 +81,13 @@ class ToolContractTest {
         try (ToolRegistry registry = new ToolRegistry()) {
             ConcurrencyProbe probe = new ConcurrencyProbe();
             registerReadTool(registry, "stateless_read_a", probe,
-                    ToolRegistry.Destructiveness.NONE, ToolRegistry.Idempotency.IDEMPOTENT);
+                    ToolContract.Destructiveness.NONE, ToolContract.Idempotency.IDEMPOTENT);
             registerReadTool(registry, "stateless_read_b", probe,
-                    ToolRegistry.Destructiveness.NONE, ToolRegistry.Idempotency.IDEMPOTENT);
+                    ToolContract.Destructiveness.NONE, ToolContract.Idempotency.IDEMPOTENT);
 
-            List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
-                    new ToolRegistry.ToolInvocation("a", "stateless_read_a", "{}"),
-                    new ToolRegistry.ToolInvocation("b", "stateless_read_b", "{}")));
+            List<ToolContract.ToolExecutionResult> results = registry.executeTools(List.of(
+                    new ToolContract.ToolInvocation("a", "stateless_read_a", "{}"),
+                    new ToolContract.ToolInvocation("b", "stateless_read_b", "{}")));
 
             assertTrue(results.stream().allMatch(result -> result.status() == ToolStatus.SUCCESS));
             assertEquals(2, probe.peak.get(), "幂等只读工具应保持既有并行行为");
@@ -113,12 +114,12 @@ class ToolContractTest {
     @Test
     void undeclaredReadOnlyToolKeepsHistoricalDefault() {
         try (ToolRegistry registry = new ToolRegistry()) {
-            registry.registerTool(new ToolRegistry.Tool(
+            registry.registerTool(new ToolContract.Tool(
                     "custom_lookup", "test", JsonNodeFactory.instance.objectNode(),
-                    arguments -> "value", ToolRegistry.ToolEffect.READ_ONLY));
+                    arguments -> "value", ToolContract.ToolEffect.READ_ONLY));
 
-            assertEquals(ToolRegistry.Destructiveness.NONE, registry.toolDestructiveness("custom_lookup"));
-            assertEquals(ToolRegistry.Idempotency.IDEMPOTENT, registry.toolIdempotency("custom_lookup"));
+            assertEquals(ToolContract.Destructiveness.NONE, registry.toolDestructiveness("custom_lookup"));
+            assertEquals(ToolContract.Idempotency.IDEMPOTENT, registry.toolIdempotency("custom_lookup"));
             assertTrue(registry.toolCacheable("custom_lookup"));
         }
     }
@@ -144,9 +145,9 @@ class ToolContractTest {
     private static void registerReadTool(ToolRegistry registry,
                                          String name,
                                          ConcurrencyProbe probe,
-                                         ToolRegistry.Destructiveness destructiveness,
-                                         ToolRegistry.Idempotency idempotency) {
-        registry.registerTool(new ToolRegistry.Tool(
+                                         ToolContract.Destructiveness destructiveness,
+                                         ToolContract.Idempotency idempotency) {
+        registry.registerTool(new ToolContract.Tool(
                 name, "contract probe", JsonNodeFactory.instance.objectNode(),
                 arguments -> {
                     probe.enter();
@@ -159,9 +160,9 @@ class ToolContractTest {
                     }
                     return "ok";
                 },
-                ToolRegistry.ToolEffect.READ_ONLY,
+                ToolContract.ToolEffect.READ_ONLY,
                 -1,
-                ToolRegistry.ToolCancellationCapability.INTERRUPT_ONLY,
+                ToolContract.ToolCancellationCapability.INTERRUPT_ONLY,
                 ToolPresentation.defaultFor(name),
                 destructiveness,
                 idempotency,

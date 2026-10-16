@@ -1,8 +1,9 @@
 package com.devcli.hitl;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.policy.AuditLog;
 import com.devcli.policy.TaskGrant;
-import com.devcli.tool.ToolRegistry.ToolAccessScope;
+import com.devcli.tool.ToolContract.ToolAccessScope;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolRegistry;
 import org.junit.jupiter.api.AfterEach;
@@ -63,8 +64,8 @@ class ToolGovernanceLifecycleTest {
                     parent.runWithTaskGrant(TaskGrant.WORKSPACE_WRITES, () -> {
                         try (ToolRegistry fork = parent.forkForProject(forkRoot)) {
                             return fork.runWithResourceLease("step-1", () -> fork.executeTools(List.of(
-                                    new ToolRegistry.ToolInvocation("call-a", "write_file", write("a.txt")),
-                                    new ToolRegistry.ToolInvocation("call-b", "write_file", write("b.txt")))));
+                                    new ToolContract.ToolInvocation("call-a", "write_file", write("a.txt")),
+                                    new ToolContract.ToolInvocation("call-b", "write_file", write("b.txt")))));
                         }
                     }));
             assertEquals(0, handler.calls.get());

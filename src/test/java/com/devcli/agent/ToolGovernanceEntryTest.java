@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.LongTermMemory;
 import com.devcli.memory.MemoryManager;
@@ -132,9 +133,9 @@ class ToolGovernanceEntryTest {
                 call("change_state", "{}"), call("fixed_value", "{}"),
                 call("change_state", "{}"), call("fixed_value", "{}"), answer("verified"));
         try (Fixture fixture = fixture(client)) {
-            fixture.registry.registerTool(new ToolRegistry.Tool("change_state", "Change local state",
+            fixture.registry.registerTool(new ToolContract.Tool("change_state", "Change local state",
                     new ObjectMapper().readTree("{\"type\":\"object\"}"),
-                    args -> Integer.toString(state.incrementAndGet()), ToolRegistry.ToolEffect.LOCAL_CONTEXT));
+                    args -> Integer.toString(state.incrementAndGet()), ToolContract.ToolEffect.LOCAL_CONTEXT));
             register(fixture.registry, "fixed_value", () -> {
                 reads.incrementAndGet();
                 return Integer.toString(state.get());
@@ -242,11 +243,11 @@ class ToolGovernanceEntryTest {
         try (Fixture fixture = fixture(client)) {
             for (int i = 0; i < 20; i++) register(fixture.registry, "lookup_" + i, () -> "value");
             register(fixture.registry, "zz_probe", () -> "probe");
-            fixture.registry.registerTool(new ToolRegistry.Tool("forget_probe", "Forget probe",
+            fixture.registry.registerTool(new ToolContract.Tool("forget_probe", "Forget probe",
                     new ObjectMapper().readTree("{\"type\":\"object\"}"), args -> {
                 fixture.registry.removeTool("zz_probe");
                 return "forgotten";
-            }, ToolRegistry.ToolEffect.LOCAL_CONTEXT));
+            }, ToolContract.ToolEffect.LOCAL_CONTEXT));
             fixture.agent.run("lookup_9");
             assertTrue(client.tools.get(1).stream().anyMatch(tool -> tool.name().equals("zz_probe")));
             assertTrue(client.tools.get(2).stream().noneMatch(tool -> tool.name().equals("zz_probe")));
@@ -307,9 +308,9 @@ class ToolGovernanceEntryTest {
                     com.devcli.tool.ToolOutput.cancelled("cancelled"))) {
                 var client = new AgentDelegationTest.ScriptedClient(call("mcp__fixture__probe", "{}"), answer("done"));
                 try (Fixture fixture = fixture(client)) {
-                    fixture.registry.registerTool(new ToolRegistry.Tool("mcp__fixture__probe", "Read fixture",
+                    fixture.registry.registerTool(new ToolContract.Tool("mcp__fixture__probe", "Read fixture",
                             new ObjectMapper().readTree("{\"type\":\"object\"}"),
-                            (ToolRegistry.StructuredToolExecutor) args -> output, ToolRegistry.ToolEffect.READ_ONLY));
+                            (ToolContract.StructuredToolExecutor) args -> output, ToolContract.ToolEffect.READ_ONLY));
                     fixture.agent.run("Read fixture");
                 }
             }
@@ -348,10 +349,10 @@ class ToolGovernanceEntryTest {
         AtomicInteger executed = new AtomicInteger();
         var client = new AgentDelegationTest.ScriptedClient(call("mutate", "{}"), answer("read instead"));
         try (Fixture fixture = fixture(client)) {
-            fixture.registry.registerTool(new ToolRegistry.Tool("mutate", "Mutate project",
+            fixture.registry.registerTool(new ToolContract.Tool("mutate", "Mutate project",
                     new ObjectMapper().readTree("{\"type\":\"object\"}"),
-                    args -> Integer.toString(executed.incrementAndGet()), ToolRegistry.ToolEffect.PROJECT_MUTATION));
-            String result = fixture.registry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY,
+                    args -> Integer.toString(executed.incrementAndGet()), ToolContract.ToolEffect.PROJECT_MUTATION));
+            String result = fixture.registry.runWithToolAccess(ToolContract.ToolAccessScope.READ_ONLY,
                     () -> fixture.agent.run("Inspect only"));
             assertEquals("read instead", result);
             assertEquals(0, executed.get());
@@ -381,9 +382,9 @@ class ToolGovernanceEntryTest {
 
     private static void register(ToolRegistry registry, String name, java.util.function.Supplier<String> action)
             throws Exception {
-        registry.registerTool(new ToolRegistry.Tool(name, "Read " + name,
+        registry.registerTool(new ToolContract.Tool(name, "Read " + name,
                 new ObjectMapper().readTree("{\"type\":\"object\",\"additionalProperties\":false}"),
-                args -> action.get(), ToolRegistry.ToolEffect.READ_ONLY));
+                args -> action.get(), ToolContract.ToolEffect.READ_ONLY));
     }
 
     private Fixture fixture(LlmClient client) {

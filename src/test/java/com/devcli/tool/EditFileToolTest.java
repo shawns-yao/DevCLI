@@ -1,5 +1,6 @@
 package com.devcli.tool;
 
+import com.devcli.tool.ToolContract;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -19,7 +20,7 @@ class EditFileToolTest {
         Files.writeString(projectRoot.resolve("sample.txt"), "before");
         try (ToolRegistry registry = registry()) {
             ToolOutput output = registry.runWithToolAccess(
-                    ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+                    ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                     () -> registry.executeToolOutput("edit_file",
                             "{\"path\":\"sample.txt\",\"old_string\":\"before\",\"new_string\":\"after\"}"));
 

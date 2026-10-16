@@ -1,5 +1,6 @@
 package com.devcli.tool.provider;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.rag.CodeRetriever;
 import com.devcli.rag.RagEvidencePayload;
 import com.devcli.rag.RagEvidenceSideChannel;
@@ -22,7 +23,7 @@ public final class RagToolProvider implements ToolProvider, AutoCloseable {
 
     @Override
     public void register(ToolContext context) {
-        context.registerTool(ToolRegistry.Tool.structured(
+        context.registerTool(ToolContract.Tool.structured(
                 "search_code",
                 "检索代码库。mode 可选：auto/general/call_chain/definition/error_trace/config；调用链场景可用 graph_depth 0-3 控制图谱扩展。",
                 context.createToolParameters(

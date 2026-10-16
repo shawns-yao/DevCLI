@@ -1,5 +1,6 @@
 package com.devcli.tool.provider;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolExecutionContext;
 import com.devcli.tool.ToolRegistry;
@@ -14,7 +15,7 @@ public interface ToolProvider {
     void register(ToolContext context);
 
     interface ToolContext {
-        void registerTool(ToolRegistry.Tool tool);
+        void registerTool(ToolContract.Tool tool);
 
         JsonNode createToolParameters(ToolParameter... params);
 
@@ -114,10 +115,10 @@ public interface ToolProvider {
 
         Consumer<String> memorySaver();
 
-        ToolRegistry.MemorySaver memorySaveHandler();
+        ToolContract.MemorySaver memorySaveHandler();
 
 
-        ToolRegistry.MemoryListHandler memoryListHandler();
+        ToolContract.MemoryListHandler memoryListHandler();
 
         com.devcli.browser.BrowserConnector browserConnector();
 
@@ -131,7 +132,7 @@ public interface ToolProvider {
 
         com.devcli.snapshot.SnapshotService snapshotService();
 
-        List<ToolRegistry.Tool> searchableTools();
+        List<ToolContract.Tool> searchableTools();
 
         boolean isMcpTool(String toolName);
 

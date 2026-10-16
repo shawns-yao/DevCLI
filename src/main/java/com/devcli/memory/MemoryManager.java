@@ -1,5 +1,6 @@
 package com.devcli.memory;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.llm.LlmClient;
 import com.devcli.context.ContextProfile;
 import com.devcli.policy.SensitiveDataRedactor;
@@ -183,7 +184,7 @@ public class MemoryManager implements AutoCloseable {
         addToolResult(toolName, argsJson, result, sideChannels, null, null, List.of());
     }
 
-    public void addToolResult(ToolRegistry.ToolExecutionResult toolResult) {
+    public void addToolResult(ToolContract.ToolExecutionResult toolResult) {
         if (toolResult == null) return;
         addToolResult(toolResult.name(), toolResult.argumentsJson(), toolResult.result(),
                 toolResult.sideChannels(), toolResult.status(), toolResult.errorCode(), List.of());

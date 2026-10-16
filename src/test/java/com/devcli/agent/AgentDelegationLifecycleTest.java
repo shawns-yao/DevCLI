@@ -1,5 +1,7 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
+import static com.devcli.tool.ToolContract.*;
 import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.hitl.HitlHandler;
@@ -115,12 +117,12 @@ class AgentDelegationLifecycleTest {
         CyclicBarrier ready = new CyclicBarrier(2);
         try (Fixture fixture = new Fixture(); ToolRegistry registry = new NoIndexRegistry()) {
             for (String name : List.of("parallel_left", "parallel_right")) {
-                registry.registerTool(new ToolRegistry.Tool(name, "Read " + name,
+                registry.registerTool(new ToolContract.Tool(name, "Read " + name,
                     JSON.readTree("{\"type\":\"object\"}"), args -> {
                     try { ready.await(3, TimeUnit.SECONDS); }
                     catch (Exception e) { throw new IllegalStateException(e); }
                     return "completed " + name;
-                }, ToolRegistry.ToolEffect.READ_ONLY));
+                }, ToolContract.ToolEffect.READ_ONLY));
             }
             fixture.parent(request -> fixture.batch("parallel_left", JSON.createObjectNode(),
                     "parallel_right", JSON.createObjectNode()));
@@ -138,15 +140,15 @@ class AgentDelegationLifecycleTest {
         Path project = Files.createDirectory(temp.resolve("project"));
         AtomicInteger revision = new AtomicInteger();
         try (Fixture fixture = new Fixture(); ToolRegistry registry = new NoIndexRegistry()) {
-            registry.registerTool(new ToolRegistry.Tool("update_revision", "Update revision",
+            registry.registerTool(new ToolContract.Tool("update_revision", "Update revision",
                     JSON.readTree("{\"type\":\"object\"}"), args -> {
                 try { Thread.sleep(200); }
                 catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new IllegalStateException(e); }
                 return Integer.toString(revision.incrementAndGet());
-            }, ToolRegistry.ToolEffect.LOCAL_CONTEXT));
-            registry.registerTool(new ToolRegistry.Tool("read_revision", "Read revision",
+            }, ToolContract.ToolEffect.LOCAL_CONTEXT));
+            registry.registerTool(new ToolContract.Tool("read_revision", "Read revision",
                     JSON.readTree("{\"type\":\"object\"}"), args -> Integer.toString(revision.get()),
-                    ToolRegistry.ToolEffect.READ_ONLY));
+                    ToolContract.ToolEffect.READ_ONLY));
             fixture.parent(request -> fixture.batch("update_revision", JSON.createObjectNode(),
                     "read_revision", JSON.createObjectNode()));
             fixture.parent(request -> fixture.answer("revision verified"));
@@ -191,13 +193,13 @@ class AgentDelegationLifecycleTest {
         Path project = Files.createDirectory(temp.resolve("project"));
         CountDownLatch started = new CountDownLatch(1);
         try (Fixture fixture = new Fixture(); ToolRegistry registry = new NoIndexRegistry()) {
-            registry.registerTool(new ToolRegistry.Tool("wait_probe", "Wait for observation",
+            registry.registerTool(new ToolContract.Tool("wait_probe", "Wait for observation",
                     JSON.readTree("{\"type\":\"object\"}"), args -> {
                 started.countDown();
                 try { Thread.sleep(2_000); }
                 catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                 return "wait ended";
-            }, ToolRegistry.ToolEffect.READ_ONLY));
+            }, ToolContract.ToolEffect.READ_ONLY));
             fixture.parent(request -> fixture.batch("wait_probe", JSON.createObjectNode(),
                     "write_file", JSON.valueToTree(Map.of("path", "late.txt", "content", "must not be written"))));
             try (Agent agent = agent(fixture, registry, project)) {
@@ -226,11 +228,11 @@ class AgentDelegationLifecycleTest {
         Path project = Files.createDirectory(temp.resolve("project"));
         try (Fixture fixture = new Fixture(); ToolRegistry registry = new NoIndexRegistry()) {
             for (int i = 0; i < 20; i++) {
-                registry.registerTool(new ToolRegistry.Tool("lookup_" + i, "Read lookup_" + i,
-                        JSON.readTree("{\"type\":\"object\"}"), args -> "value", ToolRegistry.ToolEffect.READ_ONLY));
+                registry.registerTool(new ToolContract.Tool("lookup_" + i, "Read lookup_" + i,
+                        JSON.readTree("{\"type\":\"object\"}"), args -> "value", ToolContract.ToolEffect.READ_ONLY));
             }
-            registry.registerTool(new ToolRegistry.Tool("zz_journal", "Read journal",
-                    JSON.readTree("{\"type\":\"object\"}"), args -> "journal", ToolRegistry.ToolEffect.READ_ONLY));
+            registry.registerTool(new ToolContract.Tool("zz_journal", "Read journal",
+                    JSON.readTree("{\"type\":\"object\"}"), args -> "journal", ToolContract.ToolEffect.READ_ONLY));
             fixture.parent(request -> fixture.tool("search_tools", JSON.valueToTree(Map.of("query", "zz_journal"))));
             fixture.parent(request -> fixture.delegate(brief("planner", "Inspect lookup_9", List.of())));
             fixture.parent(request -> fixture.answer("delegation checked"));

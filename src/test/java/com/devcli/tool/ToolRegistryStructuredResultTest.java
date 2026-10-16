@@ -1,5 +1,6 @@
 package com.devcli.tool;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.concurrent.CancellationContext;
 import com.devcli.concurrent.RunContext;
 import com.devcli.memory.SessionMemory;
@@ -54,8 +55,8 @@ class ToolRegistryStructuredResultTest {
     @Test
     void propagatesStructuredStatusThroughBatchResult() {
         try (ToolRegistry registry = new ToolRegistry()) {
-            ToolRegistry.ToolExecutionResult result = registry.executeTools(java.util.List.of(
-                    new ToolRegistry.ToolInvocation("call_1", "missing_tool", "{}")
+            ToolContract.ToolExecutionResult result = registry.executeTools(java.util.List.of(
+                    new ToolContract.ToolInvocation("call_1", "missing_tool", "{}")
             )).get(0);
 
             assertEquals(ToolStatus.ERROR, result.status());
@@ -121,8 +122,8 @@ class ToolRegistryStructuredResultTest {
                     com.devcli.tool.command.CommandExecutionService.Result.completed(
                             0, "m".repeat(20_000)));
 
-            ToolRegistry.ToolExecutionResult result = registry.executeTools(List.of(
-                    new ToolRegistry.ToolInvocation(
+            ToolContract.ToolExecutionResult result = registry.executeTools(List.of(
+                    new ToolContract.ToolInvocation(
                             "call_medium", "execute_command", "{\"command\":\"build\"}")))
                     .get(0);
 

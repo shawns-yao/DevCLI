@@ -1,5 +1,6 @@
 package com.devcli.hitl;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.concurrent.CancellationContext;
 import com.devcli.policy.PermissionMode;
 import com.devcli.policy.PermissionRuleSet;
@@ -162,13 +163,13 @@ class HostCommandApprovalTest {
         handler.answer = ignored -> ApprovalResult.reject("no");
         try (var registry = registry(handler)) {
             String arguments = args("git status --short");
-            ToolOutput result = registry.runWithToolAccess(ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+            ToolOutput result = registry.runWithToolAccess(ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                     () -> registry.executeToolOutput("execute_command", arguments));
             assertEquals(ToolErrorCode.HITL_REJECTED, result.errorCode());
             assertEquals(1, handler.calls);
             assertTrue(handler.request.hostExecution());
             String forbidden = args(COMMAND);
-            ToolOutput denied = registry.runWithToolAccess(ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+            ToolOutput denied = registry.runWithToolAccess(ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                     () -> registry.executeToolOutput("execute_command", forbidden));
             assertEquals(ToolErrorCode.POLICY_DENIED, denied.errorCode());
             assertEquals(1, handler.calls, "Backend policy must reject before another approval prompt");

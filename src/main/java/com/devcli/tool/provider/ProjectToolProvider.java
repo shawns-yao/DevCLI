@@ -1,5 +1,6 @@
 package com.devcli.tool.provider;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
@@ -10,7 +11,7 @@ import java.nio.file.Path;
 public final class ProjectToolProvider implements ToolProvider {
     @Override
     public void register(ToolContext context) {
-        context.registerTool(ToolRegistry.Tool.structured(
+        context.registerTool(ToolContract.Tool.structured(
                 "create_project",
                 "创建新项目结构",
                 context.createToolParameters(

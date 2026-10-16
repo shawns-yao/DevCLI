@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.context.ContextProfile;
 import com.devcli.config.ConfigResolver;
 import com.devcli.hook.HookLifecycle;
@@ -137,7 +138,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             return reportFailure(id, ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
                     "委派请求被拒绝：" + policy.reason(), false), "blocked");
         }
-        if (parent.currentToolAccessScope() != ToolRegistry.ToolAccessScope.FULL) {
+        if (parent.currentToolAccessScope() != ToolContract.ToolAccessScope.FULL) {
             return reportFailure(id, ToolOutput.rejected(ToolErrorCode.CAPABILITY_DENIED,
                     "受限子任务不能继续委派"), "blocked");
         }
@@ -146,8 +147,8 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             return reportFailure(id, ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
                     budget.describeExit(budget.check()), false), "blocked");
         }
-        ToolRegistry.ToolAccessScope childScope = "worker".equals(role)
-                ? ToolRegistry.ToolAccessScope.ISOLATED_PROJECT : ToolRegistry.ToolAccessScope.READ_ONLY;
+        ToolContract.ToolAccessScope childScope = "worker".equals(role)
+                ? ToolContract.ToolAccessScope.ISOLATED_PROJECT : ToolContract.ToolAccessScope.READ_ONLY;
         for (String tool : parseStringSet(arguments.get("allowed_tools"))) {
             if (!parent.hasTool(tool) || !childScope.permits(parent.toolEffect(tool))
                     || List.of("delegate_task", "delegate_control", "list_memory").contains(tool)) {
@@ -250,7 +251,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
                         candidateReport = JSON.createObjectNode().put("report_id", id).put("child_id", id)
                                 .put("status", "failed").put("patch_status", "NOT_APPLIED");
                         result = executeChild(workspace.toolRegistry(), client, budget, id, role, rolePrompt,
-                                arguments, context, ToolRegistry.ToolAccessScope.ISOLATED_PROJECT, upstreamSnapshot, resumed);
+                                arguments, context, ToolContract.ToolAccessScope.ISOLATED_PROJECT, upstreamSnapshot, resumed);
                         candidateReport = (ObjectNode) JSON.readTree(result.text());
                         if (result.isSuccess()) {
                             context.throwIfCancelled();
@@ -334,7 +335,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             } else {
                 try (ToolRegistry child = parent.forkForProject(Path.of(parent.getProjectPath()))) {
                     result = executeChild(child, client, budget, id, role, rolePrompt,
-                            arguments, context, ToolRegistry.ToolAccessScope.READ_ONLY, upstreamSnapshot, resumed);
+                            arguments, context, ToolContract.ToolAccessScope.READ_ONLY, upstreamSnapshot, resumed);
                     candidateReport = (ObjectNode) JSON.readTree(result.text());
                     if (result.isSuccess()) {
                         result = registerChildReport(id, result);
@@ -458,7 +459,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             ToolExecutionContext checkContext = new ToolExecutionContext(context.invocationId() + "/verify",
                     context.cancellationToken(), System.nanoTime(), Math.min(context.deadlineNanos(),
                     System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(request.timeoutSeconds())));
-            ToolOutput output = workspace.toolRegistry().runWithToolAccess(ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+            ToolOutput output = workspace.toolRegistry().runWithToolAccess(ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                     () -> workspace.toolRegistry().executeCommandOutput(request.command(), checkContext));
             if (output.status() == com.devcli.tool.ToolStatus.REJECTED) throw new IllegalStateException(output.text());
             return new com.devcli.tool.command.CommandExecutionService.Result(output.isSuccess() ? 0 : -1,
@@ -649,7 +650,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
                         "delegate-reviewer-" + UUID.randomUUID().toString().substring(0, 8),
                         "reviewer",
                         prompts.loadRequired("modes/delegate-reviewer.md"), reviewArguments,
-                        context, ToolRegistry.ToolAccessScope.READ_ONLY, "");
+                        context, ToolContract.ToolAccessScope.READ_ONLY, "");
             }
         } catch (Exception e) {
             return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
@@ -659,14 +660,14 @@ final class DelegationSession implements DelegateTaskTool.Handler {
 
     private ToolOutput executeChild(ToolRegistry registry, LlmClient client, AgentBudget budget,
                                     String id, String role, String rolePrompt, Map<String, String> arguments,
-                                    ToolExecutionContext context, ToolRegistry.ToolAccessScope scope,
+                                    ToolExecutionContext context, ToolContract.ToolAccessScope scope,
                                     String upstreamReport) {
         return executeChild(registry, client, budget, id, role, rolePrompt, arguments, context, scope, upstreamReport, null);
     }
 
     private ToolOutput executeChild(ToolRegistry registry, LlmClient client, AgentBudget budget,
                                     String id, String role, String rolePrompt, Map<String, String> arguments,
-                                    ToolExecutionContext context, ToolRegistry.ToolAccessScope scope,
+                                    ToolExecutionContext context, ToolContract.ToolAccessScope scope,
                                     String upstreamReport, DelegationState.Snapshot resumed) {
         return registry.runWithAllowedTools(parseStringSet(arguments.get("allowed_tools")),
                 () -> registry.runWithAllowedWritePaths(parseStringList(arguments.get("allowed_write_paths")),
@@ -676,7 +677,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
 
     private ToolOutput executeChildInternal(ToolRegistry registry, LlmClient client, AgentBudget budget,
                                              String id, String role, String rolePrompt, Map<String, String> arguments,
-                                             ToolExecutionContext context, ToolRegistry.ToolAccessScope scope,
+                                             ToolExecutionContext context, ToolContract.ToolAccessScope scope,
                                              String upstreamReport, DelegationState.Snapshot resumed) {
         var skillBuffer = parent.activeSkillContextBuffer();
         registry.restrictForDelegation();
@@ -814,7 +815,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
         @Override public List<LlmClient.Message> history() { return history; }
         @Override public String toolRoutingInput() { return arguments.get("task"); }
         @Override public List<LlmClient.Tool> toolDefinitions(int iteration) { return tools; }
-        @Override public ToolRegistry.ToolSnapshot toolSnapshot(int iteration) {
+        @Override public ToolContract.ToolSnapshot toolSnapshot(int iteration) {
             return registry.snapshotForCurrentAccess().withDefinitions(tools);
         }
         @Override public LlmClient.StreamListener streamListener() { return LlmClient.StreamListener.NO_OP; }
@@ -841,16 +842,16 @@ final class DelegationSession implements DelegateTaskTool.Handler {
                 if (!pending.isBlank()) history.add(LlmClient.Message.internalUser(pending));
             }
         }
-        @Override public List<ToolRegistry.ToolExecutionResult> executeTools(List<LlmClient.ToolCall> calls, int iteration) {
+        @Override public List<ToolContract.ToolExecutionResult> executeTools(List<LlmClient.ToolCall> calls, int iteration) {
             return executeTools(calls, iteration, null);
         }
-        @Override public List<ToolRegistry.ToolExecutionResult> executeTools(
-                List<LlmClient.ToolCall> calls, int iteration, ToolRegistry.ToolSnapshot snapshot) {
-            return registry.executeTools(calls.stream().map(call -> new ToolRegistry.ToolInvocation(
+        @Override public List<ToolContract.ToolExecutionResult> executeTools(
+                List<LlmClient.ToolCall> calls, int iteration, ToolContract.ToolSnapshot snapshot) {
+            return registry.executeTools(calls.stream().map(call -> new ToolContract.ToolInvocation(
                     call.id(), call.function().name(), call.function().arguments())).toList(), snapshot);
         }
         @Override public void afterToolResults(LlmClient.ChatResponse response,
-                List<ToolRegistry.ToolExecutionResult> results, int iteration, AgentBudget currentBudget) {
+                List<ToolContract.ToolExecutionResult> results, int iteration, AgentBudget currentBudget) {
             for (var result : results) {
                 if (evidence.size() == 64) evidence.remove(0);
                 evidence.add(result.name() + ":" + result.status() + ":" + result.errorCode());
@@ -873,7 +874,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
                     deadEnds.addLast(observed);
                 }
                 var effect = registry.toolEffect(result.name());
-                if (effect != ToolRegistry.ToolEffect.READ_ONLY && effect != ToolRegistry.ToolEffect.LOCAL_CONTEXT) {
+                if (effect != ToolContract.ToolEffect.READ_ONLY && effect != ToolContract.ToolEffect.LOCAL_CONTEXT) {
                     String key = mutationKey(result);
                     if (result.status() == com.devcli.tool.ToolStatus.SUCCESS) unresolvedMutations.remove(key);
                     else {
@@ -896,7 +897,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             report.putArray("modified_resources");
             report.put("transcript_ref", "delegation:" + id);
             report.put("verification", "工具状态仅表示执行结果；主 Agent 仍需核对任务验收条件");
-            if (registry.currentToolAccessScope() == ToolRegistry.ToolAccessScope.ISOLATED_PROJECT
+            if (registry.currentToolAccessScope() == ToolContract.ToolAccessScope.ISOLATED_PROJECT
                     && !unresolvedMutations.isEmpty()) {
                 report.put("status", "failed").put("error", "仍有未解决的副作用工具失败，未应用工作区修改");
                 return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED, serializeReport(report), false);
@@ -951,7 +952,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             unresolvedMutations.stream().sorted().map(DelegationSession::excerpt).forEach(questions::add);
             report.put("knowledge_outcome", hasSuccessfulEvidence ? "PARTIAL" : "NONE");
             report.put("patch_status", registry.currentToolAccessScope()
-                    == ToolRegistry.ToolAccessScope.ISOLATED_PROJECT ? "NOT_APPLIED" : "NOT_APPLICABLE");
+                    == ToolContract.ToolAccessScope.ISOLATED_PROJECT ? "NOT_APPLIED" : "NOT_APPLICABLE");
             report.put("ever_had_mutation_failure", everHadMutationFailure);
             report.put("evidence_notice", "工具摘录是观察，不是验收结论；失败尝试也不等于永久不可行");
         }
@@ -1023,7 +1024,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
         return safe.length() <= 512 ? safe : safe.substring(0, 512) + "\n[excerpt truncated]";
     }
 
-    private static String mutationKey(ToolRegistry.ToolExecutionResult result) {
+    private static String mutationKey(ToolContract.ToolExecutionResult result) {
         try {
             var arguments = JSON.readTree(result.argumentsJson());
             String target = "execute_command".equals(result.name())

@@ -1,5 +1,6 @@
 package com.devcli.hitl;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.policy.TaskGrant;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolOutput;
@@ -214,7 +215,7 @@ class DeleteFilesApprovalTest {
         try (var registry = registry(handler)) {
             assertFalse(registry.executeToolOutput("delete_files", "{\"paths\":[123]}").isSuccess());
             String arguments = paths("a.txt");
-            ToolOutput result = registry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY,
+            ToolOutput result = registry.runWithToolAccess(ToolContract.ToolAccessScope.READ_ONLY,
                     () -> registry.executeToolOutput("delete_files", arguments));
             assertEquals(ToolErrorCode.CAPABILITY_DENIED, result.errorCode());
             assertEquals(0, handler.calls);

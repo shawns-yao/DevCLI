@@ -1,5 +1,6 @@
 package com.devcli.hitl;
 
+import com.devcli.tool.ToolContract;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -412,10 +413,10 @@ class HitlToolRegistryTest {
         HitlToolRegistry registry = new HitlToolRegistry(handler);
         registry.setProjectPath(tempDir.toString());
 
-        List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
-                new ToolRegistry.ToolInvocation("call_a", "write_file",
+        List<ToolContract.ToolExecutionResult> results = registry.executeTools(List.of(
+                new ToolContract.ToolInvocation("call_a", "write_file",
                         "{\"path\":\"a.txt\",\"content\":\"a\"}"),
-                new ToolRegistry.ToolInvocation("call_b", "write_file",
+                new ToolContract.ToolInvocation("call_b", "write_file",
                         "{\"path\":\"b.txt\",\"content\":\"b\"}")));
 
         assertEquals(1, handler.maxConcurrent(), "审批输入必须串行化");

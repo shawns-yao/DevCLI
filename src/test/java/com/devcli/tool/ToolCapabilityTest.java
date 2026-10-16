@@ -1,5 +1,6 @@
 package com.devcli.tool;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.mcp.config.McpToolTrustPolicy;
 import com.devcli.mcp.protocol.McpToolDescriptor;
 import com.devcli.tool.command.CommandExecutionService;
@@ -26,7 +27,7 @@ class ToolCapabilityTest {
         ToolRegistry registry = new ToolRegistry();
         registry.setProjectPath(tempDir.toString());
 
-        registry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY, () -> {
+        registry.runWithToolAccess(ToolContract.ToolAccessScope.READ_ONLY, () -> {
             List<String> names = registry.getToolDefinitions().stream().map(tool -> tool.name()).toList();
             assertTrue(names.contains("read_file"));
             assertFalse(names.contains("write_file"));
@@ -51,7 +52,7 @@ class ToolCapabilityTest {
                 new McpToolDescriptor.Annotations(false, true, true));
         registry.registerMcpToolOutput(descriptor, arguments -> ToolOutput.success("called"));
 
-        registry.runWithToolAccess(ToolRegistry.ToolAccessScope.ISOLATED_PROJECT, () -> {
+        registry.runWithToolAccess(ToolContract.ToolAccessScope.ISOLATED_PROJECT, () -> {
             ToolOutput write = registry.executeToolOutput(
                     "write_file", "{\"path\":\"allowed.txt\",\"content\":\"ok\"}");
             assertTrue(write.isSuccess(), write.text());
@@ -81,7 +82,7 @@ class ToolCapabilityTest {
                 "search_tools", "{\"query\":\"write file\"}");
         assertTrue(full.text().contains("write_file"), full.text());
 
-        registry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY, () -> {
+        registry.runWithToolAccess(ToolContract.ToolAccessScope.READ_ONLY, () -> {
             ToolOutput readOnly = registry.executeToolOutput(
                     "search_tools", "{\"query\":\"write file\"}");
             assertFalse(readOnly.text().contains("write_file"), readOnly.text());
@@ -94,11 +95,11 @@ class ToolCapabilityTest {
         ToolRegistry registry = new ToolRegistry();
         registry.setProjectPath(tempDir.toString());
 
-        registry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY, () -> {
-            List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
-                    new ToolRegistry.ToolInvocation("first", "write_file",
+        registry.runWithToolAccess(ToolContract.ToolAccessScope.READ_ONLY, () -> {
+            List<ToolContract.ToolExecutionResult> results = registry.executeTools(List.of(
+                    new ToolContract.ToolInvocation("first", "write_file",
                             "{\"path\":\"first.txt\",\"content\":\"x\"}"),
-                    new ToolRegistry.ToolInvocation("second", "write_file",
+                    new ToolContract.ToolInvocation("second", "write_file",
                             "{\"path\":\"second.txt\",\"content\":\"x\"}")));
 
             assertTrue(results.stream().allMatch(result ->
@@ -116,11 +117,11 @@ class ToolCapabilityTest {
         registry.setProjectPath(tempDir.toString());
 
         registry.runWithResourceLease("step-1", () ->
-                registry.runWithToolAccess(ToolRegistry.ToolAccessScope.ISOLATED_PROJECT, () ->
+                registry.runWithToolAccess(ToolContract.ToolAccessScope.ISOLATED_PROJECT, () ->
                         registry.executeTools(List.of(
-                                new ToolRegistry.ToolInvocation("first", "write_file",
+                                new ToolContract.ToolInvocation("first", "write_file",
                                         "{\"path\":\"first.txt\",\"content\":\"x\"}"),
-                                new ToolRegistry.ToolInvocation("second", "write_file",
+                                new ToolContract.ToolInvocation("second", "write_file",
                                         "{\"path\":\"second.txt\",\"content\":\"x\"}")))));
 
         assertEquals(2, registry.consumeStepModifiedFiles("step-1").size());
@@ -132,7 +133,7 @@ class ToolCapabilityTest {
             AtomicInteger active = new AtomicInteger();
             AtomicInteger peak = new AtomicInteger();
             CountDownLatch bothEntered = new CountDownLatch(2);
-            ToolRegistry.ToolExecutor mutation = args -> {
+            ToolContract.ToolExecutor mutation = args -> {
                 int current = active.incrementAndGet();
                 peak.accumulateAndGet(current, Math::max);
                 bothEntered.countDown();
@@ -145,16 +146,16 @@ class ToolCapabilityTest {
                 }
                 return "ok";
             };
-            registry.registerTool(new ToolRegistry.Tool(
+            registry.registerTool(new ToolContract.Tool(
                     "mutate_a", "mutation a", JsonNodeFactory.instance.objectNode(), mutation,
-                    ToolRegistry.ToolEffect.PROJECT_MUTATION));
-            registry.registerTool(new ToolRegistry.Tool(
+                    ToolContract.ToolEffect.PROJECT_MUTATION));
+            registry.registerTool(new ToolContract.Tool(
                     "mutate_b", "mutation b", JsonNodeFactory.instance.objectNode(), mutation,
-                    ToolRegistry.ToolEffect.PROJECT_MUTATION));
+                    ToolContract.ToolEffect.PROJECT_MUTATION));
 
-            List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
-                    new ToolRegistry.ToolInvocation("a", "mutate_a", "{}"),
-                    new ToolRegistry.ToolInvocation("b", "mutate_b", "{}")));
+            List<ToolContract.ToolExecutionResult> results = registry.executeTools(List.of(
+                    new ToolContract.ToolInvocation("a", "mutate_a", "{}"),
+                    new ToolContract.ToolInvocation("b", "mutate_b", "{}")));
 
             assertTrue(results.stream().allMatch(result -> result.status() == ToolStatus.SUCCESS));
             assertEquals(1, peak.get(), "同一批次的副作用工具不得并行执行");
@@ -177,7 +178,7 @@ class ToolCapabilityTest {
         });
 
         ToolOutput output = registry.runWithToolAccess(
-                ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+                ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                 () -> registry.executeToolOutput(
                         "execute_command", "{\"command\":\"pwd\"}"));
 
@@ -193,7 +194,7 @@ class ToolCapabilityTest {
                 new McpToolDescriptor.Annotations(true, false, false));
         registry.registerMcpToolOutput(descriptor, arguments -> ToolOutput.success("read"));
 
-        registry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY, () -> {
+        registry.runWithToolAccess(ToolContract.ToolAccessScope.READ_ONLY, () -> {
             ToolOutput output = registry.executeToolOutput(descriptor.namespacedName(), "{}");
             assertEquals(ToolErrorCode.CAPABILITY_DENIED, output.errorCode());
             return null;
@@ -202,7 +203,7 @@ class ToolCapabilityTest {
         registry.setMcpToolTrustPolicy("test",
                 new McpToolTrustPolicy(true, java.util.Set.of(), java.util.Set.of()));
         registry.registerMcpToolOutput(descriptor, arguments -> ToolOutput.success("read"));
-        registry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY, () -> {
+        registry.runWithToolAccess(ToolContract.ToolAccessScope.READ_ONLY, () -> {
             ToolOutput output = registry.executeToolOutput(descriptor.namespacedName(), "{}");
             assertTrue(output.isSuccess(), output.text());
             return null;

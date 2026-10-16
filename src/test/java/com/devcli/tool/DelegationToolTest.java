@@ -1,5 +1,6 @@
 package com.devcli.tool;
 
+import com.devcli.tool.ToolContract;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -28,7 +29,7 @@ class DelegationToolTest {
             registry.restrictForDelegation();
             try (var child = com.devcli.concurrent.CancellationContext.startRunContext(project)) {
                 var own = ToolResultArtifactStore.store("child", "own evidence");
-                var allowed = registry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY, () ->
+                var allowed = registry.runWithToolAccess(ToolContract.ToolAccessScope.READ_ONLY, () ->
                         registry.executeToolOutput("read_tool_result", "{\"result_ref\":\"" + own.ref() + "\"}"));
                 assertTrue(allowed.isSuccess(), allowed.text());
                 assertTrue(allowed.text().contains("own evidence"));
@@ -56,7 +57,7 @@ class DelegationToolTest {
                 }
                 cancelled.set(context.isCancelled());
                 return ToolOutput.cancelled("cancelled");
-            }, () -> registry.executeTools(java.util.List.of(new ToolRegistry.ToolInvocation(
+            }, () -> registry.executeTools(java.util.List.of(new ToolContract.ToolInvocation(
                     "deadline", "delegate_task", delegation("explorer", "wait")))));
             assertTrue(cancelled.get());
             assertEquals(ToolErrorCode.TIMEOUT, results.getFirst().errorCode());
@@ -72,9 +73,9 @@ class DelegationToolTest {
         try (ToolRegistry registry = new ToolRegistry()) {
             var results = registry.runWithDelegation((args, context) -> ToolOutput.success(args.get("task")),
                     () -> registry.executeTools(java.util.List.of(
-                            new ToolRegistry.ToolInvocation("a", "delegate_task", delegation("explorer", "first")),
-                            new ToolRegistry.ToolInvocation("b", "delegate_task", delegation("reviewer", "second")))));
-            assertEquals(java.util.List.of("first", "second"), results.stream().map(ToolRegistry.ToolExecutionResult::result).toList());
+                            new ToolContract.ToolInvocation("a", "delegate_task", delegation("explorer", "first")),
+                            new ToolContract.ToolInvocation("b", "delegate_task", delegation("reviewer", "second")))));
+            assertEquals(java.util.List.of("first", "second"), results.stream().map(ToolContract.ToolExecutionResult::result).toList());
             assertTrue(registry.getToolDefinitions().stream().noneMatch(t -> t.name().equals("delegate_task")));
         }
     }
@@ -96,7 +97,7 @@ class DelegationToolTest {
         try (ToolRegistry registry = new ToolRegistry()) {
             var results = registry.runWithDelegation((args, context) -> ToolOutput.success(
                             args.get("constraints") + "|" + args.get("budget")),
-                    () -> registry.executeTools(java.util.List.of(new ToolRegistry.ToolInvocation(
+                    () -> registry.executeTools(java.util.List.of(new ToolContract.ToolInvocation(
                             "structured", "delegate_task",
                             "{\"role\":\"explorer\",\"task\":\"inspect\","
                                     + "\"deliverable\":\"Report findings and verification evidence\","

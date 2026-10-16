@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import static com.devcli.tool.ToolContract.*;
 import com.devcli.llm.LlmClient;
 import com.devcli.tool.ToolRegistry;
 import org.junit.jupiter.api.Test;

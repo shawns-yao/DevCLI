@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.tool.ToolStatus;
@@ -18,13 +19,13 @@ class RepeatToolAdvisorTest {
 
     private static final List<Integer> THRESHOLDS = List.of(3, 5, 8);
 
-    private static ToolRegistry.ToolExecutionResult result(String name, String argumentsJson) {
+    private static ToolContract.ToolExecutionResult result(String name, String argumentsJson) {
         return result(name, argumentsJson, ToolStatus.SUCCESS);
     }
 
-    private static ToolRegistry.ToolExecutionResult result(
+    private static ToolContract.ToolExecutionResult result(
             String name, String argumentsJson, ToolStatus status) {
-        return new ToolRegistry.ToolExecutionResult(
+        return new ToolContract.ToolExecutionResult(
                 "call_1", name, argumentsJson, "ok", 10,
                 status, status == ToolStatus.SUCCESS ? ToolErrorCode.NONE : ToolErrorCode.EXECUTION_FAILED,
                 false, List.of(), List.of());

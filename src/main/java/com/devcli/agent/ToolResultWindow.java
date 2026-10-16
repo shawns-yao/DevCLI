@@ -1,9 +1,10 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.MemoryEntry;
 import com.devcli.memory.TokenBudget;
-import com.devcli.tool.ToolRegistry.ToolExecutionResult;
+import com.devcli.tool.ToolContract.ToolExecutionResult;
 import com.devcli.tool.ToolResultArtifact;
 import com.devcli.tool.ToolResultArtifactStore;
 import com.devcli.tool.ToolSideChannel;

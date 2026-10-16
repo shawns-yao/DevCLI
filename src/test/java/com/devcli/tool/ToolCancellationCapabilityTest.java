@@ -1,5 +1,6 @@
 package com.devcli.tool;
 
+import com.devcli.tool.ToolContract;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.junit.jupiter.api.Test;
 
@@ -9,23 +10,23 @@ class ToolCancellationCapabilityTest {
 
     @Test
     void distinguishesCooperativeAndInterruptOnlyTools() {
-        ToolRegistry.Tool interruptOnly = new ToolRegistry.Tool(
+        ToolContract.Tool interruptOnly = new ToolContract.Tool(
                 "plain", "plain", JsonNodeFactory.instance.objectNode(), args -> "ok");
-        ToolRegistry.Tool cooperative = ToolRegistry.Tool.contextualStructured(
+        ToolContract.Tool cooperative = ToolContract.Tool.contextualStructured(
                 "contextual", "contextual", JsonNodeFactory.instance.objectNode(),
                 (args, context) -> ToolOutput.success("ok"), 5);
 
-        assertEquals(ToolRegistry.ToolCancellationCapability.INTERRUPT_ONLY,
+        assertEquals(ToolContract.ToolCancellationCapability.INTERRUPT_ONLY,
                 interruptOnly.cancellationCapability());
-        assertEquals(ToolRegistry.ToolCancellationCapability.COOPERATIVE,
+        assertEquals(ToolContract.ToolCancellationCapability.COOPERATIVE,
                 cooperative.cancellationCapability());
 
         try (ToolRegistry registry = new ToolRegistry()) {
             registry.registerTool(interruptOnly);
             registry.registerTool(cooperative);
-            assertEquals(ToolRegistry.ToolCancellationCapability.INTERRUPT_ONLY,
+            assertEquals(ToolContract.ToolCancellationCapability.INTERRUPT_ONLY,
                     registry.toolCancellationCapability("plain"));
-            assertEquals(ToolRegistry.ToolCancellationCapability.COOPERATIVE,
+            assertEquals(ToolContract.ToolCancellationCapability.COOPERATIVE,
                     registry.toolCancellationCapability("contextual"));
         }
     }

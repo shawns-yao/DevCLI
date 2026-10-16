@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.hook.HookDispatcher;
 import com.devcli.hook.HookLifecycle;
 import com.devcli.context.TokenUsageFormatter;
@@ -32,7 +33,7 @@ final class AgentExecutionEngine<R> {
         List<LlmClient.Tool> toolDefinitions(int iteration);
 
         /** 当前轮模型可见定义与执行绑定的不可变快照；旧委托可返回 null 保持兼容。 */
-        default ToolRegistry.ToolSnapshot toolSnapshot(int iteration) {
+        default ToolContract.ToolSnapshot toolSnapshot(int iteration) {
             return null;
         }
 
@@ -97,19 +98,19 @@ final class AgentExecutionEngine<R> {
                                          AgentBudget budget) {
         }
 
-        List<ToolRegistry.ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
+        List<ToolContract.ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
                                                             int iteration);
 
         /** 使用与模型请求相同的工具快照执行当前轮调用。 */
-        default List<ToolRegistry.ToolExecutionResult> executeTools(
+        default List<ToolContract.ToolExecutionResult> executeTools(
                 List<LlmClient.ToolCall> toolCalls,
                 int iteration,
-                ToolRegistry.ToolSnapshot snapshot) {
+                ToolContract.ToolSnapshot snapshot) {
             return executeTools(toolCalls, iteration);
         }
 
         default void afterToolResults(LlmClient.ChatResponse response,
-                                      List<ToolRegistry.ToolExecutionResult> toolResults,
+                                      List<ToolContract.ToolExecutionResult> toolResults,
                                       int iteration,
                                       AgentBudget budget) {
         }
@@ -117,7 +118,7 @@ final class AgentExecutionEngine<R> {
         /** 返回工具证据触发的确定性内部纠偏指令；空串表示无需追加。 */
         default String instructionAfterToolResults(
                 LlmClient.ChatResponse response,
-                List<ToolRegistry.ToolExecutionResult> toolResults,
+                List<ToolContract.ToolExecutionResult> toolResults,
                 int iteration,
                 AgentBudget budget) {
             return "";
@@ -134,7 +135,7 @@ final class AgentExecutionEngine<R> {
 
         default Optional<R> completedAfterToolResults(
                 LlmClient.ChatResponse response,
-                List<ToolRegistry.ToolExecutionResult> toolResults,
+                List<ToolContract.ToolExecutionResult> toolResults,
                 int iteration,
                 AgentBudget budget) {
             return Optional.empty();
@@ -282,7 +283,7 @@ final class AgentExecutionEngine<R> {
                 emitState(eventSink, RunEvent.ExecutionState.THINKING,
                         iteration, "正在请求模型生成下一步动作");
                 LlmClient.ChatResponse response;
-                ToolRegistry.ToolSnapshot toolSnapshot;
+                ToolContract.ToolSnapshot toolSnapshot;
                 try (SamplingRequestCoordinator.RequestScope ignored =
                              samplingRequests.begin(samplingRequestId(iteration))) {
                     eventSink.emit(RunEvent.ModelContext.from(
@@ -356,9 +357,9 @@ final class AgentExecutionEngine<R> {
                     emitState(eventSink, RunEvent.ExecutionState.TOOL_EXECUTING,
                             iteration, response.toolCalls().size() + " 个工具调用开始执行");
                     boolean admitted = budget.reserveToolCalls(response.toolCalls());
-                    List<ToolRegistry.ToolExecutionResult> returnedResults = admitted
+                    List<ToolContract.ToolExecutionResult> returnedResults = admitted
                             ? delegate.executeTools(response.toolCalls(), iteration, toolSnapshot)
-                            : response.toolCalls().stream().map(call -> new ToolRegistry.ToolExecutionResult(
+                            : response.toolCalls().stream().map(call -> new ToolContract.ToolExecutionResult(
                                     call.id(), call.function().name(), call.function().arguments(),
                                     budget.describeExit(AgentBudget.ExitReason.TOOL_CALL_LIMIT), 0,
                                     com.devcli.tool.ToolStatus.REJECTED,
@@ -366,13 +367,13 @@ final class AgentExecutionEngine<R> {
                     ToolResultReconciler.Reconciliation reconciliation =
                             ToolResultReconciler.reconcile(
                                     response.toolCalls(), returnedResults, delegate::toolPresentation);
-                    List<ToolRegistry.ToolExecutionResult> toolResults = ToolResultWindow.fit(
+                    List<ToolContract.ToolExecutionResult> toolResults = ToolResultWindow.fit(
                             reconciliation.results(), ToolResultWindow.available(llmClient, delegate.history(),
                                     toolSnapshot == null ? delegate.toolDefinitions(iteration) : toolSnapshot.definitions()));
                     emitPairingIssues(eventSink, reconciliation.issues());
                     emitState(eventSink, RunEvent.ExecutionState.TOOL_RESULTS_PAIRED,
                             iteration, toolResults.size() + " 个工具结果已按原调用顺序对账");
-                    for (ToolRegistry.ToolExecutionResult toolResult : toolResults) {
+                    for (ToolContract.ToolExecutionResult toolResult : toolResults) {
                         budget.recordToolResult(toolResult);
                         LlmClient.Message toolMessage = LlmClient.Message.tool(
                                 toolResult.id(), toolResult.result());
@@ -499,7 +500,7 @@ final class AgentExecutionEngine<R> {
 
     private static <R> String refreshStaleContext(Delegate<R> delegate,
                                                    RunEventSink eventSink,
-                                                   List<ToolRegistry.ToolExecutionResult> results,
+                                                   List<ToolContract.ToolExecutionResult> results,
                                                    int iteration) {
         boolean stale = results != null && results.stream().anyMatch(result ->
                 result != null && result.errorCode() == com.devcli.tool.ToolErrorCode.STALE_CONTEXT);
@@ -547,12 +548,12 @@ final class AgentExecutionEngine<R> {
      * {@link AgentBudget} 的停滞检测作为最终兜底。
      */
     private void injectRepeatToolReminders(Delegate<R> delegate, RunEventSink eventSink,
-                                           List<ToolRegistry.ToolExecutionResult> toolResults) {
+                                           List<ToolContract.ToolExecutionResult> toolResults) {
         if (toolResults == null || toolResults.isEmpty()) {
             return;
         }
         List<RepeatToolAdvisor.Reminder> reminders = new ArrayList<>();
-        for (ToolRegistry.ToolExecutionResult toolResult : toolResults) {
+        for (ToolContract.ToolExecutionResult toolResult : toolResults) {
             RepeatToolAdvisor.Reminder reminder = repeatToolAdvisor.observeAndMaybeRemind(toolResult);
             if (reminder != null) {
                 reminders.add(reminder);

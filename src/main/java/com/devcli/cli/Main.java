@@ -320,7 +320,7 @@ public class Main {
                     skillsCacheDir, userSkillsDir, projectSkillsDir, skillStateStore);
             skillRegistry.setAvailableDependencies(
                     () -> hitlToolRegistry.searchableTools().stream()
-                            .map(com.devcli.tool.ToolRegistry.Tool::name)
+                            .map(com.devcli.tool.ToolContract.Tool::name)
                             .collect(java.util.stream.Collectors.toUnmodifiableSet()),
                     () -> mcpServerManager.servers().stream()
                             .filter(server -> server.status() == com.devcli.mcp.McpServerStatus.READY)
@@ -1049,7 +1049,7 @@ public class Main {
                     java.util.function.Supplier<String> grantedTurn =
                             () -> reactToolRegistry.runWithTaskGrant(grantForTurn, reactTurn);
                     runTask = readOnlyTurn
-                            ? () -> reactToolRegistry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY,
+                            ? () -> reactToolRegistry.runWithToolAccess(ToolContract.ToolAccessScope.READ_ONLY,
                                     grantedTurn)
                             : grantedTurn::get;
                 }

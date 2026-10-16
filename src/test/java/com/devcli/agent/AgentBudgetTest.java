@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.GLMClient;
 import com.devcli.tool.ToolErrorCode;
@@ -118,7 +119,7 @@ class AgentBudgetTest {
     @Test
     void successfulStructuredResultDoesNotTreatErrorLikeTextAsFailure() {
         AgentBudget budget = new AgentBudget(1_000_000, 3, 50);
-        ToolRegistry.ToolExecutionResult result = new ToolRegistry.ToolExecutionResult(
+        ToolContract.ToolExecutionResult result = new ToolContract.ToolExecutionResult(
                 "call_1", "search_code", "{}", "symbol not found in comments",
                 1, ToolStatus.SUCCESS, ToolErrorCode.NONE, false, List.of());
 
@@ -145,8 +146,8 @@ class AgentBudgetTest {
                 .contains("连续"));
     }
 
-    private static ToolRegistry.ToolExecutionResult toolError(String id, String message) {
-        return new ToolRegistry.ToolExecutionResult(
+    private static ToolContract.ToolExecutionResult toolError(String id, String message) {
+        return new ToolContract.ToolExecutionResult(
                 id, "mcp__demo__search", "{}", message,
                 1, ToolStatus.REJECTED, ToolErrorCode.INVALID_ARGUMENTS, true, List.of());
     }

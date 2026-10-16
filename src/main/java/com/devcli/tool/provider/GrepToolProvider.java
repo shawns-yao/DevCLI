@@ -1,5 +1,6 @@
 package com.devcli.tool.provider;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
@@ -22,7 +23,7 @@ public final class GrepToolProvider implements ToolProvider {
 
     @Override
     public void register(ToolContext context) {
-        context.registerTool(ToolRegistry.Tool.structured(
+        context.registerTool(ToolContract.Tool.structured(
                 "grep_code",
                 "实时精确搜索当前工作区文件内容；适合类名、方法名、配置键、错误文本等精确定位，不依赖 RAG 索引。"
                         + "默认按 .gitignore 过滤，显式传入被忽略目录时会按该目录直扫。",

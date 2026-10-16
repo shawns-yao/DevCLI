@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.llm.LlmClient;
 import com.devcli.concurrent.CancellationContext;
 import com.devcli.concurrent.RunContext;
@@ -118,12 +119,12 @@ final class ContextReferenceGuard {
         return requested == null ? LlmClient.ToolChoice.AUTO : requested;
     }
 
-    void observe(List<ToolRegistry.ToolExecutionResult> results) {
+    void observe(List<ToolContract.ToolExecutionResult> results) {
         if (pendingStoredPaths.isEmpty() || results == null) {
             return;
         }
         boolean forcedReadAttempted = false;
-        for (ToolRegistry.ToolExecutionResult result : results) {
+        for (ToolContract.ToolExecutionResult result : results) {
             if (result == null
                     || !"read_file".equals(result.name())) {
                 continue;

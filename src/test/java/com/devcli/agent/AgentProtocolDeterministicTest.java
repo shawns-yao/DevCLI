@@ -1,5 +1,7 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
+import static com.devcli.tool.ToolContract.*;
 import com.devcli.llm.GLMClient;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.LongTermMemory;
@@ -206,13 +208,13 @@ class AgentProtocolDeterministicTest {
             }
             case MIXED_RESULTS -> {
                 assertEquals(fixture.callIds(), toolMessageIds);
-                Map<String, ToolRegistry.ToolExecutionResult> actualResults = resultsById(tools);
+                Map<String, ToolContract.ToolExecutionResult> actualResults = resultsById(tools);
                 for (int i = 0; i < fixture.callIds().size(); i++) {
                     assertEquals(1, tools.executionCount("probe_" + i));
                     assertTrue(toolMessages.get(i).content().contains(fixture.expectedPayloads().get(i)),
                             "结构化终态对应的结果文本不能丢失");
                     ToolOutput expected = fixture.expectedOutputs().get(i);
-                    ToolRegistry.ToolExecutionResult actual = actualResults.get(fixture.callIds().get(i));
+                    ToolContract.ToolExecutionResult actual = actualResults.get(fixture.callIds().get(i));
                     assertNotNull(actual);
                     assertEquals(expected.status(), actual.status());
                     assertEquals(expected.errorCode(), actual.errorCode());
@@ -235,10 +237,10 @@ class AgentProtocolDeterministicTest {
         }
     }
 
-    private static Map<String, ToolRegistry.ToolExecutionResult> resultsById(
+    private static Map<String, ToolContract.ToolExecutionResult> resultsById(
             ProtocolToolRegistry tools) {
-        Map<String, ToolRegistry.ToolExecutionResult> byId = new LinkedHashMap<>();
-        for (ToolRegistry.ToolExecutionResult result : tools.results()) {
+        Map<String, ToolContract.ToolExecutionResult> byId = new LinkedHashMap<>();
+        for (ToolContract.ToolExecutionResult result : tools.results()) {
             byId.put(result.id(), result);
         }
         return byId;
@@ -405,7 +407,7 @@ class AgentProtocolDeterministicTest {
             if (completionGate != null) {
                 gate = completionGate;
             }
-            registerTool(new ToolRegistry.Tool(
+            registerTool(new ToolContract.Tool(
                     name,
                     "deterministic protocol probe",
                     JSON.readTree("""
@@ -417,14 +419,14 @@ class AgentProtocolDeterministicTest {
                               },"required":["enabled"],"additionalProperties":false}
                             },"required":["value","mode","meta"],"additionalProperties":false}
                             """),
-                    (ToolRegistry.StructuredToolExecutor) args -> {
+                    (ToolContract.StructuredToolExecutor) args -> {
                         count.incrementAndGet();
                         if (completionGate != null) {
                             completionGate.complete(index);
                         }
                         return output;
                     },
-                    ToolRegistry.ToolEffect.READ_ONLY));
+                    ToolContract.ToolEffect.READ_ONLY));
         }
 
         @Override

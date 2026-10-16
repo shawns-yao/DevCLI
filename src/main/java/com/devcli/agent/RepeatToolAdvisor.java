@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.config.ConfigResolver;
 import com.devcli.tool.ToolInvocationFingerprint;
 import com.devcli.tool.ToolRegistry;
@@ -121,7 +122,7 @@ public final class RepeatToolAdvisor {
      * 观察一次工具执行结果并返回是否需要注入提醒；未触发时返回 null。
      * 该观察同时维护连续重复链，供 {@link #suspendsStagnationExit()} 判断停滞兜底是否暂缓。
      */
-    public Reminder observeAndMaybeRemind(ToolRegistry.ToolExecutionResult result) {
+    public Reminder observeAndMaybeRemind(ToolContract.ToolExecutionResult result) {
         if (!enabled || result == null || result.name() == null || result.name().isBlank()) {
             return null;
         }

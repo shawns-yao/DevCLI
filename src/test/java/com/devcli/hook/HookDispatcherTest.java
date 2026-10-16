@@ -1,5 +1,7 @@
 package com.devcli.hook;
 
+import com.devcli.tool.ToolContract;
+import static com.devcli.tool.ToolContract.*;
 import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.hitl.HitlHandler;
@@ -26,7 +28,7 @@ class HookDispatcherTest {
 
     @Test
     void executesReadOnlyHookAndSubstitutesContext(@TempDir Path projectRoot) throws Exception {
-        try (RecordingRegistry registry = new RecordingRegistry(ToolRegistry.ToolEffect.READ_ONLY)) {
+        try (RecordingRegistry registry = new RecordingRegistry(ToolContract.ToolEffect.READ_ONLY)) {
             registry.setProjectPath(projectRoot.toString());
             HookDefinition hook = new HookDefinition(
                     "audit", "audit", HookEvent.TOOL_EXECUTION_END, true,
@@ -47,7 +49,7 @@ class HookDispatcherTest {
 
     @Test
     void warnHookFailureDoesNotChangeCoreFlow(@TempDir Path projectRoot) throws Exception {
-        try (RecordingRegistry registry = new RecordingRegistry(ToolRegistry.ToolEffect.READ_ONLY)) {
+        try (RecordingRegistry registry = new RecordingRegistry(ToolContract.ToolEffect.READ_ONLY)) {
             registry.output = ToolOutput.error(
                     com.devcli.tool.ToolErrorCode.EXECUTION_FAILED, "failed", false);
             HookDefinition hook = definition(
@@ -62,7 +64,7 @@ class HookDispatcherTest {
 
     @Test
     void requiredHookFailureStopsCoreFlow(@TempDir Path projectRoot) throws Exception {
-        try (RecordingRegistry registry = new RecordingRegistry(ToolRegistry.ToolEffect.READ_ONLY)) {
+        try (RecordingRegistry registry = new RecordingRegistry(ToolContract.ToolEffect.READ_ONLY)) {
             registry.output = ToolOutput.error(
                     com.devcli.tool.ToolErrorCode.EXECUTION_FAILED, "failed", false);
             HookDefinition hook = definition(
@@ -77,7 +79,7 @@ class HookDispatcherTest {
     @Test
     void recordsPairedAuditEventsAndMergesAllHookDecisions(@TempDir Path projectRoot)
             throws Exception {
-        try (RecordingRegistry registry = new RecordingRegistry(ToolRegistry.ToolEffect.READ_ONLY)) {
+        try (RecordingRegistry registry = new RecordingRegistry(ToolContract.ToolEffect.READ_ONLY)) {
             registry.output = ToolOutput.error(
                     com.devcli.tool.ToolErrorCode.EXECUTION_FAILED, "failed", false);
             HookDefinition warn = new HookDefinition(
@@ -120,7 +122,7 @@ class HookDispatcherTest {
 
     @Test
     void sideEffectHookRequiresExplicitHitlPath(@TempDir Path projectRoot) throws Exception {
-        try (RecordingRegistry registry = new RecordingRegistry(ToolRegistry.ToolEffect.HOST_PROCESS)) {
+        try (RecordingRegistry registry = new RecordingRegistry(ToolContract.ToolEffect.HOST_PROCESS)) {
             HookDefinition hook = definition(
                     HookDefinition.FailureMode.REQUIRED, true);
 
@@ -141,13 +143,13 @@ class HookDispatcherTest {
         AtomicInteger executions = new AtomicInteger();
         try (HitlToolRegistry registry = new HitlToolRegistry(handler)) {
             registry.setProjectPath(projectRoot.toString());
-            registry.registerTool(new ToolRegistry.Tool(
+            registry.registerTool(new ToolContract.Tool(
                     "write_file", "test hook", JSON.readTree("""
                             {"type":"object","properties":{},"additionalProperties":true}
                             """), args -> {
                         executions.incrementAndGet();
                         return "ok";
-                    }, ToolRegistry.ToolEffect.PROJECT_MUTATION));
+                    }, ToolContract.ToolEffect.PROJECT_MUTATION));
             HookDefinition hook = new HookDefinition(
                     "write", "write", HookEvent.AGENT_END, true,
                     "write_file", JSON.createObjectNode(),

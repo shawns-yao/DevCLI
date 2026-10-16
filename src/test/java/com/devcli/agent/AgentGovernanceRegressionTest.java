@@ -1,5 +1,7 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
+import static com.devcli.tool.ToolContract.*;
 import com.devcli.llm.LlmClient;
 import com.devcli.memory.LongTermMemory;
 import com.devcli.memory.MemoryManager;
@@ -150,11 +152,11 @@ class AgentGovernanceRegressionTest {
         client.window = 16_000;
         try (Fixture fixture = fixture(client)) {
             for (int i = 0; i < 20; i++) {
-                fixture.registry.registerTool(new ToolRegistry.Tool("lookup_" + i, "Read lookup_" + i,
-                        JSON.readTree("{\"type\":\"object\"}"), args -> "value", ToolRegistry.ToolEffect.READ_ONLY));
+                fixture.registry.registerTool(new ToolContract.Tool("lookup_" + i, "Read lookup_" + i,
+                        JSON.readTree("{\"type\":\"object\"}"), args -> "value", ToolContract.ToolEffect.READ_ONLY));
             }
-            fixture.registry.registerTool(new ToolRegistry.Tool("zz_journal", "Read journal",
-                    JSON.readTree("{\"type\":\"object\"}"), args -> "journal", ToolRegistry.ToolEffect.READ_ONLY));
+            fixture.registry.registerTool(new ToolContract.Tool("zz_journal", "Read journal",
+                    JSON.readTree("{\"type\":\"object\"}"), args -> "journal", ToolContract.ToolEffect.READ_ONLY));
             for (String name : List.of("first.txt", "second.txt")) {
                 Files.writeString(fixture.project.resolve(name), (name + " ").repeat(40_000));
             }

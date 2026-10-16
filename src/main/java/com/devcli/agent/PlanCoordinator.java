@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.plan.ExecutionGraph;
 import com.devcli.concurrent.CancellationContext;
 import com.devcli.tool.ToolRegistry;
@@ -343,9 +344,9 @@ final class PlanCoordinator {
         if (!toolRegistry.hasTool(toolName)) {
             return false;
         }
-        ToolRegistry.ToolEffect effect = toolRegistry.toolEffect(toolName);
-        return effect == ToolRegistry.ToolEffect.READ_ONLY
-                || effect == ToolRegistry.ToolEffect.HOST_PROCESS;
+        ToolContract.ToolEffect effect = toolRegistry.toolEffect(toolName);
+        return effect == ToolContract.ToolEffect.READ_ONLY
+                || effect == ToolContract.ToolEffect.HOST_PROCESS;
     }
 
     private JsonNode firstPresent(JsonNode node, String... fieldNames) {

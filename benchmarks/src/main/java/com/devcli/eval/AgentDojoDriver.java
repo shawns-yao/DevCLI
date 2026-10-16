@@ -1,5 +1,6 @@
 package com.devcli.eval;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.agent.Agent;
 import com.devcli.config.DevCliConfig;
 import com.devcli.hitl.ApprovalRequest;
@@ -144,7 +145,7 @@ public final class AgentDojoDriver {
                      AgentSessionRuntime session = new AgentSessionRuntime(
                              agent, registry, projectDir, false, false)) {
                     agent.setRunEventSink(usage);
-                    output = registry.runWithToolAccess(ToolRegistry.ToolAccessScope.FULL,
+                    output = registry.runWithToolAccess(ToolContract.ToolAccessScope.FULL,
                             () -> session.runInCurrentContext(metadata.path("prompt").asText()).output());
                     result.set("final_visible_tools", MAPPER.valueToTree(
                             registry.getToolDefinitions().stream().map(LlmClient.Tool::name).toList()));

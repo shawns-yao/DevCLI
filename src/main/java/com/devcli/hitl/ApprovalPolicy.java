@@ -1,9 +1,10 @@
 package com.devcli.hitl;
 
+import com.devcli.tool.ToolContract;
 import java.util.Set;
 
 import com.devcli.tool.BuiltInToolPolicy;
-import com.devcli.tool.ToolRegistry.ToolEffect;
+import com.devcli.tool.ToolContract.ToolEffect;
 
 /**
  * 危险操作识别策略 - 基于已声明的工具契约判断需要人工确认的调用

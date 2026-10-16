@@ -1,5 +1,6 @@
 package com.devcli.tool.patch;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
@@ -405,7 +406,7 @@ class ApplyPatchToolTest {
 
         try (ToolRegistry registry = registry()) {
             ToolOutput output = registry.runWithToolAccess(
-                    ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+                    ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                     () -> run(registry,
                             "*** Begin Patch",
                             "*** Update File: a.txt",

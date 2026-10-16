@@ -19,7 +19,7 @@ public final class DelegateTaskTool {
         }
     }
 
-    static ToolRegistry.Tool definition(ToolRegistry registry) {
+    static ToolContract.Tool definition(ToolRegistry registry) {
         ObjectNode schema = new ObjectMapper().createObjectNode();
         schema.put("type", "object").put("additionalProperties", false);
         ObjectNode properties = schema.putObject("properties");
@@ -65,7 +65,7 @@ public final class DelegateTaskTool {
         ObjectNode budgetProperties = budget.putObject("properties");
         budgetProperties.putObject("max_iterations").put("type", "integer").put("minimum", 1).put("maximum", 100);
         schema.putArray("required").add("role").add("task").add("deliverable").add("task_spec");
-        return ToolRegistry.Tool.contextualStructured(NAME,
+        return ToolContract.Tool.contextualStructured(NAME,
                 "按需委派一个独立子任务。explorer/planner/reviewer 只读；worker 在隔离工作区修改，"
                         + "成功后按版本检查归并。必须提供 task_spec 输入、范围、完成条件及 deliverable。"
                         + "单次工具操作不会被委派，由主 Agent 继续。"
@@ -80,7 +80,7 @@ public final class DelegateTaskTool {
                         "devcli.delegate.timeout.seconds", "DEVCLI_DELEGATE_TIMEOUT_SECONDS", 300, 1, 3600));
     }
 
-    static ToolRegistry.Tool controlDefinition(ToolRegistry registry) {
+    static ToolContract.Tool controlDefinition(ToolRegistry registry) {
         ObjectNode schema = new ObjectMapper().createObjectNode();
         schema.put("type", "object").put("additionalProperties", false);
         ObjectNode properties = schema.putObject("properties");
@@ -89,7 +89,7 @@ public final class DelegateTaskTool {
         properties.putObject("report_id").put("type", "string").put("minLength", 1).put("maxLength", 128);
         properties.putObject("wait_seconds").put("type", "integer").put("minimum", 0).put("maximum", 30);
         schema.putArray("required").add("action").add("report_id");
-        return ToolRegistry.Tool.contextualStructured("delegate_control",
+        return ToolContract.Tool.contextualStructured("delegate_control",
                 "查询委派报告、最多等待 30 秒或取消子任务。仅主 Agent 可用；失败产物不直接应用到主项目。"
                         + "续接使用 delegate_task 的 resume_report_id 并重新声明任务和范围。",
                 schema, registry::executeDelegationControl, 35);

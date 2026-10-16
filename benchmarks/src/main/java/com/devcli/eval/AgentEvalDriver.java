@@ -1,5 +1,6 @@
 package com.devcli.eval;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.agent.Agent;
 import com.devcli.config.DevCliConfig;
 import com.devcli.llm.LlmClient;
@@ -218,7 +219,7 @@ public final class AgentEvalDriver {
             configureClosedBook(agent);
             ToolRegistry registry = agent.getToolRegistry();
             String output = registry.runWithToolAccess(
-                    ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+                    ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                     () -> session.runInCurrentContext(task.path("prompt").asText()).output());
             result.put("status", evalTrace.externalFailure() ? "external_failure" : "scored");
             result.put("output", redact(output));
@@ -309,7 +310,7 @@ public final class AgentEvalDriver {
                     try (ToolRegistry verifier = new ToolRegistry()) {
                         verifier.setProjectPath(workspace.toString());
                         ToolOutput output = verifier.runWithToolAccess(
-                                ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+                                ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                                 () -> verifier.executeCommandOutput(check.path("command").asText()));
                         int expected = check.path("expected_exit_code").asInt(0);
                         int actual = output.sideChannels().stream()

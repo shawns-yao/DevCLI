@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.llm.GLMClient;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.LlmErrorCode;
@@ -154,19 +155,19 @@ class AgentExecutionEngineTest {
         ScriptedClient llm = new ScriptedClient(List.of(
                 new LlmClient.ChatResponse("assistant", "", null, List.of(call), 1, 1)));
         try (ToolRegistry registry = new ToolRegistry()) {
-            ToolRegistry.ToolSnapshot snapshot = registry.snapshotForCurrentAccess();
-            AtomicReference<ToolRegistry.ToolSnapshot> executedSnapshot = new AtomicReference<>();
+            ToolContract.ToolSnapshot snapshot = registry.snapshotForCurrentAccess();
+            AtomicReference<ToolContract.ToolSnapshot> executedSnapshot = new AtomicReference<>();
             RecordingDelegate delegate = new RecordingDelegate(true) {
                 @Override
-                public ToolRegistry.ToolSnapshot toolSnapshot(int iteration) {
+                public ToolContract.ToolSnapshot toolSnapshot(int iteration) {
                     return snapshot;
                 }
 
                 @Override
-                public List<ToolRegistry.ToolExecutionResult> executeTools(
+                public List<ToolContract.ToolExecutionResult> executeTools(
                         List<LlmClient.ToolCall> toolCalls,
                         int iteration,
-                        ToolRegistry.ToolSnapshot currentSnapshot) {
+                        ToolContract.ToolSnapshot currentSnapshot) {
                     executedSnapshot.set(currentSnapshot);
                     return super.executeTools(toolCalls, iteration);
                 }
@@ -215,9 +216,9 @@ class AgentExecutionEngineTest {
         ));
         RecordingDelegate delegate = new RecordingDelegate() {
             @Override
-            public List<ToolRegistry.ToolExecutionResult> executeTools(
+            public List<ToolContract.ToolExecutionResult> executeTools(
                     List<LlmClient.ToolCall> toolCalls, int iteration) {
-                return List.of(new ToolRegistry.ToolExecutionResult(
+                return List.of(new ToolContract.ToolExecutionResult(
                         "call_1", "write_file", "{}", "stale", 1,
                         ToolStatus.REJECTED, ToolErrorCode.STALE_CONTEXT, true, List.of()));
             }
@@ -593,8 +594,8 @@ class AgentExecutionEngineTest {
         return new LlmClient.ChatResponse("assistant", "", "reasoning", List.of(call), 10, 2);
     }
 
-    private static ToolRegistry.ToolExecutionResult toolResult(String tool, String arguments) {
-        return new ToolRegistry.ToolExecutionResult(
+    private static ToolContract.ToolExecutionResult toolResult(String tool, String arguments) {
+        return new ToolContract.ToolExecutionResult(
                 "call_1", tool, arguments, "content", 1,
                 ToolStatus.SUCCESS, ToolErrorCode.NONE, false, List.of());
     }
@@ -602,9 +603,9 @@ class AgentExecutionEngineTest {
     private static final class SequenceDelegate implements AgentExecutionEngine.Delegate<String> {
         private final List<LlmClient.Message> history =
                 new ArrayList<>(List.of(LlmClient.Message.system("system")));
-        private final Iterator<ToolRegistry.ToolExecutionResult> results;
+        private final Iterator<ToolContract.ToolExecutionResult> results;
 
-        private SequenceDelegate(List<ToolRegistry.ToolExecutionResult> results) {
+        private SequenceDelegate(List<ToolContract.ToolExecutionResult> results) {
             this.results = results.iterator();
         }
 
@@ -628,7 +629,7 @@ class AgentExecutionEngineTest {
         }
 
         @Override
-        public List<ToolRegistry.ToolExecutionResult> executeTools(
+        public List<ToolContract.ToolExecutionResult> executeTools(
                 List<LlmClient.ToolCall> toolCalls, int iteration) {
             return List.of(results.next());
         }
@@ -716,10 +717,10 @@ class AgentExecutionEngineTest {
         }
 
         @Override
-        public List<ToolRegistry.ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
+        public List<ToolContract.ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
                                                                    int iteration) {
             events.add("tools:" + iteration);
-            return List.of(new ToolRegistry.ToolExecutionResult(
+            return List.of(new ToolContract.ToolExecutionResult(
                     "call_1", "read_file", "{\"path\":\"a.txt\"}", "content",
                     1, readStatus,
                     readStatus == ToolStatus.SUCCESS ? ToolErrorCode.NONE : ToolErrorCode.EXECUTION_FAILED,
@@ -729,7 +730,7 @@ class AgentExecutionEngineTest {
         @Override
         public String instructionAfterToolResults(
                 LlmClient.ChatResponse response,
-                List<ToolRegistry.ToolExecutionResult> toolResults,
+                List<ToolContract.ToolExecutionResult> toolResults,
                 int iteration,
                 AgentBudget budget) {
             String instruction = postToolInstruction;
@@ -740,7 +741,7 @@ class AgentExecutionEngineTest {
         @Override
         public Optional<String> completedAfterToolResults(
                 LlmClient.ChatResponse response,
-                List<ToolRegistry.ToolExecutionResult> toolResults,
+                List<ToolContract.ToolExecutionResult> toolResults,
                 int iteration,
                 AgentBudget budget) {
             if (!completeAfterTools) {
@@ -808,16 +809,16 @@ class AgentExecutionEngineTest {
         }
 
         @Override
-        public List<ToolRegistry.ToolExecutionResult> executeTools(
+        public List<ToolContract.ToolExecutionResult> executeTools(
                 List<LlmClient.ToolCall> toolCalls, int iteration) {
             return List.of(
-                    new ToolRegistry.ToolExecutionResult(
+                    new ToolContract.ToolExecutionResult(
                             "call_b", "list_dir", "{\"path\":\".\"}", "b", 1,
                             ToolStatus.SUCCESS, ToolErrorCode.NONE, false, List.of()),
-                    new ToolRegistry.ToolExecutionResult(
+                    new ToolContract.ToolExecutionResult(
                             "unknown", "grep_code", "{}", "unknown", 1,
                             ToolStatus.SUCCESS, ToolErrorCode.NONE, false, List.of()),
-                    new ToolRegistry.ToolExecutionResult(
+                    new ToolContract.ToolExecutionResult(
                             "call_b", "list_dir", "{\"path\":\".\"}", "duplicate", 1,
                             ToolStatus.SUCCESS, ToolErrorCode.NONE, false, List.of()));
         }

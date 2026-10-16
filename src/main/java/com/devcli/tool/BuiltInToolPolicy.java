@@ -1,8 +1,8 @@
 package com.devcli.tool;
 
-import com.devcli.tool.ToolRegistry.Destructiveness;
-import com.devcli.tool.ToolRegistry.Idempotency;
-import com.devcli.tool.ToolRegistry.ToolEffect;
+import com.devcli.tool.ToolContract.Destructiveness;
+import com.devcli.tool.ToolContract.Idempotency;
+import com.devcli.tool.ToolContract.ToolEffect;
 
 import java.util.LinkedHashMap;
 import java.util.Map;

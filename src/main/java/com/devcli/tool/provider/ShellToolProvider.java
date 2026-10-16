@@ -1,5 +1,6 @@
 package com.devcli.tool.provider;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.policy.CommandGuard;
 import com.devcli.policy.PolicyException;
 import com.devcli.tool.ToolErrorCode;
@@ -12,7 +13,7 @@ import java.util.Map;
 public final class ShellToolProvider implements ToolProvider {
     @Override
     public void register(ToolContext context) {
-        context.registerTool(ToolRegistry.Tool.contextualStructured(
+        context.registerTool(ToolContract.Tool.contextualStructured(
                 "execute_command",
                 "执行短时 Shell 命令。隔离任务默认使用无网络、最小权限 Docker；"
                         + "仅显式配置 HOST_RESTRICTED（兼容 HOST_WARN）时在主机执行；"

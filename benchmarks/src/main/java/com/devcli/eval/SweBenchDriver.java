@@ -1,5 +1,6 @@
 package com.devcli.eval;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.agent.Agent;
 import com.devcli.agent.AgentOrchestrator;
 import com.devcli.config.DevCliConfig;
@@ -195,7 +196,7 @@ public final class SweBenchDriver {
                 client, null, project, eventSink)) {
             ToolRegistry registry = session.agent().getToolRegistry();
             configureClosedBook(session.agent(), !solo);
-            return registry.runWithToolAccess(ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+            return registry.runWithToolAccess(ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                     () -> runRounds(session, prompt, continuationRounds, eventSink, continuationPrompts));
         }
     }

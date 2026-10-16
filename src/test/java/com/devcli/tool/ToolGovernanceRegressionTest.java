@@ -1,5 +1,6 @@
 package com.devcli.tool;
 
+import com.devcli.tool.ToolContract;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -17,11 +18,11 @@ class ToolGovernanceRegressionTest {
     @Test
     void directToolCallStillAppliesResultSizeGovernance() {
         try (ToolRegistry registry = new ToolRegistry()) {
-            registry.registerTool(new ToolRegistry.Tool(
+            registry.registerTool(new ToolContract.Tool(
                     "huge_read", "test", new com.fasterxml.jackson.databind.ObjectMapper()
                             .createObjectNode().put("type", "object"),
                     arguments -> "x".repeat(100_000),
-                    ToolRegistry.ToolEffect.READ_ONLY));
+                    ToolContract.ToolEffect.READ_ONLY));
 
             ToolOutput result = registry.executeToolOutput("huge_read", "{}");
 
@@ -44,15 +45,15 @@ class ToolGovernanceRegressionTest {
         Files.writeString(file, "before");
         try (ToolRegistry registry = new ToolRegistry()) {
             registry.setProjectPath(tempDir.toString());
-            ToolRegistry.ToolExecutionResult first = registry.executeTools(java.util.List.of(
-                    new ToolRegistry.ToolInvocation("read-1", "read_file",
+            ToolContract.ToolExecutionResult first = registry.executeTools(java.util.List.of(
+                    new ToolContract.ToolInvocation("read-1", "read_file",
                             "{\"path\":\"value.txt\"}"))).getFirst();
             assertTrue(first.result().contains("before"), first.result());
 
             Files.writeString(file, "after");
 
-            ToolRegistry.ToolExecutionResult second = registry.executeTools(java.util.List.of(
-                    new ToolRegistry.ToolInvocation("read-2", "read_file",
+            ToolContract.ToolExecutionResult second = registry.executeTools(java.util.List.of(
+                    new ToolContract.ToolInvocation("read-2", "read_file",
                             "{\"path\":\"value.txt\"}"))).getFirst();
             assertTrue(second.result().contains("after"), second.result());
         }

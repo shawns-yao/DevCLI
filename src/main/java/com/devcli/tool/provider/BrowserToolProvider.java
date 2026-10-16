@@ -1,12 +1,13 @@
 package com.devcli.tool.provider;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.browser.BrowserConnector;
 import com.devcli.tool.ToolRegistry;
 
 public final class BrowserToolProvider implements ToolProvider {
     @Override
     public void register(ToolContext context) {
-        context.registerTool(new ToolRegistry.Tool(
+        context.registerTool(new ToolContract.Tool(
                 "browser_connect",
                 "当浏览器页面返回登录页、权限不足或明确需要登录态时，自动连接已允许远程调试的本机 Chrome 并复用其登录态；公开页面不要提前调用。",
                 context.createToolParameters(),
@@ -17,7 +18,7 @@ public final class BrowserToolProvider implements ToolProvider {
                             : connector.connectDefault();
                 }
         ));
-        context.registerTool(new ToolRegistry.Tool(
+        context.registerTool(new ToolContract.Tool(
                 "browser_disconnect",
                 "完成登录态页面访问后，可切回 isolated 浏览器模式。",
                 context.createToolParameters(),
@@ -28,7 +29,7 @@ public final class BrowserToolProvider implements ToolProvider {
                             : connector.disconnect();
                 }
         ));
-        context.registerTool(new ToolRegistry.Tool(
+        context.registerTool(new ToolContract.Tool(
                 "browser_status",
                 "查看当前浏览器 MCP 模式、autoConnect 引导和旧式 CDP 端口探活状态。",
                 context.createToolParameters(),

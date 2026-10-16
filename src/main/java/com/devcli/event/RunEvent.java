@@ -1,5 +1,6 @@
 package com.devcli.event;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.llm.LlmClient;
 import com.devcli.tool.CommandResultMetadata;
 import com.devcli.tool.ToolPresentation;
@@ -291,10 +292,10 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
             results = results == null ? List.of() : List.copyOf(results);
         }
 
-        public static ToolResults from(List<ToolRegistry.ToolExecutionResult> toolResults) {
+        public static ToolResults from(List<ToolContract.ToolExecutionResult> toolResults) {
             if (toolResults == null || toolResults.isEmpty()) return new ToolResults(List.of());
             List<ToolResultData> values = new ArrayList<>(toolResults.size());
-            for (ToolRegistry.ToolExecutionResult result : toolResults) {
+            for (ToolContract.ToolExecutionResult result : toolResults) {
                 if (result == null) continue;
                 values.add(new ToolResultData(
                         result.id(),

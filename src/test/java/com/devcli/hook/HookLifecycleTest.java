@@ -1,5 +1,7 @@
 package com.devcli.hook;
 
+import com.devcli.tool.ToolContract;
+import static com.devcli.tool.ToolContract.*;
 import com.devcli.llm.LlmClient;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolOutput;
@@ -75,8 +77,8 @@ class HookLifecycleTest {
                 id, new LlmClient.ToolCall.Function(name, "{}"));
     }
 
-    private static ToolRegistry.ToolExecutionResult result(String id, String name) {
-        return new ToolRegistry.ToolExecutionResult(
+    private static ToolContract.ToolExecutionResult result(String id, String name) {
+        return new ToolContract.ToolExecutionResult(
                 id, name, "{}", "ok", 1,
                 ToolStatus.SUCCESS, ToolErrorCode.NONE, false, List.of());
     }

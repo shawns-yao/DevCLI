@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import static com.devcli.tool.ToolContract.*;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;

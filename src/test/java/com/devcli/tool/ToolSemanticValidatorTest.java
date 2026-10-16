@@ -1,5 +1,6 @@
 package com.devcli.tool;
 
+import com.devcli.tool.ToolContract;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -63,7 +64,7 @@ class ToolSemanticValidatorTest {
     @Test
     void customRuleValidatesBusinessPayloadAfterSchema() {
         try (ToolRegistry registry = new ToolRegistry()) {
-            registry.registerTool(new ToolRegistry.Tool(
+            registry.registerTool(new ToolContract.Tool(
                     "lookup_user", "lookup", new com.fasterxml.jackson.databind.ObjectMapper()
                             .readTree("{\"type\":\"object\",\"required\":[\"user_id\"],\"properties\":{\"user_id\":{\"type\":\"string\"}}}"),
                     args -> "should not run"));

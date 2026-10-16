@@ -1,5 +1,6 @@
 package com.devcli.tool;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.concurrent.CancellationContext;
 import com.devcli.concurrent.RunContext;
 import org.junit.jupiter.api.Test;
@@ -28,11 +29,11 @@ class ToolRegistryProjectIsolationTest {
             first.setProjectPath(firstProject.toString());
             second.setProjectPath(secondProject.toString());
 
-            ToolRegistry.ToolExecutionResult result = first.executeTools(List.of(
-                    new ToolRegistry.ToolInvocation("large_call", "large_tool", "{}")
+            ToolContract.ToolExecutionResult result = first.executeTools(List.of(
+                    new ToolContract.ToolInvocation("large_call", "large_tool", "{}")
             )).get(0);
-            ToolRegistry.ToolExecutionResult secondResult = second.executeTools(List.of(
-                    new ToolRegistry.ToolInvocation("large_call", "large_tool", "{}")
+            ToolContract.ToolExecutionResult secondResult = second.executeTools(List.of(
+                    new ToolContract.ToolInvocation("large_call", "large_tool", "{}")
             )).get(0);
 
             ToolResultArtifact firstArtifact = artifact(result);
@@ -65,7 +66,7 @@ class ToolRegistryProjectIsolationTest {
             try (RunContext secondRun = CancellationContext.startRunContext(secondProject)) {
                 registry.setProjectPath(secondProject.toString());
                 ToolOutput foreignArtifact = registry.runWithToolAccess(
-                        ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+                        ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                         () -> registry.executeToolOutput("read_tool_result", """
                                 {"result_ref":"%s","offset":0,"limit":100}
                                 """.formatted(artifact.ref())));
@@ -73,7 +74,7 @@ class ToolRegistryProjectIsolationTest {
                 assertEquals(ToolErrorCode.CAPABILITY_DENIED, foreignArtifact.errorCode());
 
                 ToolOutput escapedPath = registry.runWithToolAccess(
-                        ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+                        ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                         () -> registry.executeToolOutput("read_file", """
                                 {"path":"../outside.txt"}
                                 """));
@@ -86,7 +87,7 @@ class ToolRegistryProjectIsolationTest {
         }
     }
 
-    private static ToolResultArtifact artifact(ToolRegistry.ToolExecutionResult result) {
+    private static ToolResultArtifact artifact(ToolContract.ToolExecutionResult result) {
         return result.sideChannels().stream()
                 .filter(ToolResultArtifact.class::isInstance)
                 .map(ToolResultArtifact.class::cast)

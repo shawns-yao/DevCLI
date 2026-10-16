@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import static com.devcli.tool.ToolContract.*;
 import com.devcli.llm.LlmClient;
 import com.devcli.concurrent.CancellationContext;
 import com.devcli.concurrent.RunContext;

@@ -1,5 +1,6 @@
 package com.devcli.tool.provider;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.skill.Skill;
 import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillDocumentPager;
@@ -11,7 +12,7 @@ import com.devcli.tool.ToolRegistry;
 public final class SkillToolProvider implements ToolProvider {
     @Override
     public void register(ToolContext context) {
-        context.registerTool(ToolRegistry.Tool.structured(
+        context.registerTool(ToolContract.Tool.structured(
                 "load_skill",
                 "Load a budgeted page of SKILL.md guidance or one file below its references directory. Use page=2,3... to continue. Skill guidance enters the next user message; reference content is returned directly. Reloading after context compression is allowed.",
                 context.createToolParameters(

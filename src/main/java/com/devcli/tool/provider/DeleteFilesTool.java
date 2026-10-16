@@ -1,5 +1,6 @@
 package com.devcli.tool.provider;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.policy.PolicyException;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolExecutionContext;
@@ -48,7 +49,7 @@ public final class DeleteFilesTool {
         ObjectNode paths = (ObjectNode) schema.path("properties").path("paths");
         paths.put("minItems", 1).put("maxItems", MAX_FILES).put("uniqueItems", true);
         paths.putObject("items").put("type", "string").put("minLength", 1);
-        context.registerTool(ToolRegistry.Tool.contextualStructured(NAME,
+        context.registerTool(ToolContract.Tool.contextualStructured(NAME,
                 "删除明确列出的项目文件（最多 500 个、合计 20MB、单文件 5MB）。"
                         + "不递归、不展开通配符、不删除目录或符号链接。优先于 Shell 删除；"
                         + "敏感路径拒绝，审批期间文件变化则整批拒绝，失败尝试回滚，不进入回收站。",

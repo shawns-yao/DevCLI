@@ -1,5 +1,6 @@
 package com.devcli.tool.command;
 
+import com.devcli.tool.ToolContract;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.condition.EnabledOnOs;
@@ -208,7 +209,7 @@ class WindowsNativeSandboxTest {
                 parent.setProjectPath(workspace.toString());
                 try (var session = com.devcli.workspace.WorkspaceExecutionSession.open(parent, "native-test",
                         java.util.List.of("artifact.txt"))) {
-                    var output = session.toolRegistry().runWithToolAccess(com.devcli.tool.ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+                    var output = session.toolRegistry().runWithToolAccess(com.devcli.tool.ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                             () -> session.toolRegistry().executeToolOutput("execute_command",
                                     "{\"command\":\"Set-Content -NoNewline -LiteralPath artifact.txt -Value verified\"}"));
                     assertEquals("SUCCESS", output.status().name(), output.text());

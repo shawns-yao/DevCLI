@@ -1,5 +1,6 @@
 package com.devcli.tool.patch;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolExecutionContext;
 import com.devcli.tool.ToolOutput;
@@ -61,7 +62,7 @@ public final class ApplyPatchTool {
     }
 
     public static void register(ToolProvider.ToolContext context) {
-        context.registerTool(ToolRegistry.Tool.contextualStructured(
+        context.registerTool(ToolContract.Tool.contextualStructured(
                 NAME,
                 DESCRIPTION,
                 context.createToolParameters(

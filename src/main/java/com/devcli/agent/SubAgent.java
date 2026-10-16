@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.config.ConfigResolver;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -22,8 +23,8 @@ import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.tool.ToolStatus;
-import com.devcli.tool.ToolRegistry.ToolExecutionResult;
-import com.devcli.tool.ToolRegistry.ToolInvocation;
+import com.devcli.tool.ToolContract.ToolExecutionResult;
+import com.devcli.tool.ToolContract.ToolInvocation;
 import com.devcli.util.AnsiStyle;
 import com.devcli.image.ImageReferenceParser;
 import org.slf4j.Logger;
@@ -557,11 +558,11 @@ public class SubAgent {
                     }
 
                     @Override
-                    public ToolRegistry.ToolSnapshot toolSnapshot(int iteration) {
+                    public ToolContract.ToolSnapshot toolSnapshot(int iteration) {
                         if (!toolsEnabled || !shouldUseTools() || isReviewerFinalIteration(iteration)) {
                             return null;
                         }
-                        ToolRegistry.ToolSnapshot snapshot = toolRegistry.snapshotForCurrentAccess();
+                        ToolContract.ToolSnapshot snapshot = toolRegistry.snapshotForCurrentAccess();
                         if (forkContext != null) {
                             return snapshot.withDefinitions(forkContext.toolDefinitions());
                         }
@@ -654,7 +655,7 @@ public class SubAgent {
                     @Override
                     public List<ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
                                                                   int iteration,
-                                                                  ToolRegistry.ToolSnapshot snapshot) {
+                                                                  ToolContract.ToolSnapshot snapshot) {
                         return executeToolCalls(toolCalls, snapshot);
                     }
 
@@ -1004,7 +1005,7 @@ public class SubAgent {
 
     private List<ToolExecutionResult> executeToolCalls(
             List<LlmClient.ToolCall> toolCalls,
-            ToolRegistry.ToolSnapshot snapshot) {
+            ToolContract.ToolSnapshot snapshot) {
         List<ToolExecutionResult> results = new ArrayList<>();
         List<ToolInvocation> invocations = new ArrayList<>();
         List<String> allowedToolNames = allowedToolNamesForRole();

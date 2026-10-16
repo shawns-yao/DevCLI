@@ -1,5 +1,6 @@
 package com.devcli.tool;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.browser.BrowserConnector;
 import com.devcli.mcp.protocol.McpToolDescriptor;
 import com.devcli.rag.CodeChunk;
@@ -151,24 +152,24 @@ class ToolRegistryTest {
         AtomicInteger newCalls = new AtomicInteger();
         try (ToolRegistry registry = new ToolRegistry()) {
             var parameters = JsonNodeFactory.instance.objectNode();
-            registry.registerTool(new ToolRegistry.Tool(
+            registry.registerTool(new ToolContract.Tool(
                     "snapshot_tool", "old", parameters,
                     args -> {
                         oldCalls.incrementAndGet();
                         return "old";
-                    }, ToolRegistry.ToolEffect.READ_ONLY));
+                    }, ToolContract.ToolEffect.READ_ONLY));
 
-            ToolRegistry.ToolSnapshot snapshot = registry.snapshotForCurrentAccess();
+            ToolContract.ToolSnapshot snapshot = registry.snapshotForCurrentAccess();
 
-            registry.registerTool(new ToolRegistry.Tool(
+            registry.registerTool(new ToolContract.Tool(
                     "snapshot_tool", "new", parameters,
                     args -> {
                         newCalls.incrementAndGet();
                         return "new";
-                    }, ToolRegistry.ToolEffect.READ_ONLY));
+                    }, ToolContract.ToolEffect.READ_ONLY));
 
-            ToolRegistry.ToolExecutionResult result = registry.executeTools(List.of(
-                    new ToolRegistry.ToolInvocation("call_snapshot", "snapshot_tool", "{}")),
+            ToolContract.ToolExecutionResult result = registry.executeTools(List.of(
+                    new ToolContract.ToolInvocation("call_snapshot", "snapshot_tool", "{}")),
                     snapshot).getFirst();
 
             assertEquals(ToolStatus.REJECTED, result.status());
@@ -183,16 +184,16 @@ class ToolRegistryTest {
     void toolSnapshotExecutesCapturedBindingWhenCatalogIsUnchanged() {
         AtomicInteger calls = new AtomicInteger();
         try (ToolRegistry registry = new ToolRegistry()) {
-            registry.registerTool(new ToolRegistry.Tool(
+            registry.registerTool(new ToolContract.Tool(
                     "snapshot_tool", "captured", JsonNodeFactory.instance.objectNode(),
                     args -> {
                         calls.incrementAndGet();
                         return "captured";
-                    }, ToolRegistry.ToolEffect.READ_ONLY));
+                    }, ToolContract.ToolEffect.READ_ONLY));
 
-            ToolRegistry.ToolSnapshot snapshot = registry.snapshotForCurrentAccess();
-            ToolRegistry.ToolExecutionResult result = registry.executeTools(List.of(
-                    new ToolRegistry.ToolInvocation("call_snapshot", "snapshot_tool", "{}")),
+            ToolContract.ToolSnapshot snapshot = registry.snapshotForCurrentAccess();
+            ToolContract.ToolExecutionResult result = registry.executeTools(List.of(
+                    new ToolContract.ToolInvocation("call_snapshot", "snapshot_tool", "{}")),
                     snapshot).getFirst();
 
             assertEquals(ToolStatus.SUCCESS, result.status());
@@ -461,16 +462,16 @@ class ToolRegistryTest {
         com.fasterxml.jackson.databind.node.ObjectNode parameters =
                 new com.fasterxml.jackson.databind.ObjectMapper().createObjectNode();
         parameters.put("type", "object");
-        registry.registerTool(new ToolRegistry.Tool(
+        registry.registerTool(new ToolContract.Tool(
                 "first", "first read", parameters, args -> "unused",
-                ToolRegistry.ToolEffect.READ_ONLY));
-        registry.registerTool(new ToolRegistry.Tool(
+                ToolContract.ToolEffect.READ_ONLY));
+        registry.registerTool(new ToolContract.Tool(
                 "second", "second read", parameters, args -> "unused",
-                ToolRegistry.ToolEffect.READ_ONLY));
+                ToolContract.ToolEffect.READ_ONLY));
 
-        List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
-                new ToolRegistry.ToolInvocation("call_1", "first", "{}"),
-                new ToolRegistry.ToolInvocation("call_2", "second", "{}")
+        List<ToolContract.ToolExecutionResult> results = registry.executeTools(List.of(
+                new ToolContract.ToolInvocation("call_1", "first", "{}"),
+                new ToolContract.ToolInvocation("call_2", "second", "{}")
         ));
 
         assertEquals(2, peak.get(), "两个工具调用应并行执行");
@@ -495,16 +496,16 @@ class ToolRegistryTest {
                 return "result-" + name;
             }
         };
-        registry.registerTool(new ToolRegistry.Tool(
+        registry.registerTool(new ToolContract.Tool(
                 "slow", "slow read", JsonNodeFactory.instance.objectNode(),
-                args -> "unused", ToolRegistry.ToolEffect.READ_ONLY));
-        registry.registerTool(new ToolRegistry.Tool(
+                args -> "unused", ToolContract.ToolEffect.READ_ONLY));
+        registry.registerTool(new ToolContract.Tool(
                 "fast", "fast read", JsonNodeFactory.instance.objectNode(),
-                args -> "unused", ToolRegistry.ToolEffect.READ_ONLY));
+                args -> "unused", ToolContract.ToolEffect.READ_ONLY));
 
-        List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
-                new ToolRegistry.ToolInvocation("call_1", "slow", "{}"),
-                new ToolRegistry.ToolInvocation("call_2", "fast", "{}")
+        List<ToolContract.ToolExecutionResult> results = registry.executeTools(List.of(
+                new ToolContract.ToolInvocation("call_1", "slow", "{}"),
+                new ToolContract.ToolInvocation("call_2", "fast", "{}")
         ));
 
         assertTrue(results.get(0).timedOut());
@@ -527,16 +528,16 @@ class ToolRegistryTest {
                 return "result-" + name;
             }
         };
-        registry.registerTool(new ToolRegistry.Tool(
+        registry.registerTool(new ToolContract.Tool(
                 "slow", "slow tool", JsonNodeFactory.instance.objectNode(),
-                args -> "slow", ToolRegistry.ToolEffect.READ_ONLY, 1));
-        registry.registerTool(new ToolRegistry.Tool(
+                args -> "slow", ToolContract.ToolEffect.READ_ONLY, 1));
+        registry.registerTool(new ToolContract.Tool(
                 "fast", "fast tool", JsonNodeFactory.instance.objectNode(), args -> "fast",
-                ToolRegistry.ToolEffect.READ_ONLY));
+                ToolContract.ToolEffect.READ_ONLY));
 
-        List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
-                new ToolRegistry.ToolInvocation("call_1", "slow", "{}"),
-                new ToolRegistry.ToolInvocation("call_2", "fast", "{}")
+        List<ToolContract.ToolExecutionResult> results = registry.executeTools(List.of(
+                new ToolContract.ToolInvocation("call_1", "slow", "{}"),
+                new ToolContract.ToolInvocation("call_2", "fast", "{}")
         ));
 
         assertTrue(results.get(0).timedOut(), "声明 1s 超时的慢工具应在工具级 deadline 被取消");
@@ -558,13 +559,13 @@ class ToolRegistryTest {
                 return "late";
             }
         };
-        registry.registerTool(new ToolRegistry.Tool(
+        registry.registerTool(new ToolContract.Tool(
                 "slow", "slow tool", JsonNodeFactory.instance.objectNode(),
-                args -> "slow", ToolRegistry.ToolEffect.READ_ONLY, 1));
+                args -> "slow", ToolContract.ToolEffect.READ_ONLY, 1));
 
         long startedAt = System.nanoTime();
-        ToolRegistry.ToolExecutionResult result = registry.executeTools(List.of(
-                new ToolRegistry.ToolInvocation("call_1", "slow", "{}"))).get(0);
+        ToolContract.ToolExecutionResult result = registry.executeTools(List.of(
+                new ToolContract.ToolInvocation("call_1", "slow", "{}"))).get(0);
 
         assertTrue(result.timedOut());
         assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt) < 2500,
@@ -575,7 +576,7 @@ class ToolRegistryTest {
     void shouldWaitForNonCooperativeToolToActuallyStopAfterTimeout() {
         AtomicBoolean stopped = new AtomicBoolean();
         try (ToolRegistry registry = new ToolRegistry(1, 5)) {
-            registry.registerTool(ToolRegistry.Tool.contextualStructured(
+            registry.registerTool(ToolContract.Tool.contextualStructured(
                     "slow_cleanup",
                     "slow cleanup",
                     JsonNodeFactory.instance.objectNode(),
@@ -594,8 +595,8 @@ class ToolRegistryTest {
                     1));
 
             long startedAt = System.nanoTime();
-            ToolRegistry.ToolExecutionResult result = registry.executeTools(List.of(
-                    new ToolRegistry.ToolInvocation("call_1", "slow_cleanup", "{}"))).getFirst();
+            ToolContract.ToolExecutionResult result = registry.executeTools(List.of(
+                    new ToolContract.ToolInvocation("call_1", "slow_cleanup", "{}"))).getFirst();
             long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
 
             assertTrue(result.timedOut());
@@ -618,28 +619,28 @@ class ToolRegistryTest {
                 return "late-" + name;
             }
         };
-        registry.registerTool(new ToolRegistry.Tool(
+        registry.registerTool(new ToolContract.Tool(
                 "slow_a", "slow tool", JsonNodeFactory.instance.objectNode(),
-                args -> "slow", ToolRegistry.ToolEffect.READ_ONLY, 1));
-        registry.registerTool(new ToolRegistry.Tool(
+                args -> "slow", ToolContract.ToolEffect.READ_ONLY, 1));
+        registry.registerTool(new ToolContract.Tool(
                 "slow_b", "slow tool", JsonNodeFactory.instance.objectNode(),
-                args -> "slow", ToolRegistry.ToolEffect.READ_ONLY, 1));
+                args -> "slow", ToolContract.ToolEffect.READ_ONLY, 1));
 
         long startedAt = System.nanoTime();
-        List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
-                new ToolRegistry.ToolInvocation("call_1", "slow_a", "{}"),
-                new ToolRegistry.ToolInvocation("call_2", "slow_b", "{}")));
+        List<ToolContract.ToolExecutionResult> results = registry.executeTools(List.of(
+                new ToolContract.ToolInvocation("call_1", "slow_a", "{}"),
+                new ToolContract.ToolInvocation("call_2", "slow_b", "{}")));
 
-        assertTrue(results.stream().allMatch(ToolRegistry.ToolExecutionResult::timedOut));
+        assertTrue(results.stream().allMatch(ToolContract.ToolExecutionResult::timedOut));
         assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt) < 2500,
                 "并行工具的独立超时应从提交时计算，不能随结果收集顺序延后");
     }
 
     @Test
     void shouldRejectInvalidToolTimeoutDeclaration() {
-        assertThrows(IllegalArgumentException.class, () -> new ToolRegistry.Tool(
+        assertThrows(IllegalArgumentException.class, () -> new ToolContract.Tool(
                 "invalid", "invalid", JsonNodeFactory.instance.objectNode(),
-                args -> "unused", ToolRegistry.ToolEffect.READ_ONLY, 0));
+                args -> "unused", ToolContract.ToolEffect.READ_ONLY, 0));
     }
 
     @Test
@@ -710,7 +711,7 @@ class ToolRegistryTest {
     @Test
     void saveMemoryToolReportsPolicyRejection() {
         ToolRegistry registry = memoryApprovalRegistry();
-        registry.setMemorySaveHandler(fact -> new ToolRegistry.MemorySaveResult(false,
+        registry.setMemorySaveHandler(fact -> new ToolContract.MemorySaveResult(false,
                 "长期记忆策略跳过: 一次性临时信息"));
 
         String result = registry.executeTool("save_memory", "{\"fact\":\"今天地铁好挤\"}");
@@ -721,18 +722,18 @@ class ToolRegistryTest {
     @Test
     void saveMemoryToolPassesScopeTypeAndValidityToHandler() {
         ToolRegistry registry = memoryApprovalRegistry();
-        java.util.concurrent.atomic.AtomicReference<ToolRegistry.MemorySaveRequest> captured =
+        java.util.concurrent.atomic.AtomicReference<ToolContract.MemorySaveRequest> captured =
                 new java.util.concurrent.atomic.AtomicReference<>();
-        registry.setMemorySaveHandler(new ToolRegistry.MemorySaver() {
+        registry.setMemorySaveHandler(new ToolContract.MemorySaver() {
             @Override
-            public ToolRegistry.MemorySaveResult save(String fact) {
-                return new ToolRegistry.MemorySaveResult(false, "unexpected legacy call");
+            public ToolContract.MemorySaveResult save(String fact) {
+                return new ToolContract.MemorySaveResult(false, "unexpected legacy call");
             }
 
             @Override
-            public ToolRegistry.MemorySaveResult save(ToolRegistry.MemorySaveRequest request) {
+            public ToolContract.MemorySaveResult save(ToolContract.MemorySaveRequest request) {
                 captured.set(request);
-                return new ToolRegistry.MemorySaveResult(true, "已保存项目记忆", "build.md");
+                return new ToolContract.MemorySaveResult(true, "已保存项目记忆", "build.md");
             }
         });
 
@@ -750,7 +751,7 @@ class ToolRegistryTest {
     @Test
     void saveMemoryToolDoesNotEchoOriginalSensitiveFactAfterHandlerStoresIt() {
         ToolRegistry registry = memoryApprovalRegistry();
-        registry.setMemorySaveHandler(fact -> new ToolRegistry.MemorySaveResult(true,
+        registry.setMemorySaveHandler(fact -> new ToolContract.MemorySaveResult(true,
                 "已保存脱敏后的长期记忆"));
 
         String result = registry.executeTool("save_memory", "{\"fact\":\"token=tok-tool-secret\"}");

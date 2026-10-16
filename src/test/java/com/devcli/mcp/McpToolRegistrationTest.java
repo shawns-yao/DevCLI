@@ -1,5 +1,6 @@
 package com.devcli.mcp;
 
+import com.devcli.tool.ToolContract;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.llm.LlmClient;
 import com.devcli.tool.ToolOutput;
@@ -73,8 +74,8 @@ class McpToolRegistrationTest {
                     "screenshot",
                     List.of(LlmClient.ContentPart.imageBase64("aGVsbG8=", "image/png"))));
 
-            List<ToolRegistry.ToolExecutionResult> results = registry.executeTools(List.of(
-                    new ToolRegistry.ToolInvocation("call-1", "mcp__demo__echo", "{}")));
+            List<ToolContract.ToolExecutionResult> results = registry.executeTools(List.of(
+                    new ToolContract.ToolInvocation("call-1", "mcp__demo__echo", "{}")));
 
             assertEquals("screenshot", results.get(0).result());
             assertTrue(results.get(0).hasImageParts());

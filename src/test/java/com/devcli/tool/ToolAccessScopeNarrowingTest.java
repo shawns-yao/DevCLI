@@ -1,5 +1,6 @@
 package com.devcli.tool;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.hitl.HitlHandler;
 import com.devcli.hitl.HitlToolRegistry;
@@ -25,10 +26,10 @@ class ToolAccessScopeNarrowingTest {
      */
     @Test
     void narrowMatchesPermittedSetIntersection() {
-        for (ToolRegistry.ToolAccessScope left : ToolRegistry.ToolAccessScope.values()) {
-            for (ToolRegistry.ToolAccessScope right : ToolRegistry.ToolAccessScope.values()) {
-                ToolRegistry.ToolAccessScope narrowed = left.narrow(right);
-                for (ToolRegistry.ToolEffect effect : ToolRegistry.ToolEffect.values()) {
+        for (ToolContract.ToolAccessScope left : ToolContract.ToolAccessScope.values()) {
+            for (ToolContract.ToolAccessScope right : ToolContract.ToolAccessScope.values()) {
+                ToolContract.ToolAccessScope narrowed = left.narrow(right);
+                for (ToolContract.ToolEffect effect : ToolContract.ToolEffect.values()) {
                     assertEquals(left.permits(effect) && right.permits(effect),
                             narrowed.permits(effect),
                             left + ".narrow(" + right + ") 对 " + effect + " 的判定不等于交集");
@@ -39,9 +40,9 @@ class ToolAccessScopeNarrowingTest {
 
     @Test
     void narrowIsCommutativeAndIdempotent() {
-        for (ToolRegistry.ToolAccessScope left : ToolRegistry.ToolAccessScope.values()) {
+        for (ToolContract.ToolAccessScope left : ToolContract.ToolAccessScope.values()) {
             assertEquals(left, left.narrow(left));
-            for (ToolRegistry.ToolAccessScope right : ToolRegistry.ToolAccessScope.values()) {
+            for (ToolContract.ToolAccessScope right : ToolContract.ToolAccessScope.values()) {
                 assertEquals(left.narrow(right), right.narrow(left));
             }
         }
@@ -52,9 +53,9 @@ class ToolAccessScopeNarrowingTest {
         try (ToolRegistry registry = new ToolRegistry()) {
             registry.setProjectPath(tempDir.toString());
 
-            registry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY, () -> {
+            registry.runWithToolAccess(ToolContract.ToolAccessScope.READ_ONLY, () -> {
                 // 内层显式要求 FULL，也不得放宽外层的只读约束
-                ToolOutput output = registry.runWithToolAccess(ToolRegistry.ToolAccessScope.FULL,
+                ToolOutput output = registry.runWithToolAccess(ToolContract.ToolAccessScope.FULL,
                         () -> registry.executeToolOutput("write_file",
                                 "{\"path\":\"nested.txt\",\"content\":\"x\"}"));
 
@@ -71,9 +72,9 @@ class ToolAccessScopeNarrowingTest {
         try (ToolRegistry registry = new ToolRegistry()) {
             registry.setProjectPath(tempDir.toString());
 
-            registry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY, () -> {
+            registry.runWithToolAccess(ToolContract.ToolAccessScope.READ_ONLY, () -> {
                 ToolOutput output = registry.runWithToolAccess(
-                        ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+                        ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                         () -> registry.executeToolOutput("write_file",
                                 "{\"path\":\"isolated-nested.txt\",\"content\":\"x\"}"));
 
@@ -99,10 +100,10 @@ class ToolAccessScopeNarrowingTest {
         try (ToolRegistry parent = new ToolRegistry()) {
             parent.setProjectPath(parentRoot.toString());
 
-            parent.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY, () -> {
+            parent.runWithToolAccess(ToolContract.ToolAccessScope.READ_ONLY, () -> {
                 try (ToolRegistry fork = parent.forkForProject(forkRoot)) {
                     ToolOutput output = fork.runWithToolAccess(
-                            ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+                            ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                             () -> fork.executeToolOutput("write_file",
                                     "{\"path\":\"fork-write.txt\",\"content\":\"x\"}"));
 
@@ -126,7 +127,7 @@ class ToolAccessScopeNarrowingTest {
             parent.setProjectPath(parentRoot.toString());
             try (ToolRegistry fork = parent.forkForProject(forkRoot)) {
                 ToolOutput output = fork.runWithToolAccess(
-                        ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+                        ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                         () -> fork.executeToolOutput("write_file",
                                 "{\"path\":\"fork-write.txt\",\"content\":\"ok\"}"));
 
@@ -154,7 +155,7 @@ class ToolAccessScopeNarrowingTest {
                     assertEquals(TaskGrant.WORKSPACE_WRITES, fork.currentTaskGrant(),
                             "fork 应继承父线程授权");
                     ToolOutput output = fork.runWithToolAccess(
-                            ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+                            ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                             () -> fork.executeToolOutput("write_file",
                                     "{\"path\":\"inherited.txt\",\"content\":\"ok\"}"));
                     assertTrue(output.isSuccess(), output.text());
@@ -182,7 +183,7 @@ class ToolAccessScopeNarrowingTest {
                 try (ToolRegistry fork = parent.forkForProject(forkRoot)) {
                     ToolOutput output = fork.runWithTaskGrant(TaskGrant.NONE,
                             () -> fork.runWithToolAccess(
-                                    ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+                                    ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                                     () -> fork.executeToolOutput("write_file",
                                             "{\"path\":\"revoked.txt\",\"content\":\"ok\"}")));
                     assertTrue(output.isSuccess(), output.text());
@@ -202,7 +203,7 @@ class ToolAccessScopeNarrowingTest {
         try (ToolRegistry registry = new ToolRegistry()) {
             java.util.concurrent.atomic.AtomicReference<String> observed =
                     new java.util.concurrent.atomic.AtomicReference<>();
-            registry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY, () ->
+            registry.runWithToolAccess(ToolContract.ToolAccessScope.READ_ONLY, () ->
                     registry.runWithTaskGrant(TaskGrant.WORKSPACE_WRITES, () -> {
                         Thread waveWorker = new Thread(() -> observed.set(
                                 registry.currentToolAccessScope().name() + ","

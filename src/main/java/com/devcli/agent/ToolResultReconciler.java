@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.llm.LlmClient;
 import com.devcli.tool.ToolPresentation;
 import com.devcli.tool.ToolRegistry;
@@ -18,7 +19,7 @@ final class ToolResultReconciler {
     record Issue(String code, String toolCallId, String detail) {
     }
 
-    record Reconciliation(List<ToolRegistry.ToolExecutionResult> results, List<Issue> issues) {
+    record Reconciliation(List<ToolContract.ToolExecutionResult> results, List<Issue> issues) {
         Reconciliation {
             results = results == null ? List.of() : List.copyOf(results);
             issues = issues == null ? List.of() : List.copyOf(issues);
@@ -30,7 +31,7 @@ final class ToolResultReconciler {
 
     static Reconciliation reconcile(
             List<LlmClient.ToolCall> toolCalls,
-            List<ToolRegistry.ToolExecutionResult> returnedResults,
+            List<ToolContract.ToolExecutionResult> returnedResults,
             Function<String, ToolPresentation> presentationResolver) {
         List<LlmClient.ToolCall> calls = toolCalls == null ? List.of() : toolCalls;
         List<Issue> issues = new ArrayList<>();
@@ -41,9 +42,9 @@ final class ToolResultReconciler {
             }
         }
 
-        Map<String, ToolRegistry.ToolExecutionResult> byId = new LinkedHashMap<>();
+        Map<String, ToolContract.ToolExecutionResult> byId = new LinkedHashMap<>();
         if (returnedResults != null) {
-            for (ToolRegistry.ToolExecutionResult result : returnedResults) {
+            for (ToolContract.ToolExecutionResult result : returnedResults) {
                 if (result == null) {
                     issues.add(new Issue("NULL_RESULT", "", "工具执行器返回了 null 结果"));
                     continue;
@@ -61,7 +62,7 @@ final class ToolResultReconciler {
             }
         }
 
-        List<ToolRegistry.ToolExecutionResult> reconciled = new ArrayList<>(calls.size());
+        List<ToolContract.ToolExecutionResult> reconciled = new ArrayList<>(calls.size());
         Set<String> consumedIds = new HashSet<>();
         for (LlmClient.ToolCall call : calls) {
             if (call == null || call.function() == null) {
@@ -71,21 +72,21 @@ final class ToolResultReconciler {
             String id = normalizeId(call.id());
             String name = call.function().name();
             String arguments = call.function().arguments();
-            ToolRegistry.ToolInvocation invocation = new ToolRegistry.ToolInvocation(id, name, arguments);
+            ToolContract.ToolInvocation invocation = new ToolContract.ToolInvocation(id, name, arguments);
             ToolPresentation presentation = resolvePresentation(presentationResolver, name);
 
             if (!consumedIds.add(id)) {
                 issues.add(new Issue("DUPLICATE_TOOL_CALL_ID", id,
                         "模型在同一轮重复使用了 tool_call_id"));
-                reconciled.add(ToolRegistry.ToolExecutionResult.failed(
+                reconciled.add(ToolContract.ToolExecutionResult.failed(
                         invocation, "模型返回重复 tool_call_id，无法安全复用工具结果", 0, presentation));
                 continue;
             }
 
-            ToolRegistry.ToolExecutionResult result = byId.get(id);
+            ToolContract.ToolExecutionResult result = byId.get(id);
             if (result == null) {
                 issues.add(new Issue("MISSING_RESULT", id, "工具执行器未返回结果"));
-                reconciled.add(ToolRegistry.ToolExecutionResult.failed(
+                reconciled.add(ToolContract.ToolExecutionResult.failed(
                         invocation, "工具执行器未返回结果，已生成协议配对结果", 0, presentation));
                 continue;
             }
@@ -93,7 +94,7 @@ final class ToolResultReconciler {
                 issues.add(new Issue("RESULT_IDENTITY_MISMATCH", id,
                         "工具结果名称或参数与原始调用不一致，已按原始调用纠正"));
             }
-            reconciled.add(new ToolRegistry.ToolExecutionResult(
+            reconciled.add(new ToolContract.ToolExecutionResult(
                     id,
                     name,
                     arguments,

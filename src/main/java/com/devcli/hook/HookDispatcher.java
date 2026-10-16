@@ -1,5 +1,6 @@
 package com.devcli.hook;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.hitl.ApprovalPolicy;
 import com.devcli.hitl.HitlToolRegistry;
 import com.devcli.event.RunEvent;
@@ -140,14 +141,14 @@ public final class HookDispatcher {
         Decision decision = Decision.CONTINUE;
         String status = "SUCCESS";
         try {
-            ToolRegistry.ToolEffect effect = registry.toolEffect(hook.tool());
+            ToolContract.ToolEffect effect = registry.toolEffect(hook.tool());
             enforceEffectPolicy(hook, effect);
             String argumentsJson = MAPPER.writeValueAsString(
                     substitute(hook.arguments(), placeholders(event, context)));
-            ToolOutput output = effect == ToolRegistry.ToolEffect.READ_ONLY
-                    || effect == ToolRegistry.ToolEffect.LOCAL_CONTEXT
+            ToolOutput output = effect == ToolContract.ToolEffect.READ_ONLY
+                    || effect == ToolContract.ToolEffect.LOCAL_CONTEXT
                     ? registry.runWithToolAccess(
-                            ToolRegistry.ToolAccessScope.READ_ONLY,
+                            ToolContract.ToolAccessScope.READ_ONLY,
                             () -> registry.executeToolOutput(hook.tool(), argumentsJson))
                     : registry.executeToolOutput(hook.tool(), argumentsJson);
             if (output == null || !output.isSuccess()) {
@@ -177,9 +178,9 @@ public final class HookDispatcher {
         return result;
     }
 
-    private void enforceEffectPolicy(HookDefinition hook, ToolRegistry.ToolEffect effect) {
-        if (effect == ToolRegistry.ToolEffect.READ_ONLY
-                || effect == ToolRegistry.ToolEffect.LOCAL_CONTEXT) {
+    private void enforceEffectPolicy(HookDefinition hook, ToolContract.ToolEffect effect) {
+        if (effect == ToolContract.ToolEffect.READ_ONLY
+                || effect == ToolContract.ToolEffect.LOCAL_CONTEXT) {
             return;
         }
         if (!hook.allowSideEffects()) {

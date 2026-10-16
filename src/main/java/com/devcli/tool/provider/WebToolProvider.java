@@ -1,5 +1,6 @@
 package com.devcli.tool.provider;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolExecutionContext;
 import com.devcli.tool.ToolOutput;
@@ -26,7 +27,7 @@ public final class WebToolProvider implements ToolProvider {
 
     @Override
     public void register(ToolContext context) {
-        context.registerTool(ToolRegistry.Tool.contextualStructured(
+        context.registerTool(ToolContract.Tool.contextualStructured(
                 "web_search",
                 "搜索互联网，获取实时信息（最新版本、官方文档、技术资讯等）。" +
                         "支持 SerpAPI（默认）和 SearXNG（自托管）两种 provider，由 SEARCH_PROVIDER 环境变量切换。",
@@ -39,7 +40,7 @@ public final class WebToolProvider implements ToolProvider {
                 WEB_TOOL_TIMEOUT_SECONDS
         ));
 
-        context.registerTool(ToolRegistry.Tool.contextualStructured(
+        context.registerTool(ToolContract.Tool.contextualStructured(
                 "web_fetch",
                 "抓取指定 URL，提取正文转 Markdown。" +
                         "适用静态 / SSR 页面（博客、文档、官网）；JS 渲染或防爬站会返回空正文，本期不重试。",

@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.memory.CompactBoundaryRuntimeState;
 import com.devcli.memory.CompactionContext;
 import com.devcli.memory.ConversationHistoryCompactor;
@@ -23,20 +24,20 @@ final class AgentRuntimeSupport {
     static void bindMemory(ToolRegistry toolRegistry, MemoryManager memoryManager) {
         toolRegistry.setContextProfile(memoryManager.getContextProfile());
         toolRegistry.setMemorySaver(memoryManager::storeFact);
-        toolRegistry.setMemorySaveHandler(new ToolRegistry.MemorySaver() {
+        toolRegistry.setMemorySaveHandler(new ToolContract.MemorySaver() {
             @Override
-            public ToolRegistry.MemorySaveResult save(String fact) {
+            public ToolContract.MemorySaveResult save(String fact) {
                 MemoryManager.StoreResult result = memoryManager.storeFactWithPolicy(fact, true);
-                return new ToolRegistry.MemorySaveResult(
+                return new ToolContract.MemorySaveResult(
                         result.stored(), result.message(), result.id());
             }
 
             @Override
-            public ToolRegistry.MemorySaveResult save(ToolRegistry.MemorySaveRequest request) {
+            public ToolContract.MemorySaveResult save(ToolContract.MemorySaveRequest request) {
                 MemoryManager.StoreResult result = memoryManager.storeTopic(
                         request.scope(), request.name(), request.description(), request.type(),
                         request.fact(), request.validDays(), true);
-                return new ToolRegistry.MemorySaveResult(
+                return new ToolContract.MemorySaveResult(
                         result.stored(), result.message(), result.id());
             }
         });

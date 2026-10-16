@@ -1,5 +1,6 @@
 package com.devcli.tool.provider;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
@@ -22,7 +23,7 @@ public final class ToolSearchProvider implements ToolProvider {
 
     @Override
     public void register(ToolContext context) {
-        context.registerTool(ToolRegistry.Tool.structured(
+        context.registerTool(ToolContract.Tool.structured(
                 "search_tools",
                 "Search currently available tools by name, description and parameter schema. Use this when the exact MCP or built-in tool name is unknown.",
                 context.createToolParameters(
@@ -132,8 +133,8 @@ public final class ToolSearchProvider implements ToolProvider {
 
     private List<ToolSearchEntry> searchEntries(ToolContext context) {
         long version = context.toolCatalogVersion();
-        List<ToolRegistry.Tool> visible = context.searchableTools();
-        Set<String> names = visible.stream().map(ToolRegistry.Tool::name)
+        List<ToolContract.Tool> visible = context.searchableTools();
+        Set<String> names = visible.stream().map(ToolContract.Tool::name)
                 .collect(java.util.stream.Collectors.toSet());
         ToolSearchIndex snapshot = searchIndex;
         if (snapshot != null && snapshot.version() == version && snapshot.names().equals(names)) {
@@ -212,7 +213,7 @@ public final class ToolSearchProvider implements ToolProvider {
 
     private record ToolSearchEntry(String name, String description, String searchName,
                                    String searchDescription, String searchSchema) {
-        static ToolSearchEntry from(ToolRegistry.Tool tool) {
+        static ToolSearchEntry from(ToolContract.Tool tool) {
             String name = tool.name() == null ? "" : tool.name();
             String description = tool.description() == null ? "" : tool.description();
             String schema = tool.parameters() == null ? "" : tool.parameters().toString();

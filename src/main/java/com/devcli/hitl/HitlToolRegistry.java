@@ -1,5 +1,6 @@
 package com.devcli.hitl;
 
+import static com.devcli.tool.ToolContract.*;
 import com.devcli.browser.BrowserCheckResult;
 import com.devcli.policy.AuditLog;
 import com.devcli.policy.PermissionEvaluator;

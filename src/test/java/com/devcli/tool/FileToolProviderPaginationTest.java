@@ -1,5 +1,6 @@
 package com.devcli.tool;
 
+import com.devcli.tool.ToolContract;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.AfterEach;
@@ -123,8 +124,8 @@ class FileToolProviderPaginationTest {
         String resultRef = extractResultRef(managed);
 
         try (ToolRegistry registry = new ToolRegistry()) {
-            ToolRegistry.ToolExecutionResult result = registry.executeTools(List.of(
-                    new ToolRegistry.ToolInvocation(
+            ToolContract.ToolExecutionResult result = registry.executeTools(List.of(
+                    new ToolContract.ToolInvocation(
                             "restore_call", "read_tool_result",
                             "{\"result_ref\":\"" + resultRef + "\"}")
             )).get(0);

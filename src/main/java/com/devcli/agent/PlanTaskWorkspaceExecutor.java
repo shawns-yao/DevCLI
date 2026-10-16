@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.concurrent.CancellationContext;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.workspace.PatchSet;
@@ -33,7 +34,7 @@ final class PlanTaskWorkspaceExecutor {
                                              Function<ToolRegistry, T> taskAction) {
         try {
             T value = parentRegistry.runWithToolAccess(
-                    ToolRegistry.ToolAccessScope.READ_ONLY,
+                    ToolContract.ToolAccessScope.READ_ONLY,
                     () -> parentRegistry.runWithResourceLease(taskId,
                             () -> taskAction.apply(parentRegistry)));
             return Execution.success(value, parentRegistry.consumeStepModifiedFiles(taskId));
@@ -51,7 +52,7 @@ final class PlanTaskWorkspaceExecutor {
             ToolRegistry isolatedRegistry = session.toolRegistry();
             try {
                 T value = isolatedRegistry.runWithToolAccess(
-                        ToolRegistry.ToolAccessScope.ISOLATED_PROJECT,
+                        ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                         () -> isolatedRegistry.runWithResourceLease(taskId,
                                 () -> taskAction.apply(isolatedRegistry)));
                 if (CancellationContext.isCancelled()) {

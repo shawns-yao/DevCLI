@@ -1,5 +1,6 @@
 package com.devcli.tool.provider;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.policy.PolicyException;
 import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.FileReadPage;
@@ -28,7 +29,7 @@ public final class FileToolProvider implements ToolProvider {
     @Override
     public void register(ToolContext context) {
         DeleteFilesTool.register(context);
-        context.registerTool(ToolRegistry.Tool.structured(
+        context.registerTool(ToolContract.Tool.structured(
                 "read_file",
                 "分页读取项目内文件。行范围 start_line/end_line（1-based 闭区间）与字符范围 offset/limit（字符偏移与字符数）二选一，优先使用 start_line/end_line，切勿同时提供两组；默认最多返回约 4000 Token，next_cursor 可继续读取",
                 context.createToolParameters(
@@ -42,7 +43,7 @@ public final class FileToolProvider implements ToolProvider {
                 args -> readFile(context, args)
         ));
 
-        context.registerTool(ToolRegistry.Tool.structured(
+        context.registerTool(ToolContract.Tool.structured(
                 "read_tool_result",
                 "通过 result_ref 分页读取被截断或折叠的完整工具结果",
                 context.createToolParameters(
@@ -53,7 +54,7 @@ public final class FileToolProvider implements ToolProvider {
                 FileToolProvider::readToolResult
         ));
 
-        context.registerTool(ToolRegistry.Tool.contextualStructured(
+        context.registerTool(ToolContract.Tool.contextualStructured(
                 "write_file",
                 "写入文件内容（仅限项目根目录之内，单文件 5MB 上限）",
                 context.createToolParameters(
@@ -112,7 +113,7 @@ public final class FileToolProvider implements ToolProvider {
                 -1
         ));
 
-        context.registerTool(ToolRegistry.Tool.contextualStructured(
+        context.registerTool(ToolContract.Tool.contextualStructured(
                 "edit_file",
                 "对已存在文件做精确字符串替换，适合小范围修改而无需重写整个文件。先用 read_file 核对原文；old_string 必须与文件逐字一致（含缩进/空白/换行）且在文件中唯一出现，new_string 为替换内容（可为空串表示删除）",
                 context.createToolParameters(
@@ -203,7 +204,7 @@ public final class FileToolProvider implements ToolProvider {
 
         com.devcli.tool.patch.ApplyPatchTool.register(context);
 
-        context.registerTool(ToolRegistry.Tool.structured(
+        context.registerTool(ToolContract.Tool.structured(
                 "list_dir",
                 "列出目录内容（仅限项目根目录之内）",
                 context.createToolParameters(new ToolParameter("path", "string", "目录路径", true)),

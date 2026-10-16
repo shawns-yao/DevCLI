@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.llm.LlmClient;
 import com.devcli.context.ContextProfile;
 import com.devcli.tool.ToolInvocationFingerprint;
@@ -172,7 +173,7 @@ public class AgentBudget {
         }
     }
 
-    public void recordToolResult(ToolRegistry.ToolExecutionResult result) {
+    public void recordToolResult(ToolContract.ToolExecutionResult result) {
         if (result == null) {
             resetToolErrorWindow();
             return;

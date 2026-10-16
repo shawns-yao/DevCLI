@@ -1,5 +1,6 @@
 package com.devcli.hook;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.llm.LlmClient;
 import com.devcli.concurrent.CancellationContext;
 import com.devcli.concurrent.RunContext;
@@ -92,10 +93,10 @@ public final class HookLifecycle {
     }
 
     public void toolResultsReceived(
-            int iteration, List<ToolRegistry.ToolExecutionResult> toolResults) {
+            int iteration, List<ToolContract.ToolExecutionResult> toolResults) {
         if (toolResults != null) {
             HookDispatcher.HookContext context = baseContext.withIteration(iteration);
-            for (ToolRegistry.ToolExecutionResult result : toolResults) {
+            for (ToolContract.ToolExecutionResult result : toolResults) {
                 if (result == null) continue;
                 dispatcher.dispatch(HookEvent.TOOL_EXECUTION_END,
                         context.withTool(

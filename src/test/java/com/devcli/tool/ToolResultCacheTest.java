@@ -1,5 +1,6 @@
 package com.devcli.tool;
 
+import com.devcli.tool.ToolContract;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
@@ -21,10 +22,10 @@ class ToolResultCacheTest {
     void semanticallyEquivalentReadOnlyCallsShareCachedResult() throws Exception {
         AtomicInteger executions = new AtomicInteger();
         try (ToolRegistry registry = new ToolRegistry()) {
-            registry.registerTool(new ToolRegistry.Tool(
+            registry.registerTool(new ToolContract.Tool(
                     "cached_lookup", "test", JSON.readTree("{\"type\":\"object\"}"),
                     arguments -> "value-" + executions.incrementAndGet(),
-                    ToolRegistry.ToolEffect.READ_ONLY));
+                    ToolContract.ToolEffect.READ_ONLY));
 
             ToolRegistry.runWithToolTask(TASK, () -> {
                 ToolOutput first = registry.executeToolOutput("cached_lookup",
@@ -42,12 +43,12 @@ class ToolResultCacheTest {
     @Test
     void toolCatalogChangeInvalidatesCachedResult() throws Exception {
         try (ToolRegistry registry = new ToolRegistry()) {
-            registry.registerTool(new ToolRegistry.Tool(
+            registry.registerTool(new ToolContract.Tool(
                     "cached_lookup", "test", JSON.readTree("{\"type\":\"object\"}"),
-                    arguments -> "v1", ToolRegistry.ToolEffect.READ_ONLY));
-            ToolRegistry.Tool replacement = new ToolRegistry.Tool(
+                    arguments -> "v1", ToolContract.ToolEffect.READ_ONLY));
+            ToolContract.Tool replacement = new ToolContract.Tool(
                     "cached_lookup", "test", JSON.readTree("{\"type\":\"object\"}"),
-                    arguments -> "v2", ToolRegistry.ToolEffect.READ_ONLY);
+                    arguments -> "v2", ToolContract.ToolEffect.READ_ONLY);
 
             ToolRegistry.runWithToolTask(TASK, () -> {
                 assertEquals("v1", registry.executeToolOutput("cached_lookup", "{}").text());
@@ -64,10 +65,10 @@ class ToolResultCacheTest {
     void unicodeEquivalentQuerySharesCachedResult() throws Exception {
         AtomicInteger executions = new AtomicInteger();
         try (ToolRegistry registry = new ToolRegistry()) {
-            registry.registerTool(new ToolRegistry.Tool(
+            registry.registerTool(new ToolContract.Tool(
                     "cached_lookup", "test", JSON.readTree("{\"type\":\"object\"}"),
                     arguments -> "value-" + executions.incrementAndGet(),
-                    ToolRegistry.ToolEffect.READ_ONLY));
+                    ToolContract.ToolEffect.READ_ONLY));
 
             ToolRegistry.runWithToolTask(TASK, () -> {
                 registry.executeToolOutput("cached_lookup", "{\"query\":\"ＡＰＩ Service\"}");
@@ -83,10 +84,10 @@ class ToolResultCacheTest {
     void caseSensitivePatternDoesNotShareCachedResult() throws Exception {
         AtomicInteger executions = new AtomicInteger();
         try (ToolRegistry registry = new ToolRegistry()) {
-            registry.registerTool(new ToolRegistry.Tool(
+            registry.registerTool(new ToolContract.Tool(
                     "cached_lookup", "test", JSON.readTree("{\"type\":\"object\"}"),
                     arguments -> "value-" + executions.incrementAndGet(),
-                    ToolRegistry.ToolEffect.READ_ONLY));
+                    ToolContract.ToolEffect.READ_ONLY));
 
             ToolRegistry.runWithToolTask(TASK, () -> {
                 registry.executeToolOutput("cached_lookup", "{\"pattern\":\"UserService\"}");
@@ -102,14 +103,14 @@ class ToolResultCacheTest {
     void mutationInvalidatesReadOnlyCache() throws Exception {
         AtomicInteger executions = new AtomicInteger();
         try (ToolRegistry registry = new ToolRegistry()) {
-            registry.registerTool(new ToolRegistry.Tool(
+            registry.registerTool(new ToolContract.Tool(
                     "cached_lookup", "test", JSON.readTree("{\"type\":\"object\"}"),
                     arguments -> "value-" + executions.incrementAndGet(),
-                    ToolRegistry.ToolEffect.READ_ONLY));
-            registry.registerTool(new ToolRegistry.Tool(
+                    ToolContract.ToolEffect.READ_ONLY));
+            registry.registerTool(new ToolContract.Tool(
                     "mutate", "test", JSON.readTree("{\"type\":\"object\"}"),
                     arguments -> "changed",
-                    ToolRegistry.ToolEffect.PROJECT_MUTATION));
+                    ToolContract.ToolEffect.PROJECT_MUTATION));
 
             ToolRegistry.runWithToolTask(TASK, () -> {
                 registry.executeToolOutput("cached_lookup", "{\"query\":\"x\"}");

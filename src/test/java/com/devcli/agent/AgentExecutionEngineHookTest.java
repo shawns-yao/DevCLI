@@ -1,5 +1,7 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
+import static com.devcli.tool.ToolContract.*;
 import com.devcli.hook.HookDefinition;
 import com.devcli.hook.HookDispatcher;
 import com.devcli.hook.HookEvent;
@@ -98,7 +100,7 @@ class AgentExecutionEngineHookTest {
         }
 
         @Override
-        public List<ToolRegistry.ToolExecutionResult> executeTools(
+        public List<ToolContract.ToolExecutionResult> executeTools(
                 List<LlmClient.ToolCall> toolCalls, int iteration) {
             return List.of();
         }

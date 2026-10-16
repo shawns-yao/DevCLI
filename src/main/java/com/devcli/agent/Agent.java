@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.hook.HookLifecycle;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.LlmTraceLogger;
@@ -24,8 +25,8 @@ import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.util.AnsiStyle;
 import com.devcli.tool.ToolRegistry;
-import com.devcli.tool.ToolRegistry.ToolExecutionResult;
-import com.devcli.tool.ToolRegistry.ToolInvocation;
+import com.devcli.tool.ToolContract.ToolExecutionResult;
+import com.devcli.tool.ToolContract.ToolInvocation;
 import com.devcli.trace.TraceContext;
 import com.devcli.trace.TraceRecorder;
 import com.devcli.image.ImageReferenceParser;
@@ -377,8 +378,8 @@ public class Agent implements AutoCloseable {
                     }
 
                     @Override
-                    public com.devcli.tool.ToolRegistry.ToolSnapshot toolSnapshot(int iteration) {
-                        com.devcli.tool.ToolRegistry.ToolSnapshot snapshot =
+                    public com.devcli.tool.ToolContract.ToolSnapshot toolSnapshot(int iteration) {
+                        com.devcli.tool.ToolContract.ToolSnapshot snapshot =
                                 toolRegistry.snapshotForCurrentAccess();
                         logRequestContext("react iteration=" + iteration, snapshot.definitions());
                         streamRenderer.beginThinking();
@@ -501,7 +502,7 @@ public class Agent implements AutoCloseable {
                     @Override
                     public List<ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
                                                                   int iteration,
-                                                                  com.devcli.tool.ToolRegistry.ToolSnapshot snapshot) {
+                                                                  com.devcli.tool.ToolContract.ToolSnapshot snapshot) {
                         return executeToolCalls(toolCalls, iteration, snapshot);
                     }
 
@@ -1086,7 +1087,7 @@ public class Agent implements AutoCloseable {
     private List<ToolExecutionResult> executeToolCalls(
             List<LlmClient.ToolCall> toolCalls,
             int iteration,
-            com.devcli.tool.ToolRegistry.ToolSnapshot snapshot) {
+            com.devcli.tool.ToolContract.ToolSnapshot snapshot) {
         List<ToolInvocation> invocations = new ArrayList<>();
         for (LlmClient.ToolCall toolCall : toolCalls) {
             String toolName = toolCall.function().name();

@@ -1,5 +1,6 @@
 package com.devcli.hitl;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.llm.LlmClient;
 import com.devcli.policy.PermissionMode;
 import com.devcli.policy.PermissionRuleSet;
@@ -480,7 +481,7 @@ class PermissionClassifierTest {
              HitlToolRegistry registry = registry(tempDir, handler, PermissionMode.AUTO, classifier)) {
 
             var result = registry.executeTools(List.of(
-                    new ToolRegistry.ToolInvocation("write", "write_file", writeArgs("a.txt"))))
+                    new ToolContract.ToolInvocation("write", "write_file", writeArgs("a.txt"))))
                     .getFirst();
 
             assertEquals(ToolErrorCode.POLICY_DENIED, result.errorCode());

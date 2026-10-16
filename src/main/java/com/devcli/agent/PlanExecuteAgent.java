@@ -1,5 +1,6 @@
 package com.devcli.agent;
 
+import com.devcli.tool.ToolContract;
 import com.devcli.config.ConfigResolver;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -22,8 +23,8 @@ import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillRegistry;
 import com.devcli.util.AnsiStyle;
 import com.devcli.tool.ToolRegistry;
-import com.devcli.tool.ToolRegistry.ToolExecutionResult;
-import com.devcli.tool.ToolRegistry.ToolInvocation;
+import com.devcli.tool.ToolContract.ToolExecutionResult;
+import com.devcli.tool.ToolContract.ToolInvocation;
 import com.devcli.trace.TraceContext;
 import com.devcli.trace.TraceRecorder;
 import com.devcli.image.ImageReferenceParser;
@@ -555,7 +556,7 @@ public class PlanExecuteAgent {
                     }
 
                     @Override
-                    public ToolRegistry.ToolSnapshot toolSnapshot(int iteration) {
+                    public ToolContract.ToolSnapshot toolSnapshot(int iteration) {
                         return activeTaskToolRegistry().snapshotForCurrentAccess();
                     }
 
@@ -620,7 +621,7 @@ public class PlanExecuteAgent {
                     @Override
                     public List<ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls,
                                                                   int iteration,
-                                                                  ToolRegistry.ToolSnapshot snapshot) {
+                                                                  ToolContract.ToolSnapshot snapshot) {
                         return executeToolCalls(task.getId(), toolCalls, snapshot);
                     }
 
@@ -807,7 +808,7 @@ public class PlanExecuteAgent {
     private List<ToolExecutionResult> executeToolCalls(
             String taskId,
             List<LlmClient.ToolCall> toolCalls,
-            ToolRegistry.ToolSnapshot snapshot) {
+            ToolContract.ToolSnapshot snapshot) {
         List<ToolInvocation> invocations = new ArrayList<>();
         for (LlmClient.ToolCall toolCall : toolCalls) {
             String toolName = toolCall.function().name();

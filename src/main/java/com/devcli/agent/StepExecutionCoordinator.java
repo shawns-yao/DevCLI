@@ -263,7 +263,7 @@ final class StepExecutionCoordinator {
                     return null;
                 }
                 try {
-                    toolRegistry.runWithToolAccess(ToolRegistry.ToolAccessScope.READ_ONLY, () -> {
+                    toolRegistry.runWithToolAccess(ToolContract.ToolAccessScope.READ_ONLY, () -> {
                         runStepWithLease(step, steps, retryCount, worker, localReviewer, context,
                                 stepOut, workerForkContext, reviewerForkContext);
                         return null;
@@ -322,7 +322,7 @@ final class StepExecutionCoordinator {
             activeStepUpdate.set(buffer);
             try {
                 isolatedRegistry.runWithToolAccess(
-                        ToolRegistry.ToolAccessScope.ISOLATED_PROJECT, () -> {
+                        ToolContract.ToolAccessScope.ISOLATED_PROJECT, () -> {
                             runStepWithLease(step, steps, retryCount,
                                     isolatedWorker, isolatedReviewer, effectiveContext, stepOut,
                                     workerForkContext, reviewerForkContext);
