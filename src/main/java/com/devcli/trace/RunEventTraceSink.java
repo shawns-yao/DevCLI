@@ -63,6 +63,7 @@ public final class RunEventTraceSink implements RunEventSink {
             fields.put("input_tokens", usage.inputTokens());
             fields.put("output_tokens", usage.outputTokens());
             fields.put("cached_input_tokens", usage.cachedInputTokens());
+            fields.put("cache_hit_ratio", usage.cacheHitRatio());
             fields.put("cost_cny", usage.estimatedCostCny());
         } else if (event instanceof RunEvent.ExecutionStateChanged state) {
             fields.put("iteration", state.iteration());

@@ -124,6 +124,10 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
             estimatedCostCny = Math.max(0D, estimatedCostCny);
         }
 
+        public double cacheHitRatio() {
+            return inputTokens == 0 ? 0D : (double) Math.min(inputTokens, cachedInputTokens) / inputTokens;
+        }
+
         @Override
         public String type() {
             return "model.usage";

@@ -14,6 +14,17 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RunEventTraceSinkTest {
+    @Test
+    void recordsObservedCacheHitRatio(@TempDir Path tempDir) throws Exception {
+        var sink = new RunEventTraceSink(new TraceRecorder(tempDir));
+        sink.emit(new RunEvent.ModelUsage(100, 20, 75, 0));
+        try (var paths = Files.list(tempDir)) {
+            var line = new com.fasterxml.jackson.databind.ObjectMapper().readTree(Files.readString(paths.findFirst().orElseThrow()));
+            assertEquals(0.75, line.path("cache_hit_ratio").asDouble());
+        }
+        assertEquals(0, new RunEvent.ModelUsage(0, 0, 0, 0).cacheHitRatio());
+    }
+
 
     @Test
     void skipsStreamingDeltasAndModelContext(@TempDir Path tempDir) throws Exception {
