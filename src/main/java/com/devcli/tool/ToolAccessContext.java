@@ -336,7 +336,7 @@ final class ToolAccessContext {
         fork.agentContextTools.copyHandlersFrom(registry.agentContextTools);
         fork.skillRegistry = registry.skillRegistry;
         fork.skillContextBuffer = registry.skillContextBuffer == null ? null : registry.skillContextBuffer.copy();
-        fork.commandExecutionService = registry.commandExecutionService;
+        fork.executionEnvironment = registry.executionEnvironment;
         fork.catalog.mcpTrustPolicies.putAll(registry.catalog.mcpTrustPolicies);
         fork.catalog.semanticValidators.putAll(registry.catalog.semanticValidators);
         registry.catalog.mcpTools.values().forEach(registered ->

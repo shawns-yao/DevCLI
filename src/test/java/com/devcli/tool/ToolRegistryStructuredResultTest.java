@@ -100,8 +100,8 @@ class ToolRegistryStructuredResultTest {
     void reportsCommandExitFailureWithoutParsingText(@TempDir Path projectRoot) {
         try (ToolRegistry registry = commandRegistry()) {
             registry.setProjectPath(projectRoot.toString());
-            registry.setCommandExecutionService(request ->
-                    com.devcli.tool.command.CommandExecutionService.Result.completed(7, "failed"));
+            registry.setExecutionEnvironment(new com.devcli.tool.environment.LocalExecutionEnvironment(request ->
+                    com.devcli.tool.command.CommandExecutionService.Result.completed(7, "failed")));
 
             ToolOutput output = registry.executeToolOutput(
                     "execute_command", "{\"command\":\"build\"}");
@@ -118,9 +118,9 @@ class ToolRegistryStructuredResultTest {
                 projectRoot.resolve("runtime-tool-results").toString());
         try (ToolRegistry registry = commandRegistry()) {
             registry.setProjectPath(projectRoot.toString());
-            registry.setCommandExecutionService(request ->
+            registry.setExecutionEnvironment(new com.devcli.tool.environment.LocalExecutionEnvironment(request ->
                     com.devcli.tool.command.CommandExecutionService.Result.completed(
-                            0, "m".repeat(20_000)));
+                            0, "m".repeat(20_000))));
 
             ToolContract.ToolExecutionResult result = registry.executeTools(List.of(
                     new ToolContract.ToolInvocation(

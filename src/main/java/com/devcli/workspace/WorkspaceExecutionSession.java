@@ -67,10 +67,10 @@ public final class WorkspaceExecutionSession implements AutoCloseable {
         java.util.Map<String, String> baselines = new java.util.LinkedHashMap<>();
         for (var change : patch.changes()) {
             Path target = toolRegistry.resolveSafePath(change.relativePath());
-            baselines.put(change.relativePath(), java.nio.file.Files.isRegularFile(target)
-                    ? java.nio.file.Files.readString(target) : null);
+            baselines.put(change.relativePath(), toolRegistry.executionEnvironment().isRegularFile(target)
+                    ? toolRegistry.executionEnvironment().readString(target) : null);
         }
-        var applied = patch.apply(workspacePath());
+        var applied = toolRegistry.executionEnvironment().applyPatch(workspacePath(), patch);
         if (!applied.applied()) throw new IOException("恢复补丁与当前文件基线冲突: " + applied.failureDescription());
         for (var change : patch.changes()) {
             Path target = toolRegistry.resolveSafePath(change.relativePath());
@@ -123,7 +123,7 @@ public final class WorkspaceExecutionSession implements AutoCloseable {
                 return result;
             }
             beforeApply.prepare(effectivePatchSet);
-            PatchSet.ApplyResult result = effectivePatchSet.apply(projectRoot);
+            PatchSet.ApplyResult result = parentToolRegistry.executionEnvironment().applyPatch(projectRoot, effectivePatchSet);
             if (result.applied()) {
                 parentToolRegistry.invalidateToolResultCache();
                 toolRegistry.contextVersionLedger().publishPatchSet(stepId, effectivePatchSet, projectRoot);

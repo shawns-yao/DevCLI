@@ -287,7 +287,7 @@ final class ToolExecutionCore {
     ToolOutput executeCommandOutput(String command, long timeoutSeconds, ToolExecutionContext executionContext) {
         ToolAccessScope scope = registry.currentToolAccessScope();
         boolean sandboxRequired = scope == ToolAccessScope.ISOLATED_PROJECT;
-        CommandExecutionService service = registry.commandExecutionService;
+        CommandExecutionService service = registry.executionEnvironment.commands();
         ToolExecutionContext timed = new ToolExecutionContext(executionContext.invocationId(),
                 executionContext.cancellationToken(), executionContext.startedAtNanos(),
                 Math.min(executionContext.deadlineNanos(), executionContext.startedAtNanos()
@@ -308,7 +308,7 @@ final class ToolExecutionCore {
         JsonNode args = parseValidatedArguments(context.argumentsJson());
         long timeout = args.has("timeout") ? args.path("timeout").asLong() : registry.commandTimeoutSeconds;
         try {
-            registry.commandExecutionService.validateRequest(new CommandExecutionService.Request(
+            registry.executionEnvironment.commands().validateRequest(new CommandExecutionService.Request(
                     args.path("command").asText(), Path.of(registry.projectPath), timeout,
                     registry.currentToolAccessScope() == ToolAccessScope.ISOLATED_PROJECT, context.executionContext()));
             return null;

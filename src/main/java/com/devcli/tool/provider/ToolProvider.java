@@ -21,6 +21,8 @@ public interface ToolProvider {
 
         Path resolveSafePath(String path);
 
+        com.devcli.tool.environment.ExecutionEnvironment executionEnvironment();
+
         /** Review the exact text before it leaves local file handling. */
         default String reviewFileContent(String content) {
             if (com.devcli.policy.SensitiveContentPolicy.inspect(content).sensitive()) {

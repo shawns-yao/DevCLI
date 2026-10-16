@@ -29,13 +29,13 @@ class CommandTimeoutTest {
     void explicitTimeoutCanExceedTheDefaultBatchTimeout() {
         try (var tools = new ToolRegistry(1, 1)) {
             tools.setProjectPath(root.toString());
-            tools.setCommandExecutionService(new CommandExecutionService() {
+            tools.setExecutionEnvironment(new com.devcli.tool.environment.LocalExecutionEnvironment(new CommandExecutionService() {
                 public Result execute(Request request) {
                     java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1200));
                     return Result.completed(0, "finished after default deadline");
                 }
                 public boolean executesOnHost(boolean sandboxRequired) { return false; }
-            });
+            }));
             var result = tools.executeTools(List.of(new ToolContract.ToolInvocation("longer", "execute_command",
                     "{\"command\":\"mvn test\",\"timeout\":3}")));
             assertEquals(ToolStatus.SUCCESS, result.getFirst().status(), result.getFirst().result());
@@ -60,13 +60,13 @@ class CommandTimeoutTest {
     private ToolRegistry tools(AtomicReference<CommandExecutionService.Request> captured) {
         ToolRegistry tools = new ToolRegistry(1, 4);
         tools.setProjectPath(root.toString());
-        tools.setCommandExecutionService(new CommandExecutionService() {
+        tools.setExecutionEnvironment(new com.devcli.tool.environment.LocalExecutionEnvironment(new CommandExecutionService() {
             public Result execute(Request request) {
                 captured.set(request);
                 return Result.completed(0, "test backend");
             }
             public boolean executesOnHost(boolean sandboxRequired) { return false; }
-        });
+        }));
         return tools;
     }
 }

@@ -9,10 +9,8 @@ import com.devcli.tool.ToolRegistry;
 import com.devcli.tool.ToolResultArtifactStore;
 import com.devcli.workspace.WriteGateResult;
 
-import java.io.File;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 
@@ -79,8 +77,8 @@ public final class FileToolProvider implements ToolProvider {
                     context.acquireWriteLeaseChecked(activeStep, safe, path);
                     String before = null;
                     try {
-                        if (Files.exists(safe) && Files.isRegularFile(safe)) {
-                            before = Files.readString(safe);
+                        if (context.executionEnvironment().exists(safe) && context.executionEnvironment().isRegularFile(safe)) {
+                            before = context.executionEnvironment().readString(safe);
                         }
                     } catch (Exception ignored) {
                         // 二进制 / 大文件 / 编码错读不出来时，前文当 null 处理（diff 退化为长度提示）
@@ -99,9 +97,9 @@ public final class FileToolProvider implements ToolProvider {
                         executionContext.throwIfCancelled();
                         Path parent = safe.getParent();
                         if (parent != null) {
-                            Files.createDirectories(parent);
+                            context.executionEnvironment().createDirectories(parent);
                         }
-                        Files.writeString(safe, content);
+                        context.executionEnvironment().writeString(safe, content);
                         context.recordFileWrite(path, safe, before, content, activeStep);
                         executionContext.throwIfCancelled();
                         return ToolOutput.success("文件已写入: " + path);
@@ -135,13 +133,13 @@ public final class FileToolProvider implements ToolProvider {
                                 "委派 Worker 写路径不在允许范围内: " + path, false);
                     }
                     Path safe = context.resolveSafeWritePath(path);
-                    if (!Files.exists(safe) || !Files.isRegularFile(safe)) {
+                    if (!context.executionEnvironment().exists(safe) || !context.executionEnvironment().isRegularFile(safe)) {
                         return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
                                 "文件不存在或不是普通文件，无法编辑: " + path + "（新建文件请用 write_file）", true);
                     }
                     long sourceBytes;
                     try {
-                        sourceBytes = Files.size(safe);
+                        sourceBytes = context.executionEnvironment().size(safe);
                     } catch (Exception e) {
                         return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
                                 "读取文件大小失败: " + e.getMessage(), false);
@@ -152,7 +150,7 @@ public final class FileToolProvider implements ToolProvider {
                     }
                     String before;
                     try {
-                        before = Files.readString(safe);
+                        before = context.executionEnvironment().readString(safe);
                     } catch (Exception e) {
                         return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
                                 "读取文件失败: " + e.getMessage(), false);
@@ -187,7 +185,7 @@ public final class FileToolProvider implements ToolProvider {
                     }
                     try {
                         executionContext.throwIfCancelled();
-                        Files.writeString(safe, content);
+                        context.executionEnvironment().writeString(safe, content);
                         context.recordFileWrite(path, safe, before, content, activeStep);
                         executionContext.throwIfCancelled();
                         return ToolOutput.success("文件已修改: " + path + "（替换 " + edit.replacements() + " 处"
@@ -208,18 +206,13 @@ public final class FileToolProvider implements ToolProvider {
                 args -> {
                     Path safe = context.resolveSafePath(args.get("path"));
                     try {
-                        File[] files = safe.toFile().listFiles();
-                        if (files == null) {
-                            return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
-                                    "目录为空或不存在", false);
-                        }
-                        java.util.Arrays.sort(files, java.util.Comparator.comparing(File::getName));
+                        var files = context.executionEnvironment().list(safe);
                         StringBuilder sb = new StringBuilder("目录内容:\n");
                         boolean truncated = false;
                         int emitted = 0;
-                        for (File f : files) {
-                            String line = (f.isDirectory() ? "[D] " : "[F] ")
-                                    + f.getName() + "\n";
+                        for (var f : files) {
+                            String line = (f.directory() ? "[D] " : "[F] ")
+                                    + f.name() + "\n";
                             if (emitted >= MAX_DIRECTORY_ENTRIES
                                     || sb.length() + line.length() > MAX_DIRECTORY_RESULT_CHARS
                                     - DIRECTORY_TRUNCATION_HEADER.length()
@@ -272,7 +265,7 @@ public final class FileToolProvider implements ToolProvider {
             // Inspect an immutable full snapshot before pagination, so a caller cannot
             // evade detection by requesting only the middle of a credential.
             byte[] snapshot;
-            try (var input = Files.newInputStream(safe)) {
+            try (var input = context.executionEnvironment().openInput(safe)) {
                 snapshot = input.readNBytes(context.maxWriteFileBytes() + 1);
             }
             if (snapshot.length > context.maxWriteFileBytes()) {

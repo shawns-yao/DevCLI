@@ -25,7 +25,7 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>子进程输出重定向到临时文件再读取，避免大仓库下 stdout 管道写满导致 {@code waitFor} 死锁。
  */
-final class ProjectFileLister {
+public final class ProjectFileLister {
 
     /** 兜底跳过目录：git 不可用时挡住依赖、构建产物、缓存与临时目录。 */
     private static final Set<String> SKIP_DIRS = Set.of(
@@ -44,7 +44,7 @@ final class ProjectFileLister {
      * @param scope 搜索范围，必须位于 {@code root} 之内
      * @return 候选文件绝对路径，已按可移植路径字符串排序；不包含目录
      */
-    static List<Path> list(Path root, Path scope) {
+    public static List<Path> list(Path root, Path scope) {
         List<Path> viaGit = listViaGit(root, scope);
         if (viaGit != null) {
             return viaGit;

@@ -167,7 +167,7 @@ class ToolCapabilityTest {
         ToolRegistry registry = new ToolRegistry();
         registry.setProjectPath(tempDir.toString());
         AtomicReference<CommandExecutionService.Request> captured = new AtomicReference<>();
-        registry.setCommandExecutionService(new CommandExecutionService() {
+        registry.setExecutionEnvironment(new com.devcli.tool.environment.LocalExecutionEnvironment(new CommandExecutionService() {
             public boolean executesOnHost(boolean sandboxRequired) {
                 return !sandboxRequired;
             }
@@ -175,7 +175,7 @@ class ToolCapabilityTest {
                 captured.set(request);
                 return Result.completed(0, "sandbox");
             }
-        });
+        }));
 
         ToolOutput output = registry.runWithToolAccess(
                 ToolContract.ToolAccessScope.ISOLATED_PROJECT,

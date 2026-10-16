@@ -21,8 +21,6 @@ import com.devcli.policy.TaskGrant;
 import com.devcli.snapshot.SnapshotService;
 import com.devcli.skill.SkillContextBuffer;
 import com.devcli.skill.SkillRegistry;
-import com.devcli.tool.command.CommandExecutionService;
-import com.devcli.tool.command.DefaultCommandExecutionService;
 import com.devcli.tool.provider.BrowserToolProvider;
 import com.devcli.tool.provider.FileToolProvider;
 import com.devcli.tool.provider.GrepToolProvider;
@@ -71,8 +69,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
      */
     final int maxParallelTools = ConfigResolver.intValue(
             "devcli.tool.batch.max.parallel", "DEVCLI_TOOL_BATCH_MAX_PARALLEL", 10, 1, 64);
-    CommandExecutionService commandExecutionService =
-            new DefaultCommandExecutionService();
+    com.devcli.tool.environment.ExecutionEnvironment executionEnvironment =
+            new com.devcli.tool.environment.LocalExecutionEnvironment();
     String projectPath = System.getProperty("user.dir");
     DelegateRoleCatalog delegateRoles = DelegateRoleCatalog.load(Path.of(projectPath));
     PathGuard pathGuard = new PathGuard(projectPath);
@@ -335,10 +333,12 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         this.browserConnector = browserConnector;
     }
 
-    public void setCommandExecutionService(CommandExecutionService commandExecutionService) {
-        this.commandExecutionService = Objects.requireNonNull(
-                commandExecutionService, "commandExecutionService");
+    public void setExecutionEnvironment(com.devcli.tool.environment.ExecutionEnvironment environment) {
+        this.executionEnvironment = environment;
     }
+
+    @Override
+    public com.devcli.tool.environment.ExecutionEnvironment executionEnvironment() { return executionEnvironment; }
 
     public void setMemorySaver(java.util.function.Consumer<String> memorySaver) {
         this.memorySaver = memorySaver;
@@ -607,7 +607,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     protected final boolean commandExecutesOnHost() {
-        return commandExecutionService.executesOnHost(
+        return executionEnvironment.commands().executesOnHost(
                 currentToolAccessScope() == ToolAccessScope.ISOLATED_PROJECT);
     }
 

@@ -6,15 +6,11 @@ import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolExecutionContext;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
-import com.devcli.workspace.FileModeSnapshot;
 import com.devcli.workspace.PatchSet;
 import com.devcli.workspace.ProjectCommitCoordinator;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -80,7 +76,7 @@ public final class DeleteFilesTool {
                 throw new PolicyException("禁止删除项目根目录或项目外路径: " + path);
             }
             for (Path cursor = lexical; !cursor.equals(root); cursor = cursor.getParent()) {
-                if (Files.isSymbolicLink(cursor)) {
+                if (context.executionEnvironment().isSymbolicLink(cursor)) {
                     throw new PolicyException("删除路径不能包含符号链接: " + path);
                 }
             }
@@ -88,20 +84,20 @@ public final class DeleteFilesTool {
             if (!context.isWritePathAllowed(path)) {
                 throw new PolicyException("删除路径不在委派写入范围内: " + path);
             }
-            if (!Files.isRegularFile(safe, LinkOption.NOFOLLOW_LINKS)) {
+            if (!context.executionEnvironment().isRegularFile(safe)) {
                 throw new IllegalArgumentException("目标不存在或不是普通文件，不支持目录递归删除: " + path);
             }
             if (!seen.add(safe)) {
                 throw new IllegalArgumentException("删除清单包含重复路径: " + path);
             }
-            long size = Files.size(safe);
+            long size = context.executionEnvironment().size(safe);
             bytes += size;
             if (size > context.maxWriteFileBytes() || bytes > MAX_TOTAL_BYTES) {
                 throw new PolicyException("删除超出单文件 5MB 或整批 20MB 上限");
             }
             changes.add(new PatchSet.FileChange(root.relativize(safe).toString().replace('\\', '/'),
-                    PatchSet.ChangeType.DELETE, PatchSet.hash(safe), null, null,
-                    FileModeSnapshot.capture(safe), null));
+                    PatchSet.ChangeType.DELETE, context.executionEnvironment().hash(safe), null, null,
+                    context.executionEnvironment().permissions(safe), null));
         }
         return new Plan(root, changes);
     }
@@ -122,13 +118,13 @@ public final class DeleteFilesTool {
                         throw new PolicyException("删除路径不在委派写入范围内: " + change.relativePath());
                     }
                     context.acquireWriteLeaseChecked(step, safe, change.relativePath());
-                    if (!change.beforeHash().equals(PatchSet.hash(safe))) {
+                    if (!change.beforeHash().equals(context.executionEnvironment().hash(safe))) {
                         return ToolOutput.rejected(ToolErrorCode.STALE_CONTEXT,
                                 "审批后文件发生变化，整批未删除，请重新提交删除清单", true);
                     }
                     String text;
                     try {
-                        text = Files.readString(safe, StandardCharsets.UTF_8);
+                        text = context.executionEnvironment().readString(safe);
                     } catch (java.nio.charset.CharacterCodingException binary) {
                         text = null;
                     }
@@ -139,7 +135,7 @@ public final class DeleteFilesTool {
                     before.add(text);
                 }
                 execution.throwIfCancelled();
-                PatchSet.ApplyResult result = new PatchSet(plan.changes()).apply(plan.root());
+                PatchSet.ApplyResult result = context.executionEnvironment().applyPatch(plan.root(), new PatchSet(plan.changes()));
                 if (!result.applied()) {
                     return ToolOutput.rejected(result.conflicts().isEmpty()
                                     ? ToolErrorCode.EXECUTION_FAILED : ToolErrorCode.STALE_CONTEXT,

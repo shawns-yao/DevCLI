@@ -48,7 +48,7 @@ class PermissionClassifierTest {
                 });
         tools.setProjectPath(root.toString());
         tools.withProjectPermissions(store, ProjectPermissionsStore.key(root));
-        tools.setCommandExecutionService(request -> { executed.incrementAndGet(); return CommandExecutionService.Result.completed(0, "ok"); });
+        tools.setExecutionEnvironment(new com.devcli.tool.environment.LocalExecutionEnvironment(request -> { executed.incrementAndGet(); return CommandExecutionService.Result.completed(0, "ok"); }));
         return tools;
     }
 

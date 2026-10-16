@@ -32,7 +32,7 @@ public final class GlobToolProvider implements ToolProvider {
                     "glob 模式无效，请使用 *、?、** 和 / 分隔路径: " + invalid.getMessage(), true);
         }
         int limit = Integer.parseInt(args.getOrDefault("limit", "200"));
-        var matches = ProjectFileLister.list(root, scope).stream()
+        var matches = context.executionEnvironment().findFiles(root, scope).stream()
                 .map(root::relativize).filter(matcher::matches).limit(limit + 1L).toList();
         String text = matches.stream().limit(limit).map(path -> path.toString().replace('\\', '/'))
                 .collect(java.util.stream.Collectors.joining("\n"));

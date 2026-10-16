@@ -6,8 +6,6 @@ import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -45,7 +43,7 @@ public final class GrepToolProvider implements ToolProvider {
                     "grep_code 失败: pattern 不能为空", false);
         }
         Path start = context.resolveSafePath(args.getOrDefault("path", "."));
-        if (!Files.exists(start)) {
+        if (!context.executionEnvironment().exists(start)) {
             return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
                     "grep_code 未找到路径: " + args.getOrDefault("path", "."), false);
         }
@@ -68,16 +66,16 @@ public final class GrepToolProvider implements ToolProvider {
         }
 
         Path root = projectRoot(context.projectPath());
-        List<Path> files = ProjectFileLister.list(root, start);
+        List<Path> files = context.executionEnvironment().findFiles(root, start);
 
         List<String> matches = new ArrayList<>();
         for (Path file : files) {
-            if (!withinSizeLimit(file)) {
+            if (!withinSizeLimit(file, context)) {
                 continue;
             }
             List<String> lines;
             try {
-                lines = Files.readAllLines(file, StandardCharsets.UTF_8);
+                lines = context.executionEnvironment().readString(file).lines().toList();
             } catch (IOException | RuntimeException ignored) {
                 continue;
             }
@@ -99,9 +97,9 @@ public final class GrepToolProvider implements ToolProvider {
                 ? "(no matches)" : String.join("\n", matches));
     }
 
-    private boolean withinSizeLimit(Path file) {
+    private boolean withinSizeLimit(Path file, ToolContext context) {
         try {
-            return Files.size(file) <= MAX_FILE_BYTES;
+            return context.executionEnvironment().size(file) <= MAX_FILE_BYTES;
         } catch (IOException e) {
             return false;
         }

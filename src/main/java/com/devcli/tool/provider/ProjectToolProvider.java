@@ -5,7 +5,6 @@ import com.devcli.tool.ToolErrorCode;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 
 public final class ProjectToolProvider implements ToolProvider {
@@ -23,13 +22,13 @@ public final class ProjectToolProvider implements ToolProvider {
                     String type = args.get("type");
                     Path projectRoot = context.resolveSafeWritePath(name);
                     try {
-                        Files.createDirectories(projectRoot);
+                        context.executionEnvironment().createDirectories(projectRoot);
 
                         switch (type.toLowerCase()) {
                             case "java" -> {
-                                Files.createDirectories(projectRoot.resolve("src/main/java"));
-                                Files.createDirectories(projectRoot.resolve("src/main/resources"));
-                                Files.writeString(projectRoot.resolve("pom.xml"),
+                                context.executionEnvironment().createDirectories(projectRoot.resolve("src/main/java"));
+                                context.executionEnvironment().createDirectories(projectRoot.resolve("src/main/resources"));
+                                context.executionEnvironment().writeString(projectRoot.resolve("pom.xml"),
                                         String.format("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
                                                 "<project>\n" +
                                                 "    <modelVersion>4.0.0</modelVersion>\n" +
@@ -39,11 +38,11 @@ public final class ProjectToolProvider implements ToolProvider {
                                                 "</project>", name));
                             }
                             case "python" -> {
-                                Files.createDirectories(projectRoot.resolve(name));
-                                Files.writeString(projectRoot.resolve("main.py"), "# 主程序入口\n");
-                                Files.writeString(projectRoot.resolve("requirements.txt"), "# 依赖列表\n");
+                                context.executionEnvironment().createDirectories(projectRoot.resolve(name));
+                                context.executionEnvironment().writeString(projectRoot.resolve("main.py"), "# 主程序入口\n");
+                                context.executionEnvironment().writeString(projectRoot.resolve("requirements.txt"), "# 依赖列表\n");
                             }
-                            case "node" -> Files.writeString(projectRoot.resolve("package.json"),
+                            case "node" -> context.executionEnvironment().writeString(projectRoot.resolve("package.json"),
                                     String.format("{\"name\": \"%s\", \"version\": \"1.0.0\"}", name));
                             default -> {
                                 return ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS,

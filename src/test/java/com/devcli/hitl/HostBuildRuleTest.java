@@ -68,7 +68,7 @@ class HostBuildRuleTest {
         String project = com.devcli.config.ProjectPermissionsStore.key(root);
         store.decideTrust(project, true);
         tools.withProjectPermissions(store, project);
-        tools.setCommandExecutionService(request -> CommandExecutionService.Result.completed(0, "test backend"));
+        tools.setExecutionEnvironment(new com.devcli.tool.environment.LocalExecutionEnvironment(request -> CommandExecutionService.Result.completed(0, "test backend")));
         return tools;
     }
 }
