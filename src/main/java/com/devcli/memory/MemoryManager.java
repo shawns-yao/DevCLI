@@ -47,9 +47,7 @@ public class MemoryManager implements AutoCloseable {
     private static final int SESSION_PRE_SUMMARY_LARGE_TOOL_CHARS = 12_000;
     private static final long SESSION_PRE_SUMMARY_FAILURE_COOLDOWN_MILLIS = 30_000L;
     /** 索引段落标题；其 token 也要从本轮记忆预算里扣掉。 */
-    private static final String INDEX_HEADER = "## 长期记忆\n\n";
-    /** 相关性全文段落的固定标题；其 token 也要从本轮记忆预算里扣掉。 */
-    private static final String RELEVANT_MEMORY_HEADER = "\n\n## 与本次问题相关的长期记忆\n\n";
+    private static final String INDEX_HEADER = "## 长期记忆\n\n需要正文时调用 read_memory，传入索引中的主题名。\n\n";
     private final SessionMemory sessionMemory;
     private final CompactionSummaryCache compactionSummaryCache;
     private final ConversationHistoryCompactor sessionPreSummaryCompactor;
@@ -60,6 +58,9 @@ public class MemoryManager implements AutoCloseable {
     private SessionPreSummaryTask runningSessionPreSummary;
     private SessionPreSummaryTask pendingSessionPreSummary;
     private boolean sessionPreSummaryClosed;
+    private long sessionPreSummaryRequestVersion;
+    private long sessionPreSummaryCommittedVersion;
+    private long sessionPreSummaryInvalidatedVersion;
     private final AtomicLong preSummaryFullCount = new AtomicLong();
     private final AtomicLong preSummaryIncrementalCount = new AtomicLong();
     private final AtomicLong preSummaryFailureCount = new AtomicLong();
@@ -83,7 +84,7 @@ public class MemoryManager implements AutoCloseable {
     }
 
     /**
-     * @param llmClient      LLM 客户端（长期记忆选择器与预摘要使用）
+     * @param llmClient      预摘要使用的 LLM 客户端；长期记忆读取不调用模型
      * @param shortTermBudget 会话记忆 Prompt 预算
      * @param contextWindow  模型上下文窗口大小
      */
@@ -112,11 +113,14 @@ public class MemoryManager implements AutoCloseable {
     }
 
     public void setLlmClient(LlmClient llmClient) {
-        this.llmClient = llmClient;
-        this.compactionSummaryCache.clearPreSummary();
-        clearPreSummaryFailure();
-        this.sessionPreSummaryCompactor.setLlmClient(llmClient);
-        applyContextProfile(ContextProfile.from(llmClient));
+        synchronized (sessionPreSummaryScheduleLock) {
+            sessionPreSummaryInvalidatedVersion = ++sessionPreSummaryRequestVersion;
+            this.llmClient = llmClient;
+            this.compactionSummaryCache.clearPreSummary();
+            clearPreSummaryFailure();
+            this.sessionPreSummaryCompactor.setLlmClient(llmClient);
+            applyContextProfile(ContextProfile.from(llmClient));
+        }
     }
 
     public void applyContextProfile(ContextProfile contextProfile) {
@@ -632,18 +636,40 @@ public class MemoryManager implements AutoCloseable {
         if (index.isBlank()) {
             return "";
         }
-        StringBuilder context = new StringBuilder(INDEX_HEADER).append(index);
-        int remaining = safeBudget - MemoryEntry.estimateTokens(context.toString())
-                - MemoryEntry.estimateTokens(RELEVANT_MEMORY_HEADER);
-        if (remaining <= 0) {
-            return context.toString().strip();
+        return (INDEX_HEADER + index).strip();
+    }
+
+    public com.devcli.tool.ToolOutput updateWorkPlan(Map<String, String> args) {
+        try {
+            AgentWorkPlan plan = AgentWorkPlan.parse(args.get("goal"), args.get("steps"));
+            setTaskState(AgentWorkPlan.STATE_KEY, plan.serialized());
+            return com.devcli.tool.ToolOutput.success(AgentWorkPlan.render(plan.serialized()));
+        } catch (IllegalArgumentException e) {
+            return com.devcli.tool.ToolOutput.error(com.devcli.tool.ToolErrorCode.INVALID_ARGUMENTS,
+                    e.getMessage(), true);
         }
-        String rendered = longTermMemory.renderSelected(
-                longTermMemory.select(query, llmClient), remaining);
-        if (!rendered.isBlank()) {
-            context.append(RELEVANT_MEMORY_HEADER).append(rendered);
+    }
+
+    public com.devcli.tool.ToolOutput readMemory(Map<String, String> args) {
+        if (memoryIgnored) return com.devcli.tool.ToolOutput.rejected(
+                com.devcli.tool.ToolErrorCode.CAPABILITY_DENIED, "当前会话已忽略长期记忆");
+        try {
+            var entry = longTermMemory.readActiveTopic(args.get("name"), args.get("scope"));
+            if (entry.isEmpty()) return com.devcli.tool.ToolOutput.error(
+                    com.devcli.tool.ToolErrorCode.INVALID_ARGUMENTS, "主题不存在、已过期或不在当前可见作用域", true);
+            MemoryEntry memory = entry.get();
+            String body = memory.getContent();
+            int offset = Integer.parseInt(args.getOrDefault("offset", "0"));
+            int limit = Integer.parseInt(args.getOrDefault("limit", "8000"));
+            if (offset > body.length()) throw new IllegalArgumentException("offset 超出正文范围");
+            int end = (int) Math.min(body.length(), (long) offset + limit);
+            var result = MemoryJson.mapper().createObjectNode().put("name", memory.getId())
+                    .put("scope", memory.getScope()).put("content", body.substring(offset, end))
+                    .put("next_offset", end < body.length() ? end : -1).put("total_chars", body.length());
+            return com.devcli.tool.ToolOutput.success(result.toString());
+        } catch (IllegalArgumentException e) {
+            return com.devcli.tool.ToolOutput.error(com.devcli.tool.ToolErrorCode.INVALID_ARGUMENTS, e.getMessage(), true);
         }
-        return context.toString().strip();
     }
 
     private static String truncateForPrompt(String text, int maxChars) {
@@ -663,7 +689,7 @@ public class MemoryManager implements AutoCloseable {
      */
     public String buildSessionMemorySection() {
         if (memoryIgnored) {
-            return "";
+            return workPlanForPrompt();
         }
         return sessionMemory.render(SessionMemory.SessionView.FULL,
                 contextProfile.shortTermMemoryBudget());
@@ -678,7 +704,7 @@ public class MemoryManager implements AutoCloseable {
      */
     public String buildPostCompactRestoreSection() {
         if (memoryIgnored) {
-            return "";
+            return workPlanForPrompt();
         }
         return sessionMemory.renderForPostCompactRestore();
     }
@@ -688,6 +714,27 @@ public class MemoryManager implements AutoCloseable {
             return "";
         }
         return sessionMemory.renderForPostCompactRestore(viewForAgent(agentType));
+    }
+
+    public String workPlanForPrompt() {
+        return AgentWorkPlan.render(sessionMemory.getTaskState(AgentWorkPlan.STATE_KEY).orElse(""));
+    }
+
+    public void restoreWorkPlan(List<LlmClient.Message> history) {
+        java.util.Set<String> planCalls = new java.util.HashSet<>();
+        String latest = "";
+        for (LlmClient.Message message : history) {
+            if (message.toolCalls() != null) {
+                message.toolCalls().stream().filter(call -> "update_plan".equals(call.function().name()))
+                        .forEach(call -> planCalls.add(call.id()));
+            }
+            if (message.source() == LlmClient.MessageSource.SYSTEM_INTERNAL
+                    || ("tool".equals(message.role()) && planCalls.contains(message.toolCallId()))) {
+                String plan = AgentWorkPlan.extract(message.content());
+                if (!plan.isEmpty()) latest = plan;
+            }
+        }
+        if (!latest.isEmpty()) setTaskState(AgentWorkPlan.STATE_KEY, latest);
     }
 
     public String currentRagEpochSnapshot() {
@@ -714,13 +761,25 @@ public class MemoryManager implements AutoCloseable {
             List<LlmClient.Message> history,
             int turnToolCalls,
             int largestToolResultChars) {
-        return maintainSessionPreSummaryForCoveredHistory(history, turnToolCalls, largestToolResultChars);
+        long requestVersion;
+        synchronized (sessionPreSummaryScheduleLock) {
+            if (sessionPreSummaryClosed) {
+                return SessionPreSummaryMaintenanceResult.SKIPPED_DISABLED;
+            }
+            requestVersion = ++sessionPreSummaryRequestVersion;
+        }
+        return maintainSessionPreSummaryForCoveredHistory(
+                history, turnToolCalls, largestToolResultChars, requestVersion);
     }
 
     private SessionPreSummaryMaintenanceResult maintainSessionPreSummaryForCoveredHistory(
             List<LlmClient.Message> history,
             int turnToolCalls,
-            int largestToolResultChars) {
+            int largestToolResultChars,
+            long requestVersion) {
+        if (!isValidPreSummaryResult(requestVersion)) {
+            return SessionPreSummaryMaintenanceResult.SKIPPED_SUPERSEDED;
+        }
         if (!Boolean.parseBoolean(System.getProperty(SESSION_PRE_SUMMARY_ENABLED_PROPERTY, "true"))) {
             return SessionPreSummaryMaintenanceResult.SKIPPED_DISABLED;
         }
@@ -769,7 +828,7 @@ public class MemoryManager implements AutoCloseable {
                 inputTokenEstimate = TokenBudget.estimateMessagesTokens(deltaMessages)
                         + MemoryEntry.estimateTokens(base.summary());
                 if (preSummaryInputExceedsBudget(inputTokenEstimate)) {
-                    recordPreSummaryFailure(coveredFingerprint, true);
+                    recordPreSummaryFailure(requestVersion, coveredFingerprint, true);
                     return SessionPreSummaryMaintenanceResult.SKIPPED_INPUT_TOO_LARGE;
                 }
                 summary = sessionPreSummaryCompactor.summarizeIncremental(
@@ -779,18 +838,18 @@ public class MemoryManager implements AutoCloseable {
                 deltaMessageCount = coveredMessages.size();
                 inputTokenEstimate = TokenBudget.estimateMessagesTokens(coveredMessages);
                 if (preSummaryInputExceedsBudget(inputTokenEstimate)) {
-                    recordPreSummaryFailure(coveredFingerprint, true);
+                    recordPreSummaryFailure(requestVersion, coveredFingerprint, true);
                     return SessionPreSummaryMaintenanceResult.SKIPPED_INPUT_TOO_LARGE;
                 }
                 summary = sessionPreSummaryCompactor.summarizePrefix(history);
             }
             if (summary == null || summary.isBlank()) {
-                recordPreSummaryFailure(coveredFingerprint, true);
+                recordPreSummaryFailure(requestVersion, coveredFingerprint, true);
                 return SessionPreSummaryMaintenanceResult.FAILED;
             }
             RollingSummary structured = RollingSummary.parse(summary);
             if (structured.isEmpty()) {
-                recordPreSummaryFailure(coveredFingerprint, true);
+                recordPreSummaryFailure(requestVersion, coveredFingerprint, true);
                 return SessionPreSummaryMaintenanceResult.FAILED;
             }
             summary = structured.render();
@@ -799,35 +858,41 @@ public class MemoryManager implements AutoCloseable {
             summary = validation.repairedSummary();
             structured = RollingSummary.parse(summary);
             if (structured.isEmpty()) {
-                recordPreSummaryFailure(coveredFingerprint, true);
+                recordPreSummaryFailure(requestVersion, coveredFingerprint, true);
                 return SessionPreSummaryMaintenanceResult.FAILED;
             }
             summary = structured.render();
             if (summary.length() > ConversationHistoryCompactor.MAX_SUMMARY_CHARS) {
-                recordPreSummaryFailure(coveredFingerprint, true);
+                recordPreSummaryFailure(requestVersion, coveredFingerprint, true);
                 return SessionPreSummaryMaintenanceResult.FAILED;
             }
-            compactionSummaryCache.recordPreSummary(coveredMessages, summary, llmClient);
-            clearPreSummaryFailure();
-            if ("incremental".equals(maintenanceMode)) {
-                preSummaryIncrementalCount.incrementAndGet();
-            } else {
-                preSummaryFullCount.incrementAndGet();
+            synchronized (sessionPreSummaryScheduleLock) {
+                if (!isValidPreSummaryResult(requestVersion)) {
+                    return SessionPreSummaryMaintenanceResult.SKIPPED_SUPERSEDED;
+                }
+                compactionSummaryCache.recordPreSummary(coveredMessages, summary, llmClient);
+                sessionPreSummaryCommittedVersion = requestVersion;
+                clearPreSummaryFailure();
+                if ("incremental".equals(maintenanceMode)) {
+                    preSummaryIncrementalCount.incrementAndGet();
+                } else {
+                    preSummaryFullCount.incrementAndGet();
+                }
+                lastPreSummaryMetrics = new SessionPreSummaryMetrics(
+                        maintenanceMode,
+                        coveredMessages.size(),
+                        deltaMessageCount,
+                        inputTokenEstimate,
+                        summary.length(),
+                        preSummaryFullCount.get(),
+                        preSummaryIncrementalCount.get(),
+                        preSummaryFailureCount.get(),
+                        Instant.now());
             }
-            lastPreSummaryMetrics = new SessionPreSummaryMetrics(
-                    maintenanceMode,
-                    coveredMessages.size(),
-                    deltaMessageCount,
-                    inputTokenEstimate,
-                    summary.length(),
-                    preSummaryFullCount.get(),
-                    preSummaryIncrementalCount.get(),
-                    preSummaryFailureCount.get(),
-                    Instant.now());
             return SessionPreSummaryMaintenanceResult.MAINTAINED;
         } catch (IOException | RuntimeException e) {
             boolean deterministic = !(e instanceof com.devcli.llm.LlmException failure && failure.retryable());
-            recordPreSummaryFailure(coveredFingerprint, deterministic);
+            recordPreSummaryFailure(requestVersion, coveredFingerprint, deterministic);
             if (e instanceof com.devcli.llm.LlmException failure && Boolean.parseBoolean(System.getProperty(
                     ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY, "false"))) {
                 System.err.printf(java.util.Locale.ROOT,
@@ -851,12 +916,25 @@ public class MemoryManager implements AutoCloseable {
         return fingerprint.equals(preSummaryFailureFingerprint);
     }
 
-    private void recordPreSummaryFailure(String fingerprint, boolean deterministic) {
-        preSummaryFailureCount.incrementAndGet();
-        if (deterministic && fingerprint != null && !fingerprint.isBlank()) {
-            preSummaryFailureFingerprint = fingerprint;
-            preSummaryFailureUntilMillis = System.currentTimeMillis()
-                    + SESSION_PRE_SUMMARY_FAILURE_COOLDOWN_MILLIS;
+    private boolean isValidPreSummaryResult(long requestVersion) {
+        synchronized (sessionPreSummaryScheduleLock) {
+            return !sessionPreSummaryClosed
+                    && requestVersion > sessionPreSummaryInvalidatedVersion
+                    && requestVersion > sessionPreSummaryCommittedVersion;
+        }
+    }
+
+    private void recordPreSummaryFailure(long requestVersion, String fingerprint, boolean deterministic) {
+        synchronized (sessionPreSummaryScheduleLock) {
+            if (!isValidPreSummaryResult(requestVersion)) {
+                return;
+            }
+            preSummaryFailureCount.incrementAndGet();
+            if (deterministic && fingerprint != null && !fingerprint.isBlank()) {
+                preSummaryFailureFingerprint = fingerprint;
+                preSummaryFailureUntilMillis = System.currentTimeMillis()
+                        + SESSION_PRE_SUMMARY_FAILURE_COOLDOWN_MILLIS;
+            }
         }
     }
 
@@ -898,11 +976,14 @@ public class MemoryManager implements AutoCloseable {
             List<LlmClient.Message> history, int turnToolCalls, int largestToolResultChars,
             int triggerTokens, java.util.function.BooleanSupplier callGuard,
             java.util.function.Consumer<LlmClient.ChatResponse> usageConsumer) {
-        List<LlmClient.Message> snapshot = sessionPreSummaryCompactor.preSummaryHistory(history, triggerTokens);
-        SessionPreSummaryTask task = new SessionPreSummaryTask(
-                snapshot, turnToolCalls, largestToolResultChars, callGuard, usageConsumer);
+        SessionPreSummaryTask task;
         SessionPreSummaryTask superseded = null;
         synchronized (sessionPreSummaryScheduleLock) {
+            List<LlmClient.Message> snapshot = sessionPreSummaryCompactor.preSummaryHistory(history, triggerTokens);
+            long requestVersion = sessionPreSummaryClosed ? -1 : ++sessionPreSummaryRequestVersion;
+            task = new SessionPreSummaryTask(
+                    snapshot, turnToolCalls, largestToolResultChars, callGuard, usageConsumer,
+                    requestVersion);
             if (sessionPreSummaryClosed) {
                 task.complete(SessionPreSummaryMaintenanceResult.SKIPPED_DISABLED);
                 return task.result;
@@ -927,6 +1008,7 @@ public class MemoryManager implements AutoCloseable {
         private final int largestToolResultChars;
         private final java.util.function.BooleanSupplier callGuard;
         private final java.util.function.Consumer<LlmClient.ChatResponse> usageConsumer;
+        private final long requestVersion;
         private final CompletableFuture<SessionPreSummaryMaintenanceResult> result =
                 new CompletableFuture<>();
 
@@ -934,12 +1016,14 @@ public class MemoryManager implements AutoCloseable {
                                      int turnToolCalls,
                                      int largestToolResultChars,
                                      java.util.function.BooleanSupplier callGuard,
-                                     java.util.function.Consumer<LlmClient.ChatResponse> usageConsumer) {
+                                     java.util.function.Consumer<LlmClient.ChatResponse> usageConsumer,
+                                     long requestVersion) {
             this.history = history;
             this.turnToolCalls = turnToolCalls;
             this.largestToolResultChars = largestToolResultChars;
             this.callGuard = callGuard;
             this.usageConsumer = usageConsumer;
+            this.requestVersion = requestVersion;
         }
 
         @Override
@@ -951,7 +1035,7 @@ public class MemoryManager implements AutoCloseable {
                     usageConsumer.accept(response);
                 });
                 complete(maintainSessionPreSummaryForCoveredHistory(
-                        history, turnToolCalls, largestToolResultChars));
+                        history, turnToolCalls, largestToolResultChars, requestVersion));
             } catch (Throwable error) {
                 result.completeExceptionally(error);
             } finally {
@@ -1047,8 +1131,11 @@ public class MemoryManager implements AutoCloseable {
     /** 清空工作记忆（用于 /clear 命令；长期记忆保持不变）。 */
     public void clearShortTerm() {
         sessionMemory.clear();
-        compactionSummaryCache.clearPreSummary();
-        clearPreSummaryFailure();
+        synchronized (sessionPreSummaryScheduleLock) {
+            sessionPreSummaryInvalidatedVersion = ++sessionPreSummaryRequestVersion;
+            compactionSummaryCache.clearPreSummary();
+            clearPreSummaryFailure();
+        }
         sessionEventSequence.set(0);
         memoryIgnored = false;
     }
@@ -1157,6 +1244,7 @@ public class MemoryManager implements AutoCloseable {
         SessionPreSummaryTask discarded;
         synchronized (sessionPreSummaryScheduleLock) {
             sessionPreSummaryClosed = true;
+            sessionPreSummaryInvalidatedVersion = ++sessionPreSummaryRequestVersion;
             discarded = pendingSessionPreSummary;
             pendingSessionPreSummary = null;
             sessionPreSummaryExecutor.shutdownNow();

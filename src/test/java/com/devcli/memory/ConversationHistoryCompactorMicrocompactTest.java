@@ -37,6 +37,24 @@ class ConversationHistoryCompactorMicrocompactTest {
     }
 
     @Test
+    void clearsOldUniqueOutputOutsideRecentTokenBudgetAndPreservesReference() throws IOException {
+        ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 1000, true);
+        c.setMicrocompactOutputRoot(tempDir);
+        List<LlmClient.Message> history = toolHistory(tool("old-grep", "grep_code"), tool("latest", "execute_command"));
+        String old = "old-grep-match\n".repeat(1500);
+        String recent = "recent-compile-output\n".repeat(1500);
+        history.set(2, new LlmClient.Message("tool", old, null, null, "old-grep"));
+        history.set(3, new LlmClient.Message("tool", recent, null, null, "latest"));
+        assertTrue(c.microcompactOversizeMessages(history));
+        assertEquals(5, history.size());
+        assertTrue(history.get(2).content().contains("<microcompact_boundary>"));
+        assertEquals("old-grep", history.get(2).toolCallId());
+        assertEquals(recent, history.get(3).content());
+        assertEquals(old, Files.readString(tempDir.resolve(ConversationHistoryCompactor.MICROCOMPACT_OUTPUTS_DIR)
+                .resolve(ConversationHistoryCompactor.microcompactSessionId()).resolve("old-grep.txt")));
+    }
+
+    @Test
     void clearsExactDuplicateToolResultAndKeepsMetadata() {
         ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 30_000, true);
         c.setMicrocompactOutputRoot(tempDir);
@@ -130,7 +148,7 @@ class ConversationHistoryCompactorMicrocompactTest {
     }
 
     @Test
-    void ignoresLegacyToolExclusionConfiguration() {
+    void keepsSmallResultsInline() {
         ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 30_000, true);
         c.setMicrocompactOutputRoot(tempDir);
         List<LlmClient.Message> history = toolHistory(
@@ -140,19 +158,7 @@ class ConversationHistoryCompactorMicrocompactTest {
                 tool("r2", "grep_code"),
                 tool("r3", "list_dir"),
                 tool("r4", "search_code"));
-        String previous = System.getProperty(
-                ConversationHistoryCompactor.MICRO_COMPACT_EXCLUDE_TOOLS_PROPERTY);
-        try {
-            System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_EXCLUDE_TOOLS_PROPERTY,
-                    "read_file");
-            assertFalse(c.microcompactOversizeMessages(history));
-        } finally {
-            if (previous == null) {
-                System.clearProperty(ConversationHistoryCompactor.MICRO_COMPACT_EXCLUDE_TOOLS_PROPERTY);
-            } else {
-                System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_EXCLUDE_TOOLS_PROPERTY, previous);
-            }
-        }
+        assertFalse(c.microcompactOversizeMessages(history));
 
         assertEquals("result-protected-read", history.get(2).content());
         assertEquals("result-clearable-grep", history.get(3).content());

@@ -135,45 +135,6 @@ class CodeBuddyLongTermMemoryTest {
     }
 
     @Test
-    void boundsSelectorManifestBeforeCallingTheModel() {
-        Instant now = Instant.parse("2026-09-21T00:00:00Z");
-        List<TopicMemory> candidates = new ArrayList<>();
-        for (int i = 0; i < 200; i++) {
-            candidates.add(TopicMemory.of(tempDir.resolve("topic-" + i + ".md"),
-                    "主题" + i, "候选记忆用途与适用场景说明".repeat(20), "project",
-                    "", now, null, 1, now));
-        }
-
-        String manifest = LongTermMemorySelector.formatManifest(candidates);
-
-        assertTrue(MemoryEntry.estimateTokens(manifest) <= 4_096,
-                "选择器清单必须有独立输入预算，实际 token="
-                        + MemoryEntry.estimateTokens(manifest));
-        assertTrue(manifest.lines().count() < candidates.size(),
-                "超量候选应按完整条目截断，不能把全部 200 条发送给模型");
-    }
-
-    @Test
-    void selectorCannotReturnCandidateOmittedFromBoundedManifest() throws Exception {
-        Instant now = Instant.parse("2026-09-21T00:00:00Z");
-        List<TopicMemory> candidates = new ArrayList<>();
-        for (int i = 0; i < 200; i++) {
-            TopicMemory candidate = TopicMemory.of(tempDir.resolve("topic-" + i + ".md"),
-                    "主题" + i, "候选记忆用途与适用场景说明".repeat(20), "project",
-                    "正文 " + i, now, null, 1, now);
-            candidates.add(candidate);
-        }
-        TopicMemory omitted = candidates.get(candidates.size() - 1);
-        Files.writeString(omitted.file(), omitted.render());
-
-        List<TopicMemory> selected = LongTermMemorySelector.select(
-                new FixedSelectionClient(omitted.fileName()), "任意问题", candidates);
-
-        assertTrue(selected.isEmpty(),
-                "模型不得通过猜测文件名选中未发送到有界清单中的候选");
-    }
-
-    @Test
     void completedLegacyMigrationDoesNotReparseSourceOnEveryConstruction() throws Exception {
         Path legacyCard = tempDir.resolve("records").resolve("aa").resolve("legacy.md");
         Files.createDirectories(legacyCard.getParent());
@@ -212,34 +173,4 @@ class CodeBuddyLongTermMemoryTest {
         }
     }
 
-    private static final class FixedSelectionClient implements LlmClient {
-        private final String fileName;
-
-        private FixedSelectionClient(String fileName) {
-            this.fileName = fileName;
-        }
-
-        @Override
-        public ChatResponse chat(List<Message> messages, List<Tool> tools) {
-            return new ChatResponse("assistant",
-                    "{\"selected_memories\":[\"" + fileName + "\"]}",
-                    List.of(), 0, 0);
-        }
-
-        @Override
-        public ChatResponse chat(List<Message> messages, List<Tool> tools,
-                                 StreamListener listener) {
-            return chat(messages, tools);
-        }
-
-        @Override
-        public String getModelName() {
-            return "fixed-selection";
-        }
-
-        @Override
-        public String getProviderName() {
-            return "test";
-        }
-    }
 }

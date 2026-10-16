@@ -17,6 +17,15 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ConversationHistoryCompactorTest {
+    @Test
+    void restoreBudgetCannotTruncateTheCanonicalWorkPlan() {
+        var steps = java.util.stream.IntStream.range(0, 64)
+                .mapToObj(i -> new AgentWorkPlan.Step(("步骤" + i + " " + "内容".repeat(150)).substring(0, 290), "pending")).toList();
+        String plan = new AgentWorkPlan("保留完整计划", steps).serialized();
+        var compactor = new ConversationHistoryCompactor(null);
+        compactor.setPostCompactContextSupplier(() -> "背景 ".repeat(20000) + AgentWorkPlan.render(plan));
+        assertEquals(plan, AgentWorkPlan.extract(compactor.buildPostCompactRestoreContext()));
+    }
 
     @Test
     void microcompactLeavesShortResultsInlineWithoutCreatingArtifacts(@TempDir Path tempDir) throws IOException {
@@ -28,18 +37,11 @@ class ConversationHistoryCompactorTest {
                         new LlmClient.ToolCall.Function("edit_file", "{}")))),
                 new LlmClient.Message("tool", "File updated successfully", null, null, "small-result")));
         List<LlmClient.Message> original = List.copyOf(history);
-        String previous = System.getProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY);
-        try {
-            System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY, "0");
-            assertFalse(compactor.microcompactOversizeMessages(history));
-            assertEquals(original, history);
-            assertEquals(0, compactor.lastMicrocompactStats().clearedToolResults());
-            try (var files = Files.list(tempDir)) {
-                assertEquals(0, files.count(), "No recovery file is needed when cleanup saves no tokens");
-            }
-        } finally {
-            if (previous == null) System.clearProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY);
-            else System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY, previous);
+        assertFalse(compactor.microcompactOversizeMessages(history));
+        assertEquals(original, history);
+        assertEquals(0, compactor.lastMicrocompactStats().clearedToolResults());
+        try (var files = Files.list(tempDir)) {
+            assertEquals(0, files.count(), "No recovery file is needed when cleanup saves no tokens");
         }
     }
 
@@ -59,28 +61,17 @@ class ConversationHistoryCompactorTest {
         history.add(4, LlmClient.Message.assistant(null, null, List.of(new LlmClient.ToolCall(
                 "duplicate-tool", new LlmClient.ToolCall.Function("read_file", "{\"path\":\"a\"}")))));
         history.add(5, new LlmClient.Message("tool", duplicateResult, null, null, "duplicate-tool"));
-        String previousKeep = System.getProperty(
-                ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY);
-        try {
-            System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY, "0");
-            int before = TokenBudget.estimateMessagesTokens(history);
-            List<LlmClient.Message> evicted = new ArrayList<>(history);
-            assertTrue(compactor.microcompactOversizeMessages(evicted));
-            int afterEviction = TokenBudget.estimateMessagesTokens(evicted);
-            int trigger = afterEviction + 1;
-            assertTrue(before >= trigger);
-            assertTrue(afterEviction < trigger);
+        int before = TokenBudget.estimateMessagesTokens(history);
+        List<LlmClient.Message> evicted = new ArrayList<>(history);
+        assertTrue(compactor.microcompactOversizeMessages(evicted));
+        int afterEviction = TokenBudget.estimateMessagesTokens(evicted);
+        int trigger = afterEviction + 1;
+        assertTrue(before >= trigger);
+        assertTrue(afterEviction < trigger);
 
-            assertTrue(compactor.compactIfNeeded(history, trigger));
-            assertEquals(1, compactor.summarizeCalls.get(),
-                    "越过阈值后即使确定性淘汰降到阈值以下，也必须执行语义压缩");
-        } finally {
-            if (previousKeep == null) {
-                System.clearProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY);
-            } else {
-                System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY, previousKeep);
-            }
-        }
+        assertTrue(compactor.compactIfNeeded(history, trigger));
+        assertEquals(1, compactor.summarizeCalls.get(),
+                "越过阈值后即使确定性淘汰降到阈值以下，也必须执行语义压缩");
     }
 
     @Test
@@ -271,19 +262,7 @@ class ConversationHistoryCompactorTest {
         history.add(LlmClient.Message.user("RecentQ2"));
         history.add(LlmClient.Message.assistant("recent answer"));
 
-        String previousKeep = System.getProperty(
-                ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY);
-        boolean changed;
-        try {
-            System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY, "1");
-            changed = c.microcompactOversizeMessages(history);
-        } finally {
-            if (previousKeep == null) {
-                System.clearProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY);
-            } else {
-                System.setProperty(ConversationHistoryCompactor.MICRO_COMPACT_KEEP_RECENT_PROPERTY, previousKeep);
-            }
-        }
+        boolean changed = c.microcompactOversizeMessages(history);
 
         assertTrue(changed);
         assertEquals("old result body 1".repeat(100), history.get(3).content());

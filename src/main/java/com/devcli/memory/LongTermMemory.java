@@ -184,9 +184,25 @@ public class LongTermMemory implements Memory, AutoCloseable {
         return List.copyOf(byName.values());
     }
 
-    public List<TopicMemory> select(String query, LlmClient llmClient) {
-        if (!LongTermMemorySelector.enabled()) return List.of();
-        return LongTermMemorySelector.select(llmClient, query, candidates());
+    /** 只读取当前作用域扫描所得的有效主题，不解析模型提供的文件路径。 */
+    public Optional<MemoryEntry> readActiveTopic(String name, String scope) {
+        if (name == null || name.isBlank() || name.contains("/") || name.contains("\\")
+                || name.equals(".") || name.equals("..")) {
+            throw new IllegalArgumentException("name 必须是索引中的主题名，不能包含路径");
+        }
+        if (scope != null && !Set.of("global", "project").contains(scope)) {
+            throw new IllegalArgumentException("scope 只允许 global/project");
+        }
+        String target = name.endsWith(".md") ? name : name + ".md";
+        for (Path dir : visibleDirs()) {
+            if (scope != null && !scope.equals(scopeLabel(dir))) continue;
+            for (TopicMemory head : activeHeads(dir)) {
+                if (!head.fileName().equals(target) || Files.isSymbolicLink(head.file())) continue;
+                TopicMemory full = TopicMemory.read(head.file());
+                if (full != null && !full.isExpired(clock.instant())) return Optional.of(toEntry(full, dir));
+            }
+        }
+        return Optional.empty();
     }
 
     /**

@@ -78,16 +78,23 @@ class ProjectMemoryScopeToolTest {
     }
 
     @Test
-    void keepsOrdinaryDirectoriesAndNestedRepositoriesIsolated() throws Exception {
+    void keepsOrdinaryDirectoriesIsolated() throws Exception {
         Path plain = Files.createDirectories(tempDir.resolve("plain"));
         Path child = Files.createDirectories(plain.resolve("child"));
+        org.junit.jupiter.api.Assumptions.assumeTrue(MemoryPaths.resolveProjectRoot(plain.toString()).equals(plain),
+                "临时目录位于已有 Git 仓库内，不能作为普通目录夹具");
         try (MemorySession session = open(plain)) {
             session.save("plain", "普通目录事实", "当前目录使用独立配置。", "project");
         }
         try (MemorySession session = open(child)) {
-            assertFalse(session.list().contains("普通目录事实"));
+            String listed = session.list();
+            assertFalse(listed.contains("普通目录事实"), "plain=" + MemoryPaths.resolveProjectRoot(plain.toString())
+                    + "; child=" + MemoryPaths.resolveProjectRoot(child.toString()) + "; " + listed);
         }
+    }
 
+    @Test
+    void keepsNestedRepositoriesAndBrokenMetadataIsolated() throws Exception {
         Path main = createRepository(tempDir.resolve("main"));
         Path inner = createRepository(main.resolve("inner"));
         try (MemorySession session = open(main)) {

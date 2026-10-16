@@ -641,6 +641,8 @@ public class SessionMemory {
         // 硬约束不参与裁剪；超出软预算时不再追加普通投影。
         appendProtectedConstraintSection(sb);
         String ledger = taskLedger.render();
+        String workPlan = AgentWorkPlan.render(taskState.get(AgentWorkPlan.STATE_KEY));
+        if (!workPlan.isEmpty()) sb.append(workPlan).append("\n\n");
         if (!ledger.isEmpty()) {
             appendBudgeted(sb, ledger, effectiveBudget);
         }
@@ -651,6 +653,7 @@ public class SessionMemory {
                         .append(taskEnded ? " (已结束)" : " (进行中)").append('\n');
             }
             for (Map.Entry<String, String> e : taskState.entrySet()) {
+                if (AgentWorkPlan.STATE_KEY.equals(e.getKey())) continue;
                 section.append("- ").append(e.getKey()).append(": ").append(e.getValue()).append('\n');
             }
             appendBudgeted(sb, section.toString(), effectiveBudget);
@@ -807,6 +810,8 @@ public class SessionMemory {
     public synchronized String renderForPostCompactRestore(SessionView view) {
         SessionView effectiveView = view == null ? SessionView.FULL : view;
         StringBuilder sb = new StringBuilder();
+        String workPlan = AgentWorkPlan.render(taskState.get(AgentWorkPlan.STATE_KEY));
+        if (!workPlan.isEmpty()) sb.append(workPlan).append("\n\n");
         if (shouldRenderToolEvidence(effectiveView)) {
             appendRecentFileSection(sb);
         }

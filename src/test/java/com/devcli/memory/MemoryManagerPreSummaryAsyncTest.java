@@ -58,6 +58,67 @@ class MemoryManagerPreSummaryAsyncTest {
     }
 
     @Test
+    void olderAsyncResultCannotReplaceNewerCommittedSummary() throws Exception {
+        BlockingClient client = new BlockingClient();
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager manager = new MemoryManager(client, 4_096, 128_000, longTermMemory)) {
+            var older = manager.maintainSessionPreSummaryAfterTurnAsync(history("older"), 4, 0);
+            assertTrue(client.firstCallStarted.await(2, TimeUnit.SECONDS));
+
+            assertEquals(MemoryManager.SessionPreSummaryMaintenanceResult.MAINTAINED,
+                    manager.maintainSessionPreSummaryAfterTurn(history("newer"), 4, 0));
+            var newerSummary = manager.getCompactionSummaryCache().currentPreSummary().orElseThrow();
+
+            client.releaseFirstCall.countDown();
+            assertEquals(MemoryManager.SessionPreSummaryMaintenanceResult.SKIPPED_SUPERSEDED,
+                    older.get(2, TimeUnit.SECONDS));
+            assertEquals(newerSummary, manager.getCompactionSummaryCache().currentPreSummary().orElseThrow());
+        } finally {
+            client.releaseFirstCall.countDown();
+        }
+    }
+
+    @Test
+    void clearingSessionInvalidatesRunningPreSummary() throws Exception {
+        BlockingClient client = new BlockingClient();
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager manager = new MemoryManager(client, 4_096, 128_000, longTermMemory)) {
+            var pending = manager.maintainSessionPreSummaryAfterTurnAsync(history("before-clear"), 4, 0);
+            assertTrue(client.firstCallStarted.await(2, TimeUnit.SECONDS));
+
+            manager.clearShortTerm();
+            client.releaseFirstCall.countDown();
+
+            assertEquals(MemoryManager.SessionPreSummaryMaintenanceResult.SKIPPED_SUPERSEDED,
+                    pending.get(2, TimeUnit.SECONDS));
+            assertTrue(manager.getCompactionSummaryCache().currentPreSummary().isEmpty());
+        } finally {
+            client.releaseFirstCall.countDown();
+        }
+    }
+
+    @Test
+    void switchingModelInvalidatesRunningPreSummary() throws Exception {
+        BlockingClient first = new BlockingClient();
+        BlockingClient second = new BlockingClient();
+        second.releaseFirstCall.countDown();
+        try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
+             MemoryManager manager = new MemoryManager(first, 4_096, 128_000, longTermMemory)) {
+            var pending = manager.maintainSessionPreSummaryAfterTurnAsync(history("old-model"), 4, 0);
+            assertTrue(first.firstCallStarted.await(2, TimeUnit.SECONDS));
+
+            manager.setLlmClient(second);
+            first.releaseFirstCall.countDown();
+
+            assertEquals(MemoryManager.SessionPreSummaryMaintenanceResult.SKIPPED_SUPERSEDED,
+                    pending.get(2, TimeUnit.SECONDS));
+            assertTrue(manager.getCompactionSummaryCache().currentPreSummary().isEmpty());
+        } finally {
+            first.releaseFirstCall.countDown();
+        }
+    }
+
+    @Test
     void exhaustedBudgetDoesNotStartBackgroundModelCall() throws Exception {
         BlockingClient client = new BlockingClient();
         try (LongTermMemory longTermMemory = new LongTermMemory(tempDir.toFile());
