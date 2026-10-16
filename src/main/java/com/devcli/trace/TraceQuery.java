@@ -115,7 +115,7 @@ public final class TraceQuery {
             }
             out.append('\n');
         }
-        out.append("\n/trace <runId> 查看时间线，/trace list 查看本列表\n");
+        out.append("\n/trace <runId> 查看时间线，/trace <runId> --context 查看请求上下文，/trace list 查看本列表\n");
         return out.toString();
     }
 

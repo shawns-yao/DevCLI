@@ -650,6 +650,12 @@ final class CliApplication {
                         com.devcli.trace.TraceQuery traceQuery = new com.devcli.trace.TraceQuery();
                         if ("list".equalsIgnoreCase(command.payload())) {
                             ui.println(traceQuery.renderList(10));
+                        } else if (command.payload().endsWith(" --context")) {
+                            String runId = command.payload().substring(0, command.payload().length() - " --context".length()).trim();
+                            if (runId.isEmpty() || "latest".equalsIgnoreCase(runId)) {
+                                runId = traceQuery.latestRunId().orElse("");
+                            }
+                            ui.println(new com.devcli.runtime.api.RuntimeContextQuery(cliRunStore).render(runId));
                         } else {
                             ui.println(traceQuery.renderRun(command.payload()));
                         }
