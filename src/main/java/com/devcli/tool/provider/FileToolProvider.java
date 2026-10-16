@@ -115,17 +115,18 @@ public final class FileToolProvider implements ToolProvider {
 
         context.registerTool(ToolContract.Tool.contextualStructured(
                 "edit_file",
-                "对已存在文件做精确字符串替换，适合小范围修改而无需重写整个文件。先用 read_file 核对原文；old_string 必须与文件逐字一致（含缩进/空白/换行）且在文件中唯一出现，new_string 为替换内容（可为空串表示删除）",
+                "编辑已存在文件。先 read_file 核对原文；默认要求唯一匹配，replace_all=true 替换全部匹配。精确匹配失败时按完整行容忍行尾空白和缩进差异。new_string 可为空串以删除文本",
                 context.createToolParameters(
                         new ToolParameter("path", "string", "文件路径", true),
                         new ToolParameter("old_string", "string", "被替换的原文，必须在文件中唯一匹配", true),
-                        ToolParameter.requiredStringAllowingEmpty("new_string", "替换后的文本")
+                        ToolParameter.requiredStringAllowingEmpty("new_string", "替换后的文本"),
+                        new ToolParameter("replace_all", "boolean", "是否替换全部匹配，默认 false", false)
                 ),
                 (args, executionContext) -> {
                     executionContext.throwIfCancelled();
                     String path = args.get("path");
                     String oldString = args.get("old_string");
-                    String newString = args.get("new_string") == null ? "" : args.get("new_string");
+                    String newString = args.get("new_string");
                     if (oldString == null || oldString.isEmpty()) {
                         return invalid("old_string 不能为空");
                     }
@@ -161,17 +162,14 @@ public final class FileToolProvider implements ToolProvider {
                     String fileEol = before.contains("\r\n") ? "\r\n" : "\n";
                     String oldAligned = alignEol(oldString, fileEol);
                     String newAligned = alignEol(newString, fileEol);
-                    int occurrences = countOccurrences(before, oldAligned);
-                    if (occurrences == 0) {
-                        return ToolOutput.rejected(ToolErrorCode.INVALID_ARGUMENTS,
-                                "old_string 未在文件中匹配到。请重新 read_file 核对确切文本（含缩进/空白/换行）后再编辑", true);
+                    FileTextEditor.Result edit;
+                    try {
+                        edit = FileTextEditor.replace(before, oldAligned, newAligned,
+                                Boolean.parseBoolean(args.getOrDefault("replace_all", "false")));
+                    } catch (IllegalArgumentException ambiguous) {
+                        return ToolOutput.rejected(ToolErrorCode.INVALID_ARGUMENTS, ambiguous.getMessage(), true);
                     }
-                    if (occurrences > 1) {
-                        return ToolOutput.rejected(ToolErrorCode.INVALID_ARGUMENTS,
-                                "old_string 在文件中出现 " + occurrences
-                                        + " 次，必须唯一。请带上更多前后文使其唯一，或分多次精确编辑", true);
-                    }
-                    String content = before.replace(oldAligned, newAligned);
+                    String content = edit.content();
                     if (content.equals(before)) {
                         return ToolOutput.success("文件内容未变化，无需写入: " + path);
                     }
@@ -192,8 +190,8 @@ public final class FileToolProvider implements ToolProvider {
                         Files.writeString(safe, content);
                         context.recordFileWrite(path, safe, before, content, activeStep);
                         executionContext.throwIfCancelled();
-                        return ToolOutput.success("文件已精确修改: " + path + "（唯一替换 1 处，"
-                                + oldString.length() + " -> " + newString.length() + " 字符）");
+                        return ToolOutput.success("文件已修改: " + path + "（替换 " + edit.replacements() + " 处"
+                                + (edit.whitespaceMatched() ? "，使用完整行空白容错" : "") + "）");
                     } catch (Exception e) {
                         return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
                                 "编辑写入失败: " + e.getMessage(), false);
@@ -475,16 +473,6 @@ public final class FileToolProvider implements ToolProvider {
             return "";
         }
         return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", fileEol);
-    }
-
-    private static int countOccurrences(String text, String token) {
-        int count = 0;
-        int index = 0;
-        while ((index = text.indexOf(token, index)) >= 0) {
-            count++;
-            index += token.length();
-        }
-        return count;
     }
 
     private static String value(Map<String, String> args, String name) {

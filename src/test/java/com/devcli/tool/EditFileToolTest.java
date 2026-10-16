@@ -16,6 +16,37 @@ class EditFileToolTest {
     Path projectRoot;
 
     @Test
+    void replaceAllIsExplicitAndReportsAllReplacements() throws Exception {
+        Path file = projectRoot.resolve("sample.txt");
+        Files.writeString(file, "old old");
+        try (var registry = registry()) {
+            assertEquals(ToolErrorCode.INVALID_ARGUMENTS, registry.executeToolOutput("edit_file",
+                    "{\"path\":\"sample.txt\",\"old_string\":\"old\",\"new_string\":\"new\"}").errorCode());
+            assertEquals("old old", Files.readString(file));
+            var result = registry.executeToolOutput("edit_file",
+                    "{\"path\":\"sample.txt\",\"old_string\":\"old\",\"new_string\":\"new\",\"replace_all\":true}");
+            assertTrue(result.isSuccess(), result.text());
+            assertTrue(result.text().contains("替换 2 处"), result.text());
+            assertEquals("new new", Files.readString(file));
+        }
+    }
+
+    @Test
+    void whitespaceMatchingPreservesCrLfAndRejectsAmbiguousEdits() throws Exception {
+        Path file = projectRoot.resolve("sample.txt");
+        Files.writeString(file, "  old  \r\n\told\r\nend\r\n");
+        try (var registry = registry()) {
+            String args = "{\"path\":\"sample.txt\",\"old_string\":\"    old\\n\",\"new_string\":\"new\\n\"";
+            assertEquals(ToolErrorCode.INVALID_ARGUMENTS,
+                    registry.executeToolOutput("edit_file", args + "}").errorCode());
+            assertEquals("  old  \r\n\told\r\nend\r\n", Files.readString(file));
+            var result = registry.executeToolOutput("edit_file", args + ",\"replace_all\":true}");
+            assertTrue(result.isSuccess(), result.text());
+            assertEquals("new\r\nnew\r\nend\r\n", Files.readString(file));
+        }
+    }
+
+    @Test
     void isolatedProjectCanUseEditFile() throws Exception {
         Files.writeString(projectRoot.resolve("sample.txt"), "before");
         try (ToolRegistry registry = registry()) {

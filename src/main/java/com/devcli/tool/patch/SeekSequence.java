@@ -10,9 +10,24 @@ import java.util.List;
  * 合法补丁反复失败，因此按 精确 → 忽略行尾空白 → 忽略两侧空白 → Unicode 标点归一化
  * 四级降级查找。降级只放宽"定位"，不放宽"替换内容"。</p>
  */
-final class SeekSequence {
+public final class SeekSequence {
 
     private SeekSequence() {
+    }
+
+    /** 返回最严格可匹配层级的全部不重叠位置，供编辑工具检查歧义。 */
+    public static List<Integer> findWhitespaceMatches(List<String> lines, List<String> pattern) {
+        for (MatchMode mode : List.of(MatchMode.EXACT, MatchMode.RSTRIP, MatchMode.TRIM)) {
+            List<Integer> found = new java.util.ArrayList<>();
+            for (int index = 0; index <= lines.size() - pattern.size(); index++) {
+                if (matches(lines, pattern, index, mode)) {
+                    found.add(index);
+                    index += pattern.size() - 1;
+                }
+            }
+            if (!found.isEmpty()) return List.copyOf(found);
+        }
+        return List.of();
     }
 
     /**
