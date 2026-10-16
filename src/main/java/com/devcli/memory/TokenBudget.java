@@ -99,7 +99,7 @@ public class TokenBudget {
         if (messages == null) return 0;
         int total = 0;
         for (LlmClient.Message msg : messages) {
-            if (msg.contentParts() != null) {
+            if (!"tool".equals(msg.role()) && msg.hasContentParts()) {
                 for (LlmClient.ContentPart part : msg.contentParts()) {
                     if (part == null) {
                         continue;

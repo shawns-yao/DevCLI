@@ -22,6 +22,23 @@ class ConversationHistoryCompactorMicrocompactTest {
     Path tempDir;
 
     @Test
+    void collapsedToolResultDropsUnsentPartsAndStillPairsWithItsCall() {
+        var compactor = new ConversationHistoryCompactor(null, 30_000, true);
+        compactor.setMicrocompactOutputRoot(tempDir);
+        var history = toolHistory(tool("first", "grep_code"), tool("second", "grep_code"));
+        String full = "large result ".repeat(3_000);
+        history.set(2, LlmClient.Message.tool("first", full));
+        history.set(3, new LlmClient.Message("tool", full, null, null, "second", List.of(
+                LlmClient.ContentPart.text(full), LlmClient.ContentPart.imageBase64("aGVsbG8=", "image/png"))));
+        assertTrue(compactor.microcompactOversizeMessages(history));
+        assertNull(history.get(3).contentParts());
+        assertEquals("second", history.get(3).toolCallId());
+        assertTrue(history.get(3).content().contains("storedPath"));
+        assertTrue(HistoryWindow.hasCompleteToolBatches(history));
+        assertTrue(compactor.lastMicrocompactStats().afterTokens() < compactor.lastMicrocompactStats().beforeTokens());
+    }
+
+    @Test
     void neverModifiesUserOrAssistantMessages() {
         ConversationHistoryCompactor c = new ConversationHistoryCompactor(null, 30_000, true);
         String user = "user-requirement-".repeat(5_000);

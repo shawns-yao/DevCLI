@@ -106,9 +106,10 @@ final class ToolResultCompactor {
                 if (compacted.equals(content)) continue;
                 LlmClient.Message replacement = new LlmClient.Message(
                         message.role(), compacted, message.reasoningContent(), message.toolCalls(),
-                        message.toolCallId(), message.contentParts(), message.source());
-                history.set(index, replacement);
+                        message.toolCallId(), null, message.source());
                 int after = TokenBudget.estimateMessagesTokens(List.of(replacement));
+                if (after >= before) continue;
+                history.set(index, replacement);
                 removedByTool.merge(toolName, Math.max(0, before - after), Integer::sum);
                 cleared++;
                 log.info("microcompact cleared old tool_result[{}] tool={} toolCallId={}: {} -> {} chars",

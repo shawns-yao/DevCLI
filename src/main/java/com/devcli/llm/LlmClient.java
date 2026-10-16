@@ -214,6 +214,9 @@ public interface LlmClient {
         }
 
         public Message withoutImageContent() {
+            if ("tool".equals(role)) {
+                return new Message(role, content, reasoningContent, toolCalls, toolCallId, null, source);
+            }
             if (!hasImageContent()) {
                 return this;
             }
