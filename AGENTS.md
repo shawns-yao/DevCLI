@@ -254,16 +254,16 @@ Execution Trace：ReAct 与 Plan/Team 全路径通过 `RunEventTraceSink` 把结
 
 ### HITL + 策略层
 
-- 拦截顺序：HitlToolRegistry → ToolRegistry → PathGuard/CommandGuard
+- 审批前完成工具参数、语义、路径与后端硬策略校验，审批后继续执行既有策略及审计
 - 用户无法批准策略拒绝的请求
-- HITL 是治理决策的结果，不是「某几类工具固定必经的一步」：`ApprovalGate` 做三值判定 `ALLOW / HITL / DENY`，顺序固定为策略硬边界 → 用户规则层 → 模式层 → 任务授权 → 人工审批。命中策略的越界或黑名单直接 `DENY`（`POLICY_DENIED`，不先弹一次注定被拒的审批），落在任务级授权内直接 `ALLOW`，其余才 `HITL`
+- `ApprovalGate` 做三值判定 `ALLOW / HITL / DENY`。硬边界和拒绝规则优先；独立逐次确认、项目信任、已授权范围和模式决定是否询问或交给分类器。越界与黑名单直接拒绝，不先弹审批
 - 授权与策略分层且单向：`TaskGrant` 只表达用户已授权什么，永远只能收窄策略允许集，不能放宽；任何授权与自动审批都不能覆盖 `DENY`
-- 规则层使用 `permissions.hard_deny` / `soft_deny` / `allow` / `environment`，旧键 `deny` / `ask` 不再读取。策略硬边界与 `hard_deny` 始终确定性拒绝；`auto` 将其余三类注入分类器统一判定，非 `auto` 按 `hard_deny` → `soft_deny` → `allow` 求值。覆盖告警启发式与 `literalPrefix` 已删除，不维护两套优先级语义。任一规则非法仍整组拒绝，详见 `docs/adr/0013`
-- 权限模式仍由 `/mode` 切换。任何模式都改不了策略硬边界与 `hard_deny`；非 `auto` 的 `soft_deny` 强制人工确认，`auto` 则把它作为分类器规则。`askOrDeny` 只承载删除、回滚、浏览器和 MCP 等必须人工确认的动作，`askOrClassify` 承载自动模式可判定的动作；通道不可用时失败关闭
-- `auto` 同时处理默认未决动作以及命中 `allow` / `soft_deny` / 任务授权的动作；删除、回滚、浏览器和 MCP 逐次审批仍不进分类器。分类器只接收真实用户消息与 Assistant 的结构化工具调用，排除 Assistant 自述、工具结果、系统注入、插件内容和委派报告；四类规则分别注入系统提示词固定位置。默认放行与失败关闭保持分离：模型判定默认放行，但缺失、超时、协议错误和预算不足一律拒绝，连续失败达到阈值后回落 `default`
-- 命令类规则按 `&&` / `||` / `;` / `|` 拆分后逐段判定：`hard_deny` 与 `soft_deny` 任一子命令命中即触发，`allow` 要求全部命中；含重定向时 `allow` 的通配形态失效
-- 授权分两层，但两层各只有一个载体：**跨会话的持久授权**写在 `~/.devcli/config.json` 的 `permissions.allow` 规则里（见上文规则层），**本轮例外**由 `/grant` 给出、只作用于下一条任务。`permissions.baseline` 与 `TaskGrant.merge` 已删除——它们表达的「持久基线 ∪ 本轮例外」与规则层完全重叠，而并集语义还造成授权只能放宽、不能收紧。该配置文件在 `SensitivePathPolicy` 保护名单内，Agent 工具写路径不能改写它
-- 任务级例外只来自确定性来源（`/grant` 斜杠命令），不接受模型推断：`/grant write` 追加授权写入项目内任意文件、`/grant write <glob>...` 追加给定项目相对路径、`/grant net <域名>...` 追加访问该域名及其子域、`/grant commands` 追加项目构建测试命令、`/grant all` 追加全部、`/grant status` 查看本轮例外/规则层/放行缓存、`/grant off` 取消例外并清空本轮放行缓存，例外只作用于下一条任务（含编排轮）。命令类授权复用 `HostWarnCommandPolicy` 白名单（Maven 生命周期 / javac / 只读 Git），`git push` 等白名单外命令仍必须人工确认
+- 所有模式统一按硬策略 → `hard_deny` → `soft_deny` → `allow` 求值；soft_deny 强制人工确认，allow 不再调用分类器。删除阈值、命令删除、回滚、浏览器和 MCP 逐次确认独立于放行规则及模式。auto 忽略过宽命令 allow；主机命令在所有模式下均只接受窄规则。Shell 复合语义不能由命令前缀放行。详见 ADR 0021，替代 ADR 0013 的规则顺序
+- auto 与 acceptEdits 直接放行项目内 write_file / edit_file，参数、路径保护和能力检查仍生效。auto 只分类其余未决动作；连续拦截 3 次或累计拦截 20 次后切换 default，并询问当前动作。分类器故障仍拒绝，沿用连续失败阈值；两类计数分别保存，根注册表与 fork 共享，手动切换模式重置
+- 分类器只接收真实用户消息与 Assistant 结构化工具调用，不接受工具结果、Assistant 自述或委派报告作为授权。过宽命令 allow 同时从分类器输入中删除；缺失、超时、协议错误和预算不足一律拒绝
+- 交互启动首次询问当前项目是否可信，按真实项目路径在 `~/.devcli/project-permissions.json` 保存肯定或否定决定；不提交，保留到用户修改。信任只开放主机命令的规则/模式审批，不代表允许全部命令，也不继承 Skill 目录信任。未信任项目的主机命令逐次确认；`-p` 只读取已有决定，无审批通道时拒绝未授权动作
+- 全局持久规则在 `~/.devcli/config.json`；命令审批中的 `[p] 总是允许此命令前缀` 将当前完整命令前缀写入该项目的 `permissions.allow`，保存在上述用户状态文件，不改写含凭据的配置。只在可信项目、没有强制确认原因时展示，解释器通配、Shell 复合命令和敏感命令不提供此选项。撤销时在 Agent 工具之外删除对应项目规则或修改 trusted；工具写入口保护该文件
+- `/grant` 仅保留下一条任务的写入与网络例外：write [glob...]、net <域名>...、all（项目写入）、status、off。`/grant commands` 已删除；已确认计划的内部命令授权仍由原 TaskGrant 作用域承载，不能越过项目信任与硬策略
 - 授权 glob 与委派写白名单共用 `WriteGlobSet`：项目相对路径、拒绝绝对路径与 `..`、`dir/**` 语义为「该目录及其所有后代」（Java glob 的 `**` 本身不跨多级目录，这里显式补齐）。改动这套语义会同时影响 `/grant` 与 `delegate_task` 的 `allowed_write_paths`
 - 参数级资源槽的唯一声明点是 `policy.ToolResourceSlot`：`write_file` / `edit_file` → `path`、`delete_files` → `paths`、`create_project` → `name`、`execute_command` → `command`、`web_fetch` → `url`（取 host）。`ApprovalGate` 的判定分支与规则匹配共用这一份映射，避免出现两份会漂移的工具清单；`revert_turn`（批量回写整个工作区）和全部 MCP 工具一律回到人工审批，不做猜测
 - `web_fetch` 是需要出口授权的只读工具：`requiresApproval=true` + `audited=true`，命中 `/grant net <域名>` 才自动放行（域名相等或其子域，不支持通配符）；未授权域名逐次确认，`dontAsk` 模式下收口为拒绝；两种情形都仍受 `NetworkPolicy` 的 scheme 白名单与 SSRF 拦截约束。`web_search` 不在该维度内：它的目的地由 provider 配置决定，工具参数里没有可信资源槽。需要确认的只读工具在审批框里标 `🟡 需确认`，不再显示「🟢 安全」
@@ -279,7 +279,7 @@ Execution Trace：ReAct 与 Plan/Team 全路径通过 `RunEventTraceSink` 把结
 - Agent 配置写保护覆盖 `.devcli/agents/`、`hooks.json`、`mcp.json`、`config.json` 与显式配置路径，复用共享路径和 PatchSet 提交检查；角色提示词不能自行修改能力定义。关闭审批、任务授权和全部批准不放宽保护。主机命令与外部 MCP 不属于完整文件沙箱。
 - `CommandGuard` 只补两条与受保护路径呼应的辅助规则（删除 `.git` 目录、重定向写入凭据或私钥文件），因为 shell 能绕过文件层围栏；它仍不是主防线
 - CommandGuard 是辅助黑名单，不是主防线
-- `execute_command` 先检查后端硬策略，再按 hard_deny → soft_deny/ask → allow 求值。仅 HostWarnCommandPolicy 白名单内的构建/测试与只读 Git 命中显式 allow 时免主机审批；其余命令逐次确认，任务授权、全部批准和 bypassPermissions 不代替该确认。dontAsk 对未获授权命令拒绝；显式 allow 仍可放行白名单命令。白名单不是操作系统隔离，构建代码仍须可信。timeout 为 1–86400 秒，默认沿用命令超时；显式值通过工具期限契约覆盖默认批次上限，审批、排队和执行计入期限，取消继续向进程树传递。
+- `execute_command` 的模型调用与内部硬检查共用工具管线，移除后端的 reviewHostCommand 分支。参数和语义校验在审批前；后端硬策略不因信任而放宽。可信项目的窄 allow 可在 default / auto / dontAsk 下免确认，auto 可分类未决主机命令；这会执行项目构建插件，并非沙箱。timeout 为 1–86400 秒，审批、排队和执行均计入期限，取消传递到进程树。
 
 ### Plan 审阅交互
 

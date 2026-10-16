@@ -127,11 +127,11 @@ READ_ONLY → LOCAL_CONTEXT → PROJECT_MUTATION → HOST_PROCESS → EXTERNAL_M
 → HITL   人工确认
 ```
 
-授权只能收窄策略允许集，不能放宽，任何授权都不覆盖 `DENY`。授权分两层，两层各只有一个载体：**跨会话的持久授权**写在 `~/.devcli/config.json` 的 `permissions.allow` 规则里，表达「我长期信任这类操作」；**任务例外**由 `/grant` 给出，只作用于下一条任务（含编排轮），表达「这次需要超出常态的权限」。`/grant write` 追加授权写入项目内任意文件、`/grant write <glob>...` 追加给定项目相对路径、`/grant net <域名>...` 追加访问该域名及其子域、`/grant commands` 追加项目构建测试命令、`/grant all` 追加全部、`/grant status` 查看例外/规则层/放行缓存、`/grant off` 取消例外并清空本轮放行缓存。状态栏常驻显示规则层摘要，配置文件本身位于受保护路径名单内，Agent 的工具写路径改不动它。授权 glob 与委派写白名单共用同一套语义：项目相对路径、拒绝绝对路径与 `..`、`dir/**` 表示该目录及其所有后代。
+授权不覆盖硬策略。全局持久规则在 `~/.devcli/config.json` 的 `permissions.allow`；交互启动首次询问当前项目是否可信，决定与项目命令规则保存在 `~/.devcli/project-permissions.json`，不随仓库提交。`/grant write [glob...]`、`/grant net <域名>...` 只授权下一条任务；`/grant all` 仅授权项目写入，commands 子命令已移除。`/grant off` 撤销本轮例外和批量放行缓存；持久规则须由用户在 Agent 工具之外修改。路径 glob 仍拒绝绝对路径与 `..`。
 
-规则层使用 `permissions.hard_deny` / `soft_deny` / `allow` / `environment`。`hard_deny` 无条件拒绝；`soft_deny` 表达可由明确用户意图解除的边界；`allow` 表达允许例外；`environment` 只提供环境事实。`auto` 模式只确定性执行 `hard_deny`，其余三类随可信意图上下文进入分类器；非 `auto` 模式按 `hard_deny` → `soft_deny` → `allow` 求值。旧键 `deny` / `ask` 不再读取。规则语法仍为 `Tool` 或 `Tool(specifier)`，工具别名在解析时归一；任一规则非法则整组拒绝，不部分接受。详见 ADR 0013。
+所有模式先执行 `hard_deny` → `soft_deny` → `allow`：硬拒绝不变，soft_deny 询问，allow 直接放行。auto 丢弃过宽命令 allow，主机命令在其他模式下也只接受窄规则。auto / acceptEdits 直接接受项目内 write_file / edit_file；受保护路径、删除阈值、命令删除、回滚、浏览器和 MCP 的逐次确认仍有效。详见 [ADR 0021](docs/adr/0021-统一审批与项目信任.md)。
 
-`web_fetch` 是需要出口授权的只读工具：命中 `/grant net` 的域名自动放行（相等或其子域，不支持通配符），未授权域名逐次确认（`dontAsk` 模式收口为拒绝）；无论是否授权，`NetworkPolicy` 的 scheme 白名单与环回/内网拦截始终生效。域名取 `URI.getHost()`，即 userinfo（`@`）之后的部分，大小写与末尾点归一化，端口不参与判定。`web_search` 不按域名授权——目的地由 provider 配置决定，工具参数里没有可信资源槽——但两个工具共用同一份出口限流预算（60 秒 / 30 次），且在建连之前判定。命令类授权复用主机白名单（Maven 生命周期 / javac / 只读 Git），所以 `git push` 这类远程副作用仍然必须人工确认；`revert_turn`（批量回写整个工作区）和全部 MCP 工具没有可信的参数级资源槽，一律回到人工审批。已声明资源槽的参数是写入类工具的 `path`、`create_project` 的 `name`、`execute_command` 的 `command` 和 `web_fetch` 的 `url`。
+`web_fetch` 支持 `/grant net` 域名授权（相等或其子域）；scheme、环回和内网拦截始终生效。`web_search` 不按域名授权，两个网络工具仍共用出口限流预算。`revert_turn` 必须人工确认；MCP 的破坏性声明决定逐次确认，可信只读授权不代表服务端没有其他状态变化。
 
 审批的「全部放行」只在当前任务内有效：任务边界会清空按工具和按 MCP server 的放行缓存，同一条用户消息内的后续调用继续复用，下一条消息必须重新确认，不会跨任务静默放行；`/grant status` 用于查看这份缓存，`/grant off` 可以随时撤销。
 
@@ -141,11 +141,11 @@ READ_ONLY → LOCAL_CONTEXT → PROJECT_MUTATION → HOST_PROCESS → EXTERNAL_M
 
 Agent 自身配置单独保护：`.devcli/hooks.json`、`.devcli/mcp.json`、`.devcli/config.json`，以及 `devcli.hooks.file` / `DEVCLI_HOOKS_FILE` 指向的自定义 Hook 文件。共享文件写入入口与 PatchSet 提交前拒绝修改，任务授权、全部批准和关闭审批通道均不能覆盖；快照恢复跳过这些配置并提示。检查覆盖默认用户配置、物理路径别名及隔离工作区对应的主项目路径，普通 `.devcli` 文件和配置示例仍可修改。需要调整时由用户在 Agent 工具之外操作。**这不是操作系统写保护：主机命令、外部 MCP 服务、配置引用的脚本尚未统一限制；没有实现完整防注入或默认命令沙箱。**
 
-`execute_command` 走主机时，仅 HostWarnCommandPolicy 白名单中的 Maven 生命周期、javac 和只读 Git 命中显式 `allow` 规则可免确认，例如 `execute_command(mvn test:*)`。hard_deny 与 soft_deny/ask 优先，Shell 命令串、删除和白名单外命令仍逐次确认；任务授权、全部批准和 bypassPermissions 不能代替主机确认。dontAsk 会拒绝未获授权的命令。白名单不是沙箱，项目构建代码仍须可信。可传整数 `timeout`（秒，1–86400）覆盖默认命令与工具批次期限，父任务取消继续生效。
+可信项目中，`execute_command(mvn test:*)` 等窄 allow 在 default / auto / dontAsk 下直接生效；auto 可分类未决主机命令。未信任项目仍逐次确认。命令审批中的 `[p] 总是允许此命令前缀` 保存当前完整命令前缀到该项目的 `permissions.allow`；未信任、强制单次确认、复合 Shell、解释器通配和敏感命令不提供此选项。信任不是沙箱，构建插件仍可能执行任意主机代码。整数 `timeout`（秒，1–86400）覆盖默认期限，审批、排队与执行均计时，取消传递到进程树。`-p` 只读取既有信任和规则，不询问或自动授信。
 
 `/mode plan` 让只读能力上限持续作用于后续轮次：写入、命令和外部副作用工具既不注入模型也不会执行。与 `/plan` 组合时该轮会被直接拒绝（编排必须写入隔离工作区，跑到中途只会得到一片能力拒绝），并消费掉只读标记。`/mode default` 恢复逐个询问。
 
-`/mode auto` 把「默认要问」的动作交给权限分类器判断：只有走完整条求值链、没有任何规则或安全机制要求询问的动作才会送到分类器。显式 `ask` 规则、`delete_files` 删除确认、可识别的 Shell 删除、`revert_turn`、浏览器与 MCP 逐次审批都不经过分类器——它们有独立于默认策略的询问理由。分类器只看到工具名、参数、项目路径与当前模式，不继承会话历史与记忆；默认超时 10 秒（`devcli.permission.classifier.timeout.seconds`），执行前会确认工具剩余预算足以覆盖该超时，不足、装配缺失、超时、调用失败或响应不可解析一律拒绝，不猜测。连续失败次数在主 Registry 与项目 fork 间共享，默认达到 3 次（`devcli.permission.classifier.failure.threshold`）后退出 `auto` 并回落 `default`；手动切换模式会重置该计数。提示词在 `prompts/permission-classifier.md`，仅允许 `~/.devcli/prompts/` 的可信用户级覆盖；项目 `.devcli/prompts/permission-classifier.md` 会被忽略，避免仓库内容改写自身审批策略。**分类器误判放行时没有人工兜底**——fail-closed 只兜住「分类器不可用」，兜不住「分类器判断错误」，这是 `auto` 相对 `default` 的固有代价。分类器不覆盖规则层 `allow`：用户写了 `allow` 就是用户的选择；代价是无 specifier 的宽泛 `allow` 会让分类器在该工具上完全不参与。
+`/mode auto` 只分类其余未决动作。分类器接收真实用户消息与结构化工具调用，排除工具结果、Assistant 自述和委派报告。连续拦截 3 次或累计拦截 20 次后退出 auto，并询问当前动作；分类器调用故障仍拒绝，默认连续 3 次故障后回到 default。计数在根注册表与 fork 间共享，手动切换模式重置。提示词仅接受用户级覆盖。定向测试验证审批顺序，不代表模型误判率；主 Agent 默认主机命令沙箱尚未实现。
 
 能力范围与任务级授权都随轮次生效并被编排继承：能力范围只能单调收窄（只读 ⊂ 隔离项目 ⊂ 完整），嵌套调用与隔离 fork 都不能放宽外层约束；波次线程池在轮次内新建，因此继承本轮的范围与授权，长生命周期线程池在轮次外创建，不会残留某一轮的约束。
 
