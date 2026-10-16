@@ -149,9 +149,9 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 ### Memory System
 
-- 记忆按生命周期分三层：`conversationHistory + RollingSummary` 治理当前线程窗口，`SessionMemory` 保存当前任务共享的 WorkState 与 EvidenceJournal，`LongTermMemory` 保存跨任务稳定事实
+- 记忆按生命周期分三层：`ConversationJournal` 渲染当前线程窗口，`RollingSummary` 记录派生摘要；`SessionMemory` 保存当前任务共享的 WorkState 与 EvidenceJournal，`LongTermMemory` 保存跨任务稳定事实
 - `SessionMemory` 统一接收幂等 SessionEvent；ReAct、Plan 和 Team 使用 beginTask/completeTask/endTask 轮换任务投影，全部 Prompt 区块共享一个硬 Token 预算；Multi-Agent 保存真实 agentId、stepId、sequence 和 context epoch，并拒绝迟到事件
-- `ConversationHistoryCompactor` 是唯一消息窗口治理点；六段 `RollingSummary` 不保存待办、当前工作或下一步，旧九段摘要只兼容读取；`CompactionSummaryCache` 只保存可复用预摘要，默认 30 分钟过期。摘要边界同时保存投影指纹、事件范围和稳定快照引用，checkpoint/resume 会校验后再恢复
+- `ConversationHistoryCompactor` 是唯一摘要压缩入口；六段 `RollingSummary` 不保存待办、当前工作或下一步，旧九段摘要只兼容读取；`CompactionSummaryCache` 只保存可复用预摘要，默认 30 分钟过期。摘要边界保存投影指纹、事件范围和稳定快照引用用于审计；新日志从消息事实和投影记录恢复，checkpoint 窗口只用于旧会话导入
 - `RuleContext` 加载规则文件和 `/rule add` 强约束，支持 `/rule list`、`/rule remove`；旧 pinned facts 仅列为待分类候选。敏感 `save_memory` 直接拒绝，要求用户脱敏后重试
 - 压缩边界 `<compact_boundary>` 记录已加载 Skill、RAG epoch、MCP 工具快照和压缩后恢复入口状态；RAG epoch 合并当前会话已命中证据与当前项目全局索引版本，MCP 工具快照包含 server 工具数量、schema 指纹和生命周期版本
 - 压缩上下文由 `CompactionContext` 绑定项目、会话、epoch、历史序号和 Runtime 来源事件范围；消息事实优先按稳定消息指纹关联真实事件 ID，`history:index` 只保留兼容回退。摘要和降级截断均经过 `CompactionSemanticGuard`，事实补回后重新校验状态与最终预算
@@ -349,7 +349,9 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - CLI 活动输入不再使用独立 `PromptQueue` / `ActiveTurnCoordinator`；生产路径唯一使用 `AgentTurnInbox`，由 AgentExecutionEngine 按 Steering / Follow-up 时机注入。旧队列实现已删除，避免两套取消和容量语义并存
 - 验证边界：plain renderer 的 `/help` 与 `/exit` 启动烟测已通过；非交互管道不能证明 JLine 补全、方向键、底部 dock 或 HITL 按键行为，未验证前不引入 TUI differential rendering 改造
 - Runtime JSON 投影集中维护协议字段和转义，每个 payload 固定携带 `schema_version=2`；工具 arguments 优先保持 JSON 对象，无法解析时保留原文本；工具结果携带 status、error_code、retryable、elapsed_millis、image_count、presentation 和结构化 `exit_code`。`tool.result.recorded` 保存审查后、尺寸裁剪前的返回正文、图片、修改资源及已有产物引用；消息 `content_parts` 显式保存文本和图片字段。生产者已截断的输出保留不完整标记与引用，旧日志丢失的内容不能重建
-- `model.message` 是消息事实，`model.context` 是可替换的窗口投影；初始化快照使用 iteration=0，请求快照使用实际迭代号。`AgentExecutionEngine` 先发布快照，再由 `ModelContextView` 生成请求消息。CLI 与 `-p` 通过 `ConversationTurnRecorder` 在执行中追加事实，删除了 CLI 结束后补写历史的路径；`-p` JSON 返回 thread_id，便于从同一日志读取记录
+- `ConversationJournal` 从 `context.seed`、带身份的 `model.message` 和 `context.projection` 渲染每次请求。压缩、图片回收与规则更新只在临时副本上计算，再追加保留引用及派生消息；原始事实不变。`model.context` 审计实际消息和工具定义，不覆盖日志或参与新日志恢复。旧会话首次导入已保存视图，不补造缺失正文。CLI 与 `-p` 通过 `ConversationTurnRecorder` 实时追加；`-p` JSON 返回 thread_id
+- `/trace <runId> --context` 查询 runtime_events 的实际请求，按 Agent 身份展示消息、工具 schema 与用量；未完成请求显示用量未记录，图片不打印 base64 正文。运行身份有索引，查询不依赖当前活动分支，不用时间近似匹配旧日志
+- `ExecutionEnvironment` 统一装配命令和项目文件操作。默认本地文件视图配合现有命令隔离后端；文件工具及隔离补丁恢复、提交通过该接口。路径与审批先于后端执行；版本账本、LSP、工作区变更采集使用同一份本地视图。远程实现需要负责视图同步及事务语义，本轮不增加远程服务
 - 子 Agent 使用 `agent.event(agent_id, event_type, event)` 保存独立消息、结果和窗口；父上下文只接收委派最终报告。事件发布器绑定创建时的分支，后台子任务的迟到事件不会写入后来切换的分支。trace 只记录结构字段；SessionArchive 仍为可选诊断归档，两者不作为恢复来源
 - Runtime runner 收到事件 sink 后可边执行边写入 SQLite/SSE；如果 Provider 没有产生 content delta，服务端才用最终输出补一个 `message.delta`，避免流式回答重复写入
 - 每次交互、后台任务和无头 turn 都在执行线程绑定有效 `RunContext`，其中包含项目路径与取消令牌；已有调用方上下文会跨会话工作线程复用并在任务结束后恢复，只有无外层上下文时才创建临时上下文；预先创建的线程池不读取其他运行的取消状态，线程中断也进入取消语义

@@ -84,7 +84,7 @@ Plan 的任务适配由 `PlanTaskBatchExecutor` 负责，`/plan` 步骤分波由
 
 计划 DAG 继续使用 `ExecutionGraph` 校验依赖、环和最终集成就绪条件。`ExecutionArtifact` 保存真实终态。Planner 输出结构化验收标准，确定性预检负责拒绝无效计划；独立计划 Reviewer 的语义意见进入用户确认。步骤执行统一委派，最终集成通过 `ReviewCoordinator` 复核验收点；真实硬检查失败继续阻断。
 
-Agent、Plan、Worker 和 Reviewer 的流式输出状态机统一委托 `AgentStreamPresenter`；Memory/Compactor/Skill/MCP 恢复装配统一委托 `AgentRuntimeSupport`。旧内部 Renderer 包装类只保留兼容构造器，不再维护第二套状态逻辑。关键启动配置使用 `ConfigResolver`，显式非法值在加载时拒绝。
+Agent、Plan、Worker 和 Reviewer 的流式输出状态机统一委托 `AgentStreamPresenter`；Memory/Compactor/Skill/MCP 恢复装配统一委托 `AgentRuntimeSupport`。主 Agent 直接使用展示器，上下文用量与图片诊断由 `AgentContextDiagnostics` 读取渲染结果。关键启动配置使用 `ConfigResolver`，显式非法值在加载时拒绝。
 
 计划生成与语义审查保留既有 JSON 提取及有界协议修复；步骤类型、验收字段和 DAG 由确定性预检校验。空工作区合法，存在性检查应并入实现步骤。旧 Worker 的强制写工具修复、写后提前收尾及独立重试循环已删除；步骤采用统一委派，写入/命令步骤缺少真实成功证据时不得记为完成。
 
@@ -190,9 +190,11 @@ Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔�
 
 执行状态同样使用强类型 `RunEvent`，由执行内核输出 `THINKING`、`TOOL_EXECUTING`、`TOOL_RESULTS_PAIRED` 以及完成、取消、预算退出、迭代上限和失败终态；失败终态同时输出 `failure.guidance` 的分类、建议与动作列表，供 CLI 与 Runtime 投影统一消费。
 
-会话事实与模型窗口分离：CLI、`-p` 和 Runtime API 在执行期间向 `runtime.db` 的追加事件表写入事实；`tool.result.recorded` 保存内容审查后、尺寸裁剪前的返回结果、图片及生产者产物引用。工具生产者的输出配额和不完整标记继续有效。`model.message` 保存消息事实，`model.context` 保存初始化或请求前的窗口快照；`ModelContextView` 从事件生成模型请求，`ConversationReplay` 负责持久事件重放，压缩不删除旧事件。恢复包括未完成回合，缺失结果只生成状态未知的工具配对，不重放副作用；用户授权历史单独从真实输入事件恢复。子 Agent 使用带身份的 `agent.event`，不并入父窗口。旧日志缺失的正文无法补回。详见 `docs/adr/0022-会话事件日志与上下文视图分离.md`。
+会话事实与模型窗口分离：CLI、`-p` 和 Runtime API 在执行期间向 `runtime.db` 的追加事件表写入事实；`tool.result.recorded` 保存内容审查后、尺寸裁剪前的返回结果、图片及生产者产物引用。工具生产者的输出配额和不完整标记继续有效。`ConversationJournal` 以 `context.seed`、带消息身份的 `model.message` 和 `context.projection` 为来源，每次请求重新渲染；压缩器只修改临时副本，投影记录保留的消息引用和新增摘要。`model.context` 仅审计实际请求的消息与工具定义，不参与新日志恢复；checkpoint 是缓存。`ConversationReplay` 负责持久事件重放，压缩不删除旧事件。恢复包括未完成回合，缺失结果只生成状态未知的工具配对，不重放副作用；用户授权历史单独从真实输入事件恢复。子 Agent 使用带身份的 `agent.event`，不并入父窗口。旧日志导入已有视图，缺失的正文无法补回。详见 `docs/adr/0022-会话事件日志与上下文视图分离.md`。
 
-Execution Trace 经 `RunEventTraceSink` 写入 `~/.devcli/traces/trace-yyyy-MM-dd.jsonl`，runId 复用 `RunContext.runId()`。trace 只保留结构诊断字段：跳过流式正文、ModelContext、ModelMessage 和 ToolResultRecorded；子 Agent 仅记录身份及相同的结构字段，不复制正文。`/trace` 默认看最近一次运行，`/trace list` 看运行聚合，`/trace <runId>` 看指定运行。trace 和可选 SessionArchive 都不参与会话恢复。
+Execution Trace 经 `RunEventTraceSink` 写入 `~/.devcli/traces/trace-yyyy-MM-dd.jsonl`，runId 复用 `RunContext.runId()`。trace 只保留结构诊断字段，跳过消息事实、投影和完整请求。`/trace` 默认看最近一次运行，`/trace list` 看运行聚合，`/trace <runId>` 看指定运行；`/trace <runId> --context` 从 runtime_events 按实际运行身份展示逐次请求消息、工具 schema 和输入/输出/缓存 Token，主子 Agent 分开。图片展示元数据，完整载荷保留在事件中；旧日志没有运行身份时明确报告无记录，不猜测关联。trace 和可选 SessionArchive 都不参与会话恢复。
+
+文件与命令共用 `ExecutionEnvironment`：文件工具、目录、glob/grep、删除及隔离补丁恢复与提交不直接访问宿主文件 API。默认 `LocalExecutionEnvironment` 提供本地文件视图，命令复用现有主机、Docker 和 Windows 后端。项目围栏、敏感内容审批、写范围、租约、版本闸门和 LSP 仍在工具运行时；后端必须使执行侧与本地工作区视图一致，PatchSet 的冲突校验、原子应用与回滚由本地实现复用。工作区创建、变更采集和账本仍读取本地视图；本轮未提供远程传输或远程部署后端。详见 `docs/adr/0023-统一文件与命令执行环境.md`。
 
 受控 Hook 生命周期：`AgentExecutionEngine` 在 ReAct、Plan task 和 SubAgent 共用 agent/turn/message/tool execution 四层幂等生命周期。Hook 配置从 `~/.devcli/hooks.json` 与项目 `.devcli/hooks.json` 按 id 合并，或由 `DEVCLI_HOOKS_FILE` / `-Ddevcli.hooks.file` 指定；最多 64 条。Hook 只能调用 ToolRegistry 已注册工具，不直接开放 shell/HTTP 执行器；READ_ONLY / LOCAL_CONTEXT 强制在只读能力范围执行，其他 ToolEffect 必须显式 `allowSideEffects`、使用已启用的 `HitlToolRegistry`，且目标工具必须有逐次审批策略，否则拒绝。所有调用继续经过参数校验、HITL、策略、审计和当前工作区能力范围，不允许 Hook 提升 Plan/SubAgent 的权限。`warn` 失败只记录警告，`required` 失败进入 Agent 统一失败出口；异常和取消出口都会按 message → turn → agent 顺序闭合生命周期。模板位于 `Config/hooks.example.json`。
 
