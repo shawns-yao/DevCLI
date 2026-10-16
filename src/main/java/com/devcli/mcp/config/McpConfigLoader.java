@@ -1,6 +1,8 @@
 package com.devcli.mcp.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -9,29 +11,39 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class McpConfigLoader {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final Set<String> POLICY_FIELDS = Set.of(
+            "trustReadOnlyAnnotations", "readOnlyTools", "deniedTools", "disabled");
     private static final Pattern VAR_PATTERN = Pattern.compile("\\$\\{([A-Za-z_][A-Za-z0-9_]*|PROJECT_DIR|HOME)}");
 
     private final Path userConfig;
     private final Path projectConfig;
     private final Path projectDir;
+    private final Path codexConfig;
 
     public McpConfigLoader(Path projectDir) {
         this(
                 Path.of(System.getProperty("user.home"), ".devcli", "mcp.json"),
                 projectDir.resolve(".devcli").resolve("mcp.json"),
-                projectDir
+                projectDir,
+                CodexMcpConfigLoader.defaultConfigPath()
         );
     }
 
     public McpConfigLoader(Path userConfig, Path projectConfig, Path projectDir) {
+        this(userConfig, projectConfig, projectDir, null);
+    }
+
+    public McpConfigLoader(Path userConfig, Path projectConfig, Path projectDir, Path codexConfig) {
         this.userConfig = userConfig;
         this.projectConfig = projectConfig;
         this.projectDir = projectDir.toAbsolutePath().normalize();
+        this.codexConfig = codexConfig;
     }
 
     /**
@@ -39,12 +51,12 @@ public class McpConfigLoader {
      * 在启动单个 server 时进行，确保单个 server 配置错误（如缺失环境变量）不会阻塞其他 server。
      */
     public Map<String, McpServerConfig> load() throws IOException {
-        Map<String, McpServerConfig> merged = new LinkedHashMap<>();
+        Map<String, McpServerConfig> merged = new LinkedHashMap<>(CodexMcpConfigLoader.load(codexConfig));
         if (Files.exists(userConfig)) {
-            merged.putAll(read(userConfig));
+            merge(merged, userConfig);
         }
         if (Files.exists(projectConfig)) {
-            merged.putAll(read(projectConfig));
+            merge(merged, projectConfig);
         }
         return merged;
     }
@@ -58,9 +70,31 @@ public class McpConfigLoader {
         validate(config);
     }
 
-    private Map<String, McpServerConfig> read(Path file) throws IOException {
-        McpConfigFile configFile = MAPPER.readValue(file.toFile(), McpConfigFile.class);
-        return configFile.getMcpServers();
+    private void merge(Map<String, McpServerConfig> merged, Path file) throws IOException {
+        JsonNode root = MAPPER.readTree(file.toFile());
+        McpConfigFile configFile = MAPPER.treeToValue(root, McpConfigFile.class);
+        for (var entry : configFile.getMcpServers().entrySet()) {
+            JsonNode override = root.path("mcpServers").path(entry.getKey());
+            McpServerConfig existing = merged.get(entry.getKey());
+            if (existing != null && policyOnly(override)) {
+                // Local tool policy can extend an imported connection without copying its credentials.
+                // Connection replacements remain whole-server overrides and never inherit old trust.
+                ObjectNode inherited = MAPPER.valueToTree(existing);
+                override.fields().forEachRemaining(field -> inherited.set(field.getKey(), field.getValue()));
+                merged.put(entry.getKey(), MAPPER.treeToValue(inherited, McpServerConfig.class));
+            } else {
+                merged.put(entry.getKey(), entry.getValue());
+            }
+        }
+    }
+
+    private static boolean policyOnly(JsonNode node) {
+        if (!node.isObject() || node.isEmpty()) return false;
+        var fields = node.fieldNames();
+        while (fields.hasNext()) {
+            if (!POLICY_FIELDS.contains(fields.next())) return false;
+        }
+        return true;
     }
 
     private void expand(McpServerConfig config) {
