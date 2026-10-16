@@ -56,10 +56,12 @@ java -jar target/devcli-1.0-SNAPSHOT.jar serve --http --port 8080
 
 - `thread.created`
 - `turn.started`
-- `model.context`：每次模型请求前的实际消息快照，包含消息来源；图片正文不持久化
+- `model.context`：初始化或模型请求前的窗口快照，包含消息来源和图片内容；iteration=0 表示初始化
 - `model.message`：执行内核追加到模型历史的单条消息
 - `model.usage`
 - `tool.calls` / `tool.results`：包含结构化展示契约
+- `tool.result.recorded`：审查后、尺寸治理前的完整返回结果、图片、修改资源和已有产物引用
+- `agent.event`：子 Agent 身份、事件类型及事件正文；不混入父模型上下文
 - `hook.call` / `hook.result`
 - `message.delta`
 - `turn.completed`
@@ -73,9 +75,10 @@ java -jar target/devcli-1.0-SNAPSHOT.jar serve --http --port 8080
 - 后台任务 runner 使用 headless ReAct Agent，不复用交互式 TUI 的 HITL 输入
 - 工具取消使用调用级协作信号；命令进程树、Web HTTP Call 和 MCP 请求会收到取消，MCP 同时发送 `notifications/cancelled`
 - Runtime API 当前不模拟完整 OpenAI Assistants API schema，只保留兼容方向的 threads / turns / events 主路径
-- 事件日志是会话恢复事实来源；`model.context` 只从已完成 turn 重放。checkpoint 与会话投影是可重建缓存，checkpoint 同时持久化稳定快照引用并校验 projection hash、来源事件范围和 snapshot checksum，损坏时回退事件日志或更早 checkpoint
+- 事件日志是会话恢复事实来源。`ConversationReplay` 重放窗口快照和后续消息，包括未完成及失败回合；缺失工具结果生成状态未知的配对，不重放工具。压缩只改变窗口，原消息、返回结果和图片留在日志；生产者输出配额仍有效，旧日志缺失的正文无法恢复。checkpoint 与会话投影是可重建缓存，checkpoint 保持现有来源和快照校验
 - `tool.results` 的 `elapsed_millis` 和 `exit_code` 来自结构化执行元数据；兼容调用没有命令元数据时才使用明确的未知值，不从展示文本猜测退出码
 - CLI `/session` 复用相同 thread/branch/event 存储；切换会话树不修改 Side-Git、PatchSet 或工作区文件
+- CLI 和 `-p` 在执行期间实时记录；`-p` JSON 的 thread_id 可用于定位日志。事件发布器绑定开始时的分支，子任务后续事件不跟随活动分支切换
 
 ## 验证
 

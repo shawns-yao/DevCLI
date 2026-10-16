@@ -190,7 +190,9 @@ Runtime API 只绑定 `127.0.0.1`，请求线程与 Agent turn 执行线程隔�
 
 执行状态同样使用强类型 `RunEvent`，由执行内核输出 `THINKING`、`TOOL_EXECUTING`、`TOOL_RESULTS_PAIRED` 以及完成、取消、预算退出、迭代上限和失败终态；失败终态同时输出 `failure.guidance` 的分类、建议与动作列表，供 CLI 与 Runtime 投影统一消费。
 
-Execution Trace：ReAct 与 Plan/Team 全路径通过 `RunEventTraceSink` 把结构化 `RunEvent` 自动桥接到 `TraceRecorder`，按天落盘 `~/.devcli/traces/trace-yyyy-MM-dd.jsonl`，runId 直接复用 `RunContext.runId()`，与取消树共用同一标识；Main 持有单一共享 sink 实例，ReAct 经 `Agent.setRunEventSink`、编排经 `AgentOrchestrator.setAdditionalEventSink` 透传给全部 Planner/Worker/Reviewer（`SubAgent` 内与自身流式渲染 sink composite，不替代渲染）。流式 delta、全量 ModelContext 和 ModelMessage 不落盘，工具结果只记状态/错误码/耗时，不记正文；并行 Worker 因波次线程池在运行期内新建，经 InheritableThreadLocal 继承同一 runId。`/trace` 默认看最近一次运行时间线，`/trace list` 看最近运行聚合，`/trace <runId>` 看指定运行。
+会话事实与模型窗口分离：CLI、`-p` 和 Runtime API 在执行期间向 `runtime.db` 的追加事件表写入事实；`tool.result.recorded` 保存内容审查后、尺寸裁剪前的返回结果、图片及生产者产物引用。工具生产者的输出配额和不完整标记继续有效。`model.message` 保存消息事实，`model.context` 保存初始化或请求前的窗口快照；`ModelContextView` 从事件生成模型请求，`ConversationReplay` 负责持久事件重放，压缩不删除旧事件。恢复包括未完成回合，缺失结果只生成状态未知的工具配对，不重放副作用；用户授权历史单独从真实输入事件恢复。子 Agent 使用带身份的 `agent.event`，不并入父窗口。旧日志缺失的正文无法补回。详见 `docs/adr/0022-会话事件日志与上下文视图分离.md`。
+
+Execution Trace 经 `RunEventTraceSink` 写入 `~/.devcli/traces/trace-yyyy-MM-dd.jsonl`，runId 复用 `RunContext.runId()`。trace 只保留结构诊断字段：跳过流式正文、ModelContext、ModelMessage 和 ToolResultRecorded；子 Agent 仅记录身份及相同的结构字段，不复制正文。`/trace` 默认看最近一次运行，`/trace list` 看运行聚合，`/trace <runId>` 看指定运行。trace 和可选 SessionArchive 都不参与会话恢复。
 
 受控 Hook 生命周期：`AgentExecutionEngine` 在 ReAct、Plan task 和 SubAgent 共用 agent/turn/message/tool execution 四层幂等生命周期。Hook 配置从 `~/.devcli/hooks.json` 与项目 `.devcli/hooks.json` 按 id 合并，或由 `DEVCLI_HOOKS_FILE` / `-Ddevcli.hooks.file` 指定；最多 64 条。Hook 只能调用 ToolRegistry 已注册工具，不直接开放 shell/HTTP 执行器；READ_ONLY / LOCAL_CONTEXT 强制在只读能力范围执行，其他 ToolEffect 必须显式 `allowSideEffects`、使用已启用的 `HitlToolRegistry`，且目标工具必须有逐次审批策略，否则拒绝。所有调用继续经过参数校验、HITL、策略、审计和当前工作区能力范围，不允许 Hook 提升 Plan/SubAgent 的权限。`warn` 失败只记录警告，`required` 失败进入 Agent 统一失败出口；异常和取消出口都会按 message → turn → agent 顺序闭合生命周期。模板位于 `Config/hooks.example.json`。
 
