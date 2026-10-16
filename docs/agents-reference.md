@@ -375,13 +375,13 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - ImageProcessor：铺白底/缩放 2000x2000/压缩 5MB
 - 输入：`@image:file:///path.png` / `@image:/path.png` / `@image:relative.png`
 - GLM-5V-Turbo 通过 `/model glm-5v-turbo` 切换
-- 历史 image payload 替换为文本占位，保留来源、尺寸和字节 SHA-256，避免旧截图消耗上下文
+- 内联图片在 runtime/images 按图片字节 SHA-256 归档；统一循环只保留最近三张，其余替换成归档路径、尺寸和一次性描述。read_image 受限重读归档，不放宽项目文件围栏；URL 来源不隐式下载
 
 ### Deterministic Content Reduction
 
 - `DeterministicContentReducer` 在语义摘要前识别工具输出、代码、图片和普通文本，并把 `metadata` 注入摘要输入。
 - 代码元数据包括文件路径、增删行统计与 diff 指纹、符号、编译位置，以及 `rag_epoch` / `index_epoch` / `symbol_version` / `classpath_epoch`；原文引用仍由工具结果或落盘附件提供。
-- 图片元数据包括来源、MIME、尺寸和图片字节 SHA-256；base64 或本地文件均按解码后的字节计算，无法取得字节时不回退到描述文本哈希。OCR/视觉摘要由可选 provider 注入，未配置时只保留确定性元数据。
+- 图片元数据包括来源、MIME、尺寸和图片字节 SHA-256；base64 或本地文件均按解码后的字节计算，无法取得字节时不回退到描述文本哈希。当前模型支持视觉时在进入循环时生成一次描述，计入共享预算和请求审计；不支持视觉则明确缺失描述。删除未接线的 setImageSummarySupplier。
 
 ---
 

@@ -240,9 +240,9 @@ Execution Trace 经 `RunEventTraceSink` 写入 `~/.devcli/traces/trace-yyyy-MM-d
 - 本轮只注入按 ContextProfile 预算裁剪的长期记忆索引；主题正文经 read_memory 按需分页读取。选择器及其模型调用已删除，旧 relevanceSelection 开关不再有效。
 - `/memory clear` 默认只清**当前写入作用域**（有活动项目清项目，否则清全局），`/memory clear global` / `/memory clear project` 显式指定；全局目录跨项目共享，项目会话里的默认清空不得连带抹掉它，未知作用域拒绝并给出可用取值
 - 启动时将旧版 `records/` 记忆卡复制到全局作用域并保留旧文件；旧格式没有可靠项目归属，不做项目归属猜测。全部卡片处理成功后写一次性完成标记，后续构造不再重复解析旧源卡片——**迁移因此是一次性的**：落标记后新加入的旧卡片不再补迁，清空全局记忆也不会重置标记（标记在记忆根目录，产物在 `global/`）
-- `ConversationHistoryCompactor` 是唯一治理 LLM messages 窗口的压缩点；压缩前先走第 0 层 `microcompact`（触发后的确定性淘汰：只回收内容指纹重复、或同一 `path` 已被更晚 `write_file` / `edit_file` 覆盖的 `read_file` 结果，逐条落盘并替换为 `<microcompact_boundary>` 引用；不按工具名单或保留最近 N 项保护，不删消息、保 tool_call 配对；折叠后 Token 不减少或落盘失败时原地保留；折叠引用按结构识别，要求起始标记 + 闭合 + `type=tool_result`，生成与消费共用 `MicrocompactBoundary`，正文提到该标记不误判），扛不住再摘要。首次摘要按摘要模型 Token 窗口选择单次调用或 Map-Reduce，完整请求能放入窗口时不再按固定 60k 字符强制分片；后续固定保留六段，模型只提出受限生命周期操作，程序负责覆盖、完成迁移和删除；旧九段摘要可解析，但待办、当前工作和下一步会被丢弃。默认每 5 次成功压缩执行生命周期 GC，不再二次压缩旧摘要。摘要写回 history 前必须经过 `CompactionSemanticGuard`；该守卫只保护工作状态约束，不承担未来随机事实检索
+- `ConversationHistoryCompactor` 是唯一摘要压缩入口，图片像素由统一执行循环治理；压缩前先走第 0 层 `microcompact`（触发后的确定性淘汰：回收内容指纹重复、被后续写入覆盖或超出近期 Token 保留预算的旧工具结果，逐条落盘并替换为 `<microcompact_boundary>` 引用；不按工具名单或保留最近 N 项保护，不删消息、保 tool_call 配对；折叠后 Token 不减少或落盘失败时原地保留；折叠引用按结构识别，要求起始标记 + 闭合 + `type=tool_result`，生成与消费共用 `MicrocompactBoundary`，正文提到该标记不误判），扛不住再摘要。首次摘要按摘要模型 Token 窗口选择单次调用或 Map-Reduce，完整请求能放入窗口时不再按固定 60k 字符强制分片；后续固定保留六段，模型只提出受限生命周期操作，程序负责覆盖、完成迁移和删除；旧九段摘要可解析，但待办、当前工作和下一步会被丢弃。默认每 5 次成功压缩执行生命周期 GC，不再二次压缩旧摘要。摘要写回 history 前必须经过 `CompactionSemanticGuard`；该守卫只保护工作状态约束，不承担未来随机事实检索
 - `CompactionSummaryCache` 维护当前进程内会话预摘要，自动压缩时优先复用覆盖同一消息指纹且未过期的预摘要；已有预摘要覆盖当前历史前缀时，只用旧摘要和新增消息生成完整替代摘要；预摘要默认 30 分钟过期，不写长期记忆
-- 摘要分片不再使用 60,000 字符上限：首次 Map、增量更新和 Reduce 都按完整请求 Token 预算计算；增量逐批携带上批更新后的摘要，归并按实际预算分组。默认原文尾部随窗口按 8% 滚动（夹在 4K～32K），并受 history 触发阈值的一半约束；显式尾部预算不变。Provider 上下文超限时收紧请求预算重分片，不丢最旧轮次；空分片或增量协议无效不提交压缩历史。详情见 `docs/context-compaction-design.md`。
+- 摘要分片不再使用 60,000 字符上限：首次 Map、增量更新和 Reduce 都按完整请求 Token 预算计算；增量逐批携带上批更新后的摘要，归并按实际预算分组。默认原文尾部随窗口按 8% 滚动（夹在 4K～32K），并受 history 触发阈值的一半约束；显式尾部预算不变；摘要与失败截断另在剩余预算内保留最多约 20k Token 的旧用户原文，优先最近完整消息，排除内部注入。Provider 上下文超限时收紧请求预算重分片，不丢最旧轮次；空分片或增量协议无效不提交压缩历史。详情见 `docs/context-compaction-design.md`。
 - RAG 每次检索保存不含代码正文的分阶段审计记录，覆盖 keyword / semantic / graph 候选、RRF 融合、rerank、最终选择和降级状态；普通 CLI 会话归档默认关闭，启用后 ReAct 保存脱敏模型消息，Plan / Team 保存顶层输入输出，`/history clear` 同时删除归档
 - 压缩成功后会插入 `[压缩后恢复上下文]` 消息：恢复段按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 和 MCP 工具状态分节；恢复内容经统一预算与行级去重后注入，Multi-Agent 会按 Planner / Worker / Reviewer 角色裁剪；SkillContextBuffer 追加已加载 Skill 与 allowedTools 状态
 - 压缩边界 `<compact_boundary>` 会记录已加载 Skill、RAG epoch、MCP 工具快照和压缩后恢复入口状态；RAG epoch 合并当前会话已命中证据与当前项目全局索引版本，MCP 工具快照按 server 记录工具数量、schema 指纹和生命周期版本
@@ -432,6 +432,8 @@ ADR 记录的是**当时的取舍**，不是架构合同。判断当前行为以
 | 终端渲染 | render/Renderer.java + RendererFactory.java |
 
 ## 当前已知边界
+
+图片上下文：统一循环在 `runtime/images`（沿用 `devcli.runtime.dir` / `DEVCLI_RUNTIME_DIR`）按 SHA-256 归档内联像素，视觉模型生成一次有界描述并计入共享预算；只保留最近三张像素，更早图片留归档路径、尺寸和描述。`read_image` 受限重读归档，不放宽项目文件围栏。外部 URL 不隐式下载，不支持视觉时明确描述缺失。归档不提交 Git，应随会话数据保留；删除归档后不能保证重读。旧图回收只追加投影，不改原事件；摘要直接引用描述，删除未接线的图片摘要回调。详见 [ADR 0024](docs/adr/0024-按可恢复性保留用户原文与图片.md)。
 
 以下在路线图但未交付：容器/VM 级完整系统沙箱、MCP sampling + server 自动重启；当前隔离命令已使用受限 Docker，但 Docker daemon 仍属于主机高权限基础设施。MCP OAuth 暂不纳入个人使用优先级
 
