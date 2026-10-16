@@ -44,6 +44,7 @@ HITL 开启时，未获路径授权或达到批量阈值的删除必须逐次确
 cp .env.example .env
 mvn clean package -DskipTests   # 快速产出可手工验收 jar
 java -jar target/devcli-1.0-SNAPSHOT.jar
+java -jar target/devcli-1.0-SNAPSHOT.jar -p "任务"  # 无交互，stdout 为 UTF-8 JSON
 mvn test -Pquick          # 常规回归
 mvn test -Pphase16-smoke  # 终端交互兼容回归
 mvn test -Dtest=XxxTest -DskipTests=false   # 针对性
@@ -115,13 +116,13 @@ Side-Git 快照按 `devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX` 保留最近快
 
 职责边界：`agent_work_plan` 是工作意图的唯一来源，保存在 `SessionMemory.taskState`，由 `update_plan` 维护目标和步骤；in_progress 表示当前工作，首个 pending 表示下一步。ReAct 与 `/plan` 共用，压缩和恢复原样携带同一状态；旧 checkpoint 步骤在恢复时导入工作计划。`TaskLedger`、SessionMemory 的工具证据和恢复段是运行投影；`ExecutionArtifact` 仍是执行终态来源，模型计划、模型报告与实际执行证据分开。RollingSummary 只治理上下文，不创建第二份计划。
 
-模型写工具为 `write_file` / `edit_file`，明确文件删除仍用 `delete_files`。新增 `update_plan`、受限的 `read_memory` 和固定的 `call_mcp_tool`；不注册 `apply_patch` 工具，补丁编译仅作为内部 API。`read_file` 同传行范围与字符范围时仍优先行范围；`edit_file` 继续按目标换行风格匹配。
+模型写工具为 `write_file` / `edit_file`，删除使用 `delete_files`。`edit_file` 默认唯一匹配，`replace_all=true` 批量替换；精确匹配失败时复用 SeekSequence 的完整行空白匹配并检查歧义。`glob` 通过 ProjectFileLister 按项目相对模式查找文件，遵循 Git 忽略规则；`search_code` 不再注册。工作计划、记忆读取和 MCP 调用分别使用 update_plan、read_memory 和 call_mcp_tool。
 
 `ApplyPatchParser` / `ApplyPatchCompiler` 保留官方补丁解析与内存编译，产物可交给既有 PatchSet API。`ApplyPatchTool` 及专用审批路径已删除；工具目录、发现和执行管线无需按名称隐藏补丁工具。
 
 工具归属由 `BuiltInToolPolicy.Policy.mainAgentOnly` 显式声明；委派准入、工具发现和执行共用该契约。归属与读写能力分别判断，只读模式的主 Agent 仍可维护工作计划；子 Agent 的角色白名单不能开放主计划和长期记忆入口。
 
-Code RAG 检索链路当前为 keyword + semantic + bounded graph → `RRF（倒数排名融合）` → symbol-aware boost → `CrossEncoderReranker（交叉编码器重排）`。Rerank 默认开启，默认指向本地 Docker 暴露的 OpenAI-compatible `/rerank` endpoint；不可用时自动降级回 RRF 结果，不阻断检索。`/index` 按文件批量生成 chunk embedding；批量请求失败或返回数量异常时逐条降级并保留成功 chunk。`ToolRegistry` 会按项目路径复用 `CodeRetriever` / SQLite 连接，项目路径切换时关闭旧连接。索引替换会为变更和删除的 symbol 生成 `negativeFact`，`search_code` 会输出相关失效事实，并通过工具结果强类型旁路载荷把 evidence 与 negativeFact 传给 `SessionMemory`；展示文本不再嵌入结构化 JSON，旧 JSON 与旧展示文本解析只保留历史兼容。keyword 通道保持 SQLite 索引实现，`grep_code` 作为独立实时精确检索工具存在，不替代 `search_code`，用于类名、方法名、配置键、错误文本和固定字符串片段定位。`grep_code` 的候选文件由 `ProjectFileLister` 决定：git 仓库走 `git ls-files -z --cached --others --exclude-standard`，忽略语义（含嵌套 `.gitignore`、否定模式、全局 excludes）完全交给 git，不在本地重复实现；非 git 目录、git 不可用或命令失败时回落到目录遍历，只用硬编码跳过目录兜底；显式把 `path` 收窄到被忽略目录时回落遍历，尊重用户意图。子进程输出重定向到临时文件再读取，避免大仓库下管道写满导致 `waitFor` 死锁。长文档型 definition 查询直接使用 semantic route，避免 keyword fusion 与 reranker 对文档描述引入排序噪声；短符号查询仍保留 precise-first 链路。
+模型端代码 RAG 已关闭：不注册 `search_code`，删除专用 RagToolProvider 及其检索器持有路径；模型代码定位使用 glob、grep_code 和 read_file。显式 `/index`、`/search` 与 RAG 检索组件保留，仍支持 keyword/semantic/graph、RRF、重排、失效事实和索引版本校验；这些组件能力不代表默认 Agent 会自动使用 RAG。
 索引构建开始时记录 `base_epoch` 并标记 dirty 文件；增量构建把未变化代码块及 embedding 复制到 SQLite 影子表，只重新分块和嵌入 dirty 文件，并保守重算项目关系图。影子候选通过校验后，在事务内执行 `base_epoch + generation` CAS 和原子提升；旧构建不能覆盖新 epoch，未提升候选对检索不可见。检索结果标记 `CURRENT` / `STALE` / `DIRTY`；DIRTY 和 STALE 命中默认回读实时内容校验，变化内容重新分块，无法校验时保留警示。项目级 `WatchService` 会把外部文件变化标记为 DIRTY。
 
 量化评测规范见 `docs/benchmark-evaluation.md`，覆盖 RAG、Agent、Memory 和 Context Compression / Long Context。正式结果只接受公开集合原始任务、固定版本、SHA-256、官方 harness/evaluator 和完整原始报告；公开集合与历史自建测试严格分离。当前 RAG 适配器输出二值相关性的 Recall@5、MRR@5、nDCG@5，不等同于 CodeSearchNet Challenge 使用人工分级相关性的官方 nDCG；CodeXGLUE 的 MRR 是另一套协议。SWE-bench Java 评测目标为 Multilingual Java 子集，正式 resolved 只取官方 Docker harness 报告。当前 LongMemEval、LongBench v1 和 RULER 入口直接调用模型，尚未接入项目记忆或压缩功能的开关对照，不得用于宣称对应功能收益。正式评测须记录官方指标、子任务、长度和样本量。旧的项目内 CLI、订单 Saga、Checkout、对抗记忆、压缩、并发和合成 RAG 结果只在该文档历史归档中保留，不得作为当前事实或简历数字。SWE-bench 三模式脚本用 `git add -N` + binary diff 纳入新增文件，并记录输入/输出/缓存 Token 和估算成本；其 Docker 退出码、patch 应用状态、日志信号与 `meta.expect` 检查仅构成本地诊断，即使使用官方镜像和 `eval.sh`，自定义 `resolved` 也不能替代尚未接入的官方评分报告。显式 `HOST_WARN` 仅用于受限主机检查，日志不记录本机仓库绝对路径。权限分类器（`auto` 模式）另有一条**组件级**定向诊断：`benchmarks/permission-classifier-evals/v1/cases.jsonl` 是带标签的自建对抗清单加合法请求对照，`benchmarks/src/main/java/com/devcli/eval/PermissionClassifierDriver.java` 直接调用 `PermissionClassifier.classify`，按逃逸（期望拒绝却放行）与误拒（期望放行却拒绝）分开统计、外部失败单列、并按 `default` / `isolated_only` 拆分可达性；它不经过权限求值链、不执行工具、不需要 Docker，度量的是提示词与模型的判定质量，**没有**补上 Agent 级安全评测缺口，样本为自建、不得写成公开 benchmark 成绩，「本批 0 次逃逸」不得表述为普遍安全保证（`docs/permission-classifier-evals.md`）。
@@ -247,7 +248,7 @@ Execution Trace：ReAct 与 Plan/Team 全路径通过 `RunEventTraceSink` 把结
 - MCP 工具结果进入尺寸治理后会标记折叠分类：截断输出为 `INLINE_TRUNCATED`，落盘预览为 `PERSISTED_PREVIEW`
 - 工具结果尺寸治理分两层：工具层按单条结果分档（20000 字符内原文放行、20000～100000 截断、超过 100000 落盘给 5000 字符预览，同轮聚合额度 100000 字符由并行线程共享），agent 层在回灌前按整批 100000 字符 / 25000 Token 二次分配；两层阈值均为常量，不提供配置项
 - 结构化滚动摘要超过字符上限时执行确定性生命周期 GC；稳定决策和未解决事项不因压缩次数删除，仍超限时保留并告警，不交给 LLM 二次改写
-- `search_code` 结果中的结构化 negativeFact 携带 `oldSymbolVersion` 时，`SessionMemory` 即时清理对应的失效 RAG 证据；旧文本格式保留兼容解析
+- 历史结构化 RAG 证据中的 negativeFact 携带 oldSymbolVersion 时，SessionMemory 仍可清理失效证据；默认工具列表不再产生 search_code 结果。
 - `TaskLedger` 继续投影真实计划执行进度与产物；模型可维护的目标、步骤和下一步统一由 update_plan / agent_work_plan 提供，压缩和恢复不另建计划来源。
 - prompt cache：system 只含会话级稳定规则。Project Context、MCP 资源索引、记忆索引、Skill 索引和工作记忆追加到当轮消息。模型工具定义在执行循环内冻结，不再按轮检索裁剪；MCP 搜索返回当前 schema，通过固定 call_mcp_tool 调用，目标仍走参数、权限、审批与审计管线。无工具收尾使用 ToolChoice.NONE 保留定义前缀。真实缓存收益尚未做 API A/B 验证。
 
@@ -278,7 +279,7 @@ Execution Trace：ReAct 与 Plan/Team 全路径通过 `RunEventTraceSink` 把结
 - Agent 配置写保护覆盖 `.devcli/agents/`、`hooks.json`、`mcp.json`、`config.json` 与显式配置路径，复用共享路径和 PatchSet 提交检查；角色提示词不能自行修改能力定义。关闭审批、任务授权和全部批准不放宽保护。主机命令与外部 MCP 不属于完整文件沙箱。
 - `CommandGuard` 只补两条与受保护路径呼应的辅助规则（删除 `.git` 目录、重定向写入凭据或私钥文件），因为 shell 能绕过文件层围栏；它仍不是主防线
 - CommandGuard 是辅助黑名单，不是主防线
-- `execute_command` 在注册表最终分发前按实际后端判断：主机执行必须单次人工批准，任务授权、全部批准、关闭审批通道和基础注册表均不能免除；后端硬策略先检查。**主机路径也经过规则层与模式层，但只吸收收紧方向**：`deny` 规则立即拒绝、`dontAsk` 收口为拒绝，`allow` 规则与 `bypassPermissions` 不参与——主机单次确认刻意不可被放宽类判定免除（比 WorkBuddy 的全局 bypass 更严），代价是 `allow execute_command(...)` 在主机路径上不生效，加载期有告警提示改用 `deny`；隔离路径（`ISOLATED_PROJECT`）走沙箱后端，规则层与模式层在 `applyHitl` 内正常求值。审批绑定本次命令、目录和后端，审批后重新检查取消及期限；主机审批只接受 APPROVED，不接受参数修改或批量决策。Docker 工具路径沿用原规则。自定义命令后端默认视为主机，可信实现需显式声明隔离。此规则不覆盖直接调用命令服务的 Pre-Review 或外部 MCP 进程，不代表操作系统写保护
+- `execute_command` 先检查后端硬策略，再按 hard_deny → soft_deny/ask → allow 求值。仅 HostWarnCommandPolicy 白名单内的构建/测试与只读 Git 命中显式 allow 时免主机审批；其余命令逐次确认，任务授权、全部批准和 bypassPermissions 不代替该确认。dontAsk 对未获授权命令拒绝；显式 allow 仍可放行白名单命令。白名单不是操作系统隔离，构建代码仍须可信。timeout 为 1–86400 秒，默认沿用命令超时；显式值通过工具期限契约覆盖默认批次上限，审批、排队和执行计入期限，取消继续向进程树传递。
 
 ### Plan 审阅交互
 
@@ -433,6 +434,10 @@ ADR 记录的是**当时的取舍**，不是架构合同。判断当前行为以
 不要把 `ROADMAP.md` 中"将来要做"误读成"现在已有"。
 
 ## 持续维护约定
+
+`-p` 通过 PrintCommandLauncher 复用 AgentSessionRuntime，加载已有 provider、权限配置和 RuleContext；stdout 只输出一个 UTF-8 JSON，诊断写 stderr，不读取 stdin。需要临时审批的动作拒绝；权限配置中的显式允许仍生效。退出码为完成 0、失败 1、参数错误 2、取消 130，运行完成不代表用户任务已经验收。该入口仅装配内置工具，不启动交互 CLI 的浏览器、MCP 和后台任务服务。
+
+`model.usage` trace 记录 input_tokens、cached_input_tokens 和 cache_hit_ratio（缓存读取 Token / 全部输入 Token，输入为零时为 0）；`-p` 的 usage 返回整轮汇总。该指标用于观察实际缓存命中，不替代前缀改造的 A/B 收益验证。
 
 公开配对实验包含 `PairedContextDriver`、`MemoryEvidenceDriver` 和 `MemoryReaderDriver`，但它们不是完整 Agent 多轮评测。`MemoryEvidenceDriver` 使用主题 Markdown 隔离目录；默认记忆召回只注入索引，主题通过 `read_memory` 按需读取。现有组件实验不能用于宣称完整长期记忆效果。
 

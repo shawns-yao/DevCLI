@@ -10,6 +10,10 @@ For the primary entry point, see `/AGENTS.md`.
 
 ### Tool Call Governance
 
+`execute_command` 支持整数 timeout（秒，1–86400）；工具执行器通过 executionTimeoutSeconds 显式声明本次期限，不按工具名推断。`edit_file` 支持 replace_all；默认多义匹配拒绝，完整行空白容错复用 SeekSequence。`glob` 共用 ProjectFileLister，支持项目相对 `*`、`?`、`**`，默认 limit=200，上限 1000；项目路径围栏继续执行。
+
+`Main -p "任务"` 由 PrintCommandLauncher 装配现有会话、规则和权限，stdout 仅 UTF-8 JSON，诊断写 stderr；需要审批的动作拒绝。仅装配内置工具，不初始化交互 CLI 的 MCP、浏览器和后台任务服务。`model.usage` trace 与 JSON usage 暴露 cache_hit_ratio，不宣称已验证缓存收益。
+
 `delete_files` 以独立删除工具提供，以 `paths` 数组明确指定普通文件；不递归、不删除目录或符号链接、不展开通配符。预检在 Schema 后、HITL 前完成，保存路径及哈希/权限快照；执行复用委派写范围、资源租约、版本闸门、项目提交锁和 PatchSet 整批冲突检查/失败回滚，并发布修改资源与关键工作记忆证据。单文件 5MB、总计 20MB、最多 500 个。成功删除不进入回收站，恢复依赖已有快照或备份。
 
 HITL 开启时，单次清单数量达到 `DEVCLI_DELETE_APPROVAL_THRESHOLD` / `devcli.delete.approval.threshold`（默认 50，范围 1–500），或任务写路径授权未覆盖清单，均逐次确认；不复用工具/服务器全部批准。审批展示完整目标、数量、非递归说明和恢复限制；审批修改参数时拒绝本次执行，要求重新提交清单。可识别 Shell 删除也逐次确认且不声称统计目标；此检测不是完整 Shell 解析。数量阈值按单次 `delete_files` 统计，不跨调用累计；关闭 HITL 仍保留路径硬拒绝。
@@ -139,7 +143,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - GLM-5.1: 200k / DeepSeek V4: 1M / StepFun: 256k / Kimi K2.6: 256k
 - 压缩触发阈值 = `min(window × 0.90, window − 输出预留)`；输出预留 = `min(max(模型输出上限, 20000), window / 2)`。可用 `devcli.context.compression.trigger.tokens` 或环境变量 `DEVCLI_CONTEXT_COMPRESSION_TRIGGER_TOKENS` 覆盖，且只向下收紧（取与默认值的较小者），非法值抛错
 - 其余按 window 派生：短期记忆预算 `window × 0.45`（下限 4000）；记忆注入上限 `clamp(window/200, 500, 5000)`；Skill 索引 / 正文预算 `clamp(window/200, 256, 2048)` / `clamp(window/50, 1024, 8192)`；压缩后原文尾部预算 `clamp(window × 8%, 4000, 32000)`
-- 压缩对**所有** window 都生效，没有按窗口大小跳过自动摘要的分支；`search_code` 未传 `top_k` 时固定默认 5（clamp 1..30），不做档位自适应
+- 压缩对所有窗口生效，不按窗口大小跳过摘要。模型端代码定位使用 glob/grep_code/read_file，不再注册 search_code。
 - MCP resource 索引按 `window >= 32000` 注入（与模式档位无关），只含 URI / 名称 / 描述 / mimeType，不含正文
 - prompt caching：能力声明 + cached usage 解析
 
@@ -185,7 +189,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - Plan Worker 每次尝试都通过隔离 ToolRegistry 的 `runWithResourceLease(stepId, ...)` 绑定资源租约上下文，并在 finally 中释放；并行工具线程显式继承步骤租约归属。ToolRegistry 统一托管 `ResourceLeaseMaintenance`，project fork 共享同一个定时线程；最后一个注册关闭后停止。默认每 60 秒清理过期租约，可通过 `devcli.resource.lease.cleanup.interval.seconds` / `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
 - Plan 副作用步骤在隔离工作区执行；`ToolEffect` / `ToolAccessScope` 在工具管线中强制限制非隔离任务只能使用只读能力。隔离命令和 Pre-Review 默认通过受限 Docker 执行，无网络且失败关闭；每次执行使用唯一容器名，超时或取消时终止客户端进程树并有界执行 `docker rm -f`；显式 `HOST_WARN` 只允许 Maven 离线执行 `clean/validate/compile/test-compile/test/package/verify`、`javac` 与只读 Git，拒绝命令行指定的任意 Maven 插件和发布阶段，并输出主机风险提示，不自动回退。非默认 Maven 仓库需通过 `DEVCLI_COMMAND_SANDBOX_MAVEN_REPOSITORY` 或系统属性显式指定存在的绝对目录，Docker 仅对 Maven 命令只读挂载，`HOST_WARN` 注入 `maven.repo.local`。PatchSet 逐文件流式哈希，只保留变更内容；JVM 公平锁与跨进程文件锁共同串行提交，锁缓存按活跃使用者计数退役。应用前保存 before/after 哈希和原文件备份；备份限制为当前所有者访问，孤儿日志按 TTL 清理，恢复时提升完成、继续待执行或回滚，失败回滚会报告具体路径。
 - 主机模式推荐名称为 `HOST_RESTRICTED`，上述 `HOST_WARN` 保持兼容，二者策略相同。命令白名单不隔离 Maven 项目插件、构建脚本或 javac 注解处理器，只适合可信项目，不是 Docker 的安全替代。
-- 命令工具的实际主机后端（普通 FULL 和显式主机模式）在最终分发前逐次人工确认，不复用任务授权或全部批准；没有处理器或关闭 HITL 时失败关闭。后端白名单先于弹窗；审批只接受原参数单次批准，后续取消或期限耗尽不会启动进程。请求冻结命令、目录与后端；`host_command_approval` 审计以调用标识和独立审批标识关联，不记录完整命令或工作目录。提示展示脱敏后的完整命令并转义控制字符，回车默认拒绝。Docker 工具路径不新增此审批。直接调用命令服务的 Pre-Review 和外部 MCP 进程未纳入，不能作为全进程安全边界。
+- 主机命令在最终分发前检查硬策略和权限规则。白名单构建/测试及只读 Git 命中显式 allow 时记录 host_command_rule 审计；hard_deny 与 soft_deny/ask 优先。其余命令仅接受单次明确审批，不复用任务授权或全部批准。timeout（秒，1–86400）传入后端和工具期限，显式值可超过默认批次期限；父任务取消仍传递到进程树。
 - Windows 的已验证主机白名单命令使用 `cmd.exe` 执行，保留 Maven `-Dname=value` 参数；普通主机命令仍使用 PowerShell。命令指纹保留引号差异，纠正后的命令不会与先前失败调用误合并。
 - 写租约在空闲超时之外增加 600000ms 绝对期限，`DEVCLI_TEAM_LEASE_MAX_LIFETIME_MS` / `devcli.team.lease.max.lifetime.ms` 可调。单调时钟避免墙钟跳变，续租保留首次获取时间，到期重新竞争；清理使用条件删除，不移除并发更新后的租约。
 - 任务授权由 Runtime 绑定项目和唯一作用域；fork 与并行调用共享撤销标记，原授权作用域结束后不再免审批。审计关联执行轮次、步骤、授权、调用与逐次审批，并区分真实审批来源；缺失身份不补造，用户请求、Agent 身份及最终 generation 仍未贯通。
@@ -274,7 +278,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `SessionMemory` 的恢复段不复用完整 system prompt 视图，而是按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 输出短结构化上下文；代码与图片归约元数据会随内容进入摘要输入，图片身份以字节 SHA-256 为准
 - Agent / PlanExecuteAgent / SubAgent 会在恢复段追加 MCP 工具状态和本地 SkillContextBuffer 的已加载 Skill、context、allowedTools 与内容摘要
 - 恢复段通过 `PostCompactRestoreContext` 做统一预算控制和行级去重；SubAgent 恢复区使用 Planner / Worker / Reviewer 角色视图裁剪，Planner 不携带工具证据，Reviewer 不携带会话临时事件
-- RAG 证据从 `search_code` 的工具结果强类型旁路载荷进入 `SessionMemory`；尺寸治理、只读结果缓存和批量执行结果都会保留该载荷。展示文本不再嵌入结构化 JSON；旧 JSON 与旧展示文本只用于历史兼容，typed negativeFact 仍会即时清理旧 symbolVersion。
+- 默认 Agent 不新增 search_code 工具证据；历史 RAG 旁路载荷及 negativeFact 清理仍保留。显式索引与检索组件独立于模型工具目录。
 
 ### MicroCompact
 

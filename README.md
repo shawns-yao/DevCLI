@@ -141,7 +141,7 @@ READ_ONLY → LOCAL_CONTEXT → PROJECT_MUTATION → HOST_PROCESS → EXTERNAL_M
 
 Agent 自身配置单独保护：`.devcli/hooks.json`、`.devcli/mcp.json`、`.devcli/config.json`，以及 `devcli.hooks.file` / `DEVCLI_HOOKS_FILE` 指向的自定义 Hook 文件。共享文件写入入口与 PatchSet 提交前拒绝修改，任务授权、全部批准和关闭审批通道均不能覆盖；快照恢复跳过这些配置并提示。检查覆盖默认用户配置、物理路径别名及隔离工作区对应的主项目路径，普通 `.devcli` 文件和配置示例仍可修改。需要调整时由用户在 Agent 工具之外操作。**这不是操作系统写保护：主机命令、外部 MCP 服务、配置引用的脚本尚未统一限制；没有实现完整防注入或默认命令沙箱。**
 
-`execute_command` 实际走主机后端时，在启动进程前强制单次确认，包括普通主 Agent 和显式 `HOST_RESTRICTED/HOST_WARN` 的隔离任务。此规则优先于命令任务授权和全部批准；关闭审批通道或没有审批处理器时拒绝主机执行，不自动放行。**主机路径同样经过规则层与模式层，但只吸收收紧方向**：`deny` 规则立即拒绝、`dontAsk` 模式收口为拒绝；`allow` 规则与 `bypassPermissions` 不参与，因为主机单次确认刻意不可被放宽类判定免除（比 WorkBuddy 的全局 bypass 更严）——代价是 `allow execute_command(...)` 在主机路径上不生效，启动时会打印告警并提示改用 `deny`。隔离路径走沙箱后端，规则层与模式层正常求值。弹窗展示主机风险、工作目录和完整的脱敏命令，控制字符转义；仅接受 `y`，回车默认拒绝，不允许批量批准、修改参数或脱敏后执行。批准绑定本次命令、目录及后端，取消或过期后不启动进程，单独记录关联调用的审批事件。Docker 工具路径沿用原审批规则。**这是工具入口的授权强化，不是沙箱：批准后的主机命令仍可修改配置；内部 Pre-Review 和外部 MCP 服务不经过这次新增门禁。**
+`execute_command` 走主机时，仅 HostWarnCommandPolicy 白名单中的 Maven 生命周期、javac 和只读 Git 命中显式 `allow` 规则可免确认，例如 `execute_command(mvn test:*)`。hard_deny 与 soft_deny/ask 优先，Shell 命令串、删除和白名单外命令仍逐次确认；任务授权、全部批准和 bypassPermissions 不能代替主机确认。dontAsk 会拒绝未获授权的命令。白名单不是沙箱，项目构建代码仍须可信。可传整数 `timeout`（秒，1–86400）覆盖默认命令与工具批次期限，父任务取消继续生效。
 
 `/mode plan` 让只读能力上限持续作用于后续轮次：写入、命令和外部副作用工具既不注入模型也不会执行。与 `/plan` 组合时该轮会被直接拒绝（编排必须写入隔离工作区，跑到中途只会得到一片能力拒绝），并消费掉只读标记。`/mode default` 恢复逐个询问。
 
@@ -150,6 +150,18 @@ Agent 自身配置单独保护：`.devcli/hooks.json`、`.devcli/mcp.json`、`.d
 能力范围与任务级授权都随轮次生效并被编排继承：能力范围只能单调收窄（只读 ⊂ 隔离项目 ⊂ 完整），嵌套调用与隔离 fork 都不能放宽外层约束；波次线程池在轮次内新建，因此继承本轮的范围与授权，长生命周期线程池在轮次外创建，不会残留某一轮的约束。
 
 ## Prompt 与上下文
+
+一次性无交互运行：
+
+```bash
+java -jar target/devcli-1.0-SNAPSHOT.jar -p "查找测试入口并说明运行方法"
+```
+
+stdout 输出一个 UTF-8 JSON，包含 `status`、`output`、`usage`；诊断写 stderr。使用已有 provider、权限配置、规则和内置工具。需要临时审批的操作拒绝，不等待输入；可提前配置允许规则。退出码：完成 0、失败 1、参数错误 2、取消 130。`status=completed` 仅表示运行正常收尾，任务验收仍看实际输出和工具证据。该入口不装配交互 CLI 的浏览器、MCP 和后台任务服务。
+
+`edit_file` 增加 `replace_all`，默认 false；空白容错只作用于完整行，仍检查多义匹配。`glob` 示例：`{"pattern":"**/*Test.java","path":"src","limit":200}`，模式以项目根为基准，默认最多返回 200 个文件，上限 1000；超量时提示收窄查询。
+
+trace 的 `model.usage.cache_hit_ratio` 为缓存读取 Token / 总输入 Token；`-p` 的 usage 同时返回整轮汇总，用于观察缓存实际命中，尚未做真实模型 A/B。
 
 Prompt 按稳定性分层：
 
@@ -228,7 +240,7 @@ JavaParser / 文件分块
 
 索引按文件 generation 和项目 epoch 管理并发。增量索引先写入影子表，通过 CAS 校验后原子提升；旧 epoch 结果不可见。检索结果标记 `CURRENT`、`STALE` 或 `DIRTY`，必要时回读实时文件校验。代码归约会保留 diff、符号、编译位置及 RAG/index/classpath 版本元数据。
 
-`search_code` 负责语义、符号和关系检索；`grep_code` 是独立的精确定位工具，用于类名、方法名、配置键和固定文本。
+默认 Agent 不再注册 `search_code`。文件名使用 `glob`，内容与符号定位使用 `grep_code`，上下文使用 `read_file`。本节 RAG 组件供保留的显式 `/index`、`/search` 命令使用。
 
 `grep_code` 的搜索范围按 git 的忽略规则确定：git 仓库使用 `git ls-files --cached --others --exclude-standard`，嵌套 `.gitignore`、否定模式和全局 excludes 都由 git 负责；非 git 目录、git 不可用或命令失败时回落到目录遍历，只用硬编码跳过目录兜底。显式把 `path` 指向被忽略目录时回落遍历，不会因为忽略规则而搜不到。
 
