@@ -37,7 +37,7 @@ import java.util.UUID;
 public class RuntimeThreadStore implements RunStore {
     private static final Logger log = LoggerFactory.getLogger(RuntimeThreadStore.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final int SESSION_PROJECTION_VERSION = 1;
+    static final int SESSION_PROJECTION_VERSION = 1;
 
     private final Path dbPath;
     private final Connection connection;
@@ -82,18 +82,15 @@ public class RuntimeThreadStore implements RunStore {
     }
 
     public record ContextView(
-            List<LlmClient.Message> checkpointMessages,
-            List<TurnRecord> turns,
+            List<LlmClient.Message> messages,
+            List<String> userInputs,
             long lastCompletedEventId,
             Optional<RuntimeCheckpoint> checkpoint) {
         public ContextView {
-            checkpointMessages = checkpointMessages == null ? List.of() : List.copyOf(checkpointMessages);
-            turns = turns == null ? List.of() : List.copyOf(turns);
+            messages = List.copyOf(messages);
+            userInputs = List.copyOf(userInputs);
             checkpoint = checkpoint == null ? Optional.empty() : checkpoint;
         }
-    }
-
-    private record EventReplay(List<LlmClient.Message> messages, long completedEventId) {
     }
 
     public record SessionProjection(
@@ -406,7 +403,10 @@ public class RuntimeThreadStore implements RunStore {
     }
 
     public synchronized long appendEvent(String threadId, String type, String data) {
-        String branchId = activeBranchId(threadId);
+        return appendEvent(threadId, activeBranchId(threadId), type, data);
+    }
+
+    public synchronized long appendEvent(String threadId, String branchId, String type, String data) {
         try (PreparedStatement ps = connection.prepareStatement("""
                 INSERT INTO runtime_events (thread_id, branch_id, type, data, created_at)
                 VALUES (?, ?, ?, ?, ?)
@@ -562,37 +562,20 @@ public class RuntimeThreadStore implements RunStore {
         return history;
     }
 
-    /** 从原始 turn 事件重建不含摘要投影的对话，供周期性摘要纠错使用。 */
+    /** 从消息事实和裁剪前工具结果重建原文，压缩快照不会覆盖这些事实。 */
     public synchronized List<LlmClient.Message> originalConversationMessages(String threadId) {
-        List<LlmClient.Message> messages = new ArrayList<>();
-        for (TurnRecord turn : turnHistory(threadId)) {
-            messages.add(LlmClient.Message.user(turn.input()));
-            if (!turn.output().isBlank()) {
-                messages.add(LlmClient.Message.assistant(turn.output()));
-            }
-        }
-        return List.copyOf(messages);
+        return ConversationReplay.original(events(threadId, 0));
     }
 
     public synchronized ContextView contextView(String threadId) {
-        Optional<EventReplay> replay = completedEventReplay(threadId);
-        if (replay.isPresent()) {
-            EventReplay value = replay.get();
-            return new ContextView(
-                    value.messages(),
-                    List.of(),
-                    value.completedEventId(),
-                    latestCheckpoint(threadId));
-        }
         Optional<RuntimeCheckpoint> checkpoint = latestCheckpoint(threadId);
         long coveredThrough = checkpoint.map(RuntimeCheckpoint::coveredThroughEventId).orElse(0L);
-        List<TurnRecord> turns = turnHistoryAfter(threadId, coveredThrough);
-        long lastCompletedEventId = turns.isEmpty()
-                ? coveredThrough
-                : turns.getLast().completedEventId();
+        List<RuntimeEvent> visible = events(threadId, 0);
+        long lastCompletedEventId = visible.stream().filter(event -> "turn.completed".equals(event.type()))
+                .mapToLong(RuntimeEvent::id).max().orElse(0L);
         return new ContextView(
-                checkpoint.map(RuntimeCheckpoint::messages).orElse(List.of()),
-                turns,
+                ConversationReplay.context(visible, checkpoint.map(RuntimeCheckpoint::messages).orElse(List.of()), coveredThrough),
+                ConversationReplay.userInputs(visible),
                 lastCompletedEventId,
                 checkpoint);
     }
@@ -612,9 +595,9 @@ public class RuntimeThreadStore implements RunStore {
             return base;
         }
 
-        ProjectionAccumulator accumulator = base == null
-                ? new ProjectionAccumulator(logIdentity)
-                : ProjectionAccumulator.from(base);
+        SessionEventProjection accumulator = base == null
+                ? new SessionEventProjection(logIdentity)
+                : SessionEventProjection.from(base);
         long afterCursor = base == null ? 0L : base.eventCursor();
         for (RuntimeEvent event : visible) {
             if (event.id() > afterCursor) {
@@ -712,187 +695,7 @@ public class RuntimeThreadStore implements RunStore {
         return identity.toString();
     }
 
-    private static String projectionTitle(String input) {
-        if (input == null || input.isBlank()) {
-            return "";
-        }
-        String normalized = input.replaceAll("\\s+", " ").trim();
-        int codePoints = normalized.codePointCount(0, normalized.length());
-        if (codePoints <= 80) {
-            return normalized;
-        }
-        return normalized.substring(0, normalized.offsetByCodePoints(0, 80)) + "...";
-    }
 
-    private static final class ProjectionAccumulator {
-        private final String logIdentity;
-        private String title = "";
-        private String state = "idle";
-        private long inputTokens;
-        private long outputTokens;
-        private long cachedInputTokens;
-        private double estimatedCostCny;
-        private long toolCalls;
-        private long toolFailures;
-        private long hookCalls;
-        private long hookFailures;
-
-        private ProjectionAccumulator(String logIdentity) {
-            this.logIdentity = logIdentity;
-        }
-
-        private static ProjectionAccumulator from(SessionProjection projection) {
-            ProjectionAccumulator value = new ProjectionAccumulator(projection.logIdentity());
-            value.title = projection.title();
-            value.state = projection.state();
-            value.inputTokens = projection.inputTokens();
-            value.outputTokens = projection.outputTokens();
-            value.cachedInputTokens = projection.cachedInputTokens();
-            value.estimatedCostCny = projection.estimatedCostCny();
-            value.toolCalls = projection.toolCalls();
-            value.toolFailures = projection.toolFailures();
-            value.hookCalls = projection.hookCalls();
-            value.hookFailures = projection.hookFailures();
-            return value;
-        }
-
-        private void apply(RuntimeEvent event) {
-            try {
-                JsonNode data = MAPPER.readTree(event.data());
-                switch (event.type()) {
-                    case "turn.started" -> {
-                        if (title.isBlank()) {
-                            title = projectionTitle(data.path("input").asText(""));
-                        }
-                        state = "running";
-                    }
-                    case "turn.completed" -> state = "idle";
-                    case "turn.failed" -> state = "failed";
-                    case "turn.rejected" -> state = "rejected";
-                    case "session.state" -> state = data.path("state").asText(state);
-                    case "model.usage" -> {
-                        inputTokens += data.path("input_tokens").asLong(0);
-                        outputTokens += data.path("output_tokens").asLong(0);
-                        cachedInputTokens += data.path("cached_input_tokens").asLong(0);
-                        estimatedCostCny += data.path("estimated_cost_cny").asDouble(0D);
-                    }
-                    case "tool.calls" -> toolCalls += data.path("calls").size();
-                    case "tool.results" -> {
-                        JsonNode results = data.path("results");
-                        if (results.isArray()) {
-                            for (JsonNode result : results) {
-                                if (!"SUCCESS".equals(result.path("status").asText(""))) {
-                                    toolFailures++;
-                                }
-                            }
-                        }
-                    }
-                    case "hook.result" -> {
-                        hookCalls++;
-                        String decision = data.path("decision").asText("CONTINUE");
-                        if (!"CONTINUE".equals(decision)) {
-                            hookFailures++;
-                        }
-                    }
-                    default -> { }
-                }
-            } catch (Exception ignored) {
-                // 单条坏事件不破坏投影；事件日志仍保留以供诊断。
-            }
-        }
-
-        private SessionProjection finish(long cursor) {
-            return new SessionProjection(
-                    SESSION_PROJECTION_VERSION,
-                    logIdentity,
-                    cursor,
-                    title,
-                    state,
-                    inputTokens,
-                    outputTokens,
-                    cachedInputTokens,
-                    estimatedCostCny,
-                    toolCalls,
-                    toolFailures,
-                    hookCalls,
-                    hookFailures);
-        }
-    }
-
-    private Optional<EventReplay> completedEventReplay(String threadId) {
-        List<RuntimeEvent> visible = events(threadId, 0);
-        Map<String, Long> completedTurns = new HashMap<>();
-        for (RuntimeEvent event : visible) {
-            if (!"turn.completed".equals(event.type())) {
-                continue;
-            }
-            String turnId = eventTurnId(event);
-            if (!turnId.isBlank()) {
-                completedTurns.put(turnId, event.id());
-            }
-        }
-
-        RuntimeEvent selected = null;
-        RunEvent.ModelContext selectedContext = null;
-        String selectedTurnId = "";
-        for (RuntimeEvent event : visible) {
-            if (!"model.context".equals(event.type())) {
-                continue;
-            }
-            String turnId = eventTurnId(event);
-            Long completedEventId = completedTurns.get(turnId);
-            if (completedEventId == null || completedEventId < event.id()) {
-                continue;
-            }
-            Optional<RunEvent.ModelContext> decoded = RunEventJsonCodec.decodeModelContext(event.data());
-            if (decoded.isPresent() && (selected == null || event.id() > selected.id())) {
-                selected = event;
-                selectedContext = decoded.get();
-                selectedTurnId = turnId;
-            }
-        }
-        if (selected == null || selectedContext == null) {
-            return Optional.empty();
-        }
-
-        long completedEventId = completedTurns.get(selectedTurnId);
-        List<LlmClient.Message> messages = new ArrayList<>(selectedContext.toLlmMessages());
-        StringBuilder streamedOutput = new StringBuilder();
-        boolean assistantMessageRecorded = messages.stream()
-                .anyMatch(message -> "assistant".equals(message.role()));
-        for (RuntimeEvent event : visible) {
-            if (event.id() <= selected.id() || event.id() > completedEventId
-                    || !selectedTurnId.equals(eventTurnId(event))) {
-                continue;
-            }
-            if ("model.message".equals(event.type())) {
-                Optional<RunEvent.ModelMessage> decoded = RunEventJsonCodec.decodeModelMessage(event.data());
-                if (decoded.isPresent()) {
-                    LlmClient.Message message = decoded.get().message().toLlmMessage();
-                    messages.add(message);
-                    assistantMessageRecorded |= "assistant".equals(message.role());
-                }
-            } else if ("message.delta".equals(event.type())) {
-                try {
-                    streamedOutput.append(MAPPER.readTree(event.data()).path("content").asText(""));
-                } catch (Exception ignored) {
-                    // model.message 是主协议；delta 仅作为旧写入端的兼容回退。
-                }
-            }
-        }
-        if (!assistantMessageRecorded && !streamedOutput.isEmpty()) {
-            messages.add(LlmClient.Message.assistant(streamedOutput.toString()));
-        }
-        return Optional.of(new EventReplay(List.copyOf(messages), completedEventId));
-    }
-
-    private static String eventTurnId(RuntimeEvent event) {
-        try {
-            return MAPPER.readTree(event.data()).path("turn_id").asText("");
-        } catch (Exception ignored) {
-            return "";
-        }
-    }
 
     public synchronized void saveCheckpoint(
             String threadId,

@@ -484,8 +484,9 @@ final class DelegationSession implements DelegateTaskTool.Handler {
             ToolExecutionContext checkContext = new ToolExecutionContext(context.invocationId() + "/verify",
                     context.cancellationToken(), System.nanoTime(), Math.min(context.deadlineNanos(),
                     System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(request.timeoutSeconds())));
-            ToolOutput output = workspace.toolRegistry().runWithToolAccess(ToolContract.ToolAccessScope.ISOLATED_PROJECT,
-                    () -> workspace.toolRegistry().executeCommandOutput(request.command(), checkContext));
+            ToolOutput output = ToolRegistry.runWithResultEvents(event -> events.emit(new RunEvent.AgentEvent(id, event)),
+                    () -> workspace.toolRegistry().runWithToolAccess(ToolContract.ToolAccessScope.ISOLATED_PROJECT,
+                            () -> workspace.toolRegistry().executeCommandOutput(request.command(), checkContext)));
             if (output.status() == com.devcli.tool.ToolStatus.REJECTED) throw new IllegalStateException(output.text());
             return new com.devcli.tool.command.CommandExecutionService.Result(output.isSuccess() ? 0 : -1,
                     output.text(), output.status() == com.devcli.tool.ToolStatus.TIMEOUT,
@@ -860,12 +861,8 @@ final class DelegationSession implements DelegateTaskTool.Handler {
         @Override public RunEventSink eventSink() {
             // 子循环终态不能变成父运行终态，文本和历史也不混入父模型上下文。
             return event -> {
+                events.emit(new RunEvent.AgentEvent(id, event));
                 if (event instanceof RunEvent.ModelUsage) events.emit(event);
-                else if (event instanceof RunEvent.ToolResults results) {
-                    events.emit(new RunEvent.CustomMessage("delegation.tools", "子任务工具结果",
-                            Map.of("child_id", id, "results", results.results().stream()
-                                    .map(r -> r.name() + ":" + r.status()).toList().toString())));
-                }
             };
         }
         @Override public void beforeIteration(int iteration, AgentBudget currentBudget) {

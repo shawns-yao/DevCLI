@@ -39,16 +39,12 @@ class SessionTreeServiceTest {
             SessionTreeService sessions = SessionTreeService.open(agent, store);
             threadId = sessions.threadId();
 
-            assertTrue(sessions.recordTurn(
-                    "react", "first", "first", "answer-one", firstContext()).isEmpty());
+            sessions.runTurn("plan", "first", "first", () -> "answer-one", value -> value);
             assertEquals(1, store.list(RunStore.Source.INTERACTIVE, 10).size());
 
             sessions.fork("feature");
             assertTrue(contents(agent).contains("answer-one"));
-            agent.clearHistory();
-            agent.seedHistory(secondContext().subList(1, secondContext().size()));
-            assertTrue(sessions.recordTurn(
-                    "react", "second", "second", "answer-two", secondContext()).isEmpty());
+            sessions.runTurn("plan", "second", "second", () -> "answer-two", value -> value);
             assertTrue(contents(agent).contains("answer-two"));
 
             sessions.use("main");
@@ -79,7 +75,7 @@ class SessionTreeServiceTest {
              ToolRegistry registry = new ToolRegistry()) {
             Agent agent = new Agent(new GLMClient("test-key"), registry);
             SessionTreeService sessions = SessionTreeService.open(agent, store);
-            sessions.recordTurn("react", "first", "first", "answer-one", firstContext());
+            sessions.runTurn("plan", "first", "first", () -> "answer-one", value -> value);
 
             sessions.clearCurrent();
 
@@ -88,22 +84,6 @@ class SessionTreeServiceTest {
             sessions.use("main");
             assertTrue(contents(agent).contains("answer-one"));
         }
-    }
-
-    private static List<LlmClient.Message> firstContext() {
-        return List.of(
-                LlmClient.Message.system("stable-system"),
-                LlmClient.Message.user("first"),
-                LlmClient.Message.assistant("answer-one"));
-    }
-
-    private static List<LlmClient.Message> secondContext() {
-        return List.of(
-                LlmClient.Message.system("stable-system"),
-                LlmClient.Message.user("first"),
-                LlmClient.Message.assistant("answer-one"),
-                LlmClient.Message.user("second"),
-                LlmClient.Message.assistant("answer-two"));
     }
 
     private static List<String> contents(Agent agent) {

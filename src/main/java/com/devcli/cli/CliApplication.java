@@ -364,17 +364,15 @@ final class CliApplication {
                         try {
                             int keep = CliCommandParser.compactKeepRounds(command.payload());
                             ui.println("正在压缩历史上下文……");
-                            com.devcli.memory.CompactionResult result = reactAgent.compactHistoryNow(keep);
+                            com.devcli.memory.CompactionResult result = sessionTree.compactHistoryNow(keep);
                             if (result.compacted()) {
                                 String report = "上下文已压缩：" + result.beforeTokens() + " → "
                                         + result.afterTokens() + " Token，保留最近 " + keep + " 轮原文";
                                 ui.println(report);
-                                sessionTree.recordTurn("react", input, input, report,
-                                        reactAgent.getConversationHistory()).ifPresent(ui::println);
                             } else {
                                 ui.println("压缩未应用，原始上下文已保留；可能没有可压缩的旧轮次、摘要校验失败或空间收益不足。");
                             }
-                        } catch (IllegalArgumentException invalid) {
+                        } catch (Exception invalid) {
                             ui.println(invalid.getMessage());
                         }
                         ui.println();
@@ -908,7 +906,7 @@ final class CliApplication {
                             skillRegistry,
                             skillContextBuffer,
                             createTeamPlanReviewHandler(lineReader, ui, terminalInput),
-                            TRACE_SINK,
+                            event -> reactAgent.getRunEventSink().emit(event),
                             ui);
                     runTask = () -> {
                         reactAgent.recordUserIntent(submittedInput);
@@ -946,7 +944,9 @@ final class CliApplication {
                         terminalInput,
                         acceptActiveTurnInput,
                         pendingDraft,
-                        () -> snapshotService.runTurn(snapshotMode, taskInput, runTask::call));
+                        () -> sessionTree.runTurn(snapshotMode, submittedInput, taskInput,
+                                () -> snapshotService.runTurn(snapshotMode, taskInput, runTask::call),
+                                java.util.function.Function.identity()));
                 String response = turnResult.response();
                 pendingDraft = turnResult.draft();
                 if (!"react".equals(snapshotMode)) {
@@ -961,9 +961,6 @@ final class CliApplication {
                 List<LlmClient.Message> persistedMessages = "react".equals(snapshotMode)
                         ? reactAgent.getConversationHistory()
                         : List.of();
-                sessionTree.recordTurn(
-                                snapshotMode, submittedInput, taskInput, response, persistedMessages)
-                        .ifPresent(ui::println);
                 sessionArchive.recordTurn(
                         sessionTree.threadId(), sessionTree.activeBranchId(),
                         snapshotMode, submittedInput, taskInput, response, persistedMessages);

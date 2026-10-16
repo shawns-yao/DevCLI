@@ -4,6 +4,8 @@ import com.devcli.config.DevCliConfig;
 import com.devcli.llm.LlmClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.io.TempDir;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -16,6 +18,12 @@ import static org.junit.jupiter.api.Assertions.*;
 class PrintCommandLauncherTest {
     @TempDir Path root;
     private static final ObjectMapper JSON = new ObjectMapper();
+
+    @BeforeEach
+    void isolateJournal() { System.setProperty("devcli.runtime.dir", root.resolve("runtime").toString()); }
+
+    @AfterEach
+    void clearJournalDirectory() { System.clearProperty("devcli.runtime.dir"); }
 
     @Test
     void runsTheProductionSessionAndReturnsSingleJsonWithCacheUsage() throws Exception {
@@ -30,6 +38,13 @@ class PrintCommandLauncherTest {
             assertEquals("完成", result.path("output").asText());
             assertEquals(0.5, result.path("usage").path("cache_hit_ratio").asDouble());
             assertNull(parser.nextToken(), "stdout 只允许一个 JSON 对象");
+            try (var store = new com.devcli.runtime.api.RuntimeThreadStore(
+                    com.devcli.runtime.api.RuntimeThreadStore.defaultDbPath())) {
+                String thread = result.path("thread_id").asText();
+                assertFalse(thread.isBlank());
+                assertEquals("完成", store.contextView(thread).messages().getLast().content());
+                assertTrue(store.events(thread, 0).stream().anyMatch(event -> event.type().equals("turn.completed")));
+            }
         }
     }
 

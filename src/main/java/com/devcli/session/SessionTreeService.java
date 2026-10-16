@@ -3,12 +3,8 @@ package com.devcli.session;
 import com.devcli.agent.Agent;
 import com.devcli.config.ConfigResolver;
 import com.devcli.llm.LlmClient;
-import com.devcli.runtime.RunCoordinator;
-import com.devcli.runtime.api.RunEventJsonCodec;
+import com.devcli.runtime.api.ConversationTurnRecorder;
 import com.devcli.runtime.api.RuntimeThreadStore;
-import com.devcli.event.RunEvent;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
@@ -18,20 +14,16 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Optional;
-import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** CLI 与 Runtime API 共用的持久会话分支服务。 */
 public final class SessionTreeService {
-    private static final Logger log = LoggerFactory.getLogger(SessionTreeService.class);
     private static final String SESSION_PROPERTY = "devcli.session.id";
     private static final String SESSION_ENV = "DEVCLI_SESSION_ID";
 
     private final Agent agent;
     private final RuntimeThreadStore store;
-    private final RunCoordinator runCoordinator;
     private final Path currentSessionFile;
     private final AtomicBoolean legacyNoticePending = new AtomicBoolean(true);
     private String threadId;
@@ -40,7 +32,6 @@ public final class SessionTreeService {
                                Path currentSessionFile, String threadId) {
         this.agent = java.util.Objects.requireNonNull(agent, "agent");
         this.store = java.util.Objects.requireNonNull(store, "store");
-        this.runCoordinator = new RunCoordinator(store);
         this.currentSessionFile = currentSessionFile;
         this.threadId = threadId;
         restoreActiveBranch();
@@ -170,75 +161,23 @@ public final class SessionTreeService {
         return legacyNoticePending.compareAndSet(true, false);
     }
 
-    /**
-     * 记录 CLI 模型可见上下文和顶层结果。返回值仅在持久化失败时包含错误摘要，
-     * 由终端显示；可选 JSONL 归档不参与恢复。
-     */
-    public synchronized Optional<String> recordTurn(
-            String mode, String submittedInput, String expandedInput,
-            String response, List<LlmClient.Message> modelMessages) {
-        String turnId = "turn_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
-        String branchId = activeBranchId();
-        try {
-            runCoordinator.submitInteractive(
-                    turnId, threadId, branchId, normalizedMode(mode), safe(submittedInput));
-            if (!runCoordinator.start(turnId)) {
-                throw new IllegalStateException("Run 状态无法进入 running: " + turnId);
-            }
-            append(turnId, new RunEvent.TurnStarted(safe(submittedInput)));
-
-            List<LlmClient.Message> context = buildPersistedContext(
-                    expandedInput, response, modelMessages);
-            append(turnId, RunEvent.ModelContext.from(0, context));
-            String finalOutput = response == null || response.isBlank()
-                    ? latestAssistantContent(context)
-                    : response;
-            if (!finalOutput.isBlank()) {
-                append(turnId, new RunEvent.MessageDelta(finalOutput));
-            }
-            append(turnId, new RunEvent.TurnCompleted("completed"));
-            if (!runCoordinator.complete(turnId, finalOutput)) {
-                throw new IllegalStateException("Run 状态无法进入 completed: " + turnId);
-            }
-            if (modelMessages == null || modelMessages.isEmpty()) {
-                replaceAgentHistory(context);
-            }
-            return Optional.empty();
-        } catch (Exception e) {
-            runCoordinator.fail(turnId, e.getMessage());
-            log.warn("CLI session persistence failed: thread={}, branch={}, turn={}",
-                    threadId, branchId, turnId, e);
-            return Optional.of("会话持久化失败: " + e.getMessage());
-        }
+    /** 先绑定日志，再执行当前回合；异常退出也保留中途消息和工具事实。 */
+    public <T> T runTurn(String mode, String input, String modelInput,
+                         java.util.concurrent.Callable<T> action,
+                         java.util.function.Function<T, String> output) throws Exception {
+        return ConversationTurnRecorder.run(agent, store, threadId(), mode, input, modelInput, action, output);
     }
 
-    private List<LlmClient.Message> buildPersistedContext(
-            String expandedInput, String response, List<LlmClient.Message> modelMessages) {
-        if (modelMessages != null && !modelMessages.isEmpty()) {
-            return List.copyOf(modelMessages);
-        }
-        List<LlmClient.Message> context = new ArrayList<>(agent.getConversationHistory());
-        context.add(LlmClient.Message.user(safe(expandedInput)));
-        if (response != null && !response.isBlank()) {
-            context.add(LlmClient.Message.assistant(response));
-        }
-        return List.copyOf(context);
-    }
-
-    private long append(String turnId, RunEvent event) {
-        return store.appendEvent(
-                threadId, event.type(), RunEventJsonCodec.encode(event, turnId));
+    public com.devcli.memory.CompactionResult compactHistoryNow(int keep) throws Exception {
+        return runTurn("compact", "/compact", "/compact", () -> agent.compactHistoryNow(keep), result -> "");
     }
 
     private void restoreActiveBranch() {
         agent.getTurnInbox().clear();
         RuntimeThreadStore.ContextView view = store.contextView(threadId);
-        List<LlmClient.Message> history = new ArrayList<>(view.checkpointMessages());
-        for (RuntimeThreadStore.TurnRecord turn : view.turns()) {
-            history.add(LlmClient.Message.user(turn.input()));
-            history.add(LlmClient.Message.assistant(turn.output()));
-        }
-        replaceAgentHistory(history);
+        replaceAgentHistory(view.messages());
+        view.userInputs().forEach(agent::recordUserIntent);
+        if (!view.messages().isEmpty()) agent.markTrustedIntentIncomplete();
     }
 
     private void replaceAgentHistory(List<LlmClient.Message> history) {
@@ -297,23 +236,4 @@ public final class SessionTreeService {
         return normalized;
     }
 
-    private static String normalizedMode(String mode) {
-        return mode == null || mode.isBlank()
-                ? "react" : mode.trim().toLowerCase(Locale.ROOT);
-    }
-
-    private static String latestAssistantContent(List<LlmClient.Message> messages) {
-        for (int index = messages.size() - 1; index >= 0; index--) {
-            LlmClient.Message message = messages.get(index);
-            if (message != null && "assistant".equals(message.role())
-                    && message.content() != null && !message.content().isBlank()) {
-                return message.content();
-            }
-        }
-        return "";
-    }
-
-    private static String safe(String value) {
-        return value == null ? "" : value;
-    }
 }

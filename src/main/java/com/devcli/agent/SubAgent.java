@@ -499,7 +499,10 @@ public class SubAgent {
                     @Override
                     public com.devcli.event.RunEventSink eventSink() {
                         return com.devcli.event.RunEventSink.composite(
-                                additionalEventSink, streamRenderer);
+                                event -> {
+                                    additionalEventSink.emit(new com.devcli.event.RunEvent.AgentEvent(name, event));
+                                    if (event instanceof com.devcli.event.RunEvent.ModelUsage) additionalEventSink.emit(event);
+                                }, streamRenderer);
                     }
 
                     @Override

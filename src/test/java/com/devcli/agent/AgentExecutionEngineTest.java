@@ -131,6 +131,7 @@ class AgentExecutionEngineTest {
         List<RunEvent.ModelContext> contexts = delegate.runEvents.stream()
                 .filter(RunEvent.ModelContext.class::isInstance)
                 .map(RunEvent.ModelContext.class::cast)
+                .filter(context -> context.iteration() > 0)
                 .toList();
         assertEquals(2, contexts.size());
         assertEquals("SYSTEM_INTERNAL", contexts.getFirst().messages().getFirst().source());
@@ -199,6 +200,7 @@ class AgentExecutionEngineTest {
         List<RunEvent.ModelContext> contexts = delegate.runEvents.stream()
                 .filter(RunEvent.ModelContext.class::isInstance)
                 .map(RunEvent.ModelContext.class::cast)
+                .filter(context -> context.iteration() > 0)
                 .toList();
         assertEquals(2, contexts.size());
         assertTrue(contexts.get(1).messages().stream()

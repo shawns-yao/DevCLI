@@ -7,7 +7,6 @@ import com.devcli.runtime.AgentSessionRuntime;
 import com.devcli.event.RunEventSink;
 
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
@@ -137,14 +136,9 @@ public final class RuntimeSessionTurnRunner implements TurnRunner, AutoCloseable
             AgentSessionRuntime session = AgentSessionRuntime.create(
                     llmClient, memoryCuratorClientSupplier.get(), projectPath, RunEventSink.NO_OP);
             RuntimeThreadStore.ContextView view = store.contextView(id);
-            List<LlmClient.Message> seed = new ArrayList<>(view.checkpointMessages());
-            if (!view.checkpointMessages().isEmpty()) session.agent().markTrustedIntentIncomplete();
-            for (RuntimeThreadStore.TurnRecord turn : view.turns()) {
-                session.agent().recordUserIntent(turn.input());
-                seed.add(LlmClient.Message.user(turn.input()));
-                seed.add(LlmClient.Message.assistant(turn.output()));
-            }
-            session.seedHistory(seed);
+            session.seedHistory(view.messages());
+            view.userInputs().forEach(session.agent()::recordUserIntent);
+            if (!view.messages().isEmpty()) session.agent().markTrustedIntentIncomplete();
             AgentTurnInbox.Snapshot queued = store.queueSnapshot(id);
             queued.steering().forEach(item -> session.inbox().enqueueSteering(item.text()));
             queued.followUp().forEach(item -> session.inbox().enqueueFollowUp(item.text()));

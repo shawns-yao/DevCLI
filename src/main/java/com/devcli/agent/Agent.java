@@ -210,6 +210,16 @@ public class Agent implements AutoCloseable {
         this.runEventSink = runEventSink == null ? RunEventSink.NO_OP : runEventSink;
     }
 
+    public RunEventSink getRunEventSink() {
+        return runEventSink;
+    }
+
+    /** 先追加消息事实，再推进可裁剪的模型窗口。 */
+    public void appendConversationMessage(LlmClient.Message message) {
+        runEventSink.emit(RunEvent.ModelMessage.from(message));
+        conversationHistory.add(message);
+    }
+
     /** 绑定 Runtime 事件游标，使压缩边界可在重启后定位并校验。 */
     public void setCompactionSourceCursorSupplier(
             java.util.function.Supplier<ConversationHistoryCompactor.CompactionSourceCursor> supplier) {
@@ -312,6 +322,7 @@ public class Agent implements AutoCloseable {
     }
 
     private String runInternal(String userInput, LlmClient.ToolChoice initialToolChoice) {
+        runEventSink.emit(RunEvent.ModelContext.from(0, conversationHistory));
         LlmClient.ToolChoice effectiveInitialToolChoice = initialToolChoice == null
                 ? LlmClient.ToolChoice.AUTO
                 : initialToolChoice;
@@ -331,9 +342,10 @@ public class Agent implements AutoCloseable {
         // 添加用户输入到历史（当轮快照与 skill body 依次前置到原文之前）
         String userMessageContent = prependTurnContext(
                 prependSkillBodies(userInput), buildTurnContext(memoryContext));
-        conversationHistory.add(ImageReferenceParser.userMessage(
+        LlmClient.Message userMessage = ImageReferenceParser.userMessage(
                 userMessageContent,
-                Path.of(toolRegistry.getProjectPath())));
+                Path.of(toolRegistry.getProjectPath()));
+        appendConversationMessage(userMessage);
         StringBuilder reasoningTranscript = new StringBuilder();
         StreamRenderer streamRenderer = new StreamRenderer(renderer());
 

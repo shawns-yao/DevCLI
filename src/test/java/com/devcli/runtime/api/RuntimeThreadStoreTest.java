@@ -90,9 +90,8 @@ class RuntimeThreadStoreTest {
             long secondCoverage = appendTurn(store, threadId, "t2", "第二轮", "第二轮回答");
 
             RuntimeThreadStore.ContextView view = store.contextView(threadId);
-            assertEquals(2, view.checkpointMessages().size());
-            assertEquals(1, view.turns().size());
-            assertEquals("第二轮", view.turns().getFirst().input());
+            assertEquals(4, view.messages().size());
+            assertEquals("第二轮", view.messages().get(2).content());
             assertEquals(secondCoverage, view.lastCompletedEventId());
         }
 
@@ -239,7 +238,7 @@ class RuntimeThreadStoreTest {
     }
 
     @Test
-    void contextViewPrefersCompletedModelContextAndIgnoresFailedTurn(@TempDir Path tempDir)
+    void contextViewKeepsLatestFactsEvenWhenTurnFails(@TempDir Path tempDir)
             throws Exception {
         try (RuntimeThreadStore store = new RuntimeThreadStore(tempDir.resolve("runtime.db"))) {
             String threadId = store.createThread();
@@ -271,11 +270,10 @@ class RuntimeThreadStoreTest {
             RuntimeThreadStore.ContextView view = store.contextView(threadId);
 
             assertEquals(completedEventId, view.lastCompletedEventId());
-            assertTrue(view.turns().isEmpty());
-            assertEquals(List.of("system", "internal reminder", "answer"),
-                    view.checkpointMessages().stream().map(LlmClient.Message::content).toList());
-            assertEquals(LlmClient.MessageSource.PLUGIN,
-                    view.checkpointMessages().get(1).source());
+            assertEquals(List.of("wrong", "wrong"),
+                    view.messages().stream().map(LlmClient.Message::content).toList());
+            assertTrue(store.originalConversationMessages(threadId).stream()
+                    .anyMatch(message -> message.source() == LlmClient.MessageSource.PLUGIN));
         }
     }
 
