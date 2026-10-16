@@ -17,10 +17,11 @@ import java.util.stream.Collectors;
 /**
  * Skill 加载与运行时维护。
  *
- * 三层目录扫描顺序（后者整体覆盖前者同名 skill）：
+ * 目录扫描顺序（后者整体覆盖前者同名 skill）：
  *   1. builtin（jar 内置，由 SkillBuiltinExtractor 解压到 cacheRoot）
- *   2. user：~/.devcli/skills/&lt;name&gt;/SKILL.md
- *   3. project：&lt;projectDir&gt;/.devcli/skills/&lt;name&gt;/SKILL.md
+ *   2. shared：~/.agents/skills、Codex skills（含 .system）
+ *   3. user：~/.devcli/skills/&lt;name&gt;/SKILL.md
+ *   4. project：&lt;projectDir&gt;/.devcli/skills/&lt;name&gt;/SKILL.md
  *
  * 启用状态由 SkillStateStore 提供 disabled 列表过滤。
  */
@@ -30,6 +31,7 @@ public final class SkillRegistry {
     private final Path userSkillsDir;
     private final Path projectSkillsDir;
     private final SkillStateStore stateStore;
+    private final List<Path> sharedUserDirectories;
 
     private final Map<String, Skill> skillsByName = new LinkedHashMap<>();
     private final Map<String, Integer> usageCounts = new LinkedHashMap<>();
@@ -47,10 +49,24 @@ public final class SkillRegistry {
     private long referenceActivationCount;
 
     public SkillRegistry(Path builtinCacheRoot, Path userSkillsDir, Path projectSkillsDir, SkillStateStore stateStore) {
+        this(builtinCacheRoot, userSkillsDir, projectSkillsDir, stateStore, List.of());
+    }
+
+    public SkillRegistry(Path builtinCacheRoot, Path userSkillsDir, Path projectSkillsDir,
+                         SkillStateStore stateStore, List<Path> sharedUserDirectories) {
         this.builtinCacheRoot = builtinCacheRoot;
         this.userSkillsDir = userSkillsDir;
         this.projectSkillsDir = projectSkillsDir;
         this.stateStore = stateStore;
+        this.sharedUserDirectories = List.copyOf(sharedUserDirectories);
+    }
+
+    public static List<Path> sharedUserDirectories(Path home) {
+        String configured = System.getenv("CODEX_HOME");
+        Path codexHome = configured == null || configured.isBlank()
+                ? home.resolve(".codex") : Path.of(configured);
+        return List.of(home.resolve(".agents/skills"),
+                codexHome.resolve("skills/.system"), codexHome.resolve("skills"));
     }
 
     public synchronized void reload() {
@@ -58,6 +74,9 @@ public final class SkillRegistry {
         warnings.clear();
 
         loadDirectory(builtinCacheRoot, Skill.Source.BUILTIN);
+        for (Path directory : sharedUserDirectories) {
+            loadDirectory(directory, Skill.Source.USER, true);
+        }
         loadDirectory(userSkillsDir, Skill.Source.USER);
         if (projectSkillsDir != null && Files.isDirectory(projectSkillsDir)) {
             if (stateStore != null && stateStore.isProjectDirectoryTrusted(projectSkillsDir)) {
@@ -207,6 +226,10 @@ public final class SkillRegistry {
     }
 
     private void loadDirectory(Path dir, Skill.Source source) {
+        loadDirectory(dir, source, false);
+    }
+
+    private void loadDirectory(Path dir, Skill.Source source, boolean shared) {
         if (dir == null || !Files.isDirectory(dir)) {
             return;
         }
@@ -220,7 +243,7 @@ public final class SkillRegistry {
                 if (!Files.isRegularFile(skillMd)) {
                     continue;
                 }
-                Skill skill = parseSkill(entry, skillMd, source);
+                Skill skill = parseSkill(entry, skillMd, source, shared);
                 if (skill != null) {
                     skillsByName.put(skill.name(), skill);
                 }
@@ -230,7 +253,7 @@ public final class SkillRegistry {
         }
     }
 
-    private Skill parseSkill(Path skillDir, Path skillMd, Skill.Source source) {
+    private Skill parseSkill(Path skillDir, Path skillMd, Skill.Source source, boolean shared) {
         String content;
         try {
             content = Files.readString(skillMd);
@@ -239,7 +262,9 @@ public final class SkillRegistry {
             return null;
         }
 
-        SkillFrontmatterParser.ParseResult parsed = SkillFrontmatterParser.parse(content);
+        SkillFrontmatterParser.ParseResult parsed = shared
+                ? SkillFrontmatterParser.parseShared(content, skillDir.getFileName().toString())
+                : SkillFrontmatterParser.parse(content);
         for (String w : parsed.warnings()) {
             warn("skill_invalid", skillMd + ": " + w, skillMd);
         }

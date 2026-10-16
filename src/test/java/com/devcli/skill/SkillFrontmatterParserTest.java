@@ -169,4 +169,32 @@ class SkillFrontmatterParserTest {
         assertFalse(unknown.valid());
         assertFalse(wrongType.valid());
     }
+
+    @Test
+    void sharedCatalogAcceptsClientMetadataAndUsesDirectoryForDisplayNames() {
+        String content = """
+                ---
+                name: Example Skill
+                description: Shared instructions
+                license: MIT
+                metadata: { short-description: Example }
+                allowed-tools: Read Bash
+                ---
+                Keep the instructions.
+                """;
+        var parsed = SkillFrontmatterParser.parseShared(content, "example-skill");
+        assertTrue(parsed.valid(), parsed.warnings().toString());
+        assertEquals("example-skill", parsed.frontmatter().get("name"));
+        assertEquals("Keep the instructions.\n", parsed.body());
+        assertFalse(parsed.frontmatter().containsKey("allowedTools"));
+        assertFalse(SkillFrontmatterParser.parse(content).valid());
+    }
+
+    @Test
+    void sharedCatalogStillRejectsMalformedYamlAndMissingDescription() {
+        assertFalse(SkillFrontmatterParser.parseShared(
+                "---\nname: example\ndescription: [broken\n---\nbody", "example").valid());
+        assertFalse(SkillFrontmatterParser.parseShared(
+                "---\nname: example\nmetadata: {}\n---\nbody", "example").valid());
+    }
 }

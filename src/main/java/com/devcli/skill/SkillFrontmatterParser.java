@@ -35,6 +35,15 @@ public final class SkillFrontmatterParser {
     }
 
     public static ParseResult parse(String fullText) {
+        return parse(fullText, null);
+    }
+
+    /** Shared catalogs may carry metadata owned by another client. */
+    public static ParseResult parseShared(String fullText, String directoryName) {
+        return parse(fullText, directoryName);
+    }
+
+    private static ParseResult parse(String fullText, String sharedDirectoryName) {
         if (fullText == null) {
             return invalid("", "SKILL.md 内容为 null");
         }
@@ -66,7 +75,9 @@ public final class SkillFrontmatterParser {
         Map<String, Object> fields = new LinkedHashMap<>();
         for (Map.Entry<?, ?> entry : source.entrySet()) {
             if (!(entry.getKey() instanceof String key) || !ALLOWED_FIELDS.contains(key)) {
-                warnings.add("frontmatter 包含不支持的字段: " + entry.getKey());
+                if (sharedDirectoryName == null) {
+                    warnings.add("frontmatter 包含不支持的字段: " + entry.getKey());
+                }
                 continue;
             }
             Object value = entry.getValue();
@@ -80,6 +91,11 @@ public final class SkillFrontmatterParser {
                 List<String> list = stringList(value, key, warnings);
                 if (list != null) fields.put(key, list);
             }
+        }
+        String name = string(fields.get("name"));
+        if (sharedDirectoryName != null && !name.isBlank()
+                && !name.matches("[a-z0-9]+(?:-[a-z0-9]+)*")) {
+            fields.put("name", sharedDirectoryName);
         }
         validateSchema(fields, warnings);
         return new ParseResult(Map.copyOf(fields), body,
