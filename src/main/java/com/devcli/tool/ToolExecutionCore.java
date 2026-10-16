@@ -80,6 +80,8 @@ final class ToolExecutionCore {
                 }
             }
             return output;
+        } catch (com.devcli.event.RunEventSink.PersistenceFailure failure) {
+            throw failure;
         } catch (ResourceLeaseException e) {
             if (audit) {
                 registry.recordToolAudit(AuditLog.AuditEntry.denyByPolicy(

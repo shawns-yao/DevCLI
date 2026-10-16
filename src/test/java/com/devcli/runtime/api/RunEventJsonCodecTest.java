@@ -81,7 +81,7 @@ class RunEventJsonCodecTest {
     }
 
     @Test
-    void modelContextRoundTripsMessageSourceWithoutPersistingImageBody() throws Exception {
+    void modelContextRoundTripsMessageSourceAndImageBody() throws Exception {
         LlmClient.Message pluginMessage = LlmClient.Message.user(List.of(
                 LlmClient.ContentPart.text("inspect image"),
                 LlmClient.ContentPart.imageBase64("secret-base64", "image/png")),
@@ -92,12 +92,13 @@ class RunEventJsonCodecTest {
         String encoded = RunEventJsonCodec.encode(event, "turn_1");
         RunEvent.ModelContext decoded = RunEventJsonCodec.decodeModelContext(encoded).orElseThrow();
 
-        assertFalse(encoded.contains("secret-base64"));
+        assertTrue(encoded.contains("secret-base64"));
         assertEquals(3, decoded.iteration());
         assertEquals("PLUGIN", decoded.messages().get(1).source());
         assertEquals(1, decoded.messages().get(1).imageCount());
         assertEquals(LlmClient.MessageSource.PLUGIN,
                 decoded.toLlmMessages().get(1).source());
+        assertEquals(pluginMessage, decoded.toLlmMessages().get(1));
     }
 
     @Test

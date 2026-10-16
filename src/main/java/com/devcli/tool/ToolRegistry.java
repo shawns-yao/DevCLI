@@ -106,6 +106,11 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public static <T> T runWithToolTask(String identity, java.util.function.Supplier<T> action) {
         return ToolAccessContext.runWithToolTask(identity, action);
     }
+
+    public static <T> T runWithResultEvents(com.devcli.event.RunEventSink sink,
+                                          java.util.function.Supplier<T> action) {
+        return ToolAccessContext.runWithResultEvents(sink, action);
+    }
     java.util.function.BiConsumer<String, String[]> writeFileObserver = (p, ba) -> {};
     /** 按 step 归集 write_file 实际写过的文件（key 为 resourceLeaseStep 的 stepId），供 checkpoint 记录产物。 */
     final java.util.concurrent.ConcurrentHashMap<String, java.util.Set<String>> stepModifiedFiles =

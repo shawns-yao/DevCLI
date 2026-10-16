@@ -165,6 +165,10 @@ final class ToolBatchExecution {
                             cancelAll(callTokens, CancellationToken.Reason.UPSTREAM,
                                     "等待工具结果时收到上游中断");
                         } catch (ExecutionException e) {
+                            if (e.getCause() instanceof com.devcli.event.RunEventSink.PersistenceFailure failure) {
+                                cancelAll(callTokens, CancellationToken.Reason.UPSTREAM, failure.getMessage());
+                                throw failure;
+                            }
                             CancellationToken token = callTokens.get(i);
                             results.add(token.cancellation().isPresent()
                                     ? resultForCancellation(invocation, token, 0, snapshot)
@@ -298,6 +302,8 @@ final class ToolBatchExecution {
                     snapshot == null
                             ? registry.toolPresentation(invocation.name())
                             : snapshot.presentation(invocation.name()));
+        } catch (com.devcli.event.RunEventSink.PersistenceFailure failure) {
+            throw failure;
         } catch (RuntimeException e) {
             if (callToken.cancellation().isPresent()) {
                 return resultForCancellation(

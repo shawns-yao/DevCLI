@@ -186,9 +186,22 @@ final class ToolPipelineAssembly {
             registry.toolResultCache.putIfGeneration(fingerprint, output, generation);
             return output;
         });
+        registry.executionPipeline.register(ToolExecutionPipeline.Stage.RESULT_RECORDING, (context, chain) -> {
+            ToolOutput output = chain.proceed(context);
+            var sink = ToolAccessContext.resultEvents.get();
+            if (sink != null) {
+                ToolOutput original = context.attribute("journal.result", ToolOutput.class);
+                sink.emit(com.devcli.event.RunEvent.ToolResultRecorded.from(
+                        context.invocationId(), context.name(), context.argumentsJson(),
+                        original == null ? output : original, context.executionContext().elapsedMillis(),
+                        registry.toolPresentation(context.name())));
+            }
+            return output;
+        });
         registry.executionPipeline.register(ToolExecutionPipeline.Stage.RESULT_GOVERNANCE, (context, chain) -> {
             long started = System.nanoTime();
             ToolOutput output = chain.proceed(context);
+            context.putAttribute("journal.result", output);
             return registry.governToolOutput(context.name(), context.invocationId(), output,
                     registry.elapsedMillis(started));
         });

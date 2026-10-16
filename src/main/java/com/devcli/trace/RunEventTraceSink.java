@@ -53,11 +53,17 @@ public final class RunEventTraceSink implements RunEventSink {
         return event instanceof RunEvent.ReasoningDelta
                 || event instanceof RunEvent.MessageDelta
                 || event instanceof RunEvent.ModelContext
-                || event instanceof RunEvent.ModelMessage;
+                || event instanceof RunEvent.ModelMessage
+                || event instanceof RunEvent.ToolResultRecorded
+                || event instanceof RunEvent.AgentEvent child && isStreamNoise(child.event());
     }
 
     private static void extractFields(RunEvent event, Map<String, Object> fields) {
-        if (event instanceof RunEvent.TurnStarted started) {
+        if (event instanceof RunEvent.AgentEvent child) {
+            fields.put("agent_id", child.agentId());
+            fields.put("event_type", child.event().type());
+            extractFields(child.event(), fields);
+        } else if (event instanceof RunEvent.TurnStarted started) {
             fields.put("input", abbreviate(started.input()));
         } else if (event instanceof RunEvent.ModelUsage usage) {
             fields.put("input_tokens", usage.inputTokens());

@@ -35,7 +35,14 @@ class RunEventTraceSinkTest {
         sink.emit(new RunEvent.ModelContext(1, List.of()));
         sink.emit(new RunEvent.ModelMessage(
                 new RunEvent.ModelMessageData("assistant", "MODEL", "x", "",
-                        List.of(), "", 0)));
+                        List.of(), "", 0, List.of())));
+        var result = RunEvent.ToolResultRecorded.from("call", "read_file", "{}",
+                com.devcli.tool.ToolOutput.success("private full body"), 1,
+                com.devcli.tool.ToolPresentation.generic("read"));
+        sink.emit(result);
+        sink.emit(new RunEvent.AgentEvent("child", result));
+        sink.emit(new RunEvent.AgentEvent("child", RunEvent.ModelMessage.from(
+                com.devcli.llm.LlmClient.Message.user("private child context"))));
 
         try (var paths = Files.list(tempDir)) {
             assertEquals(0, paths.count(), "流式增量与全量上下文不应写入 trace");

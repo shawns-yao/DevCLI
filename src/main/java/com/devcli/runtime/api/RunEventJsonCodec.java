@@ -26,7 +26,16 @@ public final class RunEventJsonCodec {
         if (turnId != null && !turnId.isBlank()) {
             payload.put("turn_id", turnId);
         }
-        if (event instanceof RunEvent.ThreadCreated created) {
+        if (event instanceof RunEvent.AgentEvent child) {
+            payload.put("agent_id", child.agentId());
+            payload.put("event_type", child.event().type());
+            payload.set("event", parseArguments(encode(child.event(), turnId)));
+        } else if (event instanceof RunEvent.ToolResultRecorded recorded) {
+            writeToolResult(payload.putObject("result"), recorded.result());
+            writeContentParts(payload.putArray("images"), recorded.images());
+            payload.set("modified_resources", MAPPER.valueToTree(recorded.modifiedResources()));
+            payload.set("artifacts", MAPPER.valueToTree(recorded.artifacts()));
+        } else if (event instanceof RunEvent.ThreadCreated created) {
             payload.put("thread_id", created.threadId());
         } else if (event instanceof RunEvent.TurnStarted started) {
             payload.put("input", started.input());
@@ -92,18 +101,7 @@ public final class RunEventJsonCodec {
         } else if (event instanceof RunEvent.ToolResults toolResults) {
             ArrayNode results = payload.putArray("results");
             for (RunEvent.ToolResultData result : toolResults.results()) {
-                ObjectNode item = results.addObject();
-                item.put("id", result.id());
-                item.put("name", result.name());
-                item.set("arguments", parseArguments(result.argumentsJson()));
-                item.put("result", result.result());
-                item.put("status", result.status());
-                item.put("error_code", result.errorCode());
-                item.put("retryable", result.retryable());
-                item.put("elapsed_millis", result.elapsedMillis());
-                item.put("image_count", result.imageCount());
-                item.put("exit_code", result.exitCode());
-                writePresentation(item.putObject("presentation"), result.presentation());
+                writeToolResult(results.addObject(), result);
             }
         } else if (event instanceof RunEvent.HookInvocationStarted hook) {
             payload.put("invocation_id", hook.invocationId());
@@ -143,6 +141,20 @@ public final class RunEventJsonCodec {
             throw new IllegalArgumentException("不支持的运行事件: " + event.getClass().getName());
         }
         return payload.toString();
+    }
+
+    private static void writeToolResult(ObjectNode item, RunEvent.ToolResultData result) {
+        item.put("id", result.id());
+        item.put("name", result.name());
+        item.set("arguments", parseArguments(result.argumentsJson()));
+        item.put("result", result.result());
+        item.put("status", result.status());
+        item.put("error_code", result.errorCode());
+        item.put("retryable", result.retryable());
+        item.put("elapsed_millis", result.elapsedMillis());
+        item.put("image_count", result.imageCount());
+        item.put("exit_code", result.exitCode());
+        writePresentation(item.putObject("presentation"), result.presentation());
     }
 
     static Optional<RunEvent.ModelContext> decodeModelContext(String data) {
@@ -188,6 +200,7 @@ public final class RunEventJsonCodec {
         target.put("reasoning_content", message.reasoningContent());
         target.put("tool_call_id", message.toolCallId());
         target.put("image_count", message.imageCount());
+        writeContentParts(target.putArray("content_parts"), message.contentParts());
         ArrayNode toolCalls = target.putArray("tool_calls");
         for (RunEvent.ToolCallData call : message.toolCalls()) {
             ObjectNode item = toolCalls.addObject();
@@ -215,7 +228,28 @@ public final class RunEventJsonCodec {
                 value.path("reasoning_content").asText(""),
                 calls,
                 value.path("tool_call_id").asText(""),
-                value.path("image_count").asInt(0));
+                value.path("image_count").asInt(0), contentParts(value.path("content_parts")));
+    }
+
+    static List<com.devcli.llm.LlmClient.ContentPart> contentParts(JsonNode values) {
+        List<com.devcli.llm.LlmClient.ContentPart> parts = new ArrayList<>();
+        for (JsonNode value : values) {
+            parts.add(new com.devcli.llm.LlmClient.ContentPart(value.path("type").asText(),
+                    value.path("text").asText(null), value.path("image_base64").asText(null),
+                    value.path("image_url").asText(null), value.path("mime_type").asText(null)));
+        }
+        return List.copyOf(parts);
+    }
+
+    private static void writeContentParts(ArrayNode target, List<com.devcli.llm.LlmClient.ContentPart> parts) {
+        for (var part : parts) {
+            ObjectNode item = target.addObject();
+            item.put("type", part.type());
+            item.put("text", part.text());
+            item.put("image_base64", part.imageBase64());
+            item.put("image_url", part.imageUrl());
+            item.put("mime_type", part.mimeType());
+        }
     }
 
     private static void writePresentation(ObjectNode target, ToolPresentation presentation) {

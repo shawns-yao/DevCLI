@@ -15,6 +15,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class ToolExecutionPipeline {
 
     public enum Stage {
+        RESULT_RECORDING,
         CANCELLATION,
         EXISTENCE,
         CAPABILITY,

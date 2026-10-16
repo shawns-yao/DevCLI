@@ -12,6 +12,13 @@ public interface RunEventSink {
 
     void emit(RunEvent event);
 
+    /** 事实记录失败必须退出执行，不能作为可重试的工具失败继续调用模型。 */
+    final class PersistenceFailure extends RuntimeException {
+        public PersistenceFailure(RuntimeException cause) {
+            super("会话事件写入失败: " + cause.getMessage(), cause);
+        }
+    }
+
     static RunEventSink composite(RunEventSink... sinks) {
         if (sinks == null || sinks.length == 0) return NO_OP;
         List<RunEventSink> active = Arrays.stream(sinks)

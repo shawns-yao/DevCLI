@@ -25,9 +25,36 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
         RunEvent.ToolResults, RunEvent.HookInvocationStarted, RunEvent.HookInvocationCompleted,
         RunEvent.TurnCompleted, RunEvent.TurnFailed,
         RunEvent.TurnRejected, RunEvent.CheckpointCreated, RunEvent.CheckpointFailed,
-        RunEvent.ContextCompacted {
+        RunEvent.ContextCompacted, RunEvent.ToolResultRecorded, RunEvent.AgentEvent {
 
     String type();
+
+    /** 子 Agent 的独立事件流；父上下文只消费委派工具的最终报告。 */
+    record AgentEvent(String agentId, RunEvent event) implements RunEvent {
+        @Override public String type() { return "agent.event"; }
+    }
+
+    /** 安全审查后、尺寸治理前的工具事实；不作为模型上下文直接注入。 */
+    record ToolResultRecorded(ToolResultData result, List<LlmClient.ContentPart> images,
+                              List<String> modifiedResources,
+                              List<com.devcli.tool.ToolResultArtifact> artifacts) implements RunEvent {
+        public ToolResultRecorded {
+            images = List.copyOf(images);
+            modifiedResources = List.copyOf(modifiedResources);
+            artifacts = List.copyOf(artifacts);
+        }
+        public static ToolResultRecorded from(String id, String name, String arguments,
+                                               com.devcli.tool.ToolOutput output, long elapsedMillis,
+                                               ToolPresentation presentation) {
+            var execution = new ToolContract.ToolExecutionResult(id, name, arguments, output.text(), elapsedMillis,
+                    output.status(), output.errorCode(), output.retryable(), output.imageParts(), output.sideChannels(), presentation);
+            return new ToolResultRecorded(ToolResults.from(List.of(execution)).results().get(0),
+                    output.imageParts(), output.modifiedResources(), output.sideChannels().stream()
+                    .filter(com.devcli.tool.ToolResultArtifact.class::isInstance)
+                    .map(com.devcli.tool.ToolResultArtifact.class::cast).toList());
+        }
+        @Override public String type() { return "tool.result.recorded"; }
+    }
 
     record ThreadCreated(String threadId) implements RunEvent {
         public ThreadCreated {
@@ -501,7 +528,7 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
             String reasoningContent,
             List<ToolCallData> toolCalls,
             String toolCallId,
-            int imageCount) {
+            int imageCount, List<LlmClient.ContentPart> contentParts) {
         public ModelMessageData {
             role = text(role);
             source = text(source);
@@ -510,6 +537,7 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
             toolCalls = toolCalls == null ? List.of() : List.copyOf(toolCalls);
             toolCallId = text(toolCallId);
             imageCount = Math.max(0, imageCount);
+            contentParts = List.copyOf(contentParts);
         }
 
         public static ModelMessageData from(LlmClient.Message message) {
@@ -532,7 +560,7 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
                     value.reasoningContent(),
                     calls,
                     value.toolCallId(),
-                    value.imagePartCount());
+                    value.imagePartCount(), value.hasContentParts() ? value.contentParts() : List.of());
         }
 
         public LlmClient.Message toLlmMessage() {
@@ -556,7 +584,7 @@ public sealed interface RunEvent permits RunEvent.ThreadCreated, RunEvent.TurnSt
                     reasoningContent.isBlank() ? null : reasoningContent,
                     calls,
                     toolCallId.isBlank() ? null : toolCallId,
-                    null,
+                    contentParts.isEmpty() ? null : contentParts,
                     parsedSource);
         }
     }

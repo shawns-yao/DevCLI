@@ -70,6 +70,20 @@ final class ToolAccessContext {
 
     static final ThreadLocal<String> toolTaskIdentity = new ThreadLocal<>();
 
+    static final InheritableThreadLocal<com.devcli.event.RunEventSink> resultEvents =
+            new InheritableThreadLocal<>();
+
+    static <T> T runWithResultEvents(com.devcli.event.RunEventSink sink, Supplier<T> action) {
+        var previous = resultEvents.get();
+        resultEvents.set(sink);
+        try {
+            return action.get();
+        } finally {
+            if (previous == null) resultEvents.remove();
+            else resultEvents.set(previous);
+        }
+    }
+
     static <T> T runWithToolTask(String identity, java.util.function.Supplier<T> action) {
         String previous = toolTaskIdentity.get();
         if (identity == null) toolTaskIdentity.remove();
