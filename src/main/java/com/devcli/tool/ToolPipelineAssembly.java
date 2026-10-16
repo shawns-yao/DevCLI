@@ -16,6 +16,12 @@ final class ToolPipelineAssembly {
     private final ToolRegistry registry;
     ToolPipelineAssembly(ToolRegistry registry) { this.registry = registry; }
     void configureExecutionPipeline() {
+        registry.executionPipeline.register(ToolExecutionPipeline.Stage.HITL, (context, chain) -> {
+            ToolOutput denied = registry.executionCore.validateCommandRequest(context);
+            if (denied != null) registry.recordToolAudit(AuditLog.AuditEntry.denyByPolicy(
+                    context.name(), context.argumentsJson(), denied.text(), 0), context);
+            return denied == null ? registry.reviewToolApproval(context, chain) : denied;
+        });
         registry.executionPipeline.register(ToolExecutionPipeline.Stage.CANCELLATION, (context, chain) ->
                 context.executionContext().isCancelled()
                         ? ToolOutput.cancelled("用户取消了此次工具调用")
@@ -81,6 +87,10 @@ final class ToolPipelineAssembly {
         });
         registry.executionPipeline.register(ToolExecutionPipeline.Stage.SEMANTIC_VALIDATION, (context, chain) -> {
             ToolOutput error = registry.validateToolSemantics(context.name(), context.argumentsJson());
+            if (error != null && registry.requiresAudit(context.name())) {
+                registry.recordToolAudit(AuditLog.AuditEntry.denyByPolicy(
+                        context.name(), context.argumentsJson(), error.text(), 0), context);
+            }
             return error == null ? chain.proceed(context) : error;
         });
         registry.executionPipeline.register(ToolExecutionPipeline.Stage.CONTENT_REVIEW, (context, chain) -> {

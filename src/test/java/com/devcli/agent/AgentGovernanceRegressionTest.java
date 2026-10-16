@@ -252,9 +252,9 @@ class AgentGovernanceRegressionTest {
             this.approveHostCommand = approveHostCommand;
         }
         @Override public void markRagIndexDirty(Collection<String> paths) { }
-        @Override protected com.devcli.tool.ToolOutput reviewHostCommand(
-                com.devcli.tool.command.CommandExecutionService.Request request) {
-            return approveHostCommand ? null : super.reviewHostCommand(request);
+        @Override protected com.devcli.tool.ToolOutput reviewToolApproval(
+                com.devcli.tool.ToolExecutionPipeline.Context context, com.devcli.tool.ToolExecutionPipeline.Chain chain) {
+            return approveHostCommand ? chain.proceed(context) : super.reviewToolApproval(context, chain);
         }
         @Override protected ToolRegistry createProjectForkRegistry(ResourceLeaseMaintenance maintenance) {
             return new NoIndexRegistry(maintenance, approveHostCommand);

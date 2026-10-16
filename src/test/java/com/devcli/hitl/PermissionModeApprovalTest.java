@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 「模式能放行什么」与「模式放不过什么」——后者才是安全边界。</p>
  *
  * <p>本测试只覆盖非隔离路径下的工具（{@code write_file} / {@code delete_files}）。
- * 主机命令走 {@code reviewHostCommand}，不经过这里，见类尾注释。</p>
+ * 主机命令的项目信任与分类器行为见 PermissionClassifierTest。</p>
  */
 class PermissionModeApprovalTest {
 
@@ -74,7 +74,7 @@ class PermissionModeApprovalTest {
         var output = registry.executeToolOutput("write_file", writeArgs("a.txt"));
 
         assertEquals(ToolErrorCode.POLICY_DENIED, output.errorCode(), output.text());
-        assertTrue(output.text().contains("[规则]"), output.text());
+        assertTrue(output.text().contains("硬阻止规则"), output.text());
         assertFalse(Files.exists(tempDir.resolve("a.txt")));
     }
 
@@ -91,7 +91,7 @@ class PermissionModeApprovalTest {
 
         assertEquals(ToolStatus.SUCCESS, write.status(), write.text());
         assertEquals(ToolStatus.SUCCESS, delete.status(), delete.text());
-        assertEquals(0, handler.requestCount(), "bypassPermissions 不应发起审批");
+        assertEquals(1, handler.requestCount(), "未获范围授权的删除仍逐次确认");
         assertTrue(Files.exists(tempDir.resolve("b.txt")));
         assertFalse(Files.exists(tempDir.resolve("a.txt")));
     }
@@ -133,7 +133,7 @@ class PermissionModeApprovalTest {
         var output = registry.executeToolOutput("write_file", writeArgs("../" + outsideName));
 
         assertEquals(ToolErrorCode.POLICY_DENIED, output.errorCode(), output.text());
-        assertTrue(output.text().contains("[策略]"), output.text());
+        assertTrue(output.text().contains("策略拒绝"), output.text());
         assertFalse(Files.exists(outside), "模式不能越过项目根围栏");
     }
 
@@ -258,10 +258,6 @@ class PermissionModeApprovalTest {
 
         assertEquals(PermissionMode.DEFAULT, registry.currentPermissionMode());
     }
-
-    // 未覆盖：execute_command 在非隔离路径下由 applyHitl 第一行早退到 reviewHostCommand，
-    // 不经过规则层与模式短路。这是既有行为，不是本测试能固化的契约——修好之前不写测试，
-    // 否则等于把缺口写成规格。见 docs/adr/0006 的「已知缺口」。
 
     /** 记录审批次数并一律批准的 handler。 */
     private static final class RecordingHandler implements HitlHandler {

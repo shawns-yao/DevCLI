@@ -40,14 +40,14 @@ final class PrintCommandLauncher {
             LlmClient client = LlmClientFactory.createFromConfig(config);
             if (client == null) throw new IllegalStateException("未找到可用的 API Key，请检查 provider 配置");
             return run(args[1], client, config, Path.of("."), output, diagnostics);
-        } catch (RuntimeException failure) {
+        } catch (RuntimeException | java.io.IOException failure) {
             output.println(JSON.createObjectNode().put("status", "failed").put("error", failure.getMessage()));
             return 1;
         }
     }
 
     static int run(String prompt, LlmClient client, DevCliConfig config, Path project,
-                   PrintStream output, PrintStream diagnostics) {
+                   PrintStream output, PrintStream diagnostics) throws java.io.IOException {
         Usage usage = new Usage();
         HitlHandler approvals = new HitlHandler() {
             public ApprovalResult requestApproval(ApprovalRequest request) {
@@ -61,6 +61,8 @@ final class PrintCommandLauncher {
                 .withPermissionMode(CliSettings.startupPermissionMode(config))
                 .withPermissionClassifier(CliSettings.permissionClassifier(new AtomicReference<>(client)))) {
             tools.setProjectPath(project.toAbsolutePath().normalize().toString());
+            tools.withProjectPermissions(com.devcli.config.ProjectPermissionsStore.openDefault(),
+                    com.devcli.config.ProjectPermissionsStore.key(project));
             try (Agent agent = new Agent(client, tools);
                  PlainRenderer renderer = PlainRenderer.nonInteractive(diagnostics);
                  AgentSessionRuntime session = AgentSessionRuntime.adopt(agent, project)) {

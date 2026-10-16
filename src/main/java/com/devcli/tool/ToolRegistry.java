@@ -583,17 +583,21 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public String executeCommand(String command) {
         return executeCommandOutput(command).text();
     }
-    @Override
     public ToolOutput executeCommandOutput(String command) {
-        return executionCore.executeCommandOutput(command);
+        return executeCommandOutput(command, ToolExecutionContext.current(""));
     }
 
     public ToolOutput executeCommandOutput(String command, ToolExecutionContext executionContext) {
         return executeCommandOutput(command, commandTimeoutSeconds, executionContext);
     }
 
-    @Override
     public ToolOutput executeCommandOutput(String command, long timeoutSeconds, ToolExecutionContext executionContext) {
+        String arguments = mapper.createObjectNode().put("command", command).put("timeout", timeoutSeconds).toString();
+        return executionPipeline.execute("execute_command", arguments, executionContext.invocationId(), executionContext);
+    }
+
+    @Override
+    public ToolOutput runApprovedCommand(String command, long timeoutSeconds, ToolExecutionContext executionContext) {
         return executionCore.executeCommandOutput(command, timeoutSeconds, executionContext);
     }
 
@@ -602,10 +606,16 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                 currentToolAccessScope() == ToolAccessScope.ISOLATED_PROJECT);
     }
 
-    /** Null means one execution was explicitly approved; never cache this decision. */
-    protected ToolOutput reviewHostCommand(CommandExecutionService.Request request) {
-        return ToolOutput.rejected(ToolErrorCode.HITL_REJECTED,
-                "主机命令需要单次人工确认；当前没有审批处理器，未启动进程");
+    /** 所有入口共用审批阶段；基础注册表没有主机审批通道。 */
+    protected ToolOutput reviewToolApproval(ToolExecutionPipeline.Context context, ToolExecutionPipeline.Chain chain) {
+        if (toolEffect(context.name()) == ToolEffect.HOST_PROCESS && commandExecutesOnHost()) {
+            return ToolOutput.rejected(ToolErrorCode.HITL_REJECTED, "主机命令没有审批处理器，未启动进程");
+        }
+        return chain.proceed(context);
+    }
+
+    protected final ToolOutput validateCommandRequest(ToolExecutionPipeline.Context context) {
+        return executionCore.validateCommandRequest(context);
     }
     @Override
     public java.util.function.Consumer<String> memorySaver() { return memorySaver; }

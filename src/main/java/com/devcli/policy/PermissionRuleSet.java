@@ -9,18 +9,13 @@ import java.util.List;
  * <ul>
  *   <li>{@code hard_deny} —— 安全边界，<b>无条件</b>拒绝。用户意图不能清除，允许例外也不能覆盖。
  *       对应 {@link PermissionEvaluator.Outcome#HARD_DENY}。</li>
- *   <li>{@code soft_deny} —— 用户声明的边界。<b>明确且具体的用户意图可以清除它</b>，但只有分类器
- *       有资格判断意图，所以在 {@code auto} 模式下它不短路，而是作为分类器输入参与同一次判定；
- *       其余模式没有分类器可用，退回「强制人工审批」。对应
- *       {@link PermissionEvaluator.Outcome#SOFT_DENY}。</li>
- *   <li>{@code allow} —— 允许例外。仅在软阻止上生效，且同样在 {@code auto} 模式下交给分类器
- *       判断（参照实现规定例外是强制的，但有两个例外情形：伪装成例外的可疑动作、用户明确设下的
- *       边界——两者都要分类器才判得出来）。</li>
+ *   <li>{@code soft_deny} —— 所有模式下要求人工确认。</li>
+ *   <li>{@code allow} —— 规则先于分类器放行，不能覆盖软拒绝或独立逐次确认要求。</li>
  *   <li>{@code environment} —— 用户环境的事实描述（哪些域名可信、哪些资源是共享的）。
  *       它<b>不产生任何判定</b>，只作为上下文进分类器提示词，供其余三类规则与内置判据引用。</li>
  * </ul>
  *
- * <p>非自动模式的求值顺序见 {@link PermissionEvaluator}：
+ * <p>所有模式的求值顺序见 {@link PermissionEvaluator}：
  * {@code hard_deny} → {@code soft_deny} → {@code allow}。</p>
  *
  * <p>不可变值对象。规则集为空是合法状态，表示「没有用户规则」，此时求值一律返回未决，
@@ -87,16 +82,6 @@ public record PermissionRuleSet(List<PermissionRule> hardDeny,
             target.append(" · ");
         }
         target.append(label).append(' ').append(count);
-    }
-
-    /**
-     * 命中所给工具的放行规则。
-     *
-     * <p>供调用方检查「这条规则到底会不会生效」：主机执行的命令必须单次人工确认，
-     * 因此 {@code allow execute_command(...)} 在主机后端上不参与判定，加载期据此提示用户。</p>
-     */
-    public List<PermissionRule> allowRulesForTool(String toolName) {
-        return allow.stream().filter(rule -> rule.matchesTool(toolName)).toList();
     }
 
 }

@@ -114,9 +114,8 @@ public interface ToolProvider {
 
         String executeCommand(String command);
 
-        ToolOutput executeCommandOutput(String command);
-
-        ToolOutput executeCommandOutput(String command, long timeoutSeconds,
+        /** 仅供已通过工具管线的执行器调度后端；运行时调用使用 ToolRegistry.executeCommandOutput。 */
+        ToolOutput runApprovedCommand(String command, long timeoutSeconds,
                                         ToolExecutionContext executionContext);
 
         Consumer<String> memorySaver();

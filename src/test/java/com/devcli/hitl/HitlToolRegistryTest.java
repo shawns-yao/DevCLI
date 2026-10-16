@@ -261,7 +261,7 @@ class HitlToolRegistryTest {
                         "{\"path\":\"" + outside.toString().replace("\\", "\\\\")
                                 + "\",\"content\":\"x\"}"));
 
-        assertTrue(result.contains("[策略] 已拒绝"), result);
+        assertTrue(result.contains("策略拒绝"), result);
         assertFalse(Files.exists(outside), "越界写即使有授权也必须被策略拒绝");
         assertEquals(0, stub.requestCount(), "策略必然拒绝的操作不应先打扰用户");
     }

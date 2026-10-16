@@ -59,7 +59,7 @@ public class DevCliConfig {
      * 权限配置段。承载持久授权基线与用户规则层。
      *
      * <p>规则分四类，与参照实现的四个用户规则类别一一对应：{@code hardDeny}（无条件拒绝）、
-     * {@code softDeny}（用户声明的边界，明确意图可清除）、{@code allow}（允许例外）、
+     * {@code softDeny}（要求人工确认）、{@code allow}（允许例外）、
      * {@code environment}（环境事实，只作上下文不产生判定）。配置键使用
      * {@code hard_deny} / {@code soft_deny} / {@code allow} / {@code environment}，不保留旧别名。</p>
      *
@@ -102,7 +102,7 @@ public class DevCliConfig {
             this.hardDeny = hardDeny == null ? new ArrayList<>() : new ArrayList<>(hardDeny);
         }
 
-        /** 用户声明的边界规则：明确且具体的用户意图可以清除它。 */
+        /** 用户声明的询问规则：所有模式均要求人工确认。 */
         @JsonProperty("soft_deny")
         public List<String> getSoftDeny() {
             return softDeny == null ? List.of() : softDeny;

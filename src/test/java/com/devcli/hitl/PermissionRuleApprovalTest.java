@@ -42,7 +42,7 @@ class PermissionRuleApprovalTest {
 
         assertEquals(ToolStatus.REJECTED, output.status());
         assertEquals(ToolErrorCode.POLICY_DENIED, output.errorCode());
-        assertTrue(output.text().contains("[规则] 已拒绝"), output.text());
+        assertTrue(output.text().contains("硬阻止规则"), output.text());
         assertEquals(0, handler.requestCount(), "拒绝规则不应再打扰用户");
         assertFalse(Files.exists(tempDir.resolve("a.txt")));
     }
@@ -108,7 +108,7 @@ class PermissionRuleApprovalTest {
                 "{\"path\":\"../" + outsideName + "\",\"content\":\"x\"}");
 
         assertEquals(ToolErrorCode.POLICY_DENIED, output.errorCode(), output.text());
-        assertTrue(output.text().contains("[策略]"), output.text());
+        assertTrue(output.text().contains("策略拒绝"), output.text());
         assertFalse(Files.exists(outside), "放行规则不能越过项目根围栏");
     }
 

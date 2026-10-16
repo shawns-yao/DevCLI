@@ -22,15 +22,43 @@ import java.util.concurrent.locks.ReentrantLock;
  * 在统一工具执行管线的 HITL 阶段插入人工审批。
  */
 public class HitlToolRegistry extends ToolRegistry {
-    private static final com.fasterxml.jackson.databind.ObjectMapper JSON =
-            new com.fasterxml.jackson.databind.ObjectMapper();
-
     private final HitlHandler hitlHandler;
     private final int deleteApprovalThreshold = ConfigResolver.intValue(
             "devcli.delete.approval.threshold", "DEVCLI_DELETE_APPROVAL_THRESHOLD", 50, 1, 500);
     private final ReentrantLock approvalLock;
     /** 用户规则层；空集合表示没有规则，审批链行为与未引入规则时完全一致。 */
     private volatile PermissionRuleSet permissionRules = PermissionRuleSet.EMPTY;
+    private com.devcli.config.ProjectPermissionsStore projectPermissions;
+    private String permissionProject;
+    private java.nio.file.Path permissionRoot;
+    private java.util.concurrent.atomic.AtomicInteger consecutiveBlocks = new java.util.concurrent.atomic.AtomicInteger();
+    private java.util.concurrent.atomic.AtomicInteger totalBlocks = new java.util.concurrent.atomic.AtomicInteger();
+
+    public HitlToolRegistry withProjectPermissions(com.devcli.config.ProjectPermissionsStore store, String project) {
+        projectPermissions = store;
+        permissionProject = project;
+        permissionRoot = contextProjectRoot();
+        return this;
+    }
+
+    private boolean trustedProject() {
+        return projectPermissions != null && permissionRoot.equals(contextProjectRoot())
+                && projectPermissions.isTrusted(permissionProject);
+    }
+
+    private PermissionRuleSet effectiveRules() {
+        if (projectPermissions == null || !permissionRoot.equals(contextProjectRoot())) return permissionRules;
+        var allow = new java.util.ArrayList<>(permissionRules.allow());
+        allow.addAll(com.devcli.policy.PermissionRule.parseAll(projectPermissions.allowRules(permissionProject)));
+        return new PermissionRuleSet(permissionRules.hardDeny(), permissionRules.softDeny(), allow, permissionRules.environment());
+    }
+
+    private PermissionRuleSet classifierRules(String tool) {
+        var rules = effectiveRules();
+        if (com.devcli.policy.ToolResourceSlot.of(tool) != com.devcli.policy.ToolResourceSlot.COMMAND) return rules;
+        return new PermissionRuleSet(rules.hardDeny(), rules.softDeny(), rules.allow().stream()
+                .filter(com.devcli.policy.CommandPermissionRules::isNarrow).toList(), rules.environment());
+    }
     /**
      * 权限模式；默认逐个询问。
      *
@@ -100,6 +128,8 @@ public class HitlToolRegistry extends ToolRegistry {
         PermissionMode previous = this.permissionMode.getAndSet(effective);
         if (previous != effective) {
             classifierFailures.set(0);
+            consecutiveBlocks.set(0);
+            totalBlocks.set(0);
         }
         return this;
     }
@@ -145,7 +175,6 @@ public class HitlToolRegistry extends ToolRegistry {
         super();
         this.hitlHandler = hitlHandler;
         this.approvalLock = approvalLock;
-        registerExecutionMiddleware(ToolExecutionPipeline.Stage.HITL, this::applyHitl);
     }
 
     /**
@@ -165,111 +194,58 @@ public class HitlToolRegistry extends ToolRegistry {
         if (sharedClassifierFailures != null) {
             this.classifierFailures = sharedClassifierFailures;
         }
-        registerExecutionMiddleware(ToolExecutionPipeline.Stage.HITL, this::applyHitl);
     }
 
-    private ToolOutput applyHitl(ToolExecutionPipeline.Context context,
-                                 ToolExecutionPipeline.Chain chain) {
+    @Override
+    protected ToolOutput reviewToolApproval(ToolExecutionPipeline.Context context, ToolExecutionPipeline.Chain chain) {
         String name = context.name();
-        String argumentsJson = context.argumentsJson();
-        if ("execute_command".equals(name) && commandExecutesOnHost()) {
-            // The exact final command is reviewed immediately before backend dispatch.
-            return chain.proceed(context);
-        }
         boolean approvalRequired = requiresApproval(name);
-        if (!approvalRequired && !isMcpTool(name)) {
+        boolean host = toolEffect(name) == ToolEffect.HOST_PROCESS && commandExecutesOnHost();
+        if (host) context.putAttribute("approval.project", getProjectPath());
+        ApprovalGate.Result gate = ApprovalGate.decide(name, parsedArgumentsOf(context), currentTaskGrant(), approvalPathScope);
+        if (gate.decision() == ApprovalGate.Decision.DENY) return denyPolicy(context, gate.reason());
+
+        PermissionRuleSet activeRules = effectiveRules();
+        // 主机规则始终要求明确的命令范围；auto 的其他命令同样丢弃过宽 allow。
+        PermissionEvaluator.Result rules = PermissionEvaluator.evaluate(name,
+                ApprovalGate.resourceValues(name, parsedArgumentsOf(context), approvalPathScope), activeRules,
+                host || currentPermissionMode() == PermissionMode.AUTO);
+        if (rules.outcome() == PermissionEvaluator.Outcome.HARD_DENY) return denyPolicy(context, rules.reason());
+
+        BrowserCheckResult browser = checkBrowserTool(name, context.argumentsJson(), true);
+        if (browser.blocked()) return chain.proceed(context);
+        if (browser.requiresPerCallApproval()) return askOrDeny(context, chain, browser.sensitiveNotice());
+
+        boolean allowedByRules = rules.outcome() == PermissionEvaluator.Outcome.ALLOW;
+        boolean authorized = allowedByRules || gate.decision() == ApprovalGate.Decision.ALLOW;
+        DeleteFilesTool.Plan deletion = context.attribute(DeleteFilesTool.PLAN_ATTRIBUTE, DeleteFilesTool.Plan.class);
+        if (deletion != null && (deletion.changes().size() >= deleteApprovalThreshold || !authorized)) {
+            return askOrDeny(context, chain, deletion.notice());
+        }
+        if (toolEffect(name) == ToolEffect.HOST_PROCESS
+                && CommandGuard.containsDeletion(parsedArgumentsOf(context).path("command").asText())) {
+            return askOrDeny(context, chain, "检测到命令删除操作，必须单次确认；无法可靠统计目标数量及递归范围。优先使用 delete_files 提供明确文件清单。");
+        }
+        if ("revert_turn".equals(name)) {
+            return askOrDeny(context, chain, "工作区回滚会批量覆盖当前文件，必须单次人工确认。");
+        }
+        if (mcpToolRequiresPerCallApproval(name)) return askOrDeny(context, chain, mcpToolApprovalNotice(name));
+        if (rules.outcome() == PermissionEvaluator.Outcome.SOFT_DENY) return askOrDeny(context, chain, rules.reason());
+        if (host && !trustedProject()) {
+            return askOrDeny(context, chain, "当前项目尚未信任，主机命令仅允许本次确认。构建脚本可能执行任意主机代码。");
+        }
+        if (authorized) {
+            context.putAttribute(PIPELINE_APPROVAL_SOURCE, allowedByRules ? "permission_rule" : "task_grant");
+            hitlHandler.onTaskGrantAllow(name, allowedByRules ? rules.reason() : gate.reason());
             return chain.proceed(context);
         }
-        // 这里曾经有 hitlHandler.isEnabled() 早退，已删除：策略硬边界与用户规则层必须无条件执行，
-        // 否则一条 deny 规则会挂在「是否开启人工审批」这个开关后面而静默失效。
-        // 「要不要问」改由权限模式决定，见下方的模式短路与 askOrDeny 收口。
-
-        BrowserCheckResult browserCheck = checkBrowserTool(name, argumentsJson, true);
-        if (browserCheck.blocked()) {
-            return chain.proceed(context);
-        }
-        if (browserCheck.requiresPerCallApproval()) {
-            return askOrDeny(context, chain, browserCheck.sensitiveNotice());
-        }
-
-        // 求值链第 0 步：策略硬边界。路径越界、命令黑名单、非法 URL scheme 先拒绝。
-        // 规则层与任务授权都在它之后，因此任何规则都不能放宽系统策略边界。
-        ApprovalGate.Result gate = ApprovalGate.decide(
-                name, parsedArgumentsOf(context), currentTaskGrant(), approvalPathScope);
-        if (gate.decision() == ApprovalGate.Decision.DENY) {
-            recordToolAudit(AuditLog.AuditEntry.denyByPolicy(
-                    name, argumentsJson, gate.reason(), 0L), context);
-            return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
-                    "[策略] 已拒绝：" + gate.reason() + "；用户授权不能放宽系统策略边界");
-        }
-
-        // 非 auto 模式按 hard_deny → soft_deny → allow 求值；auto 只提前执行 hard_deny，
-        // 其余规则交给分类器结合可信用户意图统一判断。
-        PermissionEvaluator.Result rules = PermissionEvaluator.evaluate(
-                name,
-                ApprovalGate.resourceValues(name, parsedArgumentsOf(context), approvalPathScope),
-                permissionRules);
-        if (rules.outcome() == PermissionEvaluator.Outcome.HARD_DENY) {
-            recordToolAudit(AuditLog.AuditEntry.denyByPolicy(
-                    name, argumentsJson, rules.reason(), 0L), context);
-            return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
-                    "[规则] 已拒绝：" + rules.reason() + "；放行规则与任务授权都不能覆盖它");
-        }
-        // A locally trusted read is ordinary use, but explicit user deny/ask rules still apply.
-        if (!approvalRequired && rules.outcome() != PermissionEvaluator.Outcome.SOFT_DENY) {
-            return chain.proceed(context);
-        }
-        // auto 模式下规则层不短路：分类器是那个模式的判定者，用户规则作为它的输入参与同一次判定
-        // （见 docs/adr/0013）。allow 与 soft_deny 若在此短路，注入提示词的规则就是死文本——
-        // 分类器永远看不到它们，用户声明的边界与例外都不会被采纳。
-        //
-        // 其余模式没有分类器可用，规则层照常短路：soft_deny 退回「强制人工审批」，
-        // allow 直接放行。hard_deny 在两种模式下都短路——它的判定结果与分类器的硬阻止检查完全
-        // 相同（无条件阻止），短路不会改变结论，却省掉一次模型调用、也不受端点可用性影响。
-        boolean classifierDecides =
-                currentPermissionMode().askPolicy() == PermissionMode.AskPolicy.AUTO;
-        // 求值链第 5 步：模式短路。bypassPermissions 与 acceptEdits 在规则层之后、任务授权之前放行。
-        // 放在这里而不是更晚：更晚会被任务授权范围二次约束，「不询问」等于没生效。
-        // 只接管规则层未决的动作；soft_deny 在非 auto 模式下仍强制人工确认。
-        if (rules.outcome() == PermissionEvaluator.Outcome.UNDECIDED && currentPermissionMode().autoAllows(name)) {
+        if (!approvalRequired) return chain.proceed(context);
+        if (currentPermissionMode().autoAllows(name)) {
             context.putAttribute(PIPELINE_APPROVAL_SOURCE, "permission_mode");
             hitlHandler.onTaskGrantAllow(name, currentPermissionMode().autoAllowReason());
             return chain.proceed(context);
         }
-
-        boolean allowedByRules = rules.outcome() == PermissionEvaluator.Outcome.ALLOW;
-        // 任务授权与放行规则处于同一层级：都表示「用户已经授权」，删除阈值只按数量兜底。
-        // 这里不因 auto 模式而改变：删除阈值、命令删除、补丁与回滚是各自独立的安全要求，
-        // 不是规则层的短路出口，不能因为分类器接管了规则判定就跟着放宽。
-        boolean authorized = gate.decision() == ApprovalGate.Decision.ALLOW || allowedByRules;
-
-        DeleteFilesTool.Plan deletion = context.attribute(DeleteFilesTool.PLAN_ATTRIBUTE,
-                DeleteFilesTool.Plan.class);
-        if (deletion != null && (deletion.changes().size() >= deleteApprovalThreshold || !authorized)) {
-            return askOrDeny(context, chain, deletion.notice());
-        }
-        if ("execute_command".equals(name)
-                && CommandGuard.containsDeletion(parsedArgumentsOf(context).path("command").asText())) {
-            return askOrDeny(context, chain,
-                    "检测到命令删除操作，必须单次确认；无法可靠统计目标数量及递归范围。"
-                            + "优先使用 delete_files 提供明确文件清单；恢复取决于命令行为及已有备份。");
-        }
-        if ("revert_turn".equals(name)) {
-            return askOrDeny(context, chain,
-                    "工作区回滚会批量覆盖当前文件，必须单次人工确认；恢复前虽会创建快照，"
-                            + "仍不得由自动分类器代替用户决定。");
-        }
-        if (!classifierDecides && rules.outcome() == PermissionEvaluator.Outcome.SOFT_DENY) {
-            return askOrDeny(context, chain, rules.reason());
-        }
-        if (!classifierDecides && authorized) {
-            context.putAttribute(PIPELINE_APPROVAL_SOURCE,
-                    allowedByRules ? "permission_rule" : "task_grant");
-            hitlHandler.onTaskGrantAllow(name, allowedByRules ? rules.reason() : gate.reason());
-            return chain.proceed(context);
-        }
-
-        if (classifierDecides) {
+        if (currentPermissionMode() == PermissionMode.AUTO) {
             try {
                 context.putAttribute("approval.trusted.intent", trustedIntentContext.get());
             } catch (TrustedIntentContext.IncompleteContextException incomplete) {
@@ -277,22 +253,16 @@ public class HitlToolRegistry extends ToolRegistry {
                 return askOrDeny(context, chain, incomplete.getMessage());
             }
         }
-        String mcpServer = ApprovalPolicy.mcpServerName(name);
-        boolean forcePerCallApproval = mcpToolRequiresPerCallApproval(name);
-        if (!forcePerCallApproval
-                && (hitlHandler.isApprovedAllByTool(name)
-                || hitlHandler.isApprovedAllByServer(mcpServer))) {
+        if (hitlHandler.isApprovedAllByTool(name) || hitlHandler.isApprovedAllByServer(ApprovalPolicy.mcpServerName(name))) {
             context.putAttribute(PIPELINE_APPROVAL_SOURCE, "hitl_reused");
             return chain.proceed(context);
         }
-
-        if (forcePerCallApproval) {
-            return askOrDeny(context, chain, mcpToolApprovalNotice(name));
-        }
-        // 走到这里的动作分两类：没有任何规则或安全机制要求询问、只是默认策略是「问」的；
-        // 以及 auto 模式下命中用户 allow / soft_deny 规则、规则层刻意没有短路的。
-        // 删除确认、命令删除、补丁与回滚确认、浏览器与 MCP 的逐次审批都在上面各自短路了。
         return askOrClassify(context, chain);
+    }
+
+    private ToolOutput denyPolicy(ToolExecutionPipeline.Context context, String reason) {
+        recordToolAudit(AuditLog.AuditEntry.denyByPolicy(context.name(), context.argumentsJson(), reason, 0), context);
+        return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED, "[策略] 已拒绝：" + reason);
     }
 
     /**
@@ -325,14 +295,10 @@ public class HitlToolRegistry extends ToolRegistry {
     /**
      * 交给分类器的出口：{@code auto} 模式下由它判定，其余情况照常询问。
      *
-     * <p>进到这里的有两类动作。一类是走完整条求值链、没有任何规则或安全机制要求询问、
-     * 仅仅因为默认策略才要问的；另一类是命中用户 {@code allow} / {@code soft_deny} 规则的——
-     * {@code auto} 模式下规则层不短路，规则作为分类器输入参与同一次判定，因为只有分类器看得见
-     * 对话历史，而这两类规则的语义（软阻止可被明确意图清除、允许例外可被用户边界压过）
-     * 都要求判断意图。</p>
+     * <p>只接收规则、项目编辑和独立安全要求处理后仍未决的动作。</p>
      *
      * <p>与 {@link #askOrDeny} 分开是必要的：后者承载的是「有独立理由必须问」的动作——删除确认、
-     * 命令删除、补丁与回滚确认、逐次审批。把它们一起交给分类器，等于让模型替用户取消
+     * 命令删除、回滚确认、逐次审批。把它们一起交给分类器，等于让模型替用户取消
      * 这些刻意不可免除的硬要求。</p>
      */
     private ToolOutput askOrClassify(ToolExecutionPipeline.Context context,
@@ -360,7 +326,7 @@ public class HitlToolRegistry extends ToolRegistry {
         try {
             verdict = classifier.classify(new PermissionClassifier.Request(
                     context.name(), context.argumentsJson(), getProjectPath(),
-                    currentPermissionMode().id(), context.attribute("approval.trusted.intent", String.class), permissionRules));
+                    currentPermissionMode().id(), context.attribute("approval.trusted.intent", String.class), classifierRules(context.name())));
         } catch (java.io.IOException failure) {
             return denyByClassifierFailure(context, failure.getMessage());
         }
@@ -368,9 +334,17 @@ public class HitlToolRegistry extends ToolRegistry {
         if (verdict.block()) {
             recordToolAudit(AuditLog.AuditEntry.denyByPolicy(context.name(), context.argumentsJson(),
                     "分类器阻止：" + verdict.reason(), 0L), context);
+            int consecutive = consecutiveBlocks.incrementAndGet();
+            int total = totalBlocks.incrementAndGet();
+            if (consecutive >= 3 || total >= 20) {
+                permissionMode.set(PermissionMode.DEFAULT);
+                return askOrDeny(context, chain, "auto 已连续拦截 " + consecutive + " 次、累计拦截 " + total
+                        + " 次，已切换 default；请确认当前操作。分类器理由：" + verdict.reason());
+            }
             return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
                     "[分类器] 已阻止：" + verdict.reason() + "；改用 /mode default 可恢复逐个询问");
         }
+        consecutiveBlocks.set(0);
         context.putAttribute(PIPELINE_APPROVAL_SOURCE, "permission_classifier");
         if (hitlHandler != null) {
             hitlHandler.onTaskGrantAllow(context.name(), "分类器放行：" + verdict.reason());
@@ -399,72 +373,6 @@ public class HitlToolRegistry extends ToolRegistry {
                 "分类器失败：" + reason, 0L), context);
         return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
                 "[分类器] 已拒绝：" + reason + exitNotice);
-    }
-
-    @Override
-    protected ToolOutput reviewHostCommand(com.devcli.tool.command.CommandExecutionService.Request request) {
-        String hostCommand = request.command();
-        PermissionEvaluator.Result hostRules = PermissionEvaluator.evaluate(
-                "execute_command", java.util.List.of(hostCommand), permissionRules);
-        if (hostRules.outcome() == PermissionEvaluator.Outcome.HARD_DENY) {
-            recordHostCommandDenial(request, hostRules.reason(), "host_rule");
-            return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
-                    "[规则] 已拒绝：" + hostRules.reason());
-        }
-        if (hostRules.outcome() == PermissionEvaluator.Outcome.ALLOW
-                && com.devcli.tool.command.HostWarnCommandPolicy.isProjectBuildOrReadOnlyGit(hostCommand)
-                && !CommandGuard.containsDeletion(hostCommand)) {
-            getAuditLog().record(AuditLog.AuditEntry.allow("host_command_rule", hostRules.reason(), 0)
-                    .withIdentity(new AuditLog.ExecutionIdentity(null, currentResourceLeaseStep(), null,
-                            request.executionContext().invocationId(), null, "permission_rule"),
-                            AuditLog.APPROVER_POLICY));
-            if (hitlHandler != null) hitlHandler.onTaskGrantAllow("execute_command", hostRules.reason());
-            return null;
-        }
-        String modeDenial = currentPermissionMode().denyReason();
-        if (!modeDenial.isEmpty()) {
-            recordHostCommandDenial(request, modeDenial, "host_mode");
-            return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED,
-                    "[模式] 已拒绝：" + modeDenial + "；主机执行必须单次人工确认");
-        }
-        String args;
-        try {
-            args = JSON.writeValueAsString(java.util.Map.of(
-                    "command", request.command(), "working_directory", request.projectRoot().toString()));
-        } catch (com.fasterxml.jackson.core.JsonProcessingException failure) {
-            return ToolOutput.rejected(ToolErrorCode.HITL_REJECTED, "命令参数无法安全展示，未执行");
-        }
-        String approvalId = request.executionContext().invocationId() + "/host-" + java.util.UUID.randomUUID();
-        ApprovalResult result = null;
-        if (hitlHandler != null && hitlHandler.isEnabled()) {
-            try {
-                approvalLock.lockInterruptibly();
-                try {
-                    if (request.executionContext().isCancelled()) {
-                        return ToolOutput.cancelled("主机执行审批已取消，未启动进程");
-                    }
-                    if (request.executionContext().remainingNanos() == 0) {
-                        return ToolOutput.timedOut("命令期限已到，未请求主机执行审批");
-                    }
-                    result = hitlHandler.requestApproval(ApprovalRequest.hostCommand(args, approvalId));
-                } finally {
-                    approvalLock.unlock();
-                }
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                return ToolOutput.cancelled("等待主机执行审批时被取消");
-            }
-        }
-        boolean approved = result != null && result.decision() == ApprovalResult.Decision.APPROVED;
-        getAuditLog().record((approved
-                ? AuditLog.AuditEntry.allow("host_command_approval", "单次批准主机执行", 0)
-                : AuditLog.AuditEntry.denyByHitl("host_command_approval", "{}",
-                        "未获得单次主机执行批准", 0))
-                .withIdentity(new AuditLog.ExecutionIdentity(null, currentResourceLeaseStep(), null,
-                        request.executionContext().invocationId(), approvalId, "host_once"),
-                        AuditLog.APPROVER_HITL));
-        return approved ? null : ToolOutput.rejected(ToolErrorCode.HITL_REJECTED,
-                "当前命令未命中可免确认的构建规则，必须单次明确批准；任务授权、全部批准或关闭审批不能代替确认");
     }
 
     @Override
@@ -504,15 +412,6 @@ public class HitlToolRegistry extends ToolRegistry {
                 "未获得单次记忆写入确认", 0L), context);
         return ToolOutput.rejected(ToolErrorCode.HITL_REJECTED,
                 "长期记忆写入仅接受单次确认；自动分类、全部批准或关闭审批均不能放行");
-    }
-
-    /** 主机命令被规则层或模式层拦下时的审计记录。 */
-    private void recordHostCommandDenial(com.devcli.tool.command.CommandExecutionService.Request request,
-                                         String reason, String stage) {
-        getAuditLog().record(AuditLog.AuditEntry.denyByPolicy("execute_command", "{}", reason, 0L)
-                .withIdentity(new AuditLog.ExecutionIdentity(null, currentResourceLeaseStep(), null,
-                        request.executionContext().invocationId(), null, stage),
-                        AuditLog.APPROVER_POLICY));
     }
 
     @Override
@@ -556,8 +455,16 @@ public class HitlToolRegistry extends ToolRegistry {
         context.putAttribute(PIPELINE_APPROVAL_ID, approvalId);
         ApprovalRequest request = ApprovalRequest.of(
                 context.name(), originalArguments, null, approvalId, sensitiveNotice);
+        boolean host = toolEffect(context.name()) == ToolEffect.HOST_PROCESS && commandExecutesOnHost();
+        if (host) {
+            String rule = trustedProject() && sensitiveNotice == null
+                    ? com.devcli.policy.CommandPermissionRules.suggestedRule(parsedArgumentsOf(context).path("command").asText()) : null;
+            var display = ((com.fasterxml.jackson.databind.node.ObjectNode) parsedArgumentsOf(context)).deepCopy();
+            display.put("working_directory", getProjectPath());
+            request = ApprovalRequest.hostCommand(display.toString(), approvalId, sensitiveNotice, rule);
+        }
         boolean incompleteIntent = Boolean.TRUE.equals(context.attribute("approval.intent.incomplete", Boolean.class));
-        if (incompleteIntent) {
+        if (incompleteIntent && !host) {
             request = new ApprovalRequest(request.toolName(), request.arguments(), request.dangerLevel(),
                     request.riskDescription(), request.suggestion(), request.callerContext(),
                     sensitiveNotice, true, false);
@@ -566,6 +473,8 @@ public class HitlToolRegistry extends ToolRegistry {
         try {
             approvalLock.lockInterruptibly();
             try {
+                if (context.executionContext().isCancelled()) return ToolOutput.cancelled("审批已取消，未执行");
+                if (context.executionContext().remainingNanos() == 0) return ToolOutput.timedOut("审批期限已到，未执行");
                 result = hitlHandler.requestApproval(request);
             } finally {
                 approvalLock.unlock();
@@ -575,10 +484,24 @@ public class HitlToolRegistry extends ToolRegistry {
             return ToolOutput.cancelled("等待人工审批时执行被取消");
         }
 
+        if (context.executionContext().isCancelled()) return ToolOutput.cancelled("审批期间已取消，未执行");
+        if (context.executionContext().remainingNanos() == 0) return ToolOutput.timedOut("审批期间期限已到，未执行");
+
         if (result == null || result.isRedacted()
+                || (host && result.decision() != ApprovalResult.Decision.APPROVED
+                && result.decision() != ApprovalResult.Decision.APPROVED_PREFIX
+                && !result.isRejected())
                 || (incompleteIntent && result.decision() != ApprovalResult.Decision.APPROVED)) {
             return ToolOutput.rejected(ToolErrorCode.HITL_REJECTED,
                     "当前审批不支持此决策，未执行");
+        }
+        if (result.decision() == ApprovalResult.Decision.APPROVED_PREFIX) {
+            if (request.commandAllowRule() == null) return ToolOutput.rejected(ToolErrorCode.HITL_REJECTED, "当前操作不能保存命令前缀");
+            try {
+                projectPermissions.allow(permissionProject, request.commandAllowRule());
+            } catch (java.io.IOException failure) {
+                return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED, "命令规则保存失败，未执行：" + failure.getMessage(), false);
+            }
         }
         if (result.isRejected()) {
             String reason = result.reason() != null && !result.reason().isBlank()
@@ -624,6 +547,8 @@ public class HitlToolRegistry extends ToolRegistry {
                 return validationError;
             }
             context.replaceArguments(effectiveArguments);
+            ToolOutput commandDenial = validateCommandRequest(context);
+            if (commandDenial != null) return commandDenial;
         }
         context.putAttribute(PIPELINE_APPROVAL_ID, approvalId);
         context.putAttribute(PIPELINE_APPROVAL_SOURCE, AuditLog.APPROVER_HITL);
@@ -638,11 +563,27 @@ public class HitlToolRegistry extends ToolRegistry {
     protected ToolRegistry createProjectForkRegistry(ResourceLeaseMaintenance maintenance) {
         return new HitlToolRegistry(hitlHandler, maintenance, approvalLock, permissionMode,
                 classifierFailures)
+                .shareBlocks(consecutiveBlocks, totalBlocks)
+                .inheritProjectPermissions(this)
                 .withPermissionRules(permissionRules)
                 .withPermissionClassifier(permissionClassifier)
                 // fork 属于同一个会话，历史来源与根注册表相同：不传递会让 fork 内的分类器
                 // 看不到任何用户意图，同一动作在主注册表被放行、在 fork 里被阻止。
                 .withTrustedIntentContext(trustedIntentContext);
+    }
+
+    private HitlToolRegistry shareBlocks(java.util.concurrent.atomic.AtomicInteger consecutive,
+                                         java.util.concurrent.atomic.AtomicInteger total) {
+        consecutiveBlocks = consecutive;
+        totalBlocks = total;
+        return this;
+    }
+
+    private HitlToolRegistry inheritProjectPermissions(HitlToolRegistry parent) {
+        projectPermissions = parent.projectPermissions;
+        permissionProject = parent.permissionProject;
+        permissionRoot = parent.permissionRoot;
+        return this;
     }
 
     public HitlHandler getHitlHandler() {

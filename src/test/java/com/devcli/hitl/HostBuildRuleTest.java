@@ -15,7 +15,7 @@ class HostBuildRuleTest {
     @TempDir Path root;
 
     @Test
-    void explicitAllowPassesWhitelistedCommandsWithoutInteractiveApproval() {
+    void explicitAllowPassesWhitelistedCommandsWithoutInteractiveApproval() throws Exception {
         AtomicInteger approvals = new AtomicInteger();
         try (var tools = tools(approvals, List.of(), List.of(), List.of("execute_command(mvn test:*)"))) {
             tools.withPermissionMode(PermissionMode.DONT_ASK);
@@ -26,7 +26,7 @@ class HostBuildRuleTest {
     }
 
     @Test
-    void broadAllowCannotApproveArbitraryCommandsOrShellChains() {
+    void broadAllowCannotApproveArbitraryCommandsOrShellChains() throws Exception {
         AtomicInteger approvals = new AtomicInteger();
         try (var tools = tools(approvals, List.of(), List.of(), List.of("execute_command"))) {
             for (String command : List.of("echo unsafe", "git status & echo unsafe", "mvn test; echo unsafe")) {
@@ -39,7 +39,7 @@ class HostBuildRuleTest {
     }
 
     @Test
-    void denyAndAskRulesStillPrecedeAllow() {
+    void denyAndAskRulesStillPrecedeAllow() throws Exception {
         AtomicInteger approvals = new AtomicInteger();
         try (var tools = tools(approvals, List.of("execute_command(mvn:*)"), List.of(), List.of("execute_command"))) {
             assertEquals(ToolErrorCode.POLICY_DENIED,
@@ -53,7 +53,7 @@ class HostBuildRuleTest {
         }
     }
 
-    private HitlToolRegistry tools(AtomicInteger approvals, List<String> deny, List<String> ask, List<String> allow) {
+    private HitlToolRegistry tools(AtomicInteger approvals, List<String> deny, List<String> ask, List<String> allow) throws java.io.IOException {
         var handler = new HitlHandler() {
             public ApprovalResult requestApproval(ApprovalRequest request) {
                 approvals.incrementAndGet();
@@ -64,6 +64,10 @@ class HostBuildRuleTest {
         };
         var tools = new HitlToolRegistry(handler).withPermissionRules(PermissionRuleSet.parse(deny, ask, allow, List.of()));
         tools.setProjectPath(root.toString());
+        var store = new com.devcli.config.ProjectPermissionsStore(root.resolve("user-permissions.json"));
+        String project = com.devcli.config.ProjectPermissionsStore.key(root);
+        store.decideTrust(project, true);
+        tools.withProjectPermissions(store, project);
         tools.setCommandExecutionService(request -> CommandExecutionService.Result.completed(0, "test backend"));
         return tools;
     }

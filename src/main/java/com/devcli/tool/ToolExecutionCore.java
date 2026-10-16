@@ -118,6 +118,10 @@ final class ToolExecutionCore {
     }
 
     ToolOutput executeResolvedTool(ToolExecutionPipeline.Context context) {
+        String approvalProject = context.attribute("approval.project", String.class);
+        if (approvalProject != null && !approvalProject.equals(registry.projectPath)) {
+            return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED, "审批期间项目路径已改变，请在新项目重新发起调用");
+        }
         var deletion = context.attribute(com.devcli.tool.provider.DeleteFilesTool.PLAN_ATTRIBUTE,
                 com.devcli.tool.provider.DeleteFilesTool.Plan.class);
         if (deletion != null) {
@@ -278,15 +282,8 @@ final class ToolExecutionCore {
                 true);
     }
 
-    ToolOutput executeCommandOutput(String command) {
-        return registry.executeCommandOutput(command, ToolExecutionContext.current(""));
-    }
-
     ToolOutput executeCommandOutput(String command, long timeoutSeconds, ToolExecutionContext executionContext) {
         ToolAccessScope scope = registry.currentToolAccessScope();
-        if (!scope.permits(ToolEffect.HOST_PROCESS)) {
-            return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED, "当前能力范围不允许执行命令");
-        }
         boolean sandboxRequired = scope == ToolAccessScope.ISOLATED_PROJECT;
         CommandExecutionService service = registry.commandExecutionService;
         ToolExecutionContext timed = new ToolExecutionContext(executionContext.invocationId(),
@@ -295,13 +292,6 @@ final class ToolExecutionCore {
                         + TimeUnit.SECONDS.toNanos(timeoutSeconds)));
         CommandExecutionService.Request request = new CommandExecutionService.Request(
                 command, Path.of(registry.projectPath), timeoutSeconds, sandboxRequired, timed);
-        service.validateRequest(request);
-        if (service.executesOnHost(sandboxRequired)) {
-            String denial = com.devcli.policy.CommandGuard.check(command);
-            if (denial != null) return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED, denial);
-            ToolOutput rejected = registry.reviewHostCommand(request);
-            if (rejected != null) return rejected;
-        }
         if (request.executionContext().isCancelled()) {
             return ToolOutput.cancelled("主机执行审批或排队期间已取消，未启动进程");
         }
@@ -309,5 +299,19 @@ final class ToolExecutionCore {
             return ToolOutput.timedOut("审批或排队期间命令期限已到，未启动进程");
         }
         return service.execute(request).toToolOutput();
+    }
+
+    ToolOutput validateCommandRequest(ToolExecutionPipeline.Context context) {
+        if (registry.toolEffect(context.name()) != ToolEffect.HOST_PROCESS) return null;
+        JsonNode args = parseValidatedArguments(context.argumentsJson());
+        long timeout = args.has("timeout") ? args.path("timeout").asLong() : registry.commandTimeoutSeconds;
+        try {
+            registry.commandExecutionService.validateRequest(new CommandExecutionService.Request(
+                    args.path("command").asText(), Path.of(registry.projectPath), timeout,
+                    registry.currentToolAccessScope() == ToolAccessScope.ISOLATED_PROJECT, context.executionContext()));
+            return null;
+        } catch (PolicyException denied) {
+            return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED, denied.getMessage());
+        }
     }
 }

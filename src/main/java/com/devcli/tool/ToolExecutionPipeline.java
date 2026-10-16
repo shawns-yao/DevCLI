@@ -20,10 +20,10 @@ public final class ToolExecutionPipeline {
         CAPABILITY,
         SKILL_PERMISSION,
         ARGUMENT_VALIDATION,
+        SEMANTIC_VALIDATION,
         CONTENT_REVIEW,
         HITL,
         AUDIT,
-        SEMANTIC_VALIDATION,
         POLICY,
         RESULT_CACHE,
         RESULT_GOVERNANCE

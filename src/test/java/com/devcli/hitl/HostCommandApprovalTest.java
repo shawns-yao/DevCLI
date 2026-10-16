@@ -50,7 +50,7 @@ class HostCommandApprovalTest {
         Handler handler = new Handler();
         handler.enabled = false;
         try (var registry = registry(handler)) {
-            assertEquals(ToolErrorCode.HITL_REJECTED, run(registry).errorCode());
+            assertEquals(ToolErrorCode.POLICY_DENIED, run(registry).errorCode());
             assertEquals(0, handler.calls);
         }
         assertFalse(Files.exists(root.resolve("marker.txt")));
@@ -149,8 +149,8 @@ class HostCommandApprovalTest {
                 registry.setProjectPath(other.toString());
                 return ApprovalResult.approve();
             };
-            assertTrue(run(registry).isSuccess());
-            assertTrue(Files.exists(root.resolve("marker.txt")));
+            assertEquals(ToolErrorCode.POLICY_DENIED, run(registry).errorCode());
+            assertFalse(Files.exists(root.resolve("marker.txt")));
             assertFalse(Files.exists(other.resolve("marker.txt")));
         }
     }
@@ -221,7 +221,7 @@ class HostCommandApprovalTest {
             ToolOutput output = run(registry);
 
             assertEquals(ToolErrorCode.POLICY_DENIED, output.errorCode(), output.text());
-            assertTrue(output.text().contains("[规则]"), output.text());
+            assertTrue(output.text().contains("硬阻止规则"), output.text());
             assertEquals(0, handler.calls, "规则层拒绝不该先弹一次注定被拒的审批");
             assertFalse(Files.exists(root.resolve("marker.txt")));
         }
@@ -241,9 +241,7 @@ class HostCommandApprovalTest {
     }
 
     @Test
-    void allowRuleAndBypassModeNeverSuppressHostApproval() throws Exception {
-        // 主机单次人工确认不可被放宽类判定免除：allow 规则与 bypassPermissions 都不放行它。
-        // 这是刻意比 WorkBuddy 更严的一处——代价是给 execute_command 写 allow 规则在主机路径上不生效
+    void untrustedProjectStillRequiresSingleConfirmationInBypassMode() throws Exception {
         Handler handler = new Handler();
         try (var registry = registry(handler, PermissionMode.BYPASS_PERMISSIONS,
                 List.of(), List.of("execute_command(**)"))) {

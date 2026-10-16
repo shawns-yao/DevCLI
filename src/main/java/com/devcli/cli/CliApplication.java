@@ -150,6 +150,8 @@ final class CliApplication {
             renderer.bindLineReader(lineReader);
             PrintStream ui = renderer.stream();
             renderer.start();
+            var projectPermissions = com.devcli.config.ProjectPermissionsStore.openDefault();
+            CliProjectTrust.bind(hitlToolRegistry, projectPermissions, Path.of("."), hitlHandler);
             renderer.updateStatus(statusInfo(llmClient, hitlToolRegistry.currentPermissionMode(), "idle", mcpServerManager, null));
 
             // 统一关停协调器:JVM 多个 shutdown hook 无顺序保证,
@@ -778,9 +780,10 @@ final class CliApplication {
                         indexer.index(indexPath);
                         ui.println();
 
-                        // 同步项目路径到 ToolRegistry，让 search_code 工具可以正常工作
+                        // 切换工具项目围栏时同步取得对应项目的信任决定。
                         String absPath = new File(indexPath).getAbsolutePath();
                         reactAgent.getToolRegistry().setProjectPath(absPath);
+                        CliProjectTrust.bind(hitlToolRegistry, projectPermissions, Path.of(absPath), hitlHandler);
                         continue;
                     }
                     case SEARCH_CODE -> {

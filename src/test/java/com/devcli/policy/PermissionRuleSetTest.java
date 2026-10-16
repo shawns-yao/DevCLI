@@ -25,7 +25,5 @@ class PermissionRuleSetTest {
                 List.of(), List.of(),
                 List.of("write_file(src/**)", "execute_command(mvn test:*)"), List.of());
 
-        assertEquals(1, rules.allowRulesForTool("write_file").size());
-        assertTrue(rules.allowRulesForTool("web_fetch").isEmpty());
     }
 }

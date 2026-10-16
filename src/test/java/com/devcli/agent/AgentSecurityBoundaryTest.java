@@ -31,8 +31,8 @@ class AgentSecurityBoundaryTest {
     @Test
     void expandedReferencesAndSeededHistoryCannotAuthorizeTools() {
         List<PermissionClassifier.Request> requests = new ArrayList<>();
-        ScriptedClient client = new ScriptedClient("write_file",
-                "{\"path\":\"test.txt\",\"content\":\"data\"}");
+        ScriptedClient client = new ScriptedClient("create_project",
+                "{\"name\":\"test.txt\",\"type\":\"node\"}");
         try (var tools = new HitlToolRegistry(new Handler(ApprovalResult.approve()))
                 .withPermissionMode(PermissionMode.AUTO)
                 .withPermissionClassifier(request -> {
@@ -113,7 +113,7 @@ class AgentSecurityBoundaryTest {
     @Test
     void longUserRequestKeepsItsFinalRestriction() {
         List<PermissionClassifier.Request> seen = new ArrayList<>();
-        ScriptedClient client = new ScriptedClient("write_file", "{\"path\":\"test.txt\",\"content\":\"data\"}");
+        ScriptedClient client = new ScriptedClient("create_project", "{\"name\":\"test.txt\",\"type\":\"node\"}");
         try (var tools = new HitlToolRegistry(new Handler(ApprovalResult.reject("no")))
                 .withPermissionMode(PermissionMode.AUTO).withPermissionClassifier(request -> {
                     seen.add(request);
@@ -130,7 +130,7 @@ class AgentSecurityBoundaryTest {
     void oversizedIntentRequiresHumanInsteadOfCallingClassifier() {
         Handler handler = new Handler(ApprovalResult.reject("no"));
         List<PermissionClassifier.Request> seen = new ArrayList<>();
-        ScriptedClient client = new ScriptedClient("write_file", "{\"path\":\"test.txt\",\"content\":\"data\"}");
+        ScriptedClient client = new ScriptedClient("create_project", "{\"name\":\"test.txt\",\"type\":\"node\"}");
         try (var tools = new HitlToolRegistry(handler).withPermissionMode(PermissionMode.AUTO)
                 .withPermissionClassifier(request -> {
                     seen.add(request);
@@ -147,7 +147,7 @@ class AgentSecurityBoundaryTest {
     @Test
     void droppedOldTurnsCannotRestoreAutomaticApproval() {
         Handler handler = new Handler(ApprovalResult.reject("no"));
-        ScriptedClient client = new ScriptedClient("write_file", "{\"path\":\"test.txt\",\"content\":\"data\"}");
+        ScriptedClient client = new ScriptedClient("create_project", "{\"name\":\"test.txt\",\"type\":\"node\"}");
         List<LlmClient.ChatResponse> action = List.copyOf(client.responses);
         client.responses.clear();
         for (int i = 0; i < 64; i++) client.responses.add(
@@ -171,7 +171,7 @@ class AgentSecurityBoundaryTest {
         for (boolean enabled : List.of(true, false)) {
             Handler handler = new Handler(ApprovalResult.approveAll());
             handler.enabled = enabled;
-            ScriptedClient client = new ScriptedClient("write_file", "{\"path\":\"test.txt\",\"content\":\"data\"}");
+            ScriptedClient client = new ScriptedClient("create_project", "{\"name\":\"test.txt\",\"type\":\"node\"}");
             try (var tools = new HitlToolRegistry(handler).withPermissionMode(PermissionMode.AUTO)
                     .withPermissionClassifier(request -> { fail("不完整意图不能送给分类器"); return null; });
                  var agent = new Agent(client, tools, memory(client))) {
@@ -186,7 +186,7 @@ class AgentSecurityBoundaryTest {
     @Test
     void oversizedIntentCanProceedWithOneExplicitApproval() {
         Handler handler = new Handler(ApprovalResult.approve());
-        ScriptedClient client = new ScriptedClient("write_file", "{\"path\":\"test.txt\",\"content\":\"data\"}");
+        ScriptedClient client = new ScriptedClient("create_project", "{\"name\":\"test.txt\",\"type\":\"node\"}");
         try (var tools = new HitlToolRegistry(handler).withPermissionMode(PermissionMode.AUTO)
                 .withPermissionClassifier(request -> { fail("不完整意图不能送给分类器"); return null; });
              var agent = new Agent(client, tools, memory(client))) {

@@ -84,15 +84,15 @@ class PermissionModeTest {
     }
 
     @Test
-    void autoNeverAutoAllowsSoClassifierDecides() {
-        // auto 的价值在于「不确定时让分类器判断」，不是「自动放行」：它在规则层短路点必须留手，
-        // 把动作让给求值链末端的分类器。同时它也不能收口为拒绝，否则分类器根本没机会判定。
+    void autoAcceptsEditsAndLeavesOtherActionsToTheApprovalChain() {
         PermissionMode mode = PermissionMode.AUTO;
-        for (String tool : List.of("write_file", "edit_file", "delete_files",
+        assertTrue(mode.autoAllows("write_file"));
+        assertTrue(mode.autoAllows("edit_file"));
+        for (String tool : List.of("delete_files",
                 "create_project", "execute_command", "web_fetch")) {
             assertFalse(mode.autoAllows(tool), tool);
         }
-        assertTrue(mode.autoAllowReason().isEmpty());
+        assertFalse(mode.autoAllowReason().isEmpty());
         assertTrue(mode.denyReason().isEmpty(), "auto 不能收口为拒绝，否则分类器没有机会判定");
     }
 

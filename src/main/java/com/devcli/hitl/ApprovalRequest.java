@@ -23,20 +23,21 @@ public record ApprovalRequest(
         String sensitiveNotice,
         boolean contentReview,
         boolean redactionAllowed,
-        boolean hostExecution
+        boolean hostExecution,
+        String commandAllowRule
 ) {
     public ApprovalRequest(String toolName, String arguments, String dangerLevel,
                            String riskDescription, String suggestion, String callerContext,
                            String sensitiveNotice) {
         this(toolName, arguments, dangerLevel, riskDescription, suggestion, callerContext,
-                sensitiveNotice, false, false, false);
+                sensitiveNotice, false, false, false, null);
     }
 
     public ApprovalRequest(String toolName, String arguments, String dangerLevel,
                            String riskDescription, String suggestion, String callerContext,
                            String sensitiveNotice, boolean contentReview, boolean redactionAllowed) {
         this(toolName, arguments, dangerLevel, riskDescription, suggestion, callerContext,
-                sensitiveNotice, contentReview, redactionAllowed, false);
+                sensitiveNotice, contentReview, redactionAllowed, false, null);
     }
 
     public boolean singleDecisionOnly() {
@@ -62,15 +63,28 @@ public record ApprovalRequest(
     }
 
     public static ApprovalRequest hostCommand(String arguments, String approvalId) {
-        String notice = "即将在主机执行，仅本次批准有效。\n"
+        return hostCommand(arguments, approvalId, null, null);
+    }
+
+    public static ApprovalRequest hostCommand(String arguments, String approvalId, String notice, String allowRule) {
+        String hostNotice = "即将在主机执行。\n"
                 + "文件工具的配置写保护不能约束此命令；构建脚本也可能执行任意主机代码。";
+        if (notice != null) hostNotice += "\n" + notice;
+        if (allowRule != null) hostNotice += "\n总是允许将在当前项目保存 permissions.allow：" + allowRule;
         if (com.devcli.policy.CommandGuard.containsDeletion(arguments)) {
-            notice += "\n检测到删除操作，无法可靠统计目标数量及递归范围；恢复依赖已有备份。";
+            hostNotice += "\n检测到删除操作，无法可靠统计目标数量及递归范围；恢复依赖已有备份。";
         }
         return new ApprovalRequest("execute_command", arguments, "主机执行",
                 "没有操作系统隔离，命令及其子进程可能修改配置或访问网络",
-                null, approvalId, notice,
-                false, false, true);
+                null, approvalId, hostNotice,
+                false, false, true, allowRule);
+    }
+
+    public static ApprovalRequest projectTrust(String project) {
+        return new ApprovalRequest("project_trust", "{}", "项目信任", "构建脚本可能执行任意主机代码",
+                null, project, "是否将此项目设为可信？信任后，窄命令规则与 auto 可免人工确认；硬拒绝和删除确认仍有效。"
+                + "\n选择否将保存未信任决定，主机命令继续逐次确认。",
+                false, false, true, null);
     }
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BOX_INNER_WIDTH = 58;

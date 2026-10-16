@@ -46,7 +46,7 @@ public enum PermissionMode {
      *
      * <p>分类器不可用、超时或连续失败一律收口为拒绝——{@code auto} 不因为「判断不出来」而放行。</p>
      */
-    AUTO("auto", "由分类器逐个判断；分类器不可用时一律拒绝",
+    AUTO("auto", "接受项目编辑，窄规则优先；其余交给分类器",
             Capability.FULL, AskPolicy.AUTO);
 
     /** 模式能表达的能力上限。不含沙箱——沙箱由内部执行上下文施加。 */
@@ -119,8 +119,8 @@ public enum PermissionMode {
     public boolean autoAllows(String toolName) {
         return switch (askPolicy) {
             case ALLOW -> true;
-            case ASK_EXCEPT_EDITS -> ToolResourceSlot.of(toolName) == ToolResourceSlot.PATH;
-            case ASK, DENY, AUTO -> false;
+            case ASK_EXCEPT_EDITS, AUTO -> ToolResourceSlot.of(toolName) == ToolResourceSlot.PATH;
+            case ASK, DENY -> false;
         };
     }
 
@@ -128,8 +128,8 @@ public enum PermissionMode {
     public String autoAllowReason() {
         return switch (askPolicy) {
             case ALLOW -> "模式 " + id + " 直接放行";
-            case ASK_EXCEPT_EDITS -> "模式 " + id + " 放行编辑类工具";
-            case ASK, DENY, AUTO -> "";
+            case ASK_EXCEPT_EDITS, AUTO -> "模式 " + id + " 放行编辑类工具";
+            case ASK, DENY -> "";
         };
     }
 
