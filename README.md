@@ -17,19 +17,19 @@ CLI / Runtime API / Headless
        RunCoordinator
             │
             ├── Agent                     默认 ReAct 主 Agent
-            │    └── DelegationSession    按需委派的独立子 Agent
+            │    └── DelegationSession    统一委派子任务
             │
             └── AgentOrchestrator         显式 /plan 编排
                  ├── PlanCoordinator
-                 ├── StepExecutionCoordinator
+                 ├── StepExecutionCoordinator → DelegationSession
                  ├── ReviewCoordinator
                  └── CheckpointCoordinator
 
 共享运行时
 ├── AgentExecutionEngine      Agent / Turn / Tool 统一控制流
-├── ToolRegistry              内置工具、MCP 工具和执行管线
+├── ToolRegistry              工具装配与公共入口
 ├── PromptAssembler           分层提示词和上下文装配
-├── MemoryManager             会话、任务和长期记忆协调
+├── MemoryManager             工作计划、证据投影和长期记忆协调
 ├── CodeRetriever             代码 RAG 检索
 ├── WorkspaceExecutionSession 隔离工作区和 PatchSet
 ├── McpServerManager          MCP 连接与动态工具生命周期
@@ -40,26 +40,28 @@ CLI / Runtime API / Headless
 
 ![运行界面](images/Snipaste_2026-05-20_16-57-44.png)
 
+Windows 可用 `devcli.cmd` 调用 `scripts/start-devcli.ps1`；需先构建 JAR。脚本保持 UTF-8，读取项目 `.env`，已有进程环境变量优先，凭据不得提交。MCP 连接依次加载 Codex `config.toml`、用户 `mcp.json`、项目 `mcp.json`；本地配置可单独补充工具策略，连接替换不继承旧信任。
+
 ## 请求与执行模式
 
 ### 默认 ReAct
 
-主 Agent 负责理解需求、选择工具、推进循环和最终验收。任务需要调查、拆解、独立实现或独立复核时，主 Agent 通过 `delegate_task` 按需调用子 Agent。
+主 Agent 理解需求、维护 update_plan、选择工具并推进执行。需要独立调查、审查或边界明确的机械修改时，通过 delegate_task 调用角色定义中的子 Agent。
 
 默认路径不强制生成 DAG。简单任务保持单 Agent 的低延迟；复杂任务通过委派增加隔离和独立视角。
 
 ### 显式 `/plan`
 
-`/plan` 是面向长流程的重型编排模式，适用于并行 DAG、检查点恢复、强验收和审计场景：
+`/plan` 保留计划确认、依赖调度、验收和恢复；步骤执行进入与 ReAct 相同的 DelegationSession，不另运行 Worker 的工作区、重试和归并循环。
 
 ```text
 Planner
   → ExecutionGraph / AcceptanceCriteria
   → Worker 隔离执行
   → PreReviewVerifier 确定性检查
-  → Reviewer 语义建议（非阻塞）
+  → 按风险触发独立 Reviewer
   → PatchSet 版本校验与归并
-  → Final integration
+  → Final integration 与整体验收
 ```
 
 普通交互任务不自动切换到 `/plan`。
@@ -69,7 +71,6 @@ Planner
 ```text
 主 Agent：理解需求、分配工作、整合结果、最终验收
 explorer：只读调查和证据收集
-planner：只读拆解和验收设计
 worker：隔离工作区中的代码修改
 reviewer：只读、独立、基于证据的复核
 ```
@@ -78,7 +79,7 @@ reviewer：只读、独立、基于证据的复核
 
 委派报告由程序按项目保存，可跨用户回合通过 `report_id` / `upstream_report_id` 原文传递。`resume_report_id` 可以续接原有子任务的执行历史，重新绑定当前规则和预算；未提交补丁仅在原文件基线匹配时恢复到新隔离工作区，冲突时保留产物。Worker 报告包含修改资源、前后哈希、工具证据和副作用失败状态。
 
-`run_in_background=true` 让主 Agent 继续处理任务，使用 `delegate_control` 查询、等待或取消。后台执行使用启动回合共享预算、有界队列和同一套权限、取消、工作区及 PatchSet 链路。Java 或根级 `pom.xml` 修改归并前必须通过编译硬检查，失败时保留候选文件；主 Agent 仍负责业务验收。存储与恢复限制见 [委派运行说明](docs/agents-reference.md#default-agent-delegation)。
+`run_in_background=true` 只允许只读角色；写角色同步运行，主 Agent 等待，重叠写请求拒绝。delegate_control 保留查询、等待和取消。子任务沿用共享预算、隔离工作区、硬检查和 PatchSet；代码候选硬检查失败时保留补丁，不能直接应用到主项目。
 
 主 Agent 可在 `context` / `constraints` 中显式提供选定记忆。失败子任务仍返回有界工具观察、失败尝试和未解决问题，知识发现与补丁提交状态分开；清理失败不等于已提交修改被撤销。当前会话报告缓存最多 64 条，优先保留未解决问题、已提交产物和证据，同级按最近使用淘汰；已经选作子任务输入的报告使用固定快照，不受后续淘汰影响。该策略尚不包含依赖图保留或报告向工作记忆的独立结构化晋升。
 
@@ -157,15 +158,15 @@ base
 → personality
 → mode
 → approval
-→ project_context
-→ skills
 → context_management
 → handoff
+
+当轮消息：project_context → Skill/MCP 索引 → 记忆索引 → 工作记忆/工作计划 → 用户输入
 ```
 
-稳定层前置、易变层后置，以提高模型前缀缓存命中。模型上下文由 `ContextProfile` 和 `TokenBudget` 共同治理，不使用固定字符数代替 Token 预算。
+system 只包含会话级稳定规则。Project Context、MCP 资源索引、记忆索引、Skill 索引与工作记忆追加到当轮消息；工具定义在执行循环内冻结。MCP 搜索返回 schema 和指纹，固定 call_mcp_tool 执行目标，完整权限与审批管线不变。缓存收益需要真实请求数据验证，当前未做 A/B。
 
-上下文压缩只负责当前运行窗口：达到触发阈值后先做 microcompact 确定性淘汰（只回收内容指纹重复、或同一路径已被更晚写入覆盖的工具结果），历史摘要按预算维护，文件引用、工具证据、失败尝试和下一步动作以结构化恢复段保留。压缩上下文绑定项目、会话、epoch 和 Runtime 事件范围；摘要与降级截断都经过事实闸门，事实补回后再次校验最终预算。压缩不会改变任务状态、长期记忆或工作区状态。
+上下文压缩先按历史顺序与最近工具结果 Token 预算回收旧输出，也识别重复/被写入覆盖的结果。原文和哈希写盘成功、引用确实更短后才替换，保持工具消息配对。随后生成滚动摘要；工作计划原样保存并恢复，执行证据与计划状态分开。
 
 `/compact` 主动压缩旧对话，默认保留最近 1 轮原文；`/compact --keep N` 指定保留轮次，`N=0` 压缩全部原文轮次。摘要请求在预算允许时复用会话前缀与工具定义，工具调用不会执行；增量更新仍只读取新增消息和旧摘要索引。Anthropic 默认启用自动 Prompt Cache，兼容端点不支持时设置 `DEVCLI_ANTHROPIC_PROMPT_CACHING=false`。
 
@@ -182,7 +183,7 @@ Skill 索引
   → 记录实际激活
 ```
 
-Skill 来源分为 builtin、user 和 project 三层。project Skill 默认不可信，必须显式信任；其正文带有不可信参考资料边界，不能覆盖系统规则、提升权限或改变执行结构。
+Skill 按 builtin、共享用户目录、`~/.devcli/skills`、项目目录的顺序加载，同名后者覆盖前者。共享目录包括 `~/.agents/skills` 与 Codex skills（含 `.system`，遵循 `CODEX_HOME`）。project Skill 默认不可信，必须显式信任；正文不能提升权限或改变执行结构。
 
 推荐的 Skill 内容边界：
 
@@ -205,11 +206,11 @@ SessionMemory                         当前任务运行投影
 LongTermMemory                        跨任务稳定事实
 ```
 
-`SessionMemory` 保存本任务的待办、当前工作、下一步动作、工具证据和失败尝试，不跨进程持久化。长期记忆采用 CodeBuddy 风格的主题 Markdown：全局记忆与项目记忆物理分目录存储，项目同名主题在召回时覆盖全局版本。
+`update_plan` 保存目标和步骤，in_progress 为当前工作，首个 pending 为下一步；其唯一状态保存在 SessionMemory.taskState.agent_work_plan。ReAct 与 /plan 共用，压缩/恢复原样携带。TaskLedger 和工具证据是执行投影，ExecutionArtifact 是执行终态，计划完成标记不代替验收。长期记忆仍以主题 Markdown 为唯一权威存储。
 
 Git 主工作区、关联工作树和仓库子目录共用主工作区根路径对应的项目记忆；嵌套独立仓库仍独立，普通目录沿用绝对路径。绑定旧工作树目录时，旧主题复制到共享目录，保留源文件；同名不同内容保留共享版本并在 `/memory` 状态中显示冲突数量。处理成功后记录一次性完成标记，删除或清空记忆不会再次导入旧内容。详见 [项目记忆作用域](docs/adr/0016-Git工作树共享项目记忆.md)。
 
-每个作用域的 `MEMORY.md` 是可从主题文件重建的派生索引；默认启用 LLM 相关性选择器，候选清单最多 4096 tokens，并且模型只能选中实际发送的候选，命中后才读全文。主题 frontmatter 保存类型、创建/更新时间、修订号和可选有效期；过期条目仍可审计，但不参与索引与召回。
+每个作用域的 MEMORY.md 是可重建索引。每轮仅注入索引，不再运行相关性选择器；需要全文时用 read_memory 按主题名和作用域分页读取，保持 read_file 的项目路径围栏。主题 frontmatter 的修订、过期和作用域规则不变。
 
 `/save` 和 `save_memory` 是明确写入入口，普通消息不自动落盘。自动写入遇到同主题不同内容时保留原文，用户显式保存才会生成新修订；敏感内容拒绝写入并要求脱敏后重试。详见 `docs/adr/0007-长期记忆对齐-workbuddy.md`。
 
@@ -256,9 +257,9 @@ Worker 工作区
 确定性验证和模型评审分层：
 
 - 编译、测试、哈希、权限和版本校验由工具负责；
-- Reviewer 负责静态和语义核对；Pre-Review 硬检查实际通过后，其结论作为非阻塞建议；
+- 委派独立 Reviewer 按风险触发，拒绝会阻断候选提交；`/plan` 最终 Reviewer 在硬检查实际通过后给出非阻塞建议；
 - 验收标准声明验证方式、验证器和适用节点；
-- 编译、测试等确定性问题阻断，LLM 评审问题进入 advisory；
+- 编译、测试等确定性问题继续阻断；计划确认前的语义评审意见交用户判断；
 - 缺少真实工具证据时不能伪装为通过。
 
 默认 ReAct 委派只在高风险条件下触发独立 Reviewer，例如大范围修改、关键安全资源或副作用工具失败。Reviewer 可以配置独立模型；配置不可用时失败关闭。

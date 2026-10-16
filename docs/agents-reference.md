@@ -14,7 +14,7 @@ For the primary entry point, see `/AGENTS.md`.
 
 HITL 开启时，单次清单数量达到 `DEVCLI_DELETE_APPROVAL_THRESHOLD` / `devcli.delete.approval.threshold`（默认 50，范围 1–500），或任务写路径授权未覆盖清单，均逐次确认；不复用工具/服务器全部批准。审批展示完整目标、数量、非递归说明和恢复限制；审批修改参数时拒绝本次执行，要求重新提交清单。可识别 Shell 删除也逐次确认且不声称统计目标；此检测不是完整 Shell 解析。原 `apply_patch` 审批不变，数量阈值不覆盖补丁、不跨调用累计；关闭 HITL 仍保留路径硬拒绝。
 
-共享执行内核在可见工具超过 12 个且存在 `search_tools` 时，复用工具搜索排序，选择 5 个候选工具，并保留权限内的 `search_tools`、`read_tool_result`、`delegate_task`、`delegate_control` 及命名强制工具。搜索返回的结构化命中优先进入下一轮候选；候选只能来自当前可见定义，路由不是授权边界。排序目前基于名称、描述和 Schema 关键词，不保证自然语言语义召回率。显式并行 fork 的冻结定义保持不变，不进行逐任务路由，以维持已有缓存约定。
+共享执行内核冻结本次循环的模型工具定义，不再按每轮检索或发现结果裁剪工具列表。MCP 定义通过 search_tools 返回到正文，call_mcp_tool 接收工具名、schema_fingerprint 和参数；目标调用仍走完整管线。Skill 和能力范围在执行时继续校验。显式无工具收尾映射为 Anthropic 的 type=none / OpenAI-compatible 的 tool_choice=none，保留原工具定义。
 
 工具发现与执行同时检查能力范围、显式工具白名单和 Skill 权限。权限拒绝返回当前允许的工具示例；未知工具返回 `UNKNOWN_TOOL` 并提示搜索，不再把不存在的工具误报为快照失效。Schema、业务校验和审批继续走原管线。失败消息附带状态、错误码、retryable 和分类处理建议；不自动修参、不自动重放副作用操作。现有执行范围承担权限约束，尚未新增 diagnosis/repair 业务阶段状态机，也没有以任务关键词推断授权。
 
@@ -28,46 +28,33 @@ HITL 开启时，单次清单数量达到 `DEVCLI_DELETE_APPROVAL_THRESHOLD` / `
 
 ### Default Agent Delegation
 
-默认入口由主 Agent 使用 `delegate_task` 按需调用子 Agent；它不是 `/plan` 的替代命令，也不预先构造 DAG。复用执行内核、现有工具并行池、审批锁、隔离工作区和补丁提交服务，没有第二套调度框架。
+ReAct 与 `/plan` 步骤共用 `delegate_task` / `DelegationSession`。主 Agent 默认自己写；写角色同步独占写入阶段，父 Agent 等待，重叠写角色和后台写请求在准入阶段拒绝。只读角色可后台执行，`delegate_control` 保留 status / wait / cancel。
 
-委派建议先经过 `DelegationPolicy`，其判定只保留一条语义判据：`task_spec` 声明的执行粒度必须是多轮 Agent 循环，声明为单工具操作时拒绝、由主 Agent 直接完成。参数结构校验（`task_spec` 的 inputs、scope、done_condition，以及 deliverable 与 Worker 的 allowed_write_paths）由工具 schema 与语义校验层承担，以参数错误返回，不再表现为策略拒绝——模型据此能区分「参数写错了」与「这个任务不该委派」，前者它自己能修。程序还检查共享预算、显式工具权限和上游报告引用，在创建子模型和工作区之前拒绝不满足条件的请求；拒绝结果回传主 Agent，不自动改写成其他工具调用。单会话累计派出量有配额（默认 200，可通过 `devcli.delegate.max.per.session` / `DEVCLI_DELEGATE_MAX_PER_SESSION` 设置为 1～10000），达到上限后拒绝后续委派并提示由主 Agent 接手；真实总量仍由父子共享的 Token 与轮数预算控制，配额的作用是让「委派是有限资源」成为确定信号。子 Agent 不继承父会话历史，契约是唯一信息通道，因此工具说明要求显式传递任务、范围、完成条件与必要背景。
+默认角色为 explorer、worker、reviewer。定义依次从 `src/main/resources/agents/`、`~/.devcli/agents/`、项目 `.devcli/agents/` 加载，按文件名覆盖，项目绑定时冻结。planner 可作为自定义角色添加；主 Agent 负责维护工作计划。每个角色的 description 进入工具说明，权限从 capability 和 allowed_tools 读取，不按角色名判断。
 
-收益评估不再是准入条件，只写入 `delegation.policy` 事件供事后诊断。评分为启发式代理指标：契约基础收益 2，加 Worker 写入作用面隔离收益 0～2（不超过 3 个无通配符且带扩展名的具体路径得 2；仅满足数量少或全部具体路径得 1；其余得 0）；只读角色固定使用中性值 1，不借无效写入声明加分。成本为启动成本 1、context 与 task_spec 合计超过 8000 字符的传递成本 2，以及上游报告传递成本 1。长输入不增加隔离收益，也不证明父状态耦合；当前计费阈值并非完整 Token 成本估算。分数低于告警线（默认 2，可通过 `devcli.delegation.yield.advisory.threshold` / `DEVCLI_DELEGATION_YIELD_ADVISORY_THRESHOLD` 设置为 1～10）时事件标记 `yield_low=true` 并给出建议，但**不影响放行，也不回灌模型**——把分数告诉模型只会诱导它修改声明措辞来「过门槛」，而任务实质不变。评分不证明实际收益；执行粒度与输入封闭性仍由模型声明。`delegation.policy` 同时记录放行结论与诊断分数，不等于后续权限和预算检查已通过。现有并行池、资源租约及版本冲突检查继续生效。
+角色文件示例（项目 `.devcli/agents/planner.md`）：
 
-| 角色 | 可用能力 | 上下文 |
-| --- | --- | --- |
-| explorer / planner / reviewer | 只读工具和本地 Skill 上下文 | system 规则快照、Skill 快照、显式 task/context、自己的工具结果 |
-| worker | 以上能力，加隔离项目修改和受限命令 | 同上；不自动继承父会话或长期记忆 |
-| 主 Agent | 保留原有工具及委派能力，负责最终验收 | 自己的会话、子任务有界报告和已归并文件清单 |
+```markdown
+---
+name: planner
+description: 对明确方案提供只读的计划建议
+capability: READ_ONLY
+allowed_tools: [read_file, list_dir, grep_code]
+---
+只提出方案与待核实的问题，不修改文件；主 Agent 决定并维护最终计划。
+```
 
-子 Agent 不能递归委派、控制其他子任务、直接读写长期记忆或执行外部副作用。`search_tools` 与最终执行管线同时过滤权限，不能通过猜测工具名绕过；MCP 继续使用已有信任策略。项目内代码可读取，不将任务描述中的文件范围冒充操作系统级访问隔离。`read_tool_result` 仅允许受限运行读取本运行生成的结果，主 Agent 可以恢复历史结果。子任务消息不混入父历史；可恢复记录只保存子任务自身历史，不保存父会话、system 消息、reasoning 或图片。
+capability 仅允许 READ_ONLY / ISOLATED_PROJECT；allowed_tools 可写具体工具名，`["*"]` 表示在能力范围内开放父 Agent 已有工具。可选 provider / model 通过现有模型工厂加载，未设置复用当前角色模型；已有 `DEVCLI_DELEGATE_<ROLE>_PROVIDER/MODEL` 仍有效，文件配置优先。显式错误配置失败，不静默换模型。角色文件是受保护的 Agent 配置，运行中的文件工具不能改写。
 
-主 Agent 可通过现有 `context` 与 `constraints` 显式投影必要记忆及约束；这不是自动继承，也不授予子 Agent 长期记忆读取权限。报告中的 `summary` 仍是模型陈述，`evidence` 是 Runtime 捕获的最多 64 条近期工具观察，附调用标识、工具状态、错误码、各最多 512 字符的脱敏参数与输出摘录，以及已有 `result_ref`。`dead_ends` 保留最多 32 条失败尝试；失败不代表该方案永久不可行。`unresolved_mutations` 与 `open_questions` 标明未解决问题，不自动把模型总结填入 `facts_discovered`。
+角色权限始终与父权限、调用参数的工具/写入白名单、Skill 和工具效果相交。子 Agent 不递归委派，不读取长期记忆或外部副作用工具，不恢复其他运行的工具结果。正文提示词不能扩大权限；未实现 context: fork 顾问模式。
 
-委派报告在 JSON 序列化前统一写入 `report_security.content_trust=UNTRUSTED`。默认净化模型文本及报告内工具摘录中的 `<system-reminder>`、`<previous_response>` 和行首角色前缀，只增加反斜杠，不删除正文；命中模式记录在 `report_security.matched_patterns`。可通过 `devcli.delegation.report.sanitization.enabled` / `DEVCLI_DELEGATION_REPORT_SANITIZATION_ENABLED` 关闭形态净化，但不移除不可信标签。该机制不识别自然语言包装的恶意建议，主 Agent 仍须核验实际文件和工具证据，任何副作用继续经过权限策略、HITL、工作区与 PatchSet 链路。详见 ADR 0008。
+`task_spec` 声明独立多轮任务的输入、范围和完成条件；单工具操作留给主 Agent。程序仍检查预算、上游报告、工具范围和单会话派出配额（默认 200），收益分数只作诊断。写角色必须声明 allowed_write_paths；子任务继承冻结规则、Skill 与显式上下文，保留自己的执行历史，不复制父会话。
 
-模型错误、预算或轮数退出、取消、未解决副作用失败、独立 Reviewer 拒绝和提交冲突均保留已有证据。`knowledge_outcome=PARTIAL` 只表示曾取得成功工具观察，不证明任务验收通过。`patch_status` 区分 `NOT_APPLICABLE`、`NOT_APPLIED`、`NO_CHANGES`、`APPLIED`、`COMMIT_UNKNOWN` 和 `ROLLBACK_INCOMPLETE`；清理失败不能把已确认提交的文件改报为未提交。未提交候选不进入 `modified_resources`，候选哈希在已生成的 `patches` 中保留。
+报告、历史与候选补丁仍存于 `~/.devcli/delegations/<projectHash>/`。resume_report_id 续接重新绑定当前规则、模型与预算，禁止扩大范围；upstream_report_id 在准入时固定快照。报告标记为不可信数据，不能作为授权或验收结论；knowledge_outcome 与 patch_status 分开。
 
-`DelegationState` 由主 Agent 持有，不随用户回合重建。当前会话报告缓存最多 64 条、已知记录合计最多 64MB，优先保留未解决问题、已提交产物、工具证据，再保留普通报告；同等价值按最近写入或引用淘汰。项目私有 JSON 记录原子写入 `~/.devcli/delegations/<projectHash>/`，新 Agent 可凭原报告 ID 读取同项目记录；缓存淘汰同时尝试删除对应文件，不扫描或自动清理其他进程的全部历史。单记录最多 32MB，子任务历史正文最多 400000 字符，恢复补丁最多 500 个文件、20MB，单文件最多 5MB。上游引用准入时固定不可变快照；仍未实现依赖图保留及向工作记忆的独立结构化晋升。
+写角色使用 WorkspaceExecutionSession、既有沙箱、资源租约与版本闸门。代码候选先过 PreReviewVerifier，独立审查按 DelegationReviewGate 触发，再提交 PatchSet。`/plan` 保留计划确认、依赖调度、最终验收和原 checkpoint 协议；旧 checkpoint 继续经现有迁移器读取，后续步骤使用委派执行。写前日志、deferred PatchSet 和局部写入登记复用同一提交/恢复链路，不再运行旧 Worker 重试和归并实现。
 
-`delegate_task` 提供 `resume_report_id`，须重新声明角色、任务契约和交付物；角色不变，工具白名单及写入 glob 条目只能保持或收窄。程序重新绑定当前规则、模型、预算和工作区，恢复自身历史中的工具调用配对；缺失结果标为未知，不自动重放副作用。Worker 未提交补丁只有 beforeHash 和文件权限匹配时才恢复至新隔离工作区，随后照常验证和归并。`resume_available` / `pending_patch_files` 表明恢复能力和候选数量；提交状态不明或回滚不完整时拒绝续接。历史与补丁分别在子循环退出、工作区清理前保存，不能保证进程被强制终止时保存正在进行的修改；图片、旧运行工具附件与非 UTF-8 二进制编辑不保证续接。
-
-`run_in_background=true` 可立即返回 `status=running` 与报告 ID。后台复用有界 Worker 池（2 个线程、8 个排队位置）及现有取消原语；主 Agent 后续回合使用 `delegate_control(action=status|wait|cancel, report_id, wait_seconds)` 查询，等待默认 30 秒、最多 30 秒。完成通知仅携带 ID，报告仍是不可信数据。后台沿用启动回合的共享预算、系统和 Skill 快照、工具与写入范围及冻结的审批意图；后续用户输入不会扩大该子任务权限。取消请求只表示已发送，须查询终态。主 Agent 中止、清空历史、切换项目或关闭时取消后台任务；进程重启后不会自动启动旧后台任务，遗留 running 报告按 interrupted 返回。
-
-Worker 完成正常工具循环后才归并 PatchSet；未解决的写入/命令失败、模型失败、预算退出、超时和提交前取消均保留未提交产物。修改涉及 `.java` 或根级 `pom.xml` 时复用 `PreReviewVerifier`：Maven 执行 test-compile，无 Maven 且存在 `src/main/java` 时使用 javac。检查经过现有命令沙箱与主机审批；不支持的布局、编译或环境失败、检查期间修改及提交重绑定造成候选变化均拒绝归并。`hard_check` 返回 NOT_REQUIRED/PASSED/FAILED/NOT_SUPPORTED。独立 Reviewer 仍按现有风险信号触发；编译通过不替代业务验收。版本冲突不覆盖主项目的并发修改；修改已开始原子提交后，取消不自动撤销已提交补丁，父任务可使用既有快照回滚。
-
-所有新参数按系统属性 > 进程环境变量 > 默认值读取；不自动导出 `.env`：
-
-- `devcli.delegate.<role>.provider/model` / `DEVCLI_DELEGATE_<ROLE>_PROVIDER/MODEL`：四种角色独立配置，未设置复用本轮主模型；显式无效配置失败，不静默换模型。凭据仍由现有 `DevCliConfig` 读取。
-- `devcli.delegate.max.iterations` / `DEVCLI_DELEGATE_MAX_ITERATIONS`：每个子循环默认 32 轮，范围 `[1,100]`。
-- `devcli.delegate.timeout.seconds` / `DEVCLI_DELEGATE_TIMEOUT_SECONDS`：每次委派默认 300 秒，范围 `[1,3600]`，从工具批次提交时开始计算，包含排队。只延长委派调用，不改变同批普通工具的时限。
-- `devcli.delegation.report.sanitization.enabled` / `DEVCLI_DELEGATION_REPORT_SANITIZATION_ENABLED`：委派报告指令形态净化，默认开启；关闭后仍保留 `content_trust=UNTRUSTED`。
-- `devcli.delegation.dir` / `DEVCLI_DELEGATION_DIR`：委派记录根目录，默认 `~/.devcli/delegations/`，其下按当前项目路径散列隔离。
-- 父子共享启动回合的 `devcli.react.token.budget` 和 `devcli.react.hard.max.iterations`；子上下文摘要调用同样计入 Token 和总调用轮数。同一回合重新委派不能重置总预算，下一用户回合按现有 Agent 规则创建新预算；后台仍使用原预算。每个循环独立检测重复工具和重复错误。并行中的模型响应可能让 Token 使用超出阈值，后续调用会停止；不是按最坏响应预扣费的硬成本配额。
-
-子取消令牌连接父工具调用；Anthropic 和全部 OpenAI-compatible 客户端在取消时关闭底层 HTTP Call，不仅依赖线程中断。外部不合作的工具仍须等待其清理结束，不能将超时描述为能强杀任意主机代码。生命周期以 `delegation.started/tools/completed` 事件及 `child_id` 记录，子执行终态不覆盖父运行终态。
-
-角色指引使用已有 `PromptRepository`：内置 `prompts/modes/delegate-<role>.md`，可由 `~/.devcli/prompts/modes/`、项目 `.devcli/prompts/modes/` 覆盖；覆盖文本不改变工具权限和预算。
+配置：`DEVCLI_DELEGATE_MAX_ITERATIONS` 默认 32；`DEVCLI_DELEGATE_TIMEOUT_SECONDS` 默认 300。父子共享 Token 和总轮数预算，取消向子工具与 HTTP 传播，后台使用现有有界队列。细节与决策见 [ADR 0018](adr/0018-统一委派与工作计划.md)。
 
 ### API Key
 
@@ -126,9 +113,11 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 ### MCP Config
 
-1. 用户级：`~/.devcli/mcp.json`
-2. 项目级：`.devcli/mcp.json`
-3. 按 server 名 merge，项目级覆盖用户级
+1. Codex：`$CODEX_HOME/config.toml`，未设置时为 `~/.codex/config.toml`
+2. 用户级：`~/.devcli/mcp.json`
+3. 项目级：`.devcli/mcp.json`
+
+按 server 名覆盖，后者优先。本地仅包含工具策略字段时叠加到已有连接；替换连接时不继承旧信任。仅导入连接、环境变量引用与禁用项，不继承其他客户端审批规则；凭据留在用户配置或环境中。
 
 格式兼容 Claude Code：`command` + `args` = stdio，`url` + `headers` = Streamable HTTP。内置变量：`${PROJECT_DIR}`、`${HOME}`。安全策略字段包括 `trustReadOnlyAnnotations`、`readOnlyTools`、`deniedTools`；默认不信任服务端 readOnly 注解，destructive/openWorld 不受只读授权覆盖。
 
@@ -169,8 +158,8 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 长期记忆只保存跨会话稳定事实。每条是主题 Markdown，类型只允许 `user|feedback|project|reference`；可选 `valid_days=1..3650`，过期后保留审计但排除于索引与召回
 - 项目键在绑定时使用 Git 主工作区根路径，关联工作树和仓库子目录共享，嵌套独立仓库保持隔离；普通目录与 Git 元数据不可用时沿用请求绝对路径。旧路径主题复制到共享目录，源文件保留，同名冲突保留共享版本并在状态中显示；完成标记防止删除或清空后再次导入，迁移失败修复后可重试。不会遍历并合并尚未绑定的旧工作树目录
 - 每个作用域的 `MEMORY.md` 按本轮记忆预算（`ContextProfile.memoryContextTokens()`，500–5000 tokens）裁剪后注入，截断时附提示；索引自身上限（200 行 / 25000 字节）比预算大一个数量级，不裁剪会让预算配置对索引失效
-- 索引与选中全文**共享同一个预算**：索引先裁剪，剩余额度才给全文；全文按整条取舍，放不下的整条跳过，只有真正注入的条目才计入「本会话已注入」
-- LLM 相关性选择器默认开启，候选只包含未过期主题；发送给模型的清单最多 4096 tokens，选择结果白名单也只包含这批实际发送的候选，命中后才读全文。项目同名主题覆盖全局版本，两份原文仍保留
+- 索引使用 ContextProfile.memoryContextTokens() 预算，裁剪附提示；全文在需要时通过 read_memory 分页读取，不在构造当轮上下文时额外请求模型。
+- 每轮只注入按预算裁剪的 MEMORY.md 索引；相关性选择器及其模型调用已删除。主题全文通过 read_memory 按 name / scope 读取，默认项目同名主题覆盖全局，不接受任意路径；返回内容页、next_offset 和总字符数。
 - 同作用域自动冲突不覆盖原文；用户显式保存才更新并增加修订号。`/memory organize apply` 只从权威主题文件重建索引
 - `/memory clear` 默认只清**当前写入作用域**（有活动项目清项目，否则清全局）；`/memory clear global` 与 `/memory clear project` 显式指定。全局目录跨项目共享，项目会话里的默认清空不得连带抹掉它，结果会提示如何显式清另一作用域
 - 旧版 `records/` 记忆卡在启动时幂等复制到全局作用域，全部处理成功后写一次性完成标记，后续构造不再重复解析；源文件保留，旧格式缺少可靠项目归属，不自动归入项目
@@ -180,7 +169,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 ### Plan Multi-Agent
 
-- 唯一公开入口为 `/plan`，固定进入 Planner/Worker/Reviewer 链路；旧 `/plan --team` 与 `/team` 仅保留解析兼容，不再出现在帮助和补全中。串行或并行由 DAG 就绪状态与资源冲突决定。
+- `/plan` 保留计划确认和 checkpoint 恢复；执行步骤进入统一委派。资源分波保留只读并发，写步骤独占波次；原命令解析别名不变。
 - `MultiAgentBatchExecutor` 委托 `OrchestrationWaveExecutor` 完成有界并发、异常归属、输出隔离和稳定顺序归并；`PlanExecuteAgent` 与 STANDARD profile 仅保留内部兼容，不进入 CLI 路由。
 - 三角色：Planner / Worker(默认 2 个) / Reviewer
 - 流程：规划与确定性预检 → Reviewer 计划语义建议 → 用户确认 → 按依赖分配 Worker → Pre-Review 硬检查 / 产物 Reviewer 建议 → 归并
@@ -291,7 +280,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 - Microcompact 在 LLM 摘要前执行，不删除消息，保持 assistant tool_call 与 tool result 配对。
 - 折叠引用按结构识别：要求内容以 `<microcompact_boundary>` 起始、存在闭合标记且携带 `type=tool_result`；正文中偶然出现该字符串不算折叠引用。标记常量、判定和字段提取集中在 `MicrocompactBoundary`，生成侧与消费侧共用，避免同一语义两套判定。
-- 淘汰只按两条可证明判据：内容指纹与更早的工具结果相同（`duplicate`），或 `read_file` 的同一 `path` 在更晚位置被 `write_file` / `edit_file` 写过（`superseded`）。不按尺寸、工具类型、保留最近 N 项或工具保护名单判定，`DEVCLI_CONTEXT_MICROCOMPACT_KEEP_RECENT_TOOL_RESULTS` 与 `DEVCLI_CONTEXT_MICROCOMPACT_EXCLUDE_TOOLS` 已废弃，仅保留编译兼容。
+- 回收内容重复或已被后续写入覆盖的结果，并按历史顺序回收最近工具结果 Token 保留预算以外的旧结果（outside_recent_budget）；不按墙钟时间删除。原文和哈希写盘成功且引用确实节省 Token 后才替换，消息配对不变。旧 KEEP_RECENT_TOOL_RESULTS / EXCLUDE_TOOLS 编译占位常量一并删除。
 - 被回收的完整结果落盘到 `.devcli/microcompact_tool_outputs/<session>/<toolCallId>.txt`，并写同名 `.sha256` 边车；消息中保留 `<microcompact_boundary>`、toolCallId、toolName、originalChars、reason、sourceToolCallId 和 storedPath。折叠后 Token 不减少或落盘失败时原地保留。
 - `SessionMemory` 压缩后恢复区遇到 microcompact 工具引用时，只输出 toolCallId / originalChars / storedPath，并按 storedPath 或 toolCallId 去重。
 
@@ -399,13 +388,13 @@ ReAct 主循环 / 对话历史 / 工具调用与结果回灌
 规划后执行 / 计划审阅 / DAG 状态推进 / 失败重规划；冲突分波、并行调度和顺序输出归并委托给 `PlanTaskBatchExecutor`，结果摘要由 `PlanTaskExecutionResult` 统一生成，任务能力范围、隔离工作区、资源租约和 PatchSet 生命周期委托给 `PlanTaskWorkspaceExecutor`
 
 ### AgentOrchestrator.java
-Plan 顶层流程 / 三角色生命周期 / 配置传播 / `run` 与 `resume` 入口。Planner 修复和 DAG 预处理委托 `PlanCoordinator`，评审门禁委托 `ReviewCoordinator`，checkpoint 恢复策略和 PatchSet 对账委托 `CheckpointCoordinator`，Worker 调度、重试、隔离工作区和归并委托 `StepExecutionCoordinator`；可变状态集中在 `OrchestrationRunState`，上下文和终态报告由 `OrchestrationNarrative` 生成
+Plan 顶层流程、计划确认及 `run/resume` 入口。`PlanCoordinator` 负责计划与 DAG，`ReviewCoordinator` 负责计划和最终验收，`CheckpointCoordinator` 保留恢复与提交对账，`StepExecutionCoordinator` 仅调度步骤并调用统一委派。旧 Worker 身份保留为 checkpoint 与上下文元数据，不再执行独立 Worker 循环。
 
 ### AgentExecutionEngine.java
 ReAct / Plan task / SubAgent 共用循环；统一取消和预算检查、LLM 调用、assistant/tool 消息协议、结构化工具错误记录与 IOException 出口；取消或失败时把已经流出的 reasoning / content 写回历史，只补文本、不补 tool_call，避免留下没有配对结果的调用；路径差异通过 Delegate 钩子注入
 
 ### SubAgent.java
-可配置角色子代理 / 独立对话历史 / Worker 用工具、Planner/Reviewer 不用；执行循环委托给 AgentExecutionEngine
+计划生成、计划语义审查及最终验收使用的执行适配器；循环委托 AgentExecutionEngine。默认 ReAct 和 `/plan` 步骤的子任务使用 DelegationSession；角色定义由 DelegateRoleCatalog 加载。
 
 ### Planner.java
 LLM 生成计划 JSON / 简单任务最小计划 / 重编号 task_1..N / 依赖计算
@@ -426,13 +415,13 @@ checkpoint 协议版本 10；通过 RecoveryState 恢复共享 ExecutionArtifact
 Reviewer 前 Java 硬验证；封装 Maven/javac 命令、扫描、超时、输出解码和失败摘要，无 Maven 时使用 javac 参数文件避免命令行过长
 
 ### ToolRegistry.java
-15 个内置核心工具（含 `delete_files` 明确清单删除、`edit_file` 精确替换、`apply_patch` 官方结构化补丁、带作用域/类型/有效期的 `save_memory` 和 `grep_code` 实时精确文本搜索）+ MCP 动态工具 / executeTools() 并行入口 / ToolInvocation / ToolExecutionResult；`ToolExecutionPipeline` 按阶段执行取消、存在性、能力范围、Skill 权限、Schema 参数校验、HITL、语义/业务校验、审计、策略和结果治理；`ToolSemanticValidator` 负责本地可判定的参数组合、路径/资源状态、范围和协议语义，业务扩展可通过 `ToolRegistry.registerSemanticValidator` 注入规则；`ToolOutput` / `ToolExecutionResult` 携带 status、errorCode、retryable、elapsedMillis、imageParts、sideChannels 和 modifiedResources；命令退出码由 `CommandResultMetadata` 旁路保留并贯通 Runtime 事件与 SessionMemory，不从展示文本提取；内置 Provider 通过结构化执行器直接保留参数错误、语义拒绝、策略拒绝、命令退出、超时和取消状态；HITL 作为管线中间件，不再覆写 executeTool；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会返回 `search_tools` 引导和 query 示例
+ToolRegistry 保留公共装配入口；ToolContract 保存工具值类型，McpToolCatalog 管理目录与服务生命周期，ToolBatchExecution 管理串并行和取消，ToolAccessContext 管理权限上下文传播，ToolPipelineAssembly 装配执行阶段，ToolExecutionCore 执行参数校验、内容审查与审计，ToolProjectAccess 处理文件版本登记和已有 LSP hook。MCP 搜索不改变模型定义，固定 call_mcp_tool 以原始 schema 校验目标，权限、Skill、审批、审计、策略和结果治理继续执行。模型写工具为 write_file/edit_file，删除使用 delete_files，工作计划使用 update_plan，长期主题读取使用 read_memory。
 
 `read_file` 同传行范围与字符范围时优先行范围并返回提示；`edit_file` 会按目标文件的 CRLF/LF 风格对齐匹配文本。
 
 ### tool/patch Package
 
-`apply_patch` 的四段式实现：`ApplyPatchParser` 解析官方 `*** Begin Patch` 语法（Add / Delete / Update / `*** Move to:` / `*** End of File`，兼容 heredoc 包裹，`*** Environment ID:` 显式拒绝）→ `SeekSequence` 按 精确 → 忽略行尾空白 → 忽略两侧空白 → Unicode 标点归一化 四级降级定位上下文行 → `ApplyPatchCompiler` 在内存算出每个文件的最终内容并组装成 `PatchSet.FileChange` → `ApplyPatchTool` 复用既有写链路（写路径策略 → 委派写白名单 → 资源租约 → 版本闸门 → PatchSet 原子应用 → 版本账本登记）。
+内部 apply_patch API 的解析与 PatchSet 实现保留；模型工具定义不暴露它，模型批次调用拒绝。现有内部 API 和组件测试继续覆盖官方补丁解析、定位、内存编译、版本检查和原子应用。
 
 关键契约：不新增写入路径，PatchSet 负责冲突预检、项目级锁、原子替换与回滚；全部 hunk 在写盘前算完，任何一处失败整批不应用（官方实现逐个 hunk 直接写盘、失败只上报已提交部分）；行尾保留文件原有风格（官方默认归一化为 LF）；同一路径在一个补丁里出现两次直接拒绝；新增文件在 POSIX 上取进程默认建文件权限（避免继承临时文件的 `rw-------`）。
 

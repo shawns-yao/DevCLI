@@ -56,42 +56,42 @@ Windows + Git Bash 下必须调用 `mvn.cmd`，不要用 `bin/mvn` 这个 shell 
 
 ## 架构概览
 
-顶层分为默认 ReAct 与显式 `/plan` 编排入口，共享 ToolRegistry / MemoryManager / SnapshotService；`/plan` 固定进入 Planner/Worker/Reviewer DAG 链路，不按任务内容自动切换，串行或并行由 DAG 与资源冲突决定。ReAct、Plan task、SubAgent 的单轮控制流统一由 `AgentExecutionEngine` 承载，负责取消、预算、LLM 调用、工具消息协议和异常出口：
+默认 ReAct 与显式 `/plan` 共享 `delegate_task` / `DelegationSession` 子任务执行原语和 `AgentExecutionEngine`。`/plan` 保留计划确认、依赖调度、验收与 checkpoint；步骤的工作区、硬检查、独立审查和提交统一进入委派路径。
 
 | 路径 | 入口 | 触发 |
 |------|------|------|
 | ReAct | `Agent.java` | 默认模式 |
 | Plan 编排 | `AgentOrchestrator.java` | `/plan` |
 
-默认 ReAct 是主 Agent 按需委派模式：`delegate_task(role, task, context)` 由 `DelegationSession` 装配独立 `AgentExecutionEngine` 循环，不进入固定 DAG。explorer/planner/reviewer 只读，worker 使用已有 `WorkspaceExecutionSession`、命令沙箱、资源租约和 PatchSet 版本检查；工作循环正常结束且没有未解决的副作用工具失败后归并，主 Agent 负责最终验收。显式 `/plan` 的既有计划评审、硬检查和 checkpoint 流程保持不变。
+主 Agent 默认自己写入。写角色只能同步执行，执行期间主 Agent 等待；重叠写角色在创建模型或工作区前拒绝。后台仅允许只读角色，内置为 explorer/reviewer。隔离工作区、资源租约、硬检查和 PatchSet 继续复用，资源租约策略不变。
 
-`DelegationState` 按项目保存跨回合报告、子任务自身历史和未提交补丁，默认目录 `~/.devcli/delegations/<projectHash>/`，可用 `DEVCLI_DELEGATION_DIR` / `-Ddevcli.delegation.dir` 调整。`resume_report_id` 续接时重新绑定当前规则、模型和预算，不允许扩大角色、工具与写入范围；待提交补丁仅在原文件基线匹配时恢复到新隔离工作区。`run_in_background=true` 立即返回报告 ID，`delegate_control` 提供 status/wait/cancel；后台使用有界队列，继续消耗启动回合共享预算，取消和超时向 HTTP 与工具传递。Java 或根级 `pom.xml` 修改在归并前必须通过现有 PreReviewVerifier 硬检查；不支持的布局、检查失败或候选变化均保留产物并拒绝归并。详见 `docs/adr/0017-委派跨回合恢复与后台执行.md`。
+`DelegationState` 仍在 `~/.devcli/delegations/<projectHash>/` 保存报告、子任务历史和未提交补丁，可通过 `DEVCLI_DELEGATION_DIR` / `devcli.delegation.dir` 设置。`resume_report_id` 续接重新绑定当前规则和预算，角色、工具和写入范围只能保持或收窄；`delegate_control` 保留 status/wait/cancel。只读后台任务使用原有有界队列和共享预算，取消向 HTTP 与工具传递；写角色的后台请求直接拒绝。Java 或根级 `pom.xml` 修改仍须通过 `PreReviewVerifier` 后才能提交。
 
 委派只继承冻结的 system 规则与 Skill 快照、显式 task/context，不复制父会话、长期记忆召回或兄弟消息。子 Agent 不能委派、遍历长期记忆、访问外部副作用工具或恢复其他运行的工具结果；其工具定义快照按 `READ_ONLY` / `ISOLATED_PROJECT` 能力范围生成，不向模型暴露无权调用的工具。父子共享 Token 和总轮数预算，重复动作/错误按各自循环检测。每批最多并行 10 个工具，子任务默认 32 轮/300 秒，支持 `DEVCLI_DELEGATE_MAX_ITERATIONS` / `DEVCLI_DELEGATE_TIMEOUT_SECONDS`。取消向下传递到工具与 Anthropic/OpenAI-compatible HTTP 请求；未提交的子工作区产物不应用，已越过提交检查点的原子补丁不因取消自动回滚。
 
-`DEVCLI_DELEGATE_<ROLE>_PROVIDER/MODEL` 可配置四类角色的独立模型；未配置时复用当前主模型，显式配置不可用则返回失败，不静默替换。角色指引复用 `PromptRepository`，路径 `modes/delegate-<role>.md`，允许用户和项目级覆盖，但提示词不能放宽工具权限。详见 `docs/agents-reference.md`。
+委派角色来自 `src/main/resources/agents/*.md`（默认 explorer、worker、reviewer）、`~/.devcli/agents/*.md` 和项目 `.devcli/agents/*.md`，后者覆盖前者；项目绑定时冻结目录。每个文件用 frontmatter 声明 name、description、capability、allowed_tools，可选 provider/model，正文为提示词。能力只允许 READ_ONLY / ISOLATED_PROJECT，始终受父权限、Skill 和工具效果约束；角色名不授予写权限。planner 可作为自定义只读角色添加。角色文件属于受保护的 Agent 配置，不能由运行中的文件工具改写。角色描述进入 delegate_task 说明；模型配置仍可使用已有 `DEVCLI_DELEGATE_<ROLE>_PROVIDER/MODEL`，文件配置优先。详见 ADR 0018。
 
 委派支持通过 `context` / `constraints` 显式传递选定记忆，不自动开放长期记忆。Runtime 在失败、预算退出、取消、Reviewer 拒绝和提交冲突时保留有界工具观察、失败尝试及未解决项；`knowledge_outcome` 与 `patch_status` 分开，成功工具观察不等于验收通过，清理失败也不把已提交补丁改报为未提交。报告最多 64 条，按未解决问题、已提交产物、工具证据、普通报告优先保留，同级按最近使用淘汰；上游输入在准入时固定快照。尚未新增报告到工作记忆的结构化晋升或依赖图保留。委派准入只保留一条语义判据：执行粒度自述为多轮循环，声明为单工具操作时拒绝。参数结构校验（inputs/scope/done_condition、deliverable、Worker 写入范围）由工具 schema 与语义校验层承担，以参数错误返回而非策略拒绝，使模型能区分「参数写错了」与「这个任务不该委派」。收益评估（作用面隔离、传递成本）降级为运行事件中的诊断分数，不参与放行也不回灌模型——把分数告诉模型只会诱导它修改声明措辞。单会话累计派出量有配额（默认 200，`DEVCLI_DELEGATE_MAX_PER_SESSION` / `-Ddevcli.delegate.max.per.session`），真实总量仍由 Token 与轮数预算控制。详见 `docs/adr/0009-委派准入只保留硬门槛.md` 与 `docs/adr/0010-委派程序侧准入对齐参照实现.md`。
 
 委派报告进入主 Agent 上下文前统一标记 `report_security.content_trust=UNTRUSTED`；默认在 JSON 序列化前非破坏性净化模型文本与内联工具摘录中的运行时标签、行首角色前缀，并记录命中模式。可用 `DEVCLI_DELEGATION_REPORT_SANITIZATION_ENABLED` / `-Ddevcli.delegation.report.sanitization.enabled` 关闭形态净化，但不移除不可信标签。该机制不处理自然语言语义注入，报告只能作为核验线索，副作用仍须经过既有权限与执行链。当前不引入纯协调 Delegate Mode：主 Agent 保留直接执行能力，按需委派继续由 `DelegationPolicy` 决定。详见 `docs/adr/0008-委派报告信任边界与协调模式取舍.md`。
 
-Multi-Agent 中 Planner 负责拆解 DAG，Worker 负责实现子任务，Reviewer 给出计划语义和真实产物的非阻塞审查建议；确定性预检与 Pre-Review 硬检查负责阻断无效计划或产物。
+`/plan` 的规划和计划审阅属于入口工作流；默认委派角色不再包含 planner。主 Agent 维护工作计划，explorer 查事实，worker 同步修改，reviewer 独立审查。
 
-`AgentOrchestrator` 只保留团队装配、配置传播和 `run/resume` 顶层流程；计划生成与 DAG 预处理由 `PlanCoordinator` 承担，评审门禁由 `ReviewCoordinator` 承担，checkpoint 迁移与对账由 `CheckpointCoordinator` 承担，Worker 调度、重试、隔离工作区和 PatchSet 归并由 `StepExecutionCoordinator` 承担，可变运行态集中在 `OrchestrationRunState`，上下文与终态报告由 `OrchestrationNarrative` 生成。
+`AgentOrchestrator` 装配计划工作流；`PlanCoordinator` 处理计划协议，`StepExecutionCoordinator` 只保留依赖调度、既有原位重做和执行产物投影，通过 `DelegationSession` 执行步骤；`ReviewCoordinator` 保留计划/最终验收；`CheckpointCoordinator` 与 `DelegationCheckpoint` 接入同一工作区提交和恢复生命周期。旧独立 Worker 循环、瞬态重试和逐步 Reviewer 重试路径已删除。
 
 Plan 的任务适配由 `PlanTaskBatchExecutor` 负责，Team 的 Worker 适配由 `MultiAgentBatchExecutor` 负责；两者把冲突波次交给 `OrchestrationWaveExecutor`，共用有界并发、异常归属、独立输出缓冲与稳定顺序归并。任务结果及有界摘要由 `PlanTaskExecutionResult` 统一承载；Worker 池、公平锁、Pre-Review、Reviewer、角色记忆和 checkpoint 恢复拓扑仍只属于 Team。
 
-Plan 与 Multi-Agent 的 DAG 就绪判断和图结构校验统一使用 `ExecutionGraph`：`Task` 与 `ExecutionStep` 都实现只读 `ExecutionNode`，普通节点只在依赖全部完成后执行，最终集成节点可在依赖进入完成或失败终态后执行；缺失依赖和环会在执行前拒绝。两类节点和 checkpoint 共用 `ExecutionArtifact`。Planner 必须输出结构化 `acceptance_criteria`，确定性预检会拒绝缺失字段、未知 DAG 节点、非法验证器、环和阻塞性空工作区检查。Team 随后使用独立、无工具的 Reviewer 检查需求覆盖、逐条验收标准和 critical/high 反例；计划语义拒绝、协议损坏或模型故障会作为可见建议进入用户确认，不再阻断已通过确定性校验的计划。执行期只有实际执行并通过 Pre-Review 硬检查时，Reviewer 拒绝或故障才降为建议；未执行硬检查时 Reviewer 仍决定产物能否继续和归并。
+计划 DAG 继续使用 `ExecutionGraph` 校验依赖、环和最终集成就绪条件。`ExecutionArtifact` 保存真实终态。Planner 输出结构化验收标准，确定性预检负责拒绝无效计划；独立计划 Reviewer 的语义意见进入用户确认。步骤执行统一委派，最终集成通过 `ReviewCoordinator` 复核验收点；真实硬检查失败继续阻断。
 
 Agent、Plan、Worker 和 Reviewer 的流式输出状态机统一委托 `AgentStreamPresenter`；Memory/Compactor/Skill/MCP 恢复装配统一委托 `AgentRuntimeSupport`。旧内部 Renderer 包装类只保留兼容构造器，不再维护第二套状态逻辑。关键启动配置使用 `ConfigResolver`，显式非法值在加载时拒绝。
 
-Multi-Agent Planner 与计划语义 Reviewer 输出前后允许存在说明文本，编排器会提取完整 JSON 对象；Planner 声明的步骤类型必须属于固定枚举，纯读取或检查步骤不能伪装成 `FILE_WRITE` 后直接驱动强制写工具。计划评审只接受包含 `approved` 的合法对象，无法提取时由 Reviewer 进行一次有界协议修复；仍无效时记录协议建议并继续用户确认。Planner 解析失败、图结构无效或出现阻塞后续实现的空工作区纯检查步骤时，清空历史并携带失败原因有界修复，默认 2 次，可通过 `DEVCLI_TEAM_PLANNER_REPAIR_MAX_ATTEMPTS` / `-Ddevcli.team.planner.repair.max.attempts` 调整。空工作区是合法状态，目录或文件存在性检查应并入实现步骤并写明“若不存在则创建”。Worker 最终文本为空但本轮存在结构化 `SUCCESS` 工具证据时，编排器生成执行摘要并继续 Reviewer；没有成功工具证据时先进行一次强制执行协议修复，代码任务必须调用 `write_file` 并最小验证，读取或分析任务必须取得真实工具证据；该请求按步骤类型强制具体工具，FILE_WRITE / INTEGRATION 选择 `write_file`，COMMAND 选择 `execute_command`，其他类型选择 `list_dir`；Anthropic 与 OpenAI-compatible 都映射为命名工具选择。FILE_WRITE / INTEGRATION 步骤出现成功 `write_file` 批次后直接以结构化证据结束当前 Worker 执行；强制修复中的指定工具也采用同一规则，不再追加 LLM 收尾调用。Provider 忽略命名工具选择时，执行引擎追加一次严格 JSON 工具信封请求；只接受完整 JSON、目标工具名和对象参数，随后仍由工具参数校验与权限管线执行，不解析 reasoning、Markdown 或代码围栏。工具失败时继续让模型纠正，最终仍无成功证据才判失败。
+计划生成与语义审查保留既有 JSON 提取及有界协议修复；步骤类型、验收字段和 DAG 由确定性预检校验。空工作区合法，存在性检查应并入实现步骤。旧 Worker 的强制写工具修复、写后提前收尾及独立重试循环已删除；步骤采用统一委派，写入/命令步骤缺少真实成功证据时不得记为完成。
 
-Multi-Agent 的 `SessionMemory` 按角色注入隔离视图：Planner 只看任务状态 + 会话关键事件，不看工具原文证据；Worker 看完整任务状态 + 关键事件 + 工具证据；Reviewer 只看任务状态 + 工具证据，避免把会话事件误当验收依据。工具证据显式携带 agent、step、单调 origin sequence 和 `context_epoch`；同一 agent/step 的新执行开始后，旧 origin 的迟到证据会按逻辑序拒绝，不依赖墙钟时间。
+`SessionMemory` 对计划生成、审查和最终验收仍提供按角色收窄的执行投影；委派子任务只取得冻结规则、Skill 和显式任务上下文，不复制父会话。工具证据继续携带 agent、step、origin sequence 与 context_epoch，按逻辑序拒绝旧执行的迟到证据。
 
-Multi-Agent 并行批次由 `MultiAgentBatchExecutor` 负责资源冲突分波、Worker 分配和公平锁，再委托 `OrchestrationWaveExecutor` 执行并发与输出归并；批次使用 `SubAgent.ForkContext` 共享冻结 system prompt 前缀、exact tool definitions 快照、skill body 快照、`context_epoch` 和 fork fingerprint，每个子任务只追加自己的 user 后缀，避免并行 Worker / Reviewer 因历史或动态工具差异破坏 prompt cache 命中。只读步骤提交时若全局 epoch 已推进，会以 `STALE_CONTEXT` 拒收；隔离写步骤继续由资源级 PatchSet 版本闸门判定，避免无关文件变化造成误杀。
+计划批次保留资源冲突分波及只读并发；`SingleWriterScheduling` 把每个写步骤放入独占波次。旧 Worker 身份和步骤绑定继续用于 checkpoint 恢复和上下文装配，实际子循环统一由委派执行，不再由 Worker 池执行第二套写入链路。
 
-并行 Worker 写文件时，隔离 ToolRegistry 内的 `write_file` / `edit_file` / `apply_patch` 仍进入运行时资源租约检查：每个 Plan step 以自己的 id 持有写租约，同一隔离工作区文件只能被一个运行中步骤写入；冲突返回策略拒绝，不做 last-writer-wins 覆盖或 LLM 自动合并。Worker 尝试结束后都会在 finally 中释放本步骤租约。ToolRegistry 共享后台清理器，project fork 不重复创建线程，最后一个注册表关闭后终止；默认周期 60 秒，可通过 `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` / `-Ddevcli.resource.lease.cleanup.interval.seconds` 调整。设计说明见 `docs/runtime-resource-lease-design.md`。
+同步写角色仍经过委派写白名单、资源租约、`ContextVersionLedger` 和 PatchSet 版本闸门；同一时刻只有一个写角色。租约竞争处理保留，不能依靠独占调度绕过它。注册表和项目 fork 共用既有租约维护器。
 
 编排任务的父 ToolRegistry 与隔离 fork 共享 `ContextVersionLedger`，按项目相对路径记录文件 generation、整文件指纹和 Java class/method 符号指纹。`write_file` / `edit_file` / `apply_patch` 在租约之后执行确定性版本校验；内容未变化时不推进 generation，也不污染 RAG dirty 集。PatchSet 在项目锁内应用前再次校验，覆盖 `execute_command` 等间接写入。检测到 `STALE_CONTEXT` 后，执行内核发出强类型 `context.refresh` 生命周期事件，自动刷新受影响资源并要求 Worker 基于新内容重新生成修改；刷新后重写同一资源时，PatchSet 基线只对已确认刷新且由该 scope 重写的文件重绑定。非 Java 和 JavaParser 失败的普通 file chunk 使用整文件指纹，`file#N` 分段证据暂不进入写闸门。
 
@@ -101,23 +101,23 @@ Multi-Agent 并行批次由 `MultiAgentBatchExecutor` 负责资源冲突分波�
 
 Windows 下已通过 `HOST_WARN` 策略校验的命令使用 `cmd.exe` 执行，避免 PowerShell `-Command` 改写 Maven `-Dname=value` 参数；普通主机命令仍使用 PowerShell。重复调用指纹保留命令原文语义，带引号的纠正命令不会与未加引号的失败命令合并。
 
-Reviewer 前置硬约束：Worker 产物进入 Reviewer LLM 前，`AgentOrchestrator` 委托 `PreReviewVerifier` 执行 Pre-Review Hook；Maven 根目录即使没有根级 `src/main/java` 也会执行 `mvn -q -DskipTests test-compile` 硬检查，固定复用沙箱镜像内置 Maven，避免禁网临时容器通过 Wrapper 重复下载 Maven 本体；无 Maven 时使用 UTF-8 javac 参数文件传递源码清单，避免 Windows 命令行长度限制。两类命令都通过统一命令服务执行；默认使用 Docker，显式 `HOST_WARN` 时 Maven 自动增加离线参数并在 Reviewer 前展示主机风险提示。验证器独立负责 Java 文件扫描、命令选择、超时、参数文件清理和失败摘要，并按 Maven 依赖解析、仓库写入、工具链、超时、取消或沙箱故障的精确信号识别环境失败；普通编译错误中的 `cannot access` 不会被误判为环境问题。失败时直接生成 `approved=false` 反馈打回 Worker，不唤醒 Reviewer LLM。
+代码补丁在委派提交前由 `PreReviewVerifier` 执行 Java/Maven 硬检查；失败保留候选并拒绝提交。独立 Reviewer 按现有 `DelegationReviewGate` 信号触发；`/plan` 的最终集成仍通过 `ReviewCoordinator` 复核验收点。编辑后的 LSP 诊断继续沿用现有写入 hook，在下一次模型调用前注入，不增加第二套检查。
 
-Reviewer 输出应为包含三层评分和逐条验收结果的 JSON。实际执行并通过 Pre-Review 硬检查后，Reviewer 拒绝、协议错误或 LLM 故障只作为可见建议，不触发 Worker 重做；未执行硬检查时继续失败关闭。编译、测试等硬检查失败仍会阻断并保留隔离补丁。Reviewer 默认最多 5 轮，可通过 `DEVCLI_TEAM_REVIEWER_MAX_ITERATIONS` / `-Ddevcli.team.reviewer.max.iterations` 调整到 `[1, 8]`；最后一轮禁用工具并强制只输出裁决 JSON，证据不足时明确拒绝。
+独立委派 Reviewer 返回结构化审查结果；`/plan` 最终审查沿用现有验收协议。真实硬检查失败继续阻断；成功执行硬检查后的 Reviewer 建议规则保持现有边界。工具成功只是观察，不自动等于用户验收通过。
 
 Final integration 只做入口/API/默认参数/跨模块联动胶水；普通步骤失败比例达到 `50%` 时熔断，不让最终步骤强行修补。
 
-失败步骤支持有界在位重做（默认 1 次）：失败步骤保持原 id/依赖在 DAG 原位换思路重做，redo 用尽后保持 FAILED；最终结果显式输出 Reviewer 重试、原位重做、最后失败原因、checkpoint 和人工处理选项。ReAct、Plan task、SubAgent 与 Orchestrator 的终态失败统一由 `FailureFeedback` 输出“原因 + 分类 + 操作建议 + 下一步动作”，固定提供重试、人工接手、接受部分结果和回滚；执行内核另发出 `failure.guidance` 强类型事件供 Runtime 审计与投影。checkpoint 协议版本 10 保存共享 `ExecutionArtifact`、验收方式、验证器、适用节点、pending PatchSet 写前日志及文件权限、稳定 Planner/Worker/Reviewer 身份、步骤分配、单调消息游标、有界且按步骤归属的 AttemptDigest、已消耗的重做次数和重做失败现场；Pre-Review 遇到环境失败时，未验证 PatchSet 以带哈希和权限的私有旁路附件保存，不写入主项目，也不重复消耗 Worker 重试，修复环境后由 resume 恢复到新隔离工作区并重新验证。应用前记录 before/after 哈希、权限与原文件备份，恢复时在项目提交锁内按最终内容和权限提升 COMPLETED、继续 PENDING 或自动回滚。恢复优先重建 checkpoint 中的 Worker 拓扑并保持原步骤绑定，沿用原重做额度，并按上下文 schema 版本注入最近摘要和当前步骤的失败尝试；不持久化完整 SubAgent 对话对象图。旧协议缺失适用节点时迁移为 `FINAL`，缺失验证字段时迁移为人工验收；没有可执行验收标准的未完成 checkpoint 拒绝恢复。对账保存失败、回滚不完整或身份拓扑损坏时停止 resume；高于当前版本的 checkpoint 明确报告不兼容。计划、依赖、验收点、执行产物和恢复元数据原子写入 `~/.devcli/checkpoints/`，全部成功后删除；resume 不恢复完整 `SessionMemory`。
+计划保留既有原位重做与 checkpoint 协议 10。旧 checkpoint 继续由现有迁移器读取并转换为执行步骤；恢复后步骤接入委派。未验证补丁恢复到新工作区时统一调用 `WorkspaceExecutionSession.restorePatch`，登记新作用域的局部写入；提交继续在项目锁内记录写前日志、应用、持久化终态与清理日志。环境失败保留 deferred PatchSet，冲突、回滚不完整和高版本不兼容继续停止恢复，不另建恢复协议。
 
 Side-Git 快照按 `devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX` 保留最近快照；每次新建快照后重写 side-history，只保留最新 N 条；裁剪后调用 JGit `autoGC`，由其原生阈值决定是否后台维护，不再自研对象 GC，也无相关调优项。
 
 副作用横向信息流：write_file/execute_command 等副作用工具的证据在 `SessionMemory.EvidenceJournal` 中按高重要性保留；普通读取优先压缩或淘汰，失败压缩成 AttemptDigest，使后续步骤持续看到本任务改过哪些文件和已经排除的方案。
 
-职责边界：`conversationHistory` 与六段 `RollingSummary` 只治理当前线程上下文窗口，不保存待办、当前工作或下一步；`SessionMemory` 是当前任务内的运行投影，会按 Token 预算裁剪且不跨进程。`ExecutionArtifact` 是 Plan / Multi-Agent / checkpoint 的任务终态唯一来源；`output` 保留 Worker 原始结果，`summary` 由 Orchestrator 根据结构化成功工具证据和 Reviewer / Pre-Review 结论生成，依赖步骤只注入该可信摘要。隔离执行期间的修改只存在工作区内，PatchSet 成功应用后才把 `modifiedResources` 同步到运行态、checkpoint 和 `SessionMemory`。后续依赖步骤读取已批准的主项目成果；同进程靠 `SessionMemory`，跨进程靠 checkpoint `RecoveryState` 的有界失败尝试摘要。固定 Final integration 会在补丁归并后执行硬检查并复核全部验收点，承担合并结果的整体验证。
+职责边界：`agent_work_plan` 是工作意图的唯一来源，保存在 `SessionMemory.taskState`，由 `update_plan` 维护目标和步骤；in_progress 表示当前工作，首个 pending 表示下一步。ReAct 与 `/plan` 共用，压缩和恢复原样携带同一状态；旧 checkpoint 步骤在恢复时导入工作计划。`TaskLedger`、SessionMemory 的工具证据和恢复段是运行投影；`ExecutionArtifact` 仍是执行终态来源，模型计划、模型报告与实际执行证据分开。RollingSummary 只治理上下文，不创建第二份计划。
 
-内置核心工具 15 个：`read_file` / `write_file` / `edit_file` / `apply_patch` / `delete_files` / `list_dir` / `execute_command` / `create_project` / `search_code` / `grep_code` / `web_search` / `web_fetch` / `save_memory` / `list_memory` / `revert_turn`。`read_file` 同传行范围与字符范围时优先行范围并返回提示；`edit_file` 按目标文件换行风格对齐匹配文本。
+模型写工具为 `write_file` / `edit_file`，明确文件删除仍用 `delete_files`。新增 `update_plan`、受限的 `read_memory` 和固定的 `call_mcp_tool`；内部 `apply_patch` API 不向模型暴露，模型批次不能调用。`read_file` 同传行范围与字符范围时仍优先行范围；`edit_file` 继续按目标换行风格匹配。
 
-`apply_patch` 用官方 `*** Begin Patch` 格式一次表达跨文件、跨位置的成组修改（Add / Delete / Update / `*** Move to:` / `*** End of File`），不写行号，靠上下文行定位。它是**新的前端格式，不是新的写入路径**：`ApplyPatchParser` 解析后由 `ApplyPatchCompiler` 在内存算出每个文件的最终内容并组装成 `PatchSet.FileChange`，再交给既有 PatchSet 应用流程，复用全量冲突预检、项目级锁、原子替换与失败回滚。定位与基线校验都在写盘前完成，任何一处失败都整批不应用——官方实现逐个 hunk 直接写盘、失败只上报已提交部分，这里刻意更强。匹配按 精确 → 忽略行尾空白 → 忽略两侧空白 → Unicode 标点归一化 四级降级（`SeekSequence`）；行尾保留文件原有风格（官方默认归一化为 LF）；`*** Environment ID:` 显式拒绝；同一路径在一个补丁里出现两次直接拒绝。`ApplyPatchTool` 与 `write_file` / `edit_file` 共用同一条写链路：写路径策略 → 委派写白名单 → 资源租约 → 版本闸门 → PatchSet → 版本账本登记，单文件上限同为 5MB。单点小改仍用 `edit_file`，整文件重写仍用 `write_file`。
+内部 `apply_patch` 保留官方补丁解析及既有 PatchSet 写入链路，用于现有内部 API 和对应组件测试，不作为模型编辑工具。模型提示词只引导 edit_file / write_file；删除工具的审批和路径保护保持现有约束。
 
 Code RAG 检索链路当前为 keyword + semantic + bounded graph → `RRF（倒数排名融合）` → symbol-aware boost → `CrossEncoderReranker（交叉编码器重排）`。Rerank 默认开启，默认指向本地 Docker 暴露的 OpenAI-compatible `/rerank` endpoint；不可用时自动降级回 RRF 结果，不阻断检索。`/index` 按文件批量生成 chunk embedding；批量请求失败或返回数量异常时逐条降级并保留成功 chunk。`ToolRegistry` 会按项目路径复用 `CodeRetriever` / SQLite 连接，项目路径切换时关闭旧连接。索引替换会为变更和删除的 symbol 生成 `negativeFact`，`search_code` 会输出相关失效事实，并通过工具结果强类型旁路载荷把 evidence 与 negativeFact 传给 `SessionMemory`；展示文本不再嵌入结构化 JSON，旧 JSON 与旧展示文本解析只保留历史兼容。keyword 通道保持 SQLite 索引实现，`grep_code` 作为独立实时精确检索工具存在，不替代 `search_code`，用于类名、方法名、配置键、错误文本和固定字符串片段定位。`grep_code` 的候选文件由 `ProjectFileLister` 决定：git 仓库走 `git ls-files -z --cached --others --exclude-standard`，忽略语义（含嵌套 `.gitignore`、否定模式、全局 excludes）完全交给 git，不在本地重复实现；非 git 目录、git 不可用或命令失败时回落到目录遍历，只用硬编码跳过目录兜底；显式把 `path` 收窄到被忽略目录时回落遍历，尊重用户意图。子进程输出重定向到临时文件再读取，避免大仓库下管道写满导致 `waitFor` 死锁。长文档型 definition 查询直接使用 semantic route，避免 keyword fusion 与 reranker 对文档描述引入排序噪声；短符号查询仍保留 precise-first 链路。
 索引构建开始时记录 `base_epoch` 并标记 dirty 文件；增量构建把未变化代码块及 embedding 复制到 SQLite 影子表，只重新分块和嵌入 dirty 文件，并保守重算项目关系图。影子候选通过校验后，在事务内执行 `base_epoch + generation` CAS 和原子提升；旧构建不能覆盖新 epoch，未提升候选对检索不可见。检索结果标记 `CURRENT` / `STALE` / `DIRTY`；DIRTY 和 STALE 命中默认回读实时内容校验，变化内容重新分块，无法校验时保留警示。项目级 `WatchService` 会把外部文件变化标记为 DIRTY。
@@ -128,7 +128,7 @@ Code RAG 检索链路当前为 keyword + semantic + bounded graph → `RRF（倒
 
 项目记忆在绑定时解析 Git 主工作区根路径，关联工作树和仓库子目录共享作用域，嵌套独立仓库保持隔离；普通目录或 Git 元数据不可用时沿用请求路径。旧路径主题只在绑定该路径时复制到共享目录，源文件保留、同名冲突不覆盖，状态显示迁入、冲突与失败数量。每个旧来源有独立完成标记，删除或清空主题不重置标记；失败修复后重试。详见 `docs/adr/0016-Git工作树共享项目记忆.md`。
 
-`LongTermMemory` 按作用域目录扫描最多 200 个主题；`MEMORY.md` 最多注入前 200 行或 25000 字节。LLM 相关性选择器默认开启，通过 `DEVCLI_MEMORY_RELEVANCE_SELECTION=false` / `-Ddevcli.memory.relevanceSelection=false` 关闭；选择失败时只保留索引，不猜测全文。项目与全局同名时召回项目版本，同时显示作用域冲突。
+`LongTermMemory` 每个作用域最多扫描 200 个主题，MEMORY.md 最多注入前 200 行或 25000 字节，并受本轮索引 Token 预算约束。每轮只注入索引，不再调用相关性选择模型；需要正文时用 `read_memory(name, scope?, offset?, limit?)` 读取当前作用域中未过期的主题，项目同名主题优先。该入口不接受任意路径，也不放宽 read_file 的项目围栏。
 
 过期记忆仍保留用于审计，但不进入索引、候选或检索。同作用域同主题的自动冲突保留原文，用户显式保存才覆盖并增加修订号。Curator、晋升/确认队列、Evidence 审核态、旁路计数和旧关键词打分器已移除。详见 `docs/adr/0007-长期记忆对齐-workbuddy.md`。
 
@@ -138,7 +138,7 @@ Windows 原生隔离后端通过 `DEVCLI_COMMAND_SANDBOX_MODE=WINDOWS_NATIVE` �
 
 模型调用可靠性链路：Anthropic 与全部 OpenAI-compatible Provider 统一抛出 `LlmException`，错误码覆盖认证、限流、过载、超时、网络、参数、上下文超限、内容过滤、服务端和响应格式错误；只对限流、过载、超时、网络和 5xx 做指数退避有界重试，流式内容开始输出后禁止重试。OpenAI-compatible 默认按标准协商 HTTP/2 与 HTTP/1.1，仅在异常兼容网关上通过 `DEVCLI_LLM_HTTP_PROTOCOL=HTTP_1_1` / `-Ddevcli.llm.http.protocol=HTTP_1_1` 显式降级，非法值失败关闭。工具调用流同时兼容标准增量片段、累积快照和完整字段重复发送，避免工具名或完整 JSON 参数重复拼接。SubAgent 错误消息保留标准错误码和 `retryable` 标记，Orchestrator 不再依赖具体网络错误文案判断瞬时故障。默认 3 次、500ms 初始退避、8s 上限、0.2 jitter，可通过 `DEVCLI_LLM_RETRY_*` 或对应系统属性调整。
 
-工具调用可靠性链路：LLM 先按 reasoning 说明目标、工具选择和参数来源；工具定义使用 JSON Schema 强约束类型、必填项、枚举值和未知字段；`ToolRegistry` 通过 `ToolExecutionPipeline` 分阶段执行取消、工具存在性、能力范围、Skill 权限、参数校验、HITL、审计、策略和结果尺寸治理；并行工具线程显式继承能力范围、资源租约和 Skill buffer 快照，项目 fork 复制 `SkillContextBuffer`，不共享可变状态；工具结果使用 `ToolStatus`、`ToolErrorCode` 和 retryable 结构化表达；内置 Provider 可通过结构化执行器直接返回状态，参数错误、策略拒绝、命令非零退出、超时和取消不再先压成普通文本；ReAct、Plan、SubAgent 的重复错误熔断不再依赖结果文本关键词；执行前通过 `json-schema-validator` + 本地兜底校验内置工具和 MCP 工具参数，失败以 `工具参数校验失败` 回传模型修正；默认只注入内置核心工具和已激活 MCP 工具；ReAct、Plan 和 Multi-Agent turn 开始前会按当前用户输入预激活匹配到的 MCP 工具；`search_tools` 使用工具索引缓存，MCP 工具变更后自动失效，命中 MCP 工具后激活到后续工具定义；未知工具会提示先调用 `search_tools`；危险工具继续走 HITL / Policy / AuditLog；工具参数通过稳定语义指纹参与停滞判断，JSON 字段顺序、查询大小写、Unicode 等价字符和冗余空白不会绕过重复检测；正则 pattern 保持大小写敏感，避免错误缓存命中；成功且无图片的 READ_ONLY 工具结果按会话短期缓存，任何非只读工具执行和项目路径切换都会清空缓存；MCP 工具结果被截断或落盘预览时会标记折叠分类；工具结果进入 SessionMemory，最终回答必须用工具证据闭环。
+工具调用可靠性链路：LLM 先按 reasoning 说明目标、工具选择和参数来源；工具定义使用 JSON Schema 强约束类型、必填项、枚举值和未知字段；`ToolRegistry` 通过 `ToolExecutionPipeline` 分阶段执行取消、工具存在性、能力范围、Skill 权限、参数校验、HITL、审计、策略和结果尺寸治理；并行工具线程显式继承能力范围、资源租约和 Skill buffer 快照，项目 fork 复制 `SkillContextBuffer`，不共享可变状态；工具结果使用 `ToolStatus`、`ToolErrorCode` 和 retryable 结构化表达；内置 Provider 可通过结构化执行器直接返回状态，参数错误、策略拒绝、命令非零退出、超时和取消不再先压成普通文本；ReAct、Plan、SubAgent 的重复错误熔断不再依赖结果文本关键词；执行前通过 `json-schema-validator` + 本地兜底校验内置工具和 MCP 工具参数，失败以 `工具参数校验失败` 回传模型修正；模型工具定义在执行循环内固定；MCP 不预激活到工具列表，`search_tools` 使用目录缓存返回 schema 与指纹，固定 `call_mcp_tool` 执行目标并重新经过完整管线；未知工具会提示先调用 `search_tools`；危险工具继续走 HITL / Policy / AuditLog；工具参数通过稳定语义指纹参与停滞判断，JSON 字段顺序、查询大小写、Unicode 等价字符和冗余空白不会绕过重复检测；正则 pattern 保持大小写敏感，避免错误缓存命中；成功且无图片的 READ_ONLY 工具结果按会话短期缓存，任何非只读工具执行和项目路径切换都会清空缓存；MCP 工具结果被截断或落盘预览时会标记折叠分类；工具结果进入 SessionMemory，最终回答必须用工具证据闭环。
 
 工具契约是显式声明，不按工具名推断：`ToolEffect` 只表达资源域（READ_ONLY / LOCAL_CONTEXT / PROJECT_MUTATION / HOST_PROCESS / EXTERNAL_MUTATION），另有正交的破坏性等级 `Destructiveness`（NONE / BENIGN / STRUCTURAL）、幂等性 `Idempotency`（IDEMPOTENT / NON_IDEMPOTENT）和 `cacheable` 缓存资格。内置工具的唯一声明点是 `BuiltInToolPolicy`（effect + approval + audited + 契约三维）；MCP 工具由 `mcpTool` 保守推导，本地只读授权只代表访问等级、服务端 annotations 默认不可信，因此只读授权工具声明为 `BENIGN` + 非幂等 + 不可缓存，其余为 `STRUCTURAL` + 非幂等 + 不可缓存。未声明契约的第三方工具按 effect 取保守默认（只读/本地上下文为 NONE + 幂等 + 可缓存，与历史行为一致），未知工具按外部实质变更 + 非幂等处理。
 
@@ -220,7 +220,7 @@ Execution Trace：ReAct 与 Plan/Team 全路径通过 `RunEventTraceSink` 把结
 
 ### Memory
 
-- 记忆按生命周期分三层：`conversationHistory` 与六段 `RollingSummary` 是当前线程的短期上下文治理；`SessionMemory` 是当前任务共享的工作记忆；`LongTermMemory` 是跨任务持久事实。`RuleContext` 属于规则系统，不是记忆
+- 记忆按生命周期区分当前窗口、任务运行状态与长期主题；工作计划作为 SessionMemory 中单独的 agent_work_plan 状态保存，执行证据不从计划状态推断。
 - `SessionMemory` 通过 `accept(SessionEvent)` 统一接收工具结果、用户确认和步骤变化；内部 `WorkState` 按键覆盖或按步骤状态机推进，`EvidenceJournal` 按 CRITICAL / FAILURE / MILESTONE / ORDINARY / REGENERABLE 分级。事件按 agent、step、类型和逻辑 sequence 幂等，旧 origin 证据按 `context_epoch` 拒绝。ReAct、Plan 和 Team 都使用 `beginTask/completeTask/endTask` 明确任务边界
 - SessionMemory Prompt 使用单一硬 Token 预算：先保留任务状态、修改文件和失败摘要，再按 importance/sequence 注入关键事件和工具证据；关键原文超限时折叠成规范化引用。Multi-Agent 共享单一实例，真实 agentId、stepId 和单调 sequence 会参与证据归属与迟到计划/步骤事件拒绝；`ExecutionArtifact` 仍是任务终态唯一来源
 - `CompactionSummaryCache` 只缓存压缩预摘要，不是记忆；`RuleContext` 加载 `DEVCLI.md` 和 `/rule add` 强约束，支持 `/rule list`、`/rule remove`，旧 `pinned_facts.json` 只列为待分类迁移候选，不会静默当成规则。稳定事实使用 `/save` 写入 `LongTermMemory`，旧 `/save --pin` 仅保留废弃提示
@@ -230,7 +230,7 @@ Execution Trace：ReAct 与 Plan/Team 全路径通过 `RunEventTraceSink` 把结
 - 敏感内容命中时直接拒绝写入并要求脱敏后重试，不创建持久化确认票据
 - 用户显式要求忽略记忆（如“别管记忆”“忽略记忆”）时，本会话不注入长期记忆、通用 SessionMemory 和角色裁剪后的 SessionMemory
 - `/memory organize` 显示过期与作用域冲突统计；`/memory organize apply` 从权威主题文件重建所有索引。`/memory export` 导出包含作用域、类型、修订和过期状态的 `memory-audit.md`
-- 索引与相关性全文共享本轮记忆预算：索引先按 `ContextProfile.memoryContextTokens()`（500–5000 tokens）裁剪并附截断提示，剩余额度才给全文；全文按整条取舍，放不下的整条跳过，只有真正注入的条目才计入「本会话已注入」。索引自身上限（200 行 / 25000 字节）比预算大一个数量级，不裁剪会让预算配置对索引失效
+- 本轮只注入按 ContextProfile 预算裁剪的长期记忆索引；主题正文经 read_memory 按需分页读取。选择器及其模型调用已删除，旧 relevanceSelection 开关不再有效。
 - `/memory clear` 默认只清**当前写入作用域**（有活动项目清项目，否则清全局），`/memory clear global` / `/memory clear project` 显式指定；全局目录跨项目共享，项目会话里的默认清空不得连带抹掉它，未知作用域拒绝并给出可用取值
 - 启动时将旧版 `records/` 记忆卡复制到全局作用域并保留旧文件；旧格式没有可靠项目归属，不做项目归属猜测。全部卡片处理成功后写一次性完成标记，后续构造不再重复解析旧源卡片——**迁移因此是一次性的**：落标记后新加入的旧卡片不再补迁，清空全局记忆也不会重置标记（标记在记忆根目录，产物在 `global/`）
 - `ConversationHistoryCompactor` 是唯一治理 LLM messages 窗口的压缩点；压缩前先走第 0 层 `microcompact`（触发后的确定性淘汰：只回收内容指纹重复、或同一 `path` 已被更晚 `write_file` / `edit_file` 覆盖的 `read_file` 结果，逐条落盘并替换为 `<microcompact_boundary>` 引用；不按工具名单或保留最近 N 项保护，不删消息、保 tool_call 配对；折叠后 Token 不减少或落盘失败时原地保留；折叠引用按结构识别，要求起始标记 + 闭合 + `type=tool_result`，生成与消费共用 `MicrocompactBoundary`，正文提到该标记不误判），扛不住再摘要。首次摘要按摘要模型 Token 窗口选择单次调用或 Map-Reduce，完整请求能放入窗口时不再按固定 60k 字符强制分片；后续固定保留六段，模型只提出受限生命周期操作，程序负责覆盖、完成迁移和删除；旧九段摘要可解析，但待办、当前工作和下一步会被丢弃。默认每 5 次成功压缩执行生命周期 GC，不再二次压缩旧摘要。摘要写回 history 前必须经过 `CompactionSemanticGuard`；该守卫只保护工作状态约束，不承担未来随机事实检索
@@ -246,8 +246,8 @@ Execution Trace：ReAct 与 Plan/Team 全路径通过 `RunEventTraceSink` 把结
 - 工具结果尺寸治理分两层：工具层按单条结果分档（20000 字符内原文放行、20000～100000 截断、超过 100000 落盘给 5000 字符预览，同轮聚合额度 100000 字符由并行线程共享），agent 层在回灌前按整批 100000 字符 / 25000 Token 二次分配；两层阈值均为常量，不提供配置项
 - 结构化滚动摘要超过字符上限时执行确定性生命周期 GC；稳定决策和未解决事项不因压缩次数删除，仍超限时保留并告警，不交给 LLM 二次改写
 - `search_code` 结果中的结构化 negativeFact 携带 `oldSymbolVersion` 时，`SessionMemory` 即时清理对应的失效 RAG 证据；旧文本格式保留兼容解析
-- `TaskLedger` 作为 `SessionMemory.WorkState` 的计划执行进度投影，不进 conversationHistory，压缩不触碰它；Plan 和 Multi-Agent 通过统一事件入口更新，让长 plan 压缩后仍能看到当前 step / 已完成 / 待执行 / 失败。任务完成或失败时记录结构化 `modifiedFiles` 和短 `resultSummary`，不依赖完整结果正文。
-- prompt cache（各模型自动前缀缓存）：system prompt 每轮刷新易变段（memory / workingMemory）以让 LLM 看最新状态，代价是自动前缀缓存只命中固定头部（base/personality/mode/approval）；`PromptAssembler` 把稳定段（Sticky）前置、易变段后置以尽量延长可缓存前缀，`PromptAssemblerTest` 锁定"固定头部不被动态内容污染"契约。进一步延长命中（动态段全后移 / 移出 system 到尾部 message）需 prompt 评估 + 真实 API 命中率 A/B，未做
+- `TaskLedger` 继续投影真实计划执行进度与产物；模型可维护的目标、步骤和下一步统一由 update_plan / agent_work_plan 提供，压缩和恢复不另建计划来源。
+- prompt cache：system 只含会话级稳定规则。Project Context、MCP 资源索引、记忆索引、Skill 索引和工作记忆追加到当轮消息。模型工具定义在执行循环内冻结，不再按轮检索裁剪；MCP 搜索返回 schema 和指纹，通过固定 call_mcp_tool 调用，目标仍走参数、权限、审批与审计管线。无工具收尾使用 ToolChoice.NONE 保留定义前缀。真实缓存收益尚未做 API A/B 验证。
 
 ### HITL + 策略层
 
@@ -273,7 +273,7 @@ Execution Trace：ReAct 与 Plan/Team 全路径通过 `RunEventTraceSink` 把结
 - `/grant` 同样作用于整轮（含编排）：例外随轮次继承，只消除审批提示，不改变能力范围与策略边界。跨会话的持久授权不再由状态栏承载，改用 `permissions.allow` 规则；状态栏改为显示规则层摘要（`docs/adr/0006`）
 - PathGuard 强制路径限定在项目根内
 - 受保护路径由 `SensitivePathPolicy` 在**策略层**拦截，与 HITL 开关无关、也不可被审批放行：`.git` / `.ssh` 整棵目录、`.env` 与 `.env.*`（`allowTemplates=true` 时放行 `.env.example` / `.env.sample` / `.env.template` / `.env.dist`）、`credentials.json` / `service-account.json` / `.netrc` / `.npmrc` / `.pypirc`、`id_rsa*` / `id_ed25519*` 与 `.pem` / `.key` / `.p12` / `.pfx` / `.jks` / `.keystore` / `.ppk`。`write_file` / `edit_file` / `apply_patch` / `create_project` 走 `resolveSafeWritePath`；文件名单与隔离工作区物化共用一份实现（物化传 `allowTemplates=false`，保持既有过滤行为）。`target` / `node_modules` 仍是物化排除项，不是安全边界
-- Agent 配置写保护：`.devcli/hooks.json` / `mcp.json` / `config.json` 与自定义 `devcli.hooks.file` / `DEVCLI_HOOKS_FILE` 在共享写路径及 PatchSet 提交前检查，覆盖默认用户配置、物理别名和隔离注册表的主项目映射；关闭审批通道、任务授权和全部批准不能覆盖。快照恢复跳过受保护配置并提示；不禁止 `.devcli` 下普通文件。主机命令、外部 MCP 服务和配置引用的脚本未被统一限制，不能称为全工具写保护或完整沙箱
+- Agent 配置写保护覆盖 `.devcli/agents/`、`hooks.json`、`mcp.json`、`config.json` 与显式配置路径，复用共享路径和 PatchSet 提交检查；角色提示词不能自行修改能力定义。关闭审批、任务授权和全部批准不放宽保护。主机命令与外部 MCP 不属于完整文件沙箱。
 - `CommandGuard` 只补两条与受保护路径呼应的辅助规则（删除 `.git` 目录、重定向写入凭据或私钥文件），因为 shell 能绕过文件层围栏；它仍不是主防线
 - CommandGuard 是辅助黑名单，不是主防线
 - `execute_command` 在注册表最终分发前按实际后端判断：主机执行必须单次人工批准，任务授权、全部批准、关闭审批通道和基础注册表均不能免除；后端硬策略先检查。**主机路径也经过规则层与模式层，但只吸收收紧方向**：`deny` 规则立即拒绝、`dontAsk` 收口为拒绝，`allow` 规则与 `bypassPermissions` 不参与——主机单次确认刻意不可被放宽类判定免除（比 WorkBuddy 的全局 bypass 更严），代价是 `allow execute_command(...)` 在主机路径上不生效，加载期有告警提示改用 `deny`；隔离路径（`ISOLATED_PROJECT`）走沙箱后端，规则层与模式层在 `applyHitl` 内正常求值。审批绑定本次命令、目录和后端，审批后重新检查取消及期限；主机审批只接受 APPROVED，不接受参数修改或批量决策。Docker 工具路径沿用原规则。自定义命令后端默认视为主机，可信实现需显式声明隔离。此规则不覆盖直接调用命令服务的 Pre-Review 或外部 MCP 进程，不代表操作系统写保护
@@ -303,7 +303,7 @@ Execution Trace：ReAct 与 Plan/Team 全路径通过 `RunEventTraceSink` 把结
 
 - system prompt 索引段注入三处提示词，上限 20 个 / 4KB
 - Skill frontmatter 支持 `allowedTools`、`context: inline|fork` 和 `paths`；`paths` 会按当前输入或任务文本中的项目相对路径条件激活，`context: fork` 会在加载结果和恢复段标记，提示优先放入 fork / 子任务上下文
-- system prompt 索引段注入三处提示词，上限 20 个 / 4KB；启用 Skill 按使用频率优先、名称次序排序
+- Skill 索引追加到当轮消息，上限 20 个 / 4KB；按使用频率优先、名称次序排序。目录顺序为 builtin、共享用户目录（`~/.agents/skills`、Codex skills）、`~/.devcli/skills`、项目目录，同名后者覆盖前者；项目目录仍须显式信任。
 - `load_skill` → SkillContextBuffer → 下一轮 user message 前置注入，并记录本进程内使用频率
 - `allowedTools` 为空表示不启用 Skill 工具限制；已加载 Skill 声明 `allowedTools` 时，后续工具调用必须命中当前 SkillContextBuffer 的白名单，`/clear` 清空该状态；压缩后恢复会保留已调用 Skill 的 context、allowedTools 和内容摘要
 
