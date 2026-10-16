@@ -6,6 +6,8 @@ import org.jline.terminal.Terminal;
 
 import java.io.PrintStream;
 import java.util.List;
+import java.util.ArrayList;
+import java.util.function.Consumer;
 
 /**
  * 临时浮起的命令选择列表。
@@ -20,10 +22,16 @@ public final class SlashPalette {
 
     private final PrintStream out;
     private final Terminal terminal;
+    private final Consumer<List<String>> lineSink;
 
     public SlashPalette(PrintStream out, Terminal terminal) {
+        this(out, terminal, null);
+    }
+
+    public SlashPalette(PrintStream out, Terminal terminal, Consumer<List<String>> lineSink) {
         this.out = out;
         this.terminal = terminal;
+        this.lineSink = lineSink;
     }
 
     /**
@@ -62,28 +70,35 @@ public final class SlashPalette {
             }
         } finally {
             erase(rendered);
+            if (lineSink != null) lineSink.accept(List.of());
         }
     }
 
     private int render(String title, List<String> items, int selected) {
-        out.println();
-        out.println(AnsiStyle.heading("┌─ " + (title == null ? "选择" : title) + " ─"));
+        List<String> lines = new ArrayList<>();
+        lines.add("");
+        lines.add(AnsiStyle.heading("┌─ " + (title == null ? "选择" : title) + " ─"));
         for (int i = 0; i < items.size(); i++) {
             String prefix = (i == selected) ? "▶ " : "  ";
             String numberHint = i < 9 ? "[" + (i + 1) + "] " : "    ";
             String line = "│ " + prefix + numberHint + items.get(i);
             if (i == selected) {
-                out.println(AnsiStyle.emphasis(line));
+                lines.add(AnsiStyle.emphasis(line));
             } else {
-                out.println(line);
+                lines.add(line);
             }
         }
-        out.println(AnsiStyle.subtle("└─ ↑↓ 切换  Enter 确认  Esc 取消  数字键直选"));
-        out.flush();
+        lines.add(AnsiStyle.subtle("└─ ↑↓ 切换  Enter 确认  Esc 取消  数字键直选"));
+        if (lineSink != null) lineSink.accept(lines);
+        else {
+            lines.forEach(out::println);
+            out.flush();
+        }
         return items.size() + 3;
     }
 
     private void erase(int lines) {
+        if (lineSink != null) return;
         if (lines <= 0) return;
         synchronized (out) {
             out.print(AnsiSeq.moveUp(lines));

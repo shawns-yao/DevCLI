@@ -41,6 +41,11 @@ final class InlineActivityDisplay implements AutoCloseable {
     private long startedNanos;
     private int frame;
     private int renderedRows;
+    private java.util.function.Consumer<List<AttributedString>> lineSink;
+
+    synchronized void setLineSink(java.util.function.Consumer<List<AttributedString>> sink) {
+        this.lineSink = sink;
+    }
 
     InlineActivityDisplay(Terminal terminal, PrintStream renderLock) {
         this(terminal, renderLock, null);
@@ -147,6 +152,10 @@ final class InlineActivityDisplay implements AutoCloseable {
         if (!active || closed) {
             return;
         }
+        if (lineSink != null) {
+            lineSink.accept(buildLines());
+            return;
+        }
         synchronized (renderLock) {
             PrintWriter writer = terminalWriter();
             clearRenderedArea(writer);
@@ -182,6 +191,10 @@ final class InlineActivityDisplay implements AutoCloseable {
     }
 
     private void clearRenderedArea(PrintWriter writer) {
+        if (lineSink != null) {
+            lineSink.accept(List.of());
+            return;
+        }
         if (renderedRows <= 0) {
             return;
         }
@@ -205,7 +218,7 @@ final class InlineActivityDisplay implements AutoCloseable {
     private List<AttributedString> buildLines() {
         int cols = Math.max(20, TerminalCapabilities.safeSize(terminal).getColumns() - 1);
         List<AttributedString> lines = new ArrayList<>();
-        lines.add(fit("  " + spinner() + " " + label + "... (esc to cancel, " + elapsedSeconds() + "s)",
+        lines.add(fit("  " + spinner() + " " + label + "... (" + (lineSink == null ? "esc" : "ctrl+c") + " to cancel, " + elapsedSeconds() + "s)",
                 cols, STATUS_STYLE));
 
         List<String> quoteLines = reasoningLines();

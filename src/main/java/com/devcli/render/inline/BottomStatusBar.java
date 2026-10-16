@@ -2,16 +2,12 @@ package com.devcli.render.inline;
 
 import com.devcli.render.StatusInfo;
 import org.jline.terminal.Terminal;
-import org.jline.utils.InfoCmp;
 import org.jline.utils.AttributedString;
 import org.jline.utils.AttributedStyle;
 import org.jline.utils.Status;
 
 import java.io.PrintStream;
-import java.nio.file.Path;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * JLine 托管的底部 dock。
@@ -24,9 +20,6 @@ import java.util.regex.Pattern;
  * start/update/close，不关心底层布局实现。
  */
 public final class BottomStatusBar implements AutoCloseable {
-
-    private static final int CONTEXT_BAR_WIDTH = 8;
-    private static final Pattern SUMMARY_RATIO = Pattern.compile("(?i)^(?:MCP|Skill)\\s+(\\d+)/(\\d+)$");
 
     private final Terminal terminal;
     private final PrintStream out;
@@ -53,7 +46,7 @@ public final class BottomStatusBar implements AutoCloseable {
         }
         status = Status.getStatus(terminal);
         if (status != null) {
-            status.setBorder(true);
+            status.setBorder(false);
         }
         started = true;
         renderDock();
@@ -77,7 +70,6 @@ public final class BottomStatusBar implements AutoCloseable {
     /** 在即将读取输入时刷新 JLine dock；光标和输入行位置由 LineReader 管理。 */
     public void prepareInputLine() {
         renderDock();
-        moveCursorToDockInputRow();
     }
 
     /** 输入提交后保留底部 dock；正文继续在 JLine 保留区上方滚动。 */
@@ -97,21 +89,6 @@ public final class BottomStatusBar implements AutoCloseable {
         }
     }
 
-    private void moveCursorToDockInputRow() {
-        StatusInfo info = current;
-        if (info == null || closed || !started) {
-            return;
-        }
-        int rows = TerminalCapabilities.safeSize(terminal).getRows();
-        int cols = TerminalCapabilities.safeSize(terminal).getColumns();
-        int dockRows = formatStatusLines(info, cols).size() + 1; // JLine Status border.
-        int inputRow = inputDockRow(rows, dockRows);
-        synchronized (out) {
-            terminal.puts(InfoCmp.Capability.cursor_address, inputRow, 0);
-            terminal.flush();
-        }
-    }
-
     @Override
     public synchronized void close() {
         if (closed) {
@@ -125,33 +102,17 @@ public final class BottomStatusBar implements AutoCloseable {
         }
     }
 
-    static String formatStatusLine(StatusInfo info, int cols) {
-        String mode = permissionModeLabel(info.permissionMode());
-        String right = environmentSummary(info);
-        if (right.isBlank()) {
-            return fitToColumns(" " + mode, cols);
-        }
-        int gap = Math.max(1, cols - visibleLength(mode) - visibleLength(right) - 2);
-        return fitToColumns(" " + mode + " ".repeat(gap) + right + " ", cols);
-    }
-
-    /**
-     * 状态栏的权限模式位。取代原来的 HITL ON/OFF 单布尔——后者只能表达「问不问」，
-     * 表达不了「只读」「自动放行编辑」这些模式差异（见 docs/adr/0006）。
-     */
-    private static String permissionModeLabel(String permissionMode) {
-        return permissionMode == null || permissionMode.isBlank()
-                ? "模式 (unknown)"
-                : "模式 " + permissionMode;
-    }
-
     static String formatFooterLine(StatusInfo info, int cols) {
-        String model = info.model() == null || info.model().isBlank() ? "Auto Model" : info.model().trim();
+        String model = info.model() == null || info.model().isBlank() ? "auto" : info.model().trim();
         String phase = info.phase() == null || info.phase().isBlank() ? "idle" : info.phase().trim();
-        StringBuilder sb = new StringBuilder(" Auto Model · ");
+        StringBuilder sb = new StringBuilder(" ");
         sb.append(model);
+        appendField(sb, info.permissionMode());
         appendField(sb, phase);
         appendField(sb, contextSegment(info));
+        appendField(sb, info.mcpSummary());
+        appendField(sb, info.skillSummary());
+        appendField(sb, info.grantSummary());
         if (info.inputTokens() > 0 || info.outputTokens() > 0 || info.cachedInputTokens() > 0) {
             appendField(sb, "in " + formatTokens(info.inputTokens()) + " out " + formatTokens(info.outputTokens()));
             if (info.cachedInputTokens() > 0) {
@@ -164,7 +125,6 @@ public final class BottomStatusBar implements AutoCloseable {
         if (info.elapsedMillis() > 0) {
             appendField(sb, formatElapsed(info.elapsedMillis()));
         }
-        appendField(sb, compactCwd());
         return fitToColumns(sb.toString(), cols);
     }
 
@@ -175,7 +135,7 @@ public final class BottomStatusBar implements AutoCloseable {
         sb.append("  ").append(value.trim());
     }
 
-    private static StatusInfo mergeEnvironment(StatusInfo next, StatusInfo previous) {
+    static StatusInfo mergeEnvironment(StatusInfo next, StatusInfo previous) {
         if (next == null || previous == null) {
             return next;
         }
@@ -197,13 +157,8 @@ public final class BottomStatusBar implements AutoCloseable {
 
     static List<AttributedString> formatStatusLines(StatusInfo info, int cols) {
         return List.of(
-                new AttributedString(formatStatusLine(info, cols), AttributedStyle.DEFAULT),
                 new AttributedString(formatFooterLine(info, cols), AttributedStyle.DEFAULT.faint())
         );
-    }
-
-    static int inputDockRow(int terminalRows, int dockRows) {
-        return Math.max(0, terminalRows - Math.max(0, dockRows) - 1);
     }
 
     private static String fitToColumns(String text, int cols) {
@@ -211,79 +166,18 @@ public final class BottomStatusBar implements AutoCloseable {
             return "";
         }
         String safe = text == null ? "" : text;
-        if (safe.length() > cols) {
-            return safe.substring(0, cols);
+        AttributedString attributed = new AttributedString(safe);
+        if (attributed.columnLength() > cols) {
+            return attributed.columnSubSequence(0, Math.max(0, cols - 1)).toString() + "…";
         }
-        return safe + " ".repeat(cols - safe.length());
-    }
-
-    private static String environmentSummary(StatusInfo info) {
-        String mcp = formatEnvironment(info.mcpSummary(), "MCP server", "MCP servers");
-        String skill = formatEnvironment(info.skillSummary(), "skill", "skills");
-        String grant = formatGrant(info.grantSummary());
-        StringBuilder sb = new StringBuilder();
-        for (String part : List.of(mcp, skill, grant)) {
-            if (part == null || part.isBlank()) {
-                continue;
-            }
-            if (sb.length() > 0) {
-                sb.append(" · ");
-            }
-            sb.append(part);
-        }
-        return sb.toString();
-    }
-
-    /**
-     * 授权基线摘要直接展示：它已经是状态栏用语（如 {@code write src/** · commands}），
-     * 不参与 MCP / Skill 的比率折叠。空白表示未配置基线，不占位。
-     */
-    private static String formatGrant(String raw) {
-        return raw == null ? "" : raw.trim();
-    }
-
-    private static String formatEnvironment(String raw, String singular, String plural) {
-        if (raw == null || raw.isBlank()) {
-            return "";
-        }
-        String value = raw.trim();
-        Matcher matcher = SUMMARY_RATIO.matcher(value);
-        if (!matcher.matches()) {
-            return value;
-        }
-        int active = Integer.parseInt(matcher.group(1));
-        int total = Integer.parseInt(matcher.group(2));
-        if (active == total) {
-            return total + " " + (total == 1 ? singular : plural);
-        }
-        return active + "/" + total + " " + plural;
+        return safe + " ".repeat(cols - attributed.columnLength());
     }
 
     private static String contextSegment(StatusInfo info) {
         long total = Math.max(0L, info.totalTokens());
         long window = Math.max(0L, info.contextWindow());
         int percent = window <= 0L ? 0 : (int) Math.min(100L, Math.round(total * 100.0 / window));
-        int filled = window <= 0L ? 0 : (int) Math.min(CONTEXT_BAR_WIDTH,
-                Math.round(total * CONTEXT_BAR_WIDTH * 1.0 / window));
-        String bar = "█".repeat(Math.max(0, filled)) + "░".repeat(Math.max(0, CONTEXT_BAR_WIDTH - filled));
-        return "ctx " + bar + " " + percent + "% (" + formatTokens(total) + "/" + formatTokens(window) + ")";
-    }
-
-    private static String compactCwd() {
-        String cwd = System.getProperty("user.dir");
-        if (cwd == null || cwd.isBlank()) {
-            return "";
-        }
-        String normalized = Path.of(cwd).toAbsolutePath().normalize().toString();
-        String home = System.getProperty("user.home");
-        if (home != null && !home.isBlank() && normalized.startsWith(home)) {
-            normalized = "~" + normalized.substring(home.length());
-        }
-        return normalized;
-    }
-
-    private static int visibleLength(String text) {
-        return text == null ? 0 : text.length();
+        return "ctx " + percent + "%";
     }
 
     private static String formatTokens(long t) {

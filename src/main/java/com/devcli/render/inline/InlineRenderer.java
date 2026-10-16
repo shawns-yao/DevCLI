@@ -41,6 +41,7 @@ public final class InlineRenderer implements Renderer {
     private final List<TranscriptEntry> transcript = new ArrayList<>();
     private final AtomicBoolean startupScreenPrinted = new AtomicBoolean(true);
     private volatile LineReader lineReader;
+    private FixedTerminalView fixedView;
     private int renderedRows;
     private boolean redrawing;
     private volatile boolean started;
@@ -95,7 +96,9 @@ public final class InlineRenderer implements Renderer {
         if (started || closed) {
             return;
         }
-        if (statusBar != null) {
+        if (fixedView != null) {
+            fixedView.start();
+        } else if (statusBar != null) {
             statusBar.start();
         }
         started = true;
@@ -118,12 +121,12 @@ public final class InlineRenderer implements Renderer {
 
     @Override
     public String inputPrompt() {
-        return "* ";
+        return "> ";
     }
 
     @Override
     public String inputRightPrompt() {
-        return "message / @path / @image";
+        return "";
     }
 
     @Override
@@ -138,6 +141,7 @@ public final class InlineRenderer implements Renderer {
         if (statusBar != null) {
             statusBar.close();
         }
+        if (fixedView != null) fixedView.close();
         fallback.close();
     }
 
@@ -182,6 +186,10 @@ public final class InlineRenderer implements Renderer {
     @Override
     public void bindLineReader(LineReader lineReader) {
         this.lineReader = lineReader;
+        if (lineReader instanceof FixedInputLineReader fixed) {
+            fixedView = fixed.view();
+            if (activityDisplay != null) activityDisplay.setLineSink(fixedView::activity);
+        }
     }
 
     /**
@@ -216,6 +224,10 @@ public final class InlineRenderer implements Renderer {
      * {@code * prompt}，避免同一条输入在屏幕上出现两次。
      */
     public void clearAcceptedInput(String input) {
+        if (fixedView != null) {
+            fixedView.clearInput();
+            return;
+        }
         if (terminal == null || closed) {
             return;
         }
@@ -282,12 +294,14 @@ public final class InlineRenderer implements Renderer {
 
     @Override
     public void appendDiff(String filePath, String before, String after) {
-        new InlineDiffRenderer(out).render(filePath, before, after);
+        new InlineDiffRenderer(fixedView == null ? out : stream).render(filePath, before, after);
     }
 
     @Override
     public void updateStatus(StatusInfo status) {
-        if (statusBar != null) {
+        if (fixedView != null) {
+            fixedView.status(status);
+        } else if (statusBar != null) {
             statusBar.update(status);
         }
         if (activityDisplay != null) {
@@ -300,7 +314,7 @@ public final class InlineRenderer implements Renderer {
         if (terminal == null) {
             return fallback.promptApproval(request);
         }
-        return new InlineApprovalPrompter(out, terminal, lineReader).prompt(request);
+        return new InlineApprovalPrompter(fixedView == null ? out : stream, terminal, lineReader).prompt(request);
     }
 
     @Override
@@ -308,7 +322,7 @@ public final class InlineRenderer implements Renderer {
         if (terminal == null) {
             return fallback.openPalette(title, items);
         }
-        return new SlashPalette(out, terminal).open(title, items);
+        return new SlashPalette(out, terminal, fixedView == null ? null : fixedView::overlay).open(title, items);
     }
 
     /** 测试可见：当前实例是否启动了 status bar。 */
@@ -384,6 +398,7 @@ public final class InlineRenderer implements Renderer {
                 processStreamedLine(line);
             }
         }
+        if (fixedView != null && !inCodeBlock) fixedView.preview(lineBuffer.toString());
     }
 
     private void processStreamedLine(String line) {
@@ -397,7 +412,7 @@ public final class InlineRenderer implements Renderer {
             codeHeaderLine = stripTrailingNewline(line);
             codeBodyLines.clear();
             codeStartTranscriptIndex = transcript.size();
-            codeHeaderEmitted = activePrintAboveReader() == null;
+            codeHeaderEmitted = fixedView == null && activePrintAboveReader() == null;
             if (codeHeaderEmitted) {
                 emit(line);
                 transcript.add(new TextEntry(line));
@@ -482,6 +497,10 @@ public final class InlineRenderer implements Renderer {
 
     private void emit(String text) {
         if (text == null || text.isEmpty()) {
+            return;
+        }
+        if (fixedView != null) {
+            fixedView.append(text);
             return;
         }
         LineReader reader = activePrintAboveReader();
@@ -597,7 +616,7 @@ public final class InlineRenderer implements Renderer {
                 return;
             }
             LineReader reader = activePrintAboveReader();
-            if (reader != null) {
+            if (reader != null || fixedView != null) {
                 StringBuilder snapshot = new StringBuilder();
                 int rowsAfter = 0;
                 for (TranscriptEntry entry : transcript) {
@@ -606,7 +625,8 @@ public final class InlineRenderer implements Renderer {
                     rowsAfter += estimateRows(rendered);
                 }
                 renderedRows = rowsAfter;
-                reader.printAbove(snapshot.toString());
+                if (fixedView != null) fixedView.append(snapshot.toString());
+                else reader.printAbove(snapshot.toString());
                 return;
             }
             redrawing = true;

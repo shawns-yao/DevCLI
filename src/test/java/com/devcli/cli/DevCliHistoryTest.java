@@ -38,7 +38,7 @@ class DevCliHistoryTest {
     void configuresPersistentHistoryFileAndOptions() throws Exception {
         LineReader lineReader = newLineReader();
 
-        Main.configureHistory(lineReader, tempDir);
+        TerminalInputSupport.configureHistory(lineReader, tempDir);
 
         Path expected = tempDir.resolve(".devcli").resolve("history").resolve("input.history")
                 .toAbsolutePath().normalize();
@@ -55,12 +55,12 @@ class DevCliHistoryTest {
     @Test
     void clearsPersistentHistory() throws Exception {
         LineReader lineReader = newLineReader();
-        Main.configureHistory(lineReader, tempDir);
+        TerminalInputSupport.configureHistory(lineReader, tempDir);
         History history = lineReader.getHistory();
         history.add("第一条");
         history.save();
 
-        Main.clearLineReaderHistory(lineReader);
+        TerminalInputSupport.clearLineReaderHistory(lineReader);
 
         assertTrue(history.isEmpty());
         Path expected = tempDir.resolve(".devcli").resolve("history").resolve("input.history")
@@ -73,7 +73,7 @@ class DevCliHistoryTest {
         Path dir = Files.createDirectory(tempDir.resolve("history-dir"));
 
         assertEquals(dir.resolve("input.history").toAbsolutePath().normalize(),
-                Main.normalizeHistoryFile(dir));
+                TerminalInputSupport.normalizeHistoryFile(dir));
     }
 
     private static LineReader newLineReader() throws Exception {

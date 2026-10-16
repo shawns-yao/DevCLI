@@ -60,51 +60,51 @@ class CliCommandParserTest {
 
     @Test
     void resolvesConcreteModelNameToProviderAndModel() {
-        Main.ModelSelection step = Main.resolveModelSelection("step-custom-model");
+        CliSettings.ModelSelection step = CliSettings.resolveModelSelection("step-custom-model");
         assertEquals("step", step.provider());
         assertEquals("step-custom-model", step.model());
         assertEquals(true, step.explicitModel());
 
-        Main.ModelSelection glm = Main.resolveModelSelection("glm-4v-plus");
+        CliSettings.ModelSelection glm = CliSettings.resolveModelSelection("glm-4v-plus");
         assertEquals("glm", glm.provider());
         assertEquals("glm-4v-plus", glm.model());
 
-        Main.ModelSelection provider = Main.resolveModelSelection("step");
+        CliSettings.ModelSelection provider = CliSettings.resolveModelSelection("step");
         assertEquals("step", provider.provider());
         assertNull(provider.model());
         assertEquals(false, provider.explicitModel());
 
-        Main.ModelSelection openai = Main.resolveModelSelection("openai");
+        CliSettings.ModelSelection openai = CliSettings.resolveModelSelection("openai");
         assertEquals("openai", openai.provider());
         assertNull(openai.model());
         assertEquals(false, openai.explicitModel());
 
-        Main.ModelSelection anthropic = Main.resolveModelSelection("anthropic");
+        CliSettings.ModelSelection anthropic = CliSettings.resolveModelSelection("anthropic");
         assertEquals("anthropic", anthropic.provider());
         assertNull(anthropic.model());
         assertEquals(false, anthropic.explicitModel());
 
-        Main.ModelSelection claudeModel = Main.resolveModelSelection("claude-sonnet-4-20250514");
+        CliSettings.ModelSelection claudeModel = CliSettings.resolveModelSelection("claude-sonnet-4-20250514");
         assertEquals("anthropic", claudeModel.provider());
         assertEquals("claude-sonnet-4-20250514", claudeModel.model());
         assertEquals(true, claudeModel.explicitModel());
 
-        Main.ModelSelection defaultGlm = Main.resolveModelSelection("glm");
+        CliSettings.ModelSelection defaultGlm = CliSettings.resolveModelSelection("glm");
         assertEquals("glm", defaultGlm.provider());
         assertEquals("glm-5.1", defaultGlm.model());
         assertEquals(true, defaultGlm.explicitModel());
 
-        Main.ModelSelection explicitGlm = Main.resolveModelSelection("glm-5.1");
+        CliSettings.ModelSelection explicitGlm = CliSettings.resolveModelSelection("glm-5.1");
         assertEquals("glm", explicitGlm.provider());
         assertEquals("glm-5.1", explicitGlm.model());
         assertEquals(true, explicitGlm.explicitModel());
 
-        Main.ModelSelection kimi = Main.resolveModelSelection("kimi-k2.6");
+        CliSettings.ModelSelection kimi = CliSettings.resolveModelSelection("kimi-k2.6");
         assertEquals("kimi", kimi.provider());
         assertEquals("kimi-k2.6", kimi.model());
         assertEquals(true, kimi.explicitModel());
 
-        Main.ModelSelection moonshot = Main.resolveModelSelection("moonshot");
+        CliSettings.ModelSelection moonshot = CliSettings.resolveModelSelection("moonshot");
         assertEquals("kimi", moonshot.provider());
         assertNull(moonshot.model());
         assertEquals(false, moonshot.explicitModel());

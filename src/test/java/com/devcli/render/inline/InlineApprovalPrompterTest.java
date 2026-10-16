@@ -60,6 +60,7 @@ class InlineApprovalPrompterTest {
     void followUpReasonUsesBoundLineReader() throws Exception {
         Terminal terminal = mockTerminalReturning('n');
         LineReader lineReader = Mockito.mock(LineReader.class);
+        Mockito.when(lineReader.readLine("审批> ")).thenReturn("n");
         Mockito.when(lineReader.readLine("")).thenReturn("line-reader reason");
         ByteArrayOutputStream sink = new ByteArrayOutputStream();
         InlineApprovalPrompter p = new InlineApprovalPrompter(

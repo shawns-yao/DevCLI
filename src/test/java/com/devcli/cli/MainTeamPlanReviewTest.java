@@ -12,7 +12,7 @@ class MainTeamPlanReviewTest {
 
     @Test
     void mapsSupplementDecisionForTeamPlanReview() {
-        AgentOrchestrator.TeamPlanReviewDecision decision = Main.mapTeamReviewDecision(
+        AgentOrchestrator.TeamPlanReviewDecision decision = CliPlanReview.mapTeamReviewDecision(
                 PlanReviewInputParser.parse("补充默认参数验证"));
 
         assertEquals(AgentOrchestrator.TeamPlanReviewAction.SUPPLEMENT, decision.action());
@@ -30,7 +30,7 @@ class MainTeamPlanReviewTest {
                         List.of("FINAL"))),
                 true);
 
-        String text = Main.formatTeamPlanReview(request);
+        String text = CliPlanReview.formatTeamPlanReview(request);
 
         assertTrue(text.contains("Plan 执行前评审"));
         assertTrue(!text.contains("Team 执行前评审"));
@@ -46,7 +46,7 @@ class MainTeamPlanReviewTest {
                 "实现功能", "step_1 实现", List.of(), false,
                 true, true, "原始目标、节点和验收标准已闭环");
 
-        String text = Main.formatTeamPlanReview(request);
+        String text = CliPlanReview.formatTeamPlanReview(request);
 
         assertTrue(text.contains("Reviewer 计划语义评审"));
         assertTrue(text.contains("已闭环"));
@@ -58,7 +58,7 @@ class MainTeamPlanReviewTest {
                 "实现功能", "step_1 实现", List.of(), false,
                 true, false, "计划遗漏错误处理");
 
-        String text = Main.formatTeamPlanReview(request);
+        String text = CliPlanReview.formatTeamPlanReview(request);
 
         assertTrue(text.contains("建议"), text);
         assertTrue(text.contains("计划遗漏错误处理"), text);

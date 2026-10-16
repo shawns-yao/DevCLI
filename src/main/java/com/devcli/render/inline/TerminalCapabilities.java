@@ -28,10 +28,6 @@ public final class TerminalCapabilities {
         if (type == null || type.isBlank()) {
             type = System.getenv("TERM");
         }
-        if (System.getenv("NO_COLOR") != null) {
-            // NO_COLOR 只影响样式，不影响光标控制——保留 true，颜色由 AnsiStyle 自己关
-            return true;
-        }
         return type == null || !type.equalsIgnoreCase("dumb");
     }
 

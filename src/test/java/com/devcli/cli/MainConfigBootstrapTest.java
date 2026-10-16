@@ -14,7 +14,7 @@ class MainConfigBootstrapTest {
 
     @Test
     void createsDefaultChromeDevtoolsMcpConfigWhenMissing(@TempDir Path tempHome) throws Exception {
-        Main.McpConfigBootstrapResult result = Main.ensureDefaultMcpConfig(tempHome);
+        CliSettings.McpConfigBootstrapResult result = CliSettings.ensureDefaultMcpConfig(tempHome);
 
         Path config = tempHome.resolve(".devcli").resolve("mcp.json");
         assertTrue(result.created());
@@ -41,7 +41,7 @@ class MainConfigBootstrapTest {
                 """;
         Files.writeString(config, original);
 
-        Main.McpConfigBootstrapResult result = Main.ensureDefaultMcpConfig(tempHome);
+        CliSettings.McpConfigBootstrapResult result = CliSettings.ensureDefaultMcpConfig(tempHome);
 
         assertFalse(result.created());
         assertEquals(original, Files.readString(config));
@@ -56,7 +56,7 @@ class MainConfigBootstrapTest {
         config.getPermissions().setAllow(List.of("Edit(src/**)"));
         config.getPermissions().setEnvironment(List.of("可信域名：github.com"));
 
-        com.devcli.policy.PermissionRuleSet rules = Main.loadPermissionRules(config);
+        com.devcli.policy.PermissionRuleSet rules = CliSettings.loadPermissionRules(config);
 
         assertEquals(1, rules.hardDeny().size());
         assertEquals(1, rules.softDeny().size());
@@ -68,7 +68,7 @@ class MainConfigBootstrapTest {
 
     @Test
     void emptyPermissionRulesYieldNoRules() {
-        com.devcli.policy.PermissionRuleSet rules = Main.loadPermissionRules(new DevCliConfig());
+        com.devcli.policy.PermissionRuleSet rules = CliSettings.loadPermissionRules(new DevCliConfig());
 
         assertTrue(rules.isEmpty(), "未配置规则时必须等价于无规则，由模式基线策略接管");
     }
@@ -80,7 +80,7 @@ class MainConfigBootstrapTest {
         // MCP 工具没有声明参数级资源槽，带括号的规则在解析时就必须被拒绝
         config.getPermissions().setAllow(List.of("mcp__puppeteer__navigate(page)"));
 
-        com.devcli.policy.PermissionRuleSet rules = Main.loadPermissionRules(config);
+        com.devcli.policy.PermissionRuleSet rules = CliSettings.loadPermissionRules(config);
 
         assertTrue(rules.isEmpty(), "任一条规则非法时必须整体降级，不能让合法规则单独生效");
     }
@@ -91,16 +91,16 @@ class MainConfigBootstrapTest {
         config.getPermissions().setDefaultMode("bypassPermissions");
 
         assertEquals(com.devcli.policy.PermissionMode.BYPASS_PERMISSIONS,
-                Main.startupPermissionMode(config));
+                CliSettings.startupPermissionMode(config));
     }
 
     @Test
     void startupPermissionModeDefaultsToAsking() {
         assertEquals(com.devcli.policy.PermissionMode.DEFAULT,
-                Main.startupPermissionMode(new DevCliConfig()),
+                CliSettings.startupPermissionMode(new DevCliConfig()),
                 "未配置时必须逐个询问：一个默认不生效的 deny 规则比没有更糟");
         assertEquals(com.devcli.policy.PermissionMode.DEFAULT,
-                Main.startupPermissionMode(null), "配置整体缺失时不能抛异常");
+                CliSettings.startupPermissionMode(null), "配置整体缺失时不能抛异常");
     }
 
     @Test
@@ -110,7 +110,7 @@ class MainConfigBootstrapTest {
 
         // 回落而不是启动失败：配置写错不该让人打不开工具
         assertEquals(com.devcli.policy.PermissionMode.DEFAULT,
-                Main.startupPermissionMode(config));
+                CliSettings.startupPermissionMode(config));
     }
 
     @Test
@@ -122,19 +122,19 @@ class MainConfigBootstrapTest {
                 List.of(), List.of("write_file(*)"), List.of(), List.of());
 
         // dontAsk 把未决动作收口为拒绝，连显式 soft_deny 规则也被拒绝，不会弹审批
-        assertTrue(Main.neverPrompts(com.devcli.policy.PermissionMode.DONT_ASK, noRules));
-        assertTrue(Main.neverPrompts(com.devcli.policy.PermissionMode.DONT_ASK, softDenyRule));
+        assertTrue(CliSettings.neverPrompts(com.devcli.policy.PermissionMode.DONT_ASK, noRules));
+        assertTrue(CliSettings.neverPrompts(com.devcli.policy.PermissionMode.DONT_ASK, softDenyRule));
 
         // bypassPermissions 放行未决动作，但显式 soft_deny 规则仍然会询问
-        assertTrue(Main.neverPrompts(com.devcli.policy.PermissionMode.BYPASS_PERMISSIONS, noRules));
-        assertFalse(Main.neverPrompts(com.devcli.policy.PermissionMode.BYPASS_PERMISSIONS, softDenyRule));
+        assertTrue(CliSettings.neverPrompts(com.devcli.policy.PermissionMode.BYPASS_PERMISSIONS, noRules));
+        assertFalse(CliSettings.neverPrompts(com.devcli.policy.PermissionMode.BYPASS_PERMISSIONS, softDenyRule));
 
         // 其余模式都可能弹审批——auto 的分类器失败也会退回询问
         for (var mode : List.of(com.devcli.policy.PermissionMode.DEFAULT,
                 com.devcli.policy.PermissionMode.PLAN,
                 com.devcli.policy.PermissionMode.ACCEPT_EDITS,
                 com.devcli.policy.PermissionMode.AUTO)) {
-            assertFalse(Main.neverPrompts(mode, noRules), mode.id());
+            assertFalse(CliSettings.neverPrompts(mode, noRules), mode.id());
         }
     }
 }

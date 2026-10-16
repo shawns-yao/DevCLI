@@ -21,7 +21,7 @@ class MainPlanAgentFactoryTest {
         Agent reactAgent = new Agent(llmClient, sharedToolRegistry);
         MemoryManager sharedMemoryManager = reactAgent.getMemoryManager();
 
-        PlanExecuteAgent planAgent = Main.createPlanAgent(
+        PlanExecuteAgent planAgent = CliPlanReview.createPlanAgent(
                 llmClient,
                 reactAgent,
                 (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.cancel()

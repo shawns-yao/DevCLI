@@ -75,7 +75,8 @@ public final class InlineApprovalPrompter {
                     : sensitive
                     ? AnsiStyle.subtle("[y] approve  [n] reject  [s] skip  [m] modify")
                     : AnsiStyle.subtle("[y] approve  [a] all  [n] reject  [s] skip  [m] modify");
-            out.print("> " + optionsLine + " ");
+            if (lineReader != null) out.println(optionsLine);
+            else out.print("> " + optionsLine + " ");
             out.flush();
 
             int key = readSingleKey();
@@ -126,6 +127,14 @@ public final class InlineApprovalPrompter {
     }
 
     private int readSingleKey() {
+        if (lineReader != null) {
+            try {
+                String response = lineReader.readLine("审批> ").trim();
+                return response.isEmpty() ? '\n' : response.length() == 1 ? response.charAt(0) : '?';
+            } catch (UserInterruptException | EndOfFileException e) {
+                return -1;
+            }
+        }
         Attributes original;
         try {
             original = terminal.enterRawMode();

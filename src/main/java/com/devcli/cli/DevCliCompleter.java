@@ -74,7 +74,7 @@ final class DevCliCompleter implements Completer {
         String word = line.word() == null ? "" : line.word();
         int replacementStart = Math.max(0, prefix.length() - word.length());
 
-        for (Main.SlashCommandHint hint : Main.slashCommandHints()) {
+        for (CliDisplay.SlashCommandHint hint : CliDisplay.slashCommandHints()) {
             String command = hint.insertText();
             if (!command.startsWith(prefix)) {
                 continue;

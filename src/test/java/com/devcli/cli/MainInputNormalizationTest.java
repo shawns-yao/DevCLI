@@ -23,28 +23,28 @@ class MainInputNormalizationTest {
 
     @Test
     void keepsMultilinePasteStructure() {
-        String normalized = Main.prepareSeedBuffer("请把任务拆成可并行的 DAG:\n1. 读 pom.xml\r\n2. 列出 src/main/java");
+        String normalized = TerminalInputSupport.prepareSeedBuffer("请把任务拆成可并行的 DAG:\n1. 读 pom.xml\r\n2. 列出 src/main/java");
 
         assertEquals("请把任务拆成可并行的 DAG:\n1. 读 pom.xml\n2. 列出 src/main/java", normalized);
     }
 
     @Test
     void keepsSingleLineInputUntouched() {
-        String normalized = Main.prepareSeedBuffer("帮我读取 pom.xml");
+        String normalized = TerminalInputSupport.prepareSeedBuffer("帮我读取 pom.xml");
 
         assertEquals("帮我读取 pom.xml", normalized);
     }
 
     @Test
     void normalizesLegacyCarriageReturnsWithoutChangingTextLayout() {
-        String normalized = Main.prepareSeedBuffer("第一行\r第二行\r\n第三行");
+        String normalized = TerminalInputSupport.prepareSeedBuffer("第一行\r第二行\r\n第三行");
 
         assertEquals("第一行\n第二行\n第三行", normalized);
     }
 
     @Test
     void startupHintsKeepSlashCommandDetailsOutOfInitialScreen() {
-        List<String> hints = Main.startupHints();
+        List<String> hints = CliDisplay.startupHints();
 
         assertTrue(hints.stream().anyMatch(hint -> hint.contains("输入 '/' 后按 Tab 补全命令")));
         assertTrue(hints.stream().noneMatch(hint -> hint.contains("/model")));
@@ -54,16 +54,17 @@ class MainInputNormalizationTest {
 
     @Test
     void startupBannerUsesOpenLayoutWithoutRightBorder() {
-        List<String> lines = Main.startupBannerLines();
+        List<String> lines = CliDisplay.startupBannerLines();
 
         assertTrue(lines.stream().anyMatch(line -> line.contains("DevCLI")));
         assertTrue(lines.stream().noneMatch(line -> line.contains("PaiCLI")));
         assertTrue(lines.stream().noneMatch(line -> line.contains("DecCLL")));
         assertTrue(lines.stream().noneMatch(line -> line.contains("π")));
         assertTrue(lines.stream().anyMatch(line -> line.contains("v16.1.0")));
-        assertTrue(lines.stream().anyMatch(line -> line.contains("██████╗")));
-        assertTrue(lines.stream().anyMatch(line -> line.contains("Tips for getting started")));
-        assertTrue(lines.stream().anyMatch(line -> line.contains("@path")));
+        assertTrue(lines.size() <= 6, "startup must stay compact");
+        assertTrue(lines.stream().noneMatch(line -> line.contains("██████╗")));
+        assertTrue(lines.stream().noneMatch(line -> line.contains("Tips for getting started")));
+        assertTrue(lines.stream().anyMatch(line -> line.contains("/help")));
         assertTrue(lines.stream().noneMatch(line -> line.contains("for shortcuts")));
         assertTrue(lines.stream().noneMatch(line -> line.contains("────────────────")));
         assertTrue(lines.stream().noneMatch(line -> line.endsWith("║")),
@@ -72,7 +73,7 @@ class MainInputNormalizationTest {
 
     @Test
     void slashCommandTailTipsExposeCommandDescriptions() {
-        var tips = Main.slashCommandTailTips();
+        var tips = TerminalInputSupport.slashCommandTailTips();
 
         assertTrue(tips.containsKey("/model"));
         assertTrue(tips.get("/model").getMainDesc().get(0).toString().contains("查看当前模型"));
@@ -81,8 +82,8 @@ class MainInputNormalizationTest {
 
     @Test
     void promptDoesNotUseBottomSpaciousModeByDefault() {
-        assertFalse(Main.defaultSpaciousPrompt(false));
-        assertFalse(Main.defaultSpaciousPrompt(true));
+        assertFalse(TerminalInputSupport.defaultSpaciousPrompt(false));
+        assertFalse(TerminalInputSupport.defaultSpaciousPrompt(true));
     }
 
     @Test
@@ -91,7 +92,20 @@ class MainInputNormalizationTest {
         try {
             System.setProperty("devcli.mcp.startup.wait.seconds", "2");
 
-            assertEquals(Duration.ofSeconds(2), Main.mcpStartupWait());
+            assertEquals(Duration.ofSeconds(2), CliSettings.mcpStartupWait());
+        } finally {
+            restoreProperty("devcli.mcp.startup.wait.seconds", old);
+        }
+    }
+
+    @Test
+    void invalidMcpStartupWaitFallsBackToThirtySeconds() {
+        String old = System.getProperty("devcli.mcp.startup.wait.seconds");
+        try {
+            for (String value : List.of("0", "-1", "invalid")) {
+                System.setProperty("devcli.mcp.startup.wait.seconds", value);
+                assertEquals(Duration.ofSeconds(30), CliSettings.mcpStartupWait());
+            }
         } finally {
             restoreProperty("devcli.mcp.startup.wait.seconds", old);
         }
@@ -101,7 +115,7 @@ class MainInputNormalizationTest {
     void submittedPromptIsRenderedBackIntoTranscript() {
         ByteArrayOutputStream sink = new ByteArrayOutputStream();
 
-        Main.printSubmittedPrompt(new PrintStream(sink, true, StandardCharsets.UTF_8), "  是谁？  ");
+        TerminalInputSupport.printSubmittedPrompt(new PrintStream(sink, true, StandardCharsets.UTF_8), "  是谁？  ");
 
         String emitted = sink.toString(StandardCharsets.UTF_8);
         assertTrue(emitted.contains(">"), emitted);
@@ -114,7 +128,7 @@ class MainInputNormalizationTest {
     void submittedSingleLinePromptDoesNotAddExtraBlankLine() {
         ByteArrayOutputStream sink = new ByteArrayOutputStream();
 
-        Main.printSubmittedPrompt(new PrintStream(sink, true, StandardCharsets.UTF_8), "你好啊");
+        TerminalInputSupport.printSubmittedPrompt(new PrintStream(sink, true, StandardCharsets.UTF_8), "你好啊");
 
         String emitted = sink.toString(StandardCharsets.UTF_8);
         assertEquals(1, emitted.chars().filter(ch -> ch == '\n').count(), emitted);
@@ -130,7 +144,7 @@ class MainInputNormalizationTest {
             System.setProperty("os.name", "Mac OS X");
             System.clearProperty("java.awt.headless");
 
-            Main.configureAwtForCli();
+            TerminalInputSupport.configureAwtForCli();
 
             assertEquals("true", System.getProperty("java.awt.headless"));
         } finally {
@@ -147,7 +161,7 @@ class MainInputNormalizationTest {
             System.setProperty("os.name", "Linux");
             System.clearProperty("java.awt.headless");
 
-            Main.configureAwtForCli();
+            TerminalInputSupport.configureAwtForCli();
 
             assertFalse(System.getProperties().containsKey("java.awt.headless"));
         } finally {
@@ -161,15 +175,15 @@ class MainInputNormalizationTest {
         LineReader lineReader = newLineReader();
         lineReader.getBuffer().write("@image:</tmp/shot.png> 这张图呢");
 
-        Main.clearInputBuffer(lineReader);
+        TerminalInputSupport.clearInputBuffer(lineReader);
 
         assertEquals("", lineReader.getBuffer().toString());
     }
 
     @Test
     void slashCommandHintsIncludeRagSlashCommands() {
-        List<String> commands = Main.slashCommandHints().stream()
-                .map(Main.SlashCommandHint::display)
+        List<String> commands = CliDisplay.slashCommandHints().stream()
+                .map(CliDisplay.SlashCommandHint::display)
                 .toList();
 
         assertTrue(commands.contains("/help"));
@@ -182,7 +196,7 @@ class MainInputNormalizationTest {
 
     @Test
     void slashCommandChoicesAreRenderedDirectlyWithoutJLineConfirmationText() {
-        String choices = Main.formatSlashCommandChoices(120);
+        String choices = CliDisplay.formatSlashCommandChoices(120);
 
         assertTrue(choices.contains("/model anthropic"), choices);
         assertTrue(choices.contains("/model openai"), choices);
@@ -192,25 +206,25 @@ class MainInputNormalizationTest {
         assertTrue(choices.contains("/model kimi"), choices);
         assertTrue(choices.contains("/browser status"), choices);
         assertFalse(choices.contains("do you wish"), choices);
-        assertTrue(choices.lines().count() < Main.slashCommandHints().size(),
+        assertTrue(choices.lines().count() < CliDisplay.slashCommandHints().size(),
                 "choices should be compact multi-column output");
     }
 
     @Test
     void classifiesStandaloneEscapeAsCancelIntent() {
-        assertEquals(Main.EscapeSequenceType.STANDALONE_ESC, Main.classifyEscapeSequence(""));
+        assertEquals(TerminalInputSupport.EscapeSequenceType.STANDALONE_ESC, TerminalInputSupport.classifyEscapeSequence(""));
     }
 
     @Test
     void classifiesArrowKeysAsControlSequences() {
-        assertEquals(Main.EscapeSequenceType.CONTROL_SEQUENCE, Main.classifyEscapeSequence("[A"));
-        assertEquals(Main.EscapeSequenceType.CONTROL_SEQUENCE, Main.classifyEscapeSequence("[B"));
-        assertEquals(Main.EscapeSequenceType.CONTROL_SEQUENCE, Main.classifyEscapeSequence("OA"));
+        assertEquals(TerminalInputSupport.EscapeSequenceType.CONTROL_SEQUENCE, TerminalInputSupport.classifyEscapeSequence("[A"));
+        assertEquals(TerminalInputSupport.EscapeSequenceType.CONTROL_SEQUENCE, TerminalInputSupport.classifyEscapeSequence("[B"));
+        assertEquals(TerminalInputSupport.EscapeSequenceType.CONTROL_SEQUENCE, TerminalInputSupport.classifyEscapeSequence("OA"));
     }
 
     @Test
     void classifiesBracketedPasteSequenceSeparately() {
-        assertEquals(Main.EscapeSequenceType.BRACKETED_PASTE, Main.classifyEscapeSequence("[200~hello"));
+        assertEquals(TerminalInputSupport.EscapeSequenceType.BRACKETED_PASTE, TerminalInputSupport.classifyEscapeSequence("[200~hello"));
     }
 
     @Test
@@ -220,7 +234,7 @@ class MainInputNormalizationTest {
         history.add("第一条");
         history.add("最近一条");
 
-        assertEquals("最近一条", Main.seedBufferForHistoryNavigation(lineReader, "[A"));
+        assertEquals("最近一条", TerminalInputSupport.seedBufferForHistoryNavigation(lineReader, "[A"));
     }
 
     @Test
@@ -228,50 +242,50 @@ class MainInputNormalizationTest {
         LineReader lineReader = newLineReader();
         lineReader.getHistory().add("最近一条");
 
-        assertEquals("", Main.seedBufferForHistoryNavigation(lineReader, "[B"));
+        assertEquals("", TerminalInputSupport.seedBufferForHistoryNavigation(lineReader, "[B"));
     }
 
     @Test
     void decideEscCancelTriggersOnStandaloneEsc() {
         // 单 ESC（escTail 为空）→ 取消
-        assertTrue(Main.decideEscCancel(27, ""));
-        assertTrue(Main.decideEscCancel(27, null));
+        assertTrue(CliTurnRunner.decideEscCancel(27, ""));
+        assertTrue(CliTurnRunner.decideEscCancel(27, null));
     }
 
     @Test
     void decideEscCancelIgnoresArrowKeyEscapeSequence() {
         // 上方向键 ESC[A → CONTROL_SEQUENCE，不取消
-        assertFalse(Main.decideEscCancel(27, "[A"));
+        assertFalse(CliTurnRunner.decideEscCancel(27, "[A"));
         // 下方向键
-        assertFalse(Main.decideEscCancel(27, "[B"));
+        assertFalse(CliTurnRunner.decideEscCancel(27, "[B"));
         // 应用模式方向键
-        assertFalse(Main.decideEscCancel(27, "OA"));
+        assertFalse(CliTurnRunner.decideEscCancel(27, "OA"));
     }
 
     @Test
     void decideEscCancelIgnoresBracketedPaste() {
-        assertFalse(Main.decideEscCancel(27, "[200~hello"));
+        assertFalse(CliTurnRunner.decideEscCancel(27, "[200~hello"));
     }
 
     @Test
     void decideEscCancelIgnoresNonEscFirstByte() {
         // 普通字符不应触发
-        assertFalse(Main.decideEscCancel((int) 'a', null));
-        assertFalse(Main.decideEscCancel((int) '/', "cancel"));
-        assertFalse(Main.decideEscCancel(0, null));
-        assertFalse(Main.decideEscCancel(-1, null));
+        assertFalse(CliTurnRunner.decideEscCancel((int) 'a', null));
+        assertFalse(CliTurnRunner.decideEscCancel((int) '/', "cancel"));
+        assertFalse(CliTurnRunner.decideEscCancel(0, null));
+        assertFalse(CliTurnRunner.decideEscCancel(-1, null));
     }
 
     @Test
     void readEscCancelHandlesNullTerminalSafely() {
-        assertFalse(Main.readEscCancel(null));
+        assertFalse(CliTurnRunner.readEscCancel(null));
     }
 
     @Test
     void buildTerminalUsesDetectedConsoleEncoding() throws Exception {
         String previous = System.getProperty("devcli.terminal.encoding");
         System.setProperty("devcli.terminal.encoding", "UTF-8");
-        try (Terminal terminal = Main.buildTerminal()) {
+        try (Terminal terminal = TerminalInputSupport.buildTerminal()) {
             assertEquals(StandardCharsets.UTF_8, terminal.encoding());
             assertEquals(StandardCharsets.UTF_8, terminal.inputEncoding());
             assertEquals(StandardCharsets.UTF_8, terminal.outputEncoding());
@@ -284,7 +298,7 @@ class MainInputNormalizationTest {
     void forceAnsiUsesXtermTypeForMisdetectedTerminal() throws Exception {
         String previous = System.getProperty("devcli.terminal.force.ansi");
         System.setProperty("devcli.terminal.force.ansi", "true");
-        try (Terminal terminal = Main.buildTerminal()) {
+        try (Terminal terminal = TerminalInputSupport.buildTerminal()) {
             assertEquals("xterm-256color", terminal.getType());
         } finally {
             restoreProperty("devcli.terminal.force.ansi", previous);
@@ -297,7 +311,7 @@ class MainInputNormalizationTest {
         try {
             System.clearProperty("devcli.terminal.encoding");
 
-            assertEquals(StandardCharsets.UTF_8, Main.consoleCharset());
+            assertEquals(StandardCharsets.UTF_8, TerminalInputSupport.consoleCharset());
         } finally {
             restoreProperty("devcli.terminal.encoding", previous);
         }
@@ -309,7 +323,7 @@ class MainInputNormalizationTest {
         try {
             System.setProperty("devcli.terminal.encoding", "GBK");
 
-            assertEquals(java.nio.charset.Charset.forName("GBK"), Main.consoleCharset());
+            assertEquals(java.nio.charset.Charset.forName("GBK"), TerminalInputSupport.consoleCharset());
         } finally {
             restoreProperty("devcli.terminal.encoding", previous);
         }

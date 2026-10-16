@@ -21,12 +21,11 @@ class BottomStatusBarTest {
         StatusInfo info = StatusInfo.tokens("glm-5.1", 200_000L, 1000L, 234L, 100L, "¥0.0123",
                 "default", 1500L, "running");
         String line = BottomStatusBar.formatFooterLine(info, 200);
-        assertTrue(line.contains("Auto Model"), line);
+        assertFalse(line.contains("Auto Model"), line);
         assertTrue(line.contains("running"), line);
         assertTrue(line.contains("glm-5.1"), line);
         assertTrue(line.contains("ctx"), line);
         assertTrue(line.contains("1%"), line);
-        assertTrue(line.contains("1.2k/200.0k"), line);
         assertTrue(line.contains("in 1.0k out 234"), line);
         assertTrue(line.contains("cache 100"), line);
         assertTrue(line.contains("¥0.0123"), line);
@@ -36,16 +35,16 @@ class BottomStatusBarTest {
     @Test
     void formatStatusLinePadsToColumnWidth() {
         StatusInfo info = new StatusInfo("glm-5.1", 0L, 200_000L, null, 0L);
-        String line = BottomStatusBar.formatStatusLine(info, 80);
-        assertTrue(visible(line).length() == 80, "status line should fill the bar: " + visible(line).length());
+        String line = BottomStatusBar.formatFooterLine(info, 80);
+        assertEquals(80, new org.jline.utils.AttributedString(line).columnLength());
     }
 
     @Test
     void formatStatusLineTruncatesWhenLong() {
         StatusInfo info = new StatusInfo("very-long-model-name-exceeding-cols",
                 999_999L, 200_000L, "bypassPermissions", 0L);
-        String line = BottomStatusBar.formatStatusLine(info, 30);
-        assertTrue(visible(line).length() == 30);
+        String line = BottomStatusBar.formatFooterLine(info, 30);
+        assertEquals(30, new org.jline.utils.AttributedString(line).columnLength());
     }
 
     @Test
@@ -67,19 +66,18 @@ class BottomStatusBarTest {
     void footerLineFitsColumnWidth() {
         String line = BottomStatusBar.formatFooterLine(StatusInfo.idle("glm-5.1", 200_000L, "default"), 40);
         assertTrue(line.length() == 40, "footer should fill requested width: " + line.length());
-        assertTrue(line.contains("Auto Model"), line);
+        assertTrue(line.contains("glm-5.1"), line);
     }
 
     @Test
     void activeStatusLineShowsPhase() {
-        // 模式名与 phase 故意取不同值：phase 走 footer，模式走 status row，混淆两者会让断言失效
+        // 模式与执行阶段分别保留在同一状态行。
         StatusInfo info = StatusInfo.active("glm-5.1", 200_000L, "acceptEdits", "plan")
                 .withEnvironment("MCP 4/4", "Skill 2/2");
-        String top = BottomStatusBar.formatStatusLine(info, 80);
         String bottom = BottomStatusBar.formatFooterLine(info, 80);
-        assertTrue(top.contains("4 MCP servers"), top);
-        assertTrue(top.contains("2 skills"), top);
-        assertTrue(top.contains("acceptEdits"), "status row should show the permission mode: " + top);
+        assertTrue(bottom.contains("MCP 4/4"), bottom);
+        assertTrue(bottom.contains("Skill 2/2"), bottom);
+        assertTrue(bottom.contains("acceptEdits"), bottom);
         assertTrue(bottom.contains("plan"), bottom);
         assertTrue(bottom.contains("glm-5.1"), bottom);
     }
@@ -88,9 +86,9 @@ class BottomStatusBarTest {
     void statusLinesUseJLineAttributes() {
         StatusInfo info = new StatusInfo("glm-5.1", 0L, 200_000L, null, 0L);
         var lines = BottomStatusBar.formatStatusLines(info, 80);
-        assertEquals(2, lines.size());
-        assertTrue(lines.get(0).toString().contains("模式"), "status row should show the permission mode slot");
-        assertTrue(lines.get(1).toAnsi().contains("[2m"), "footer row should use subtle style");
+        assertEquals(1, lines.size());
+        assertTrue(lines.get(0).toString().contains("glm-5.1"));
+        assertTrue(lines.get(0).toAnsi().contains("[2m"), "footer row should use subtle style");
     }
 
     @Test
@@ -164,6 +162,8 @@ class BottomStatusBarTest {
             bar.update(StatusInfo.idle("glm-5.1", 200_000L, null));
             sink.reset();
             bar.prepareInputLine();
+            Mockito.verify(terminal, Mockito.never()).puts(
+                    Mockito.eq(org.jline.utils.InfoCmp.Capability.cursor_address), Mockito.any(Object[].class));
             String prepared = sink.toString(StandardCharsets.UTF_8);
             assertFalse(prepared.startsWith("\n\n"), "dock must not inject spacer rows under the prompt: " + prepared);
             assertFalse(prepared.contains(AnsiSeq.moveUp(3)), prepared);

@@ -148,8 +148,8 @@ class InlineRendererTest {
             renderer.afterInput();
 
             String emitted = sink.toString(StandardCharsets.UTF_8);
-            assertEquals("* ", renderer.inputPrompt());
-            assertTrue(renderer.inputRightPrompt().contains("@path"));
+            assertEquals("> ", renderer.inputPrompt());
+            assertTrue(renderer.inputRightPrompt().isEmpty());
             assertFalse(emitted.contains("[39;1H"), "LineReader should own the input row: " + emitted);
             assertFalse(emitted.contains("[37;1H"), "renderer should not force transcript cursor rows: " + emitted);
         } finally {
