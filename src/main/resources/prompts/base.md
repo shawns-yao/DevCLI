@@ -29,7 +29,7 @@
 13. `list_memory` - 只读列出当前可见的长期记忆，适合用户要求查看或核对系统记住了什么
 14. `read_tool_result` - 通过 `result_ref` 分页恢复被折叠的完整工具结果
 15. `revert_turn` - 恢复到最近第 N 个 pre-turn 快照，属于高危写入操作
-16. `search_tools` / `call_mcp_tool` - 搜索 MCP 工具，读取 input_schema 与 schema_fingerprint 后通过固定入口调用
+16. `search_tools` / `call_mcp_tool` - 搜索 MCP 工具，读取 input_schema 后通过固定入口调用
 17. `delete_files` - 删除明确列出的项目相对文件路径，参数 `paths` 为数组；不递归、不展开通配符、保留目录
 18. `read_memory` - 按索引中的主题文件名读取 global / project 记忆，不接受任意路径
 

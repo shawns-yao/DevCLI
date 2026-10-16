@@ -719,7 +719,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     /** 动态工具只改变消息中的发现结果，不改变发送给模型的 catalog.tools 数组。 */
-    ToolOutput dispatchMcpTool(String name, String fingerprint, String arguments,
+    ToolOutput dispatchMcpTool(String name, String arguments,
                               ToolExecutionContext context) {
         Tool target = activeTool(name);
         if (target == null || activeMcpTool(name) == null
@@ -727,15 +727,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
             return ToolOutput.rejected(ToolErrorCode.INVALID_ARGUMENTS,
                     "请先调用 search_tools 发现目标 MCP 工具并读取完整 schema", true);
         }
-        if (!McpToolDispatcher.fingerprint(target).equals(fingerprint)) {
-            return ToolOutput.rejected(ToolErrorCode.STALE_CONTEXT,
-                    "MCP 工具定义已变化，请重新调用 search_tools 获取当前 schema 与指纹", true);
-        }
         return executionPipeline.execute(name, arguments, context.invocationId() + "/mcp", context);
-    }
-
-    public static String toolDefinitionFingerprint(Tool tool) {
-        return McpToolDispatcher.fingerprint(tool);
     }
 
     boolean activateMcpToolDefinition(String toolName) {

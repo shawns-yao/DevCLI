@@ -73,7 +73,7 @@ class AgentDojoDriverTest {
             var definitions = registry.getToolDefinitions();
             String found = registry.executeTool("search_tools", "{\"query\":\"lookup\"}");
             assertTrue(found.contains("input_schema"));
-            assertTrue(found.contains("schema_fingerprint"));
+            assertTrue(found.contains("input_schema"));
             assertEquals(definitions, registry.getToolDefinitions());
             assertTrue(definitions.stream().anyMatch(t -> t.name().equals("call_mcp_tool")));
         }

@@ -51,8 +51,7 @@ class McpDeferredDispatchTest {
             registry.executeToolOutput("search_tools", "{\"query\":\"mcp__sample__send\",\"limit\":\"1\"}");
             var target = registry.searchableTools().stream().filter(t -> t.name().equals("mcp__sample__send"))
                     .findFirst().orElseThrow();
-            var arguments = JSON.createObjectNode().put("tool_name", target.name())
-                    .put("schema_fingerprint", ToolRegistry.toolDefinitionFingerprint(target));
+            var arguments = JSON.createObjectNode().put("tool_name", target.name());
             arguments.putObject("arguments");
             assertEquals(ToolErrorCode.INVALID_ARGUMENTS,
                     registry.executeToolOutput("call_mcp_tool", arguments.toString()).errorCode());
@@ -69,10 +68,16 @@ class McpDeferredDispatchTest {
                 return null;
             });
             assertEquals(2, calls.get());
-            arguments.put("schema_fingerprint", "0".repeat(64));
-            assertEquals(ToolErrorCode.STALE_CONTEXT,
+            registry.registerMcpToolOutput(new McpToolDescriptor("sample", "send", target.name(),
+                    "Send updated message", JSON.readTree("""
+                    {"type":"object","properties":{"body":{"type":"string"}},"required":["body"]}
+                    """)), input -> { calls.incrementAndGet(); return ToolOutput.success("sent"); });
+            assertEquals(ToolErrorCode.INVALID_ARGUMENTS,
                     registry.executeToolOutput("call_mcp_tool", arguments.toString()).errorCode());
-            assertEquals(2, calls.get());
+            assertEquals(2, calls.get(), "当前 schema 校验失败不得执行目标工具");
+            arguments.putObject("arguments").put("body", "updated");
+            assertTrue(registry.executeToolOutput("call_mcp_tool", arguments.toString()).isSuccess());
+            assertEquals(3, calls.get());
         }
     }
 }

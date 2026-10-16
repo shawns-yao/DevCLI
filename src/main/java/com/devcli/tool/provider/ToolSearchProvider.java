@@ -25,7 +25,7 @@ public final class ToolSearchProvider implements ToolProvider {
     public void register(ToolContext context) {
         context.registerTool(ToolContract.Tool.structured(
                 "search_tools",
-                "Search available tools by name, description and parameter schema. MCP results include input_schema and schema_fingerprint for call_mcp_tool; discovery never changes top-level tool definitions.",
+                "Search available tools by name, description and parameter schema. MCP results include input_schema for call_mcp_tool; discovery never changes top-level tool definitions.",
                 context.createToolParameters(
                         new ToolParameter("query", "string", "keywords to search in tool name, description and parameter schema", true),
                         new ToolParameter("limit", "string", "maximum number of matches to return, default 10", false)
@@ -74,9 +74,8 @@ public final class ToolSearchProvider implements ToolProvider {
                     .append(oneLine(entry.description())).append('\n');
             if (entry.name().startsWith("mcp__")) {
                 context.searchableTools().stream().filter(tool -> tool.name().equals(entry.name()))
-                        .findFirst().ifPresent(tool -> sb.append("  schema_fingerprint: ")
-                                .append(ToolRegistry.toolDefinitionFingerprint(tool))
-                                .append("\n  input_schema: ").append(tool.parameters()).append('\n'));
+                        .findFirst().ifPresent(tool -> sb.append("  input_schema: ")
+                                .append(tool.parameters()).append('\n'));
             }
         }
         return ToolOutput.success(sb.toString().stripTrailing())
