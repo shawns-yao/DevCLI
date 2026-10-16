@@ -12,7 +12,6 @@ import com.devcli.tool.ResourceLeaseMaintenance;
 import com.devcli.tool.ToolOutput;
 import com.devcli.tool.ToolRegistry;
 import com.devcli.tool.provider.DeleteFilesTool;
-import com.devcli.tool.patch.ApplyPatchRiskInspector;
 import com.devcli.config.ConfigResolver;
 import com.devcli.policy.CommandGuard;
 
@@ -254,13 +253,6 @@ public class HitlToolRegistry extends ToolRegistry {
             return askOrDeny(context, chain,
                     "检测到命令删除操作，必须单次确认；无法可靠统计目标数量及递归范围。"
                             + "优先使用 delete_files 提供明确文件清单；恢复取决于命令行为及已有备份。");
-        }
-        if ("apply_patch".equals(name)) {
-            String patchNotice = ApplyPatchRiskInspector.explicitApprovalNotice(
-                    parsedArgumentsOf(context).path("patch").asText());
-            if (patchNotice != null) {
-                return askOrDeny(context, chain, patchNotice);
-            }
         }
         if ("revert_turn".equals(name)) {
             return askOrDeny(context, chain,

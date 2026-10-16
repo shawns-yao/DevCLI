@@ -66,46 +66,6 @@ class AgentConfigWriteProtectionTest {
     }
 
     @Test
-    void patchCannotCreateConfigOrPartiallyApplyOrdinaryChanges() throws Exception {
-        try (var registry = registry()) {
-            denied(call(registry, "apply_patch", Map.of("patch", """
-                    *** Begin Patch
-                    *** Add File: ordinary.txt
-                    +hello
-                    *** Add File: .devcli/mcp.json
-                    +{}
-                    *** End Patch
-                    """)));
-            assertFalse(Files.exists(root.resolve("ordinary.txt")));
-            assertFalse(Files.exists(root.resolve(".devcli/mcp.json")));
-        }
-    }
-
-    @Test
-    void patchCannotMoveIntoOrDeleteConfiguration() throws Exception {
-        file("ordinary.txt", "before\n");
-        file(".devcli/mcp.json", "{}\n");
-        try (var registry = registry()) {
-            denied(call(registry, "apply_patch", Map.of("patch", """
-                    *** Begin Patch
-                    *** Update File: ordinary.txt
-                    *** Move to: .devcli/hooks.json
-                    @@
-                    -before
-                    +after
-                    *** End Patch
-                    """)));
-            denied(call(registry, "apply_patch", Map.of("patch", """
-                    *** Begin Patch
-                    *** Delete File: .devcli/mcp.json
-                    *** End Patch
-                    """)));
-            assertEquals("before\n", Files.readString(root.resolve("ordinary.txt")));
-            assertEquals("{}\n", Files.readString(root.resolve(".devcli/mcp.json")));
-        }
-    }
-
-    @Test
     void customHookPathCannotBeOverwrittenOrPreemptedByParentFile() throws Exception {
         String old = System.getProperty("devcli.hooks.file");
         System.setProperty("devcli.hooks.file", root.resolve("custom/hooks.json").toString());

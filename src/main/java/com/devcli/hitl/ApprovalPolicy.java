@@ -66,7 +66,6 @@ public class ApprovalPolicy {
             case "revert_turn" -> "将按 Side-Git 快照批量恢复工作区文件，可能覆盖当前未保存修改";
             case "write_file" -> "将写入或覆盖文件内容，原有内容将丢失";
             case "edit_file" -> "将精确替换项目文件内容，错误匹配可能破坏现有实现";
-            case "apply_patch" -> "将按补丁批量创建、修改、删除或改名项目文件，影响范围可跨多个文件";
             case "delete_files" -> "将删除清单中的项目文件，不进入回收站；成功后恢复需已有快照或备份";
             case "create_project" -> "将在磁盘上创建新目录和文件";
             case "web_fetch" -> "将向外部站点发起请求，URL 与抓取行为会暴露给第三方；"

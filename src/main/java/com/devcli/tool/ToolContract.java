@@ -179,6 +179,12 @@ public final class ToolContract {
                        Destructiveness destructiveness,
                        Idempotency idempotency,
                        boolean cacheable) {
+        /** 工具归属和物理影响共同限制访问；角色只可继续收窄。 */
+        public boolean permitsAccess(ToolAccessScope scope, boolean delegatedChild) {
+            return scope.permits(effect) && (!delegatedChild
+                    || !BuiltInToolPolicy.policyOrDefault(name, effect).mainAgentOnly());
+        }
+
         /** 兼容既有 8 参调用：契约从内置显式声明或 effect 保守默认推导。 */
         public Tool(String name, String description, JsonNode parameters, ToolExecutor executor,
                     ToolEffect effect, long timeoutSeconds,

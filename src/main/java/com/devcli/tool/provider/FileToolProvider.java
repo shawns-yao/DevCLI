@@ -202,7 +202,6 @@ public final class FileToolProvider implements ToolProvider {
                 -1
         ));
 
-        com.devcli.tool.patch.ApplyPatchTool.register(context);
 
         context.registerTool(ToolContract.Tool.structured(
                 "list_dir",

@@ -22,7 +22,8 @@ public final class BuiltInToolPolicy {
                          boolean audited,
                          Destructiveness destructiveness,
                          Idempotency idempotency,
-                         boolean cacheable) {
+                         boolean cacheable,
+                         boolean mainAgentOnly) {
     }
 
     private static final Map<String, Policy> POLICIES = policies();
@@ -87,57 +88,61 @@ public final class BuiltInToolPolicy {
                 false,
                 readOnlyLike ? Destructiveness.NONE : Destructiveness.STRUCTURAL,
                 readOnlyLike ? Idempotency.IDEMPOTENT : Idempotency.NON_IDEMPOTENT,
-                effective == ToolEffect.READ_ONLY);
+                effective == ToolEffect.READ_ONLY, false);
     }
 
     private static Map<String, Policy> policies() {
         Map<String, Policy> values = new LinkedHashMap<>();
         // 只读且不依赖外部可变状态的工具可以短期缓存，也允许同批并行。
         register(values, ToolEffect.READ_ONLY, false, false,
-                Destructiveness.NONE, Idempotency.IDEMPOTENT, true,
+                Destructiveness.NONE, Idempotency.IDEMPOTENT, true, false,
                 "read_tool_result", "search_tools");
         // 只读但仍依赖外部可变状态（文件、网络、记忆、浏览器态）：不缓存，不假设并发安全。
         register(values, ToolEffect.READ_ONLY, false, false,
-                Destructiveness.NONE, Idempotency.IDEMPOTENT, false,
+                Destructiveness.NONE, Idempotency.IDEMPOTENT, false, false,
                 "read_file", "list_dir", "search_code", "grep_code",
-                "web_search", "list_memory", "read_memory", "browser_status");
+                "web_search", "browser_status");
+        // 长期记忆与主计划只属于主 Agent；角色白名单不能放宽归属边界。
+        register(values, ToolEffect.READ_ONLY, false, false,
+                Destructiveness.NONE, Idempotency.IDEMPOTENT, false, true,
+                "list_memory", "read_memory");
         // web_fetch 会把请求送到外部站点，是需要出口授权的只读工具：默认逐次确认，
         // 命中任务级域名授权时才自动放行；审计保留每次放行与拒绝记录。
         register(values, ToolEffect.READ_ONLY, true, true,
-                Destructiveness.NONE, Idempotency.IDEMPOTENT, false,
+                Destructiveness.NONE, Idempotency.IDEMPOTENT, false, false,
                 "web_fetch");
         register(values, ToolEffect.LOCAL_CONTEXT, false, false,
-                Destructiveness.NONE, Idempotency.IDEMPOTENT, false,
-                "load_skill", "delegate_control");
+                Destructiveness.NONE, Idempotency.IDEMPOTENT, false, false, "load_skill");
         register(values, ToolEffect.LOCAL_CONTEXT, false, false,
-                Destructiveness.NONE, Idempotency.NON_IDEMPOTENT, false, "update_plan");
+                Destructiveness.NONE, Idempotency.IDEMPOTENT, false, true, "delegate_control");
+        register(values, ToolEffect.LOCAL_CONTEXT, false, false,
+                Destructiveness.NONE, Idempotency.NON_IDEMPOTENT, false, true, "update_plan");
         // 调度入口本身不授予权限；目标 MCP 工具重新进入完整执行管线。
         register(values, ToolEffect.LOCAL_CONTEXT, false, false,
-                Destructiveness.NONE, Idempotency.NON_IDEMPOTENT, false,
+                Destructiveness.NONE, Idempotency.NON_IDEMPOTENT, false, false,
                 "call_mcp_tool");
         register(values, ToolEffect.PROJECT_MUTATION, true, true,
-                Destructiveness.STRUCTURAL, Idempotency.IDEMPOTENT, false,
+                Destructiveness.STRUCTURAL, Idempotency.IDEMPOTENT, false, false,
                 "write_file");
         register(values, ToolEffect.PROJECT_MUTATION, true, true,
-                Destructiveness.STRUCTURAL, Idempotency.NON_IDEMPOTENT, false,
+                Destructiveness.STRUCTURAL, Idempotency.NON_IDEMPOTENT, false, false,
                 "edit_file", "create_project", "revert_turn");
-        // apply_patch 一个调用可跨文件增删改与改名，破坏面大于单文件写入，按非幂等声明。
         register(values, ToolEffect.PROJECT_MUTATION, true, true,
-                Destructiveness.STRUCTURAL, Idempotency.NON_IDEMPOTENT, false,
-                "apply_patch", "delete_files");
+                Destructiveness.STRUCTURAL, Idempotency.NON_IDEMPOTENT, false, false,
+                "delete_files");
         register(values, ToolEffect.HOST_PROCESS, true, true,
-                Destructiveness.STRUCTURAL, Idempotency.NON_IDEMPOTENT, false,
+                Destructiveness.STRUCTURAL, Idempotency.NON_IDEMPOTENT, false, false,
                 "execute_command");
         // 浏览器连接只在会话内流转状态，不改业务数据。
         register(values, ToolEffect.EXTERNAL_MUTATION, false, false,
-                Destructiveness.BENIGN, Idempotency.NON_IDEMPOTENT, false,
+                Destructiveness.BENIGN, Idempotency.NON_IDEMPOTENT, false, false,
                 "browser_connect", "browser_disconnect");
         register(values, ToolEffect.EXTERNAL_MUTATION, false, false,
-                Destructiveness.STRUCTURAL, Idempotency.NON_IDEMPOTENT, false,
+                Destructiveness.STRUCTURAL, Idempotency.NON_IDEMPOTENT, false, true,
                 "delegate_task");
         // 写入确认在 CONTENT_REVIEW 阶段执行，不进入可复用或自动批准分支。
         register(values, ToolEffect.EXTERNAL_MUTATION, false, true,
-                Destructiveness.STRUCTURAL, Idempotency.NON_IDEMPOTENT, false,
+                Destructiveness.STRUCTURAL, Idempotency.NON_IDEMPOTENT, false, true,
                 "save_memory");
         return Map.copyOf(values);
     }
@@ -149,8 +154,10 @@ public final class BuiltInToolPolicy {
                                  Destructiveness destructiveness,
                                  Idempotency idempotency,
                                  boolean cacheable,
+                                 boolean mainAgentOnly,
                                  String... names) {
-        Policy policy = new Policy(effect, approval, audited, destructiveness, idempotency, cacheable);
+        Policy policy = new Policy(effect, approval, audited, destructiveness, idempotency, cacheable,
+                mainAgentOnly);
         for (String name : names) {
             target.put(name, policy);
         }

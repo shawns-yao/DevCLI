@@ -20,6 +20,33 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 工具契约（破坏性等级 / 幂等性 / 缓存资格）的声明与消费行为。
  */
 class ToolContractTest {
+    @Test
+    void mainAgentOwnershipIsSharedByAdmissionDiscoveryAndExecution() {
+        try (ToolRegistry registry = new ToolRegistry()) {
+            registry.runWithToolAccess(ToolContract.ToolAccessScope.READ_ONLY, () -> {
+                assertTrue(registry.getToolDefinitions().stream().anyMatch(t -> t.name().equals("update_plan")),
+                        "主 Agent 的只读模式仍可维护计划");
+                return null;
+            });
+            registry.restrictForDelegation();
+            for (var scope : List.of(ToolContract.ToolAccessScope.READ_ONLY,
+                    ToolContract.ToolAccessScope.ISOLATED_PROJECT)) {
+                registry.runWithToolAccess(scope, () -> {
+                    for (String name : List.of("delegate_task", "delegate_control", "list_memory",
+                            "read_memory", "update_plan")) {
+                        assertFalse(registry.permitsDelegatedTool(name, scope), name);
+                        assertTrue(registry.getToolDefinitions().stream().noneMatch(t -> t.name().equals(name)), name);
+                        assertTrue(registry.searchableTools().stream().noneMatch(t -> t.name().equals(name)), name);
+                        assertEquals(ToolErrorCode.CAPABILITY_DENIED,
+                                registry.executeToolOutput(name, "{}").errorCode(), name);
+                    }
+                    assertTrue(registry.permitsDelegatedTool("read_file", scope));
+                    return null;
+                });
+            }
+        }
+    }
+
 
     /**
      * 工具名看起来是查询，实际会改状态：本地只读授权只放宽访问等级，

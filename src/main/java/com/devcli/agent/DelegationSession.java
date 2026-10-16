@@ -169,8 +169,7 @@ final class DelegationSession implements DelegateTaskTool.Handler {
         }
         ToolContract.ToolAccessScope childScope = definition.capability();
         for (String tool : parseStringSet(arguments.get("allowed_tools"))) {
-            if (!parent.hasTool(tool) || !childScope.permits(parent.toolEffect(tool))
-                    || List.of("delegate_task", "delegate_control", "list_memory").contains(tool)) {
+            if (!parent.permitsDelegatedTool(tool, childScope)) {
                 return reportFailure(id, ToolOutput.rejected(ToolErrorCode.CAPABILITY_DENIED,
                         "子任务请求的工具不可用或不符合角色权限: " + tool, false), "blocked");
             }

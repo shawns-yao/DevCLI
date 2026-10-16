@@ -29,9 +29,8 @@ final class ToolPipelineAssembly {
             Tool tool = registry.activeTool(context.name());
             ToolAccessScope scope = registry.currentToolAccessScope();
             Set<String> allowlist = registry.access.allowedToolNames.get();
-            if (tool != null && (context.name().equals("apply_patch") && registry.access.activeToolSnapshot.get() != null
-                    || !registry.allowsToolName(allowlist, context.name())
-                    || !scope.permits(tool.effect()) || registry.access.restrictedInDelegation(context.name()))) {
+            if (tool != null && (!registry.allowsToolName(allowlist, context.name())
+                    || !tool.permitsAccess(scope, registry.access.delegatedChild))) {
                 if (registry.requiresAudit(context.name())) {
                     registry.recordToolAudit(AuditLog.AuditEntry.denyByPolicy(context.name(),
                             context.argumentsJson(), "CAPABILITY_DENIED", 0), context);

@@ -90,10 +90,9 @@ class ApprovalPolicyTest {
         assertTrue(tools.contains("create_project"));
         assertTrue(tools.contains("revert_turn"));
         assertTrue(tools.contains("edit_file"));
-        assertTrue(tools.contains("apply_patch"), "apply_patch 可跨文件增删改，必须逐次确认");
         assertTrue(tools.contains("web_fetch"), "web_fetch 需要出口授权，应列入需确认集合");
         assertTrue(tools.contains("delete_files"));
-        assertEquals(8, tools.size());
+        assertEquals(7, tools.size());
     }
 
     @Test
@@ -145,7 +144,7 @@ class ApprovalPolicyTest {
     @Test
     void mcpToolStaysOutsideOfBuiltinDangerousTools() {
         // mcp__ 前缀不应污染 DANGEROUS_TOOLS 集合本身（保证 set 含义清晰）
-        assertEquals(8, ApprovalPolicy.getDangerousTools().size());
+        assertEquals(7, ApprovalPolicy.getDangerousTools().size());
         assertFalse(ApprovalPolicy.getDangerousTools().contains("mcp__demo__tool"));
     }
 }

@@ -11,14 +11,15 @@ class McpDeferredDispatchTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     @Test
-    void internalPatchToolIsNeitherDiscoverableNorCallableByTheModel() {
+    void patchToolIsNotRegistered() {
         try (ToolRegistry registry = new ToolRegistry()) {
+            assertFalse(registry.hasTool("apply_patch"));
             assertTrue(registry.getToolDefinitions().stream().noneMatch(tool -> tool.name().equals("apply_patch")));
             assertTrue(registry.searchableTools().stream().noneMatch(tool -> tool.name().equals("apply_patch")));
             var snapshot = registry.snapshotForCurrentAccess();
             var results = registry.executeTools(java.util.List.of(new ToolContract.ToolInvocation(
                     "patch", "apply_patch", "{\"patch\":\"*** Begin Patch\\n*** End Patch\"}")), snapshot);
-            assertEquals(ToolErrorCode.CAPABILITY_DENIED, results.getFirst().errorCode());
+            assertEquals(ToolErrorCode.UNKNOWN_TOOL, results.getFirst().errorCode());
         }
     }
 

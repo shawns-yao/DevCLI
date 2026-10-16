@@ -43,17 +43,6 @@ class SessionMemoryRetentionTest {
     }
 
     @Test
-    void patchEvidenceHasTheSameProtectionAsOtherWrites() {
-        SessionMemory memory = new SessionMemory(1, 16, 8);
-        memory.recordToolResult("apply_patch", "{\"patch\":\"update\"}", "patch applied");
-        memory.recordToolResult("read_file", "{\"path\":\"unrelated.txt\"}", "unrelated");
-
-        assertEquals("apply_patch", memory.getRecentToolResults().getFirst().toolName);
-        assertEquals(SessionMemory.EvidenceKind.CRITICAL,
-                memory.snapshot().evidenceJournal().getFirst().kind());
-    }
-
-    @Test
     void activeStepReadOutranksOldWriteWithoutLosingChangedFileFact() {
         SessionMemory memory = new SessionMemory(1, 16, 8);
         memory.recordToolResult("write_file", "{\"path\":\"README.md\"}", "formatting updated");

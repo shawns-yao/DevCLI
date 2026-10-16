@@ -71,15 +71,6 @@ class PermissionClassifierTest {
         return json.append("]}").toString();
     }
 
-    private static String patchArgs(String... lines) {
-        String patch = String.join("\n", lines)
-                .replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r");
-        return "{\"patch\":\"" + patch + "\"}";
-    }
-
     // ------------------ 分类器确实接管了「默认要问」的动作 ------------------
 
     @Test
@@ -344,68 +335,6 @@ class PermissionClassifierTest {
         assertEquals(0, classifier.callCount(),
                 "删除确认有独立于默认策略的询问理由，不该交给分类器");
         assertEquals(1, handler.requestCount());
-    }
-
-    @Test
-    void applyPatchDeletionNeverReachesClassifier(@TempDir Path tempDir) throws Exception {
-        java.nio.file.Files.writeString(tempDir.resolve("a.txt"), "x\n");
-        RecordingHandler handler = new RecordingHandler();
-        StubClassifier classifier = new StubClassifier()
-                .always(PermissionClassifier.Verdict.allow("分类器想放行"));
-        HitlToolRegistry registry = registry(tempDir, handler, PermissionMode.AUTO, classifier);
-
-        var output = registry.executeToolOutput("apply_patch", patchArgs(
-                "*** Begin Patch",
-                "*** Delete File: a.txt",
-                "*** End Patch"));
-
-        assertNotEquals(ToolErrorCode.POLICY_DENIED, output.errorCode(), output.text());
-        assertEquals(0, classifier.callCount(), "补丁删除必须固定走人工审批");
-        assertEquals(1, handler.requestCount());
-    }
-
-    @Test
-    void applyPatchMoveNeverReachesClassifier(@TempDir Path tempDir) throws Exception {
-        java.nio.file.Files.writeString(tempDir.resolve("old.txt"), "before\n");
-        RecordingHandler handler = new RecordingHandler();
-        StubClassifier classifier = new StubClassifier()
-                .always(PermissionClassifier.Verdict.allow("分类器想放行"));
-        HitlToolRegistry registry = registry(tempDir, handler, PermissionMode.AUTO, classifier);
-
-        var output = registry.executeToolOutput("apply_patch", patchArgs(
-                "*** Begin Patch",
-                "*** Update File: old.txt",
-                "*** Move to: new.txt",
-                "@@",
-                "-before",
-                "+after",
-                "*** End Patch"));
-
-        assertNotEquals(ToolErrorCode.POLICY_DENIED, output.errorCode(), output.text());
-        assertEquals(0, classifier.callCount(), "补丁改名必须固定走人工审批");
-        assertEquals(1, handler.requestCount());
-    }
-
-    @Test
-    void ordinaryApplyPatchStillUsesClassifier(@TempDir Path tempDir) throws Exception {
-        java.nio.file.Files.writeString(tempDir.resolve("a.txt"), "before\n");
-        RecordingHandler handler = new RecordingHandler();
-        StubClassifier classifier = new StubClassifier()
-                .always(PermissionClassifier.Verdict.allow("普通内容修改可自动审批"));
-        HitlToolRegistry registry = registry(tempDir, handler, PermissionMode.AUTO, classifier);
-
-        var output = registry.executeToolOutput("apply_patch", patchArgs(
-                "*** Begin Patch",
-                "*** Update File: a.txt",
-                "@@",
-                "-before",
-                "+after",
-                "*** End Patch"));
-
-        assertNotEquals(ToolErrorCode.POLICY_DENIED, output.errorCode(), output.text());
-        assertEquals(1, classifier.callCount(), "普通内容修改仍应保留 auto 的自动审批能力");
-        assertEquals(0, handler.requestCount());
-        assertEquals("after\n", java.nio.file.Files.readString(tempDir.resolve("a.txt")));
     }
 
     @Test

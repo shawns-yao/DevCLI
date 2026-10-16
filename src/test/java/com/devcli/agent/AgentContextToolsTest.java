@@ -60,8 +60,11 @@ class AgentContextToolsTest {
             memory.restoreWorkPlan(List.of(LlmClient.Message.internalUser(restored)));
             assertEquals(stored, memory.getSessionMemory().snapshot().workState().get("agent_work_plan"));
             registry.restrictForDelegation();
-            assertTrue(registry.getToolDefinitions().stream().noneMatch(t ->
-                    t.name().equals("update_plan") || t.name().equals("read_memory")));
+            registry.runWithToolAccess(com.devcli.tool.ToolContract.ToolAccessScope.READ_ONLY, () -> {
+                assertTrue(registry.getToolDefinitions().stream().noneMatch(t ->
+                        t.name().equals("update_plan") || t.name().equals("read_memory")));
+                return null;
+            });
         }
     }
 

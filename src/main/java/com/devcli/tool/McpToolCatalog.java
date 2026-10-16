@@ -420,7 +420,7 @@ final class McpToolCatalog {
         for (Tool tool : orderedTools) {
             bindings.put(tool.name(), new ToolBinding(tool, registry.catalog.mcpTools.get(tool.name())));
             if (registry.isToolDefinitionVisible(tool.name())
-                    && scope.permits(tool.effect())
+                    && tool.permitsAccess(scope, registry.access.delegatedChild)
                     && registry.allowsToolName(allowlist, tool.name())) {
                 definitions.add(new LlmClient.Tool(tool.name(), tool.description(), tool.parameters()));
             }

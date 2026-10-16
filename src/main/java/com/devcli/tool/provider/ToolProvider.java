@@ -62,7 +62,7 @@ public interface ToolProvider {
         /**
          * 写入前的资源租约检查：租约已失效说明目标文件正被其他步骤写入。
          *
-         * <p>write_file / edit_file / apply_patch 共用同一段检查，差异只在展示路径；
+         * <p>write_file / edit_file 共用同一段检查，差异只在展示路径；
          * 无步骤 id 的单 Agent 路径不参与租约，直接放行。</p>
          */
         default void acquireWriteLeaseChecked(String stepId, Path safePath, String displayPath) {

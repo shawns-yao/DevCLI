@@ -199,11 +199,6 @@ final class ToolAccessContext {
         delegatedChild = true;
     }
 
-    boolean restrictedInDelegation(String toolName) {
-        return delegatedChild && (isDelegationTool(toolName) || "list_memory".equals(toolName)
-                || "read_memory".equals(toolName) || "update_plan".equals(toolName));
-    }
-
     <T> T runWithResourceLease(String stepId, java.util.function.Supplier<T> action) {
         if (action == null) {
             return null;

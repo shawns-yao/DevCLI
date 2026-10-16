@@ -443,7 +443,6 @@ public class SessionMemory {
         String normalized = result == null ? "" : result.toLowerCase(Locale.ROOT);
         if (normalized.contains("negativefact") || "write_file".equals(toolName)
                 || "edit_file".equals(toolName)
-                || "apply_patch".equals(toolName)
                 || "delete_files".equals(toolName)
                 || "create_project".equals(toolName) || isPassingTestResult(toolName, normalized)) {
             return EvidenceKind.CRITICAL;

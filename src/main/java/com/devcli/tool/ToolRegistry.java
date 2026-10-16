@@ -630,10 +630,8 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     public List<Tool> searchableTools() {
         ToolAccessScope scope = currentToolAccessScope();
         return catalog.tools.values().stream()
-                .filter(tool -> !tool.name().equals("apply_patch"))
                 .filter(tool -> !ToolAccessContext.isDelegationTool(tool.name()) || access.delegationHandler.get() != null)
-                .filter(tool -> !access.restrictedInDelegation(tool.name()))
-                .filter(tool -> scope.permits(tool.effect()))
+                .filter(tool -> tool.permitsAccess(scope, access.delegatedChild))
                 .filter(tool -> allowsToolName(access.allowedToolNames.get(), tool.name()))
                 .filter(tool -> validateSkillToolAllowed(tool.name()) == null)
                 .toList();
@@ -710,10 +708,12 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         return snapshotForCurrentAccess().definitions();
     }
 
+    public boolean permitsDelegatedTool(String name, ToolAccessScope scope) {
+        Tool tool = activeTool(name);
+        return tool != null && tool.permitsAccess(scope, true);
+    }
+
     boolean isToolDefinitionVisible(String toolName) {
-        // 内部补丁 API 继续复用既有 PatchSet；模型编辑入口收敛为 edit_file / write_file。
-        if (toolName.equals("apply_patch")) return false;
-        if (access.restrictedInDelegation(toolName)) return false;
         if (ToolAccessContext.isDelegationTool(toolName)) return access.delegationHandler.get() != null;
         return !catalog.mcpTools.containsKey(toolName);
     }
