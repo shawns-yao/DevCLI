@@ -21,7 +21,6 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
-import java.util.function.Function;
 import java.util.function.Supplier;
 import static com.devcli.memory.CompactionSummarizer.*;
 import static com.devcli.memory.CompactionSummaryWorkflow.*;
@@ -322,11 +321,6 @@ public class ConversationHistoryCompactor {
         this.originalHistorySupplier = supplier;
     }
 
-    /** 可选 OCR/视觉摘要钩子；摘要输入始终保留图片字节指纹，避免依赖描述文本。 */
-    public void setImageSummarySupplier(Function<LlmClient.Message, String> supplier) {
-        messageRenderer.imageSummarySupplier = supplier == null ? message -> "" : supplier;
-    }
-
     /** 将摘要调用纳入外层 Agent 的 Token 预算；不设置时保持兼容的无限制行为。 */
     public void setSummaryCallGuard(BooleanSupplier summaryCallGuard) {
         this.summaryCallGuard = summaryCallGuard == null ? () -> true : summaryCallGuard;
@@ -625,6 +619,17 @@ public class ConversationHistoryCompactor {
         ContextProjectionBuilder.Projection projection = projectionBuilder.project(
                 systemMessages, summary, restoreContext,
                 history.subList(splitIdx, history.size()));
+        ContextProfile profile = ContextProfile.from(llmClient);
+        int windowBudget = profile.maxContextWindow() - profile.outputReserveTokens()
+                - TokenBudget.estimateToolDefinitionsTokens(summaryToolsSupplier == null ? List.of() : summaryToolsSupplier.get()) - 1;
+        windowBudget = Math.min(windowBudget, currentTokens - 1);
+        List<LlmClient.Message> retainedUsers = UserMessageRetention.select(oldMsgs,
+                windowBudget - TokenBudget.estimateMessagesTokens(projection.messages()));
+        if (!retainedUsers.isEmpty()) {
+            List<LlmClient.Message> recent = new ArrayList<>(retainedUsers);
+            recent.addAll(history.subList(splitIdx, history.size()));
+            projection = projectionBuilder.project(systemMessages, summary, restoreContext, recent);
+        }
         List<LlmClient.Message> rebuilt = new ArrayList<>(projection.messages());
         // checkpoint 只保存 system 之后的可恢复窗口；其指纹也按同一范围计算。
         String checkpointProjectionHash = ContextProjectionBuilder.fingerprintOf(

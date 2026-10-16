@@ -8,13 +8,10 @@ import java.util.Base64;
 import java.util.HexFormat;
 import java.util.Locale;
 import java.util.Map;
-import java.util.function.Function;
 import static com.devcli.memory.ConversationHistoryCompactor.*;
 
 /** 摘要来源消息的有界文本、图片元数据与工具引用呈现。 */
 final class SummaryMessageRenderer {
-
-    Function<LlmClient.Message, String> imageSummarySupplier = message -> "";
 
     String renderMessageForSummary(LlmClient.Message message) {
         if (message == null) return "";
@@ -57,6 +54,10 @@ final class SummaryMessageRenderer {
         if (!message.hasContentParts()) return;
         for (LlmClient.ContentPart part : message.contentParts()) {
             if (part == null || !part.isImage()) continue;
+            if (part.imageReference() != null) {
+                rendered.append('\n').append(part.imageReference().placeholder());
+                continue;
+            }
             rendered.append("\n[image_metadata");
             if (part.mimeType() != null && !part.mimeType().isBlank()) {
                 rendered.append(" mime=").append(part.mimeType());
@@ -73,14 +74,6 @@ final class SummaryMessageRenderer {
                 rendered.append(" source=").append(part.imageUrl());
             }
             rendered.append("]");
-        }
-        try {
-            String vision = imageSummarySupplier.apply(message);
-            if (vision != null && !vision.isBlank()) {
-                rendered.append("\n[vision_summary]").append(vision.trim()).append("[/vision_summary]");
-            }
-        } catch (RuntimeException ignored) {
-            // Visual/OCR providers are optional; byte metadata remains authoritative.
         }
     }
 

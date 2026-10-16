@@ -130,12 +130,12 @@ class AgentManualCompactionTest {
     }
 
     @Test
-    void zeroKeptTurnsCompressesAllOriginalRounds() throws Exception {
+    void zeroKeptTurnsSummarizesAssistantHistoryAndKeepsUserTextWithinBudget() throws Exception {
         try (Fixture fixture = new Fixture(root, false)) {
             fixture.agent.seedHistory(history());
             assertTrue(fixture.agent.compactHistoryNow(0).compacted());
             assertTrue(fixture.agent.getConversationHistory().stream()
-                    .noneMatch(message -> message.source() == LlmClient.MessageSource.USER));
+                    .anyMatch(message -> message.source() == LlmClient.MessageSource.USER));
         }
     }
 

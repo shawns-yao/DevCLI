@@ -413,7 +413,6 @@ public class SubAgent {
     public AgentMessage execute(AgentMessage task, PrintStream out) {
         log.info("[{}] executing task from {}: type={}", name, task.fromAgent(), task.type());
         currentSkillActivationText = task == null || task.content() == null ? "" : task.content();
-        pruneHistoricalImagePayloads();
         refreshSystemPrompt();
         return executeWithHistory(task, out, conversationHistory, null, true);
     }
@@ -680,20 +679,6 @@ public class SubAgent {
     public void clearHistory() {
         LlmClient.Message systemMsg = conversationHistory.get(0);
         conversationHistory.reset(List.of(systemMsg));
-    }
-
-    private void pruneHistoricalImagePayloads() {
-        int imageCount = conversationHistory.revise("historical_images", messages -> {
-            int images = 0;
-            for (int i = 0; i < messages.size(); i++) {
-                images += messages.get(i).imagePartCount();
-                if (messages.get(i).hasImageContent()) messages.set(i, messages.get(i).withoutImageContent());
-            }
-            return images;
-        });
-        if (imageCount > 0) {
-            log.info("[{}] pruned historical image payloads before sub-agent turn: images={}", name, imageCount);
-        }
     }
 
     private boolean shouldUseTools() {

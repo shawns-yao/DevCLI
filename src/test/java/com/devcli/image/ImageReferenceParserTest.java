@@ -33,7 +33,8 @@ class ImageReferenceParserTest {
         assertTrue(message.content().contains("请直接观察本轮图片内容"));
         assertTrue(message.content().contains("历史对话、历史工具结果、网页/仓库信息都只能作为背景"));
         assertTrue(message.content().contains("如果当前图片与历史上下文冲突，以当前图片为准"));
-        assertTrue(message.content().contains("不要调用 MCP、文件系统或浏览器工具重新读取 Image source"));
+        assertTrue(message.content().contains("当前附件无需重新读取"));
+        assertTrue(message.content().contains("read_image 打开归档引用"));
         assertTrue(message.contentParts().get(message.contentParts().size() - 1).isImage(),
                 "图片 block 应放在最后，避免后续 source 文本让模型误判只收到路径");
     }

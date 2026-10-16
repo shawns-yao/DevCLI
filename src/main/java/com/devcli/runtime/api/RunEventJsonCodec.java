@@ -272,7 +272,9 @@ public final class RunEventJsonCodec {
         for (JsonNode value : values) {
             parts.add(new com.devcli.llm.LlmClient.ContentPart(value.path("type").asText(),
                     value.path("text").asText(null), value.path("image_base64").asText(null),
-                    value.path("image_url").asText(null), value.path("mime_type").asText(null)));
+                    value.path("image_url").asText(null), value.path("mime_type").asText(null),
+                    value.hasNonNull("image_reference") ? MAPPER.convertValue(value.path("image_reference"),
+                            com.devcli.llm.LlmClient.ImageReference.class) : null));
         }
         return List.copyOf(parts);
     }
@@ -285,6 +287,7 @@ public final class RunEventJsonCodec {
             item.put("image_base64", part.imageBase64());
             item.put("image_url", part.imageUrl());
             item.put("mime_type", part.mimeType());
+            if (part.imageReference() != null) item.set("image_reference", MAPPER.valueToTree(part.imageReference()));
         }
     }
 

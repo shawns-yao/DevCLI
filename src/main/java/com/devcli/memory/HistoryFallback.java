@@ -150,6 +150,8 @@ final class HistoryFallback {
         }
         String plan = AgentWorkPlan.extract(context.buildPostCompactRestoreContext());
         if (!plan.isEmpty()) preserved.add(LlmClient.Message.internalUser(AgentWorkPlan.render(plan)));
+        preserved.addAll(systemEnd + 2, UserMessageRetention.select(history.subList(systemEnd, systemEnd + toRemove),
+                targetTokens - TokenBudget.estimateMessagesTokens(preserved)));
         int fallbackProjectionHashIndex = systemEnd;
         if (fallbackProjectionHashIndex < preserved.size()) {
             LlmClient.Message marker = preserved.get(fallbackProjectionHashIndex);

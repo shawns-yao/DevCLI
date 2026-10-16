@@ -72,18 +72,30 @@ public interface LlmClient {
         return capabilities().promptCacheMode();
     }
 
-    record ContentPart(String type, String text, String imageBase64, String imageUrl, String mimeType) {
+    record ImageReference(String path, int width, int height, String description) {
+        public String placeholder() {
+            return "[image: " + path + ", " + (width > 0 ? width + "x" + height : "尺寸未知")
+                    + ", " + (description.isBlank() ? "未生成视觉描述" : description) + "]";
+        }
+    }
+
+    record ContentPart(String type, String text, String imageBase64, String imageUrl, String mimeType,
+                       ImageReference imageReference) {
         public static ContentPart text(String text) {
-            return new ContentPart("text", text, null, null, null);
+            return new ContentPart("text", text, null, null, null, null);
         }
 
         public static ContentPart imageBase64(String imageBase64, String mimeType) {
             return new ContentPart("image_base64", null, imageBase64, null,
-                    mimeType == null || mimeType.isBlank() ? "image/png" : mimeType);
+                    mimeType == null || mimeType.isBlank() ? "image/png" : mimeType, null);
         }
 
         public static ContentPart imageUrl(String imageUrl) {
-            return new ContentPart("image_url", null, null, imageUrl, null);
+            return new ContentPart("image_url", null, null, imageUrl, null, null);
+        }
+
+        public ContentPart withImageReference(ImageReference reference) {
+            return new ContentPart(type, text, imageBase64, imageUrl, mimeType, reference);
         }
 
         public boolean isText() {
@@ -221,19 +233,17 @@ public interface LlmClient {
                 return this;
             }
             List<ContentPart> stripped = new ArrayList<>();
-            int omitted = 0;
             for (ContentPart part : contentParts) {
                 if (part == null) {
                     continue;
                 }
                 if (part.isImage()) {
-                    omitted++;
+                    stripped.add(ContentPart.text(part.imageReference() == null
+                            ? "[image: 未归档，原始载荷保留在会话事件中]" : part.imageReference().placeholder()));
                 } else {
                     stripped.add(part);
                 }
             }
-            stripped.add(ContentPart.text("[历史图片附件已省略 " + omitted
-                    + " 张；如需重新查看，请使用上文 Image source 或相关工具结果。]"));
             return new Message(role, plainText(stripped), reasoningContent, toolCalls,
                     toolCallId, List.copyOf(stripped), source);
         }

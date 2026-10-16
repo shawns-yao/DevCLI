@@ -160,6 +160,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                         "租约空闲超时被回收，空闲 " + heldMs + "ms",
                         heldMs)));
         new FileToolProvider().register(this);
+        new com.devcli.tool.provider.ImageToolProvider().register(this);
         new GrepToolProvider().register(this);
         new com.devcli.tool.provider.GlobToolProvider().register(this);
         new ShellToolProvider().register(this);

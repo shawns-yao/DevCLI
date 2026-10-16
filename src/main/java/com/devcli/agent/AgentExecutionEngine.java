@@ -233,6 +233,7 @@ final class AgentExecutionEngine<R> {
     }
 
     private R runLoop(Delegate<R> delegate) {
+        var images = new ImageContextManager(llmClient, new com.devcli.image.ImageArtifactStore());
         List<LlmClient.Tool> frozenDefinitions = null;
         boolean definitionsCaptured = false;
         ToolCallGovernance toolGovernance = new ToolCallGovernance();
@@ -269,6 +270,13 @@ final class AgentExecutionEngine<R> {
             if (iteration == 0) continue;
             if (hookLifecycle != null) {
                 hookLifecycle.startTurn(iteration);
+            }
+            try {
+                if (!images.prepare(delegate.history(), budget, eventSink)) continue;
+            } catch (IOException error) {
+                emitState(eventSink, RunEvent.ExecutionState.FAILED, iteration, error.getMessage());
+                eventSink.emit(FailureFeedback.fromReason(error.getMessage()).toRunEvent());
+                return delegate.failed(error, budget);
             }
             delegate.beforeIteration(iteration, budget);
             // 压缩或并行子任务可能在准备期间耗尽 Token；已预留的轮数不重复检查。

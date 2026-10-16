@@ -62,7 +62,7 @@ public class ImageReferenceParser {
         List<LlmClient.ContentPart> parts = new ArrayList<>();
         StringBuilder textPart = new StringBuilder(textWithoutRefs)
                 .append("\n\n")
-                .append("[图片已作为图片附件附加。请直接观察本轮图片内容；除非用户明确要求结合历史，历史对话、历史工具结果、网页/仓库信息都只能作为背景，不能替代当前图片内容；如果当前图片与历史上下文冲突，以当前图片为准。不要调用 MCP、文件系统或浏览器工具重新读取 Image source；如果你无法直接观察附件，请明确说明无法看图，不要根据路径或历史上下文猜测。]");
+                .append("[图片已作为图片附件附加。请直接观察本轮图片内容；除非用户明确要求结合历史，历史对话、历史工具结果、网页/仓库信息都只能作为背景，不能替代当前图片内容；如果当前图片与历史上下文冲突，以当前图片为准。当前附件无需重新读取；历史图片若已变成 [image: ...] 占位，可调用 read_image 打开归档引用。如果无法直接观察附件，请明确说明，不要根据路径或历史上下文猜测。]");
         if (!notes.isEmpty()) {
             textPart.append("\n").append(String.join("\n", notes));
         }

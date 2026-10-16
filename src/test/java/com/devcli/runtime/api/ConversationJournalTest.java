@@ -71,7 +71,7 @@ class ConversationJournalTest {
             assertEquals(full, store.originalConversationMessages(thread).stream()
                     .filter(message -> "tool".equals(message.role())).findFirst().orElseThrow().content());
             assertTrue(store.originalConversationMessages(thread).stream().anyMatch(LlmClient.Message::hasImageContent));
-            assertFalse(store.contextView(thread).messages().stream().anyMatch(LlmClient.Message::hasImageContent));
+            assertTrue(store.contextView(thread).messages().stream().anyMatch(LlmClient.Message::hasImageContent));
             assertTrue(store.contextView(thread).messages().stream().filter(message -> "tool".equals(message.role()))
                     .allMatch(message -> message.content().length() < full.length()));
         }

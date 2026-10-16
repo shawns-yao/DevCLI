@@ -199,7 +199,7 @@ class ConversationHistoryCompactorTest {
         history.add(LlmClient.Message.assistant("current answer"));
 
         assertTrue(c.compactIfNeeded(history, 100));
-        assertEquals(currentRequest, history.get(3).content(),
+        assertTrue(history.stream().anyMatch(message -> currentRequest.equals(message.content())),
                 "规则式 microcompact 不得裁剪当前用户请求");
         assertEquals(0, c.lastMicrocompactStats().clearedToolResults());
     }
@@ -399,7 +399,8 @@ class ConversationHistoryCompactorTest {
         assertTrue(history.get(3).content().contains("src/Main.java"));
         assertEquals("assistant", history.get(4).role());
         assertEquals("user", history.get(5).role(), "恢复上下文后保留尾部仍应以 user 起头");
-        assertTrue(history.get(5).content().startsWith("Q5"));
+        assertTrue(history.get(5).content().startsWith("Q0"), "剩余预算允许时保留更早用户原文");
+        assertTrue(history.get(history.size() - 2).content().startsWith("Q5"));
     }
 
     @Test

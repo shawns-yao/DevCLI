@@ -76,7 +76,7 @@ class AbstractOpenAiCompatibleClientImageInputTest {
                     .path("messages").get(0).path("content");
 
             assertEquals("text", content.get(0).path("type").asText());
-            assertEquals(true, content.get(0).path("text").asText().contains("Image source"));
+            assertEquals(true, content.get(0).path("text").asText().contains(image.toString()));
             assertEquals("image_url", content.get(content.size() - 1).path("type").asText());
         }
     }
@@ -468,6 +468,7 @@ class AbstractOpenAiCompatibleClientImageInputTest {
         LlmClient.Message message = LlmClient.Message.user(List.of(
                 LlmClient.ContentPart.text("Image source: /tmp/shot.png"),
                 LlmClient.ContentPart.imageBase64("aGVsbG8=", "image/png")
+                        .withImageReference(new LlmClient.ImageReference("archive/shot.img", 640, 480, "错误截图"))
         ));
 
         LlmClient.Message stripped = message.withoutImageContent();
@@ -475,7 +476,7 @@ class AbstractOpenAiCompatibleClientImageInputTest {
         assertFalse(stripped.hasImageContent());
         assertEquals("user", stripped.role());
         assertEquals(2, stripped.contentParts().size());
-        assertEquals("Image source: /tmp/shot.png\n\n[历史图片附件已省略 1 张；如需重新查看，请使用上文 Image source 或相关工具结果。]",
+        assertEquals("Image source: /tmp/shot.png\n\n[image: archive/shot.img, 640x480, 错误截图]",
                 stripped.content());
     }
 

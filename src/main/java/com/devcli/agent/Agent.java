@@ -339,7 +339,6 @@ public class Agent implements AutoCloseable {
                 : initialToolChoice;
         log.info("ReAct run started: inputLength={}", userInput == null ? 0 : userInput.length());
         currentSkillActivationText = userInput == null ? "" : userInput;
-        pruneHistoricalImagePayloads();
         memoryManager.setActiveProjectScope(toolRegistry.getProjectPath());
         // 写入当前会话工作记忆；真实 messages 由 conversation 维护。
         memoryManager.addUserMessage(userInput);
@@ -746,20 +745,6 @@ public class Agent implements AutoCloseable {
             }
         } catch (Exception e) {
             log.warn("conversation compaction failed", e);
-        }
-    }
-
-    private void pruneHistoricalImagePayloads() {
-        int imageCount = conversation.revise("historical_images", messages -> {
-            int images = 0;
-            for (int i = 0; i < messages.size(); i++) {
-                images += messages.get(i).imagePartCount();
-                if (messages.get(i).hasImageContent()) messages.set(i, messages.get(i).withoutImageContent());
-            }
-            return images;
-        });
-        if (imageCount > 0) {
-            log.info("Pruned historical image payloads before new ReAct turn: images={}", imageCount);
         }
     }
 

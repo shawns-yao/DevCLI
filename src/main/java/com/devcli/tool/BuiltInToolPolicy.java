@@ -96,7 +96,7 @@ public final class BuiltInToolPolicy {
         // 只读且不依赖外部可变状态的工具可以短期缓存，也允许同批并行。
         register(values, ToolEffect.READ_ONLY, false, false,
                 Destructiveness.NONE, Idempotency.IDEMPOTENT, true, false,
-                "read_tool_result", "search_tools");
+                "read_tool_result", "read_image", "search_tools");
         // 只读但仍依赖外部可变状态（文件、网络、记忆、浏览器态）：不缓存，不假设并发安全。
         register(values, ToolEffect.READ_ONLY, false, false,
                 Destructiveness.NONE, Idempotency.IDEMPOTENT, false, false,
