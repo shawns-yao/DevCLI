@@ -39,6 +39,11 @@ public final class PlainRenderer implements Renderer {
         this(System.out, new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)));
     }
 
+    /** 无交互入口只向诊断流输出，输入固定为空，不接管 stdin。 */
+    public static PlainRenderer nonInteractive(PrintStream diagnostics) {
+        return new PlainRenderer(diagnostics, new BufferedReader(new java.io.StringReader("")));
+    }
+
     PlainRenderer(PrintStream out, BufferedReader in) {
         this.out = out;
         this.in = in;

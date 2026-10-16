@@ -82,6 +82,13 @@ final class CliApplication {
 
         configureLogging();
 
+        if (PrintCommandLauncher.isPrintCommand(args)) {
+            int code = PrintCommandLauncher.execute(args,
+                    new PrintStream(System.out, true, StandardCharsets.UTF_8), System.err);
+            if (code != 0) System.exit(code);
+            return;
+        }
+
         DevCliConfig config = DevCliConfig.load();
         com.devcli.policy.PermissionRuleSet permissionRules = loadPermissionRules(config);
         permissionRuleSummary = permissionRules.compactSummary();
