@@ -1,37 +1,35 @@
 package com.devcli.rag;
 
-import com.devcli.util.VectorMath;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
 import java.nio.file.Path;
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.LinkedHashSet;
-import java.util.Optional;
 import java.util.Set;
+import static com.devcli.rag.VectorSearch.safeIndexEpoch;
+import static com.devcli.rag.VectorSearch.blankToDefault;
 
-/**
- * SQLite 向量存储 + 代码关系图谱持久化
- * <p>
- * 向量以 JSON 数组形式存储在 SQLite 中，检索时在内存计算余弦相似度。
- * 对于代码库规模（通常几百到几千个块），此方案足够；规模再大可换 FAISS / pgvector 等。
- */
+/** 索引存储门面；事务和关系数据在此维护，结构初始化和检索分别委托专用组件。 */
 public class VectorStore implements AutoCloseable {
+
+    private final VectorSearch search;
+
     private static final Logger log = LoggerFactory.getLogger(VectorStore.class);
+
     private static final ObjectMapper mapper = new ObjectMapper();
+
     private final Connection connection;
+
     private final String projectPath;
+
     private final String classpathEpoch;
-    private volatile AnnSnapshot annSnapshot;
-    private volatile SearchDiagnostics lastSearchDiagnostics = SearchDiagnostics.empty();
 
     public VectorStore(String projectPath) throws SQLException {
         this.projectPath = projectPath;
@@ -45,7 +43,8 @@ public class VectorStore implements AutoCloseable {
         String dbPath = dir.getAbsolutePath() + "/codebase.db";
         this.connection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
         applyConcurrencyPragmas();
-        initTables();
+        new VectorStoreSchema(connection, this::jsonToEmbedding).initialize();
+        search = new VectorSearch(connection, projectPath, classpathEpoch, this);
     }
 
     /**
@@ -59,247 +58,6 @@ public class VectorStore implements AutoCloseable {
             stmt.execute("PRAGMA busy_timeout=5000");
         } catch (SQLException e) {
             log.warn("启用 WAL/busy_timeout 失败，回退默认 journal 模式: {}", e.getMessage());
-        }
-    }
-
-    private void initTables() throws SQLException {
-        // 代码块表：存储分块内容和向量
-        String createChunks = """
-                CREATE TABLE IF NOT EXISTS code_chunks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    project_path TEXT NOT NULL,
-                    file_path TEXT NOT NULL,
-                    chunk_type TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    embedding_json TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-                """;
-
-        // 代码关系表：存储类/方法间的依赖关系
-        String createRelations = """
-                CREATE TABLE IF NOT EXISTS code_relations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    project_path TEXT NOT NULL,
-                    from_file TEXT NOT NULL,
-                    from_name TEXT NOT NULL,
-                    to_file TEXT,
-                    to_name TEXT,
-                    relation_type TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-                """;
-
-        // 索引加速查询
-        String createIdxProject = "CREATE INDEX IF NOT EXISTS idx_project ON code_chunks(project_path)";
-        String createIdxFile = "CREATE INDEX IF NOT EXISTS idx_file ON code_chunks(file_path)";
-        String createIdxType = "CREATE INDEX IF NOT EXISTS idx_type ON code_chunks(chunk_type)";
-        String createIdxRelProject = "CREATE INDEX IF NOT EXISTS idx_rel_project ON code_relations(project_path)";
-        String createIdxRelFrom = "CREATE INDEX IF NOT EXISTS idx_rel_from ON code_relations(from_name)";
-        String createIdxRelTo = "CREATE INDEX IF NOT EXISTS idx_rel_to ON code_relations(to_name)";
-
-        try (Statement stmt = connection.createStatement()) {
-            stmt.execute(createChunks);
-            stmt.execute(createRelations);
-            addColumnIfMissing(stmt, "code_chunks", "embedding_blob", "BLOB");
-            addColumnIfMissing(stmt, "code_chunks", "index_epoch", "TEXT DEFAULT 'none'");
-            addColumnIfMissing(stmt, "code_chunks", "symbol_version", "TEXT DEFAULT 'none'");
-            addColumnIfMissing(stmt, "code_chunks", "classpath_epoch", "TEXT DEFAULT 'none'");
-            addColumnIfMissing(stmt, "code_relations", "resolution_source", "TEXT DEFAULT 'AST_INFERRED'");
-            addColumnIfMissing(stmt, "code_relations", "confidence", "REAL DEFAULT 0.5");
-            addColumnIfMissing(stmt, "code_relations", "classpath_epoch", "TEXT DEFAULT 'none'");
-            stmt.execute("""
-                    CREATE TABLE IF NOT EXISTS symbol_invalidations (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        project_path TEXT NOT NULL,
-                        symbol_key TEXT NOT NULL,
-                        file_path TEXT NOT NULL,
-                        chunk_type TEXT NOT NULL,
-                        name TEXT NOT NULL,
-                        old_symbol_version TEXT NOT NULL,
-                        new_symbol_version TEXT NOT NULL,
-                        old_index_epoch TEXT NOT NULL,
-                        new_index_epoch TEXT NOT NULL,
-                        classpath_epoch TEXT NOT NULL,
-                        negative_fact TEXT NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                    """);
-            stmt.execute("""
-                    CREATE TABLE IF NOT EXISTS code_index_state (
-                        project_path TEXT PRIMARY KEY,
-                        active_epoch TEXT NOT NULL DEFAULT 'none',
-                        status TEXT NOT NULL DEFAULT 'CURRENT',
-                        generation INTEGER NOT NULL DEFAULT 0,
-                        updated_at_ms INTEGER NOT NULL DEFAULT 0
-                    )
-                    """);
-            stmt.execute("""
-                    CREATE TABLE IF NOT EXISTS code_index_dirty_files (
-                        project_path TEXT NOT NULL,
-                        file_path TEXT NOT NULL,
-                        marked_at_ms INTEGER NOT NULL,
-                        PRIMARY KEY(project_path, file_path)
-                    )
-                    """);
-            stmt.execute("""
-                    CREATE TABLE IF NOT EXISTS code_shadow_chunks (
-                        project_path TEXT NOT NULL,
-                        target_epoch TEXT NOT NULL,
-                        file_path TEXT NOT NULL,
-                        chunk_type TEXT NOT NULL,
-                        name TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        embedding_json TEXT,
-                        embedding_blob BLOB,
-                        symbol_version TEXT NOT NULL,
-                        classpath_epoch TEXT NOT NULL
-                    )
-                    """);
-            addColumnIfMissing(stmt, "code_shadow_chunks", "embedding_blob", "BLOB");
-            stmt.execute("""
-                    CREATE TABLE IF NOT EXISTS code_shadow_relations (
-                        project_path TEXT NOT NULL,
-                        target_epoch TEXT NOT NULL,
-                        from_file TEXT NOT NULL,
-                        from_name TEXT NOT NULL,
-                        to_file TEXT,
-                        to_name TEXT,
-                        relation_type TEXT NOT NULL,
-                        resolution_source TEXT NOT NULL,
-                        confidence REAL NOT NULL,
-                        classpath_epoch TEXT NOT NULL
-                    )
-                    """);
-            stmt.execute("""
-                    CREATE TABLE IF NOT EXISTS code_shadow_state (
-                        project_path TEXT NOT NULL,
-                        target_epoch TEXT NOT NULL,
-                        base_epoch TEXT NOT NULL,
-                        base_generation INTEGER NOT NULL,
-                        mode TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        created_at_ms INTEGER NOT NULL,
-                        PRIMARY KEY(project_path, target_epoch)
-                    )
-                    """);
-            stmt.execute(createIdxProject);
-            stmt.execute(createIdxFile);
-            stmt.execute(createIdxType);
-            stmt.execute("CREATE INDEX IF NOT EXISTS idx_invalidation_project ON symbol_invalidations(project_path)");
-            stmt.execute("CREATE INDEX IF NOT EXISTS idx_invalidation_symbol ON symbol_invalidations(symbol_key)");
-            stmt.execute(createIdxRelProject);
-            stmt.execute(createIdxRelFrom);
-            stmt.execute(createIdxRelTo);
-            stmt.execute("CREATE INDEX IF NOT EXISTS idx_shadow_chunks_project_epoch "
-                    + "ON code_shadow_chunks(project_path, target_epoch)");
-            stmt.execute("CREATE INDEX IF NOT EXISTS idx_shadow_relations_project_epoch "
-                    + "ON code_shadow_relations(project_path, target_epoch)");
-            initFullTextIndex(stmt);
-        }
-        migrateLegacyEmbeddings("code_chunks", "id");
-        migrateLegacyEmbeddings("code_shadow_chunks", "rowid");
-    }
-
-    private void initFullTextIndex(Statement stmt) throws SQLException {
-        if (fullTextIndexNeedsRebuild(stmt)) {
-            stmt.execute("DROP TRIGGER IF EXISTS code_chunks_fts_ai");
-            stmt.execute("DROP TRIGGER IF EXISTS code_chunks_fts_ad");
-            stmt.execute("DROP TRIGGER IF EXISTS code_chunks_fts_au");
-            stmt.execute("DROP TABLE IF EXISTS code_chunks_fts");
-            stmt.execute("DELETE FROM rag_schema_state WHERE schema_key='fts_version'");
-        }
-        stmt.execute("""
-                CREATE VIRTUAL TABLE IF NOT EXISTS code_chunks_fts USING fts5(
-                    project_path UNINDEXED, file_path, name, content,
-                    content='code_chunks', content_rowid='id', tokenize='trigram')
-                """);
-        stmt.execute("""
-                CREATE TRIGGER IF NOT EXISTS code_chunks_fts_ai AFTER INSERT ON code_chunks BEGIN
-                    INSERT INTO code_chunks_fts(rowid, project_path, file_path, name, content)
-                    VALUES (new.id, new.project_path, new.file_path, new.name, new.content);
-                END
-                """);
-        stmt.execute("""
-                CREATE TRIGGER IF NOT EXISTS code_chunks_fts_ad AFTER DELETE ON code_chunks BEGIN
-                    INSERT INTO code_chunks_fts(code_chunks_fts, rowid, project_path, file_path, name, content)
-                    VALUES ('delete', old.id, old.project_path, old.file_path, old.name, old.content);
-                END
-                """);
-        stmt.execute("""
-                CREATE TRIGGER IF NOT EXISTS code_chunks_fts_au AFTER UPDATE ON code_chunks BEGIN
-                    INSERT INTO code_chunks_fts(code_chunks_fts, rowid, project_path, file_path, name, content)
-                    VALUES ('delete', old.id, old.project_path, old.file_path, old.name, old.content);
-                    INSERT INTO code_chunks_fts(rowid, project_path, file_path, name, content)
-                    VALUES (new.id, new.project_path, new.file_path, new.name, new.content);
-                END
-                """);
-        stmt.execute("""
-                CREATE TABLE IF NOT EXISTS rag_schema_state (
-                    schema_key TEXT PRIMARY KEY,
-                    schema_value TEXT NOT NULL
-                )
-                """);
-        boolean rebuild;
-        try (ResultSet state = stmt.executeQuery(
-                "SELECT schema_value FROM rag_schema_state WHERE schema_key='fts_version'")) {
-            rebuild = !state.next() || !"1".equals(state.getString(1));
-        }
-        if (rebuild) {
-            stmt.execute("INSERT INTO code_chunks_fts(code_chunks_fts) VALUES('rebuild')");
-            stmt.execute("""
-                    INSERT INTO rag_schema_state(schema_key, schema_value) VALUES('fts_version', '1')
-                    ON CONFLICT(schema_key) DO UPDATE SET schema_value=excluded.schema_value
-                    """);
-        }
-    }
-
-    private boolean fullTextIndexNeedsRebuild(Statement stmt) throws SQLException {
-        try (ResultSet columns = stmt.executeQuery("PRAGMA table_info(code_chunks_fts)")) {
-            boolean exists = false;
-            boolean hasProjectPath = false;
-            while (columns.next()) {
-                exists = true;
-                if ("project_path".equalsIgnoreCase(columns.getString(2))) {
-                    hasProjectPath = true;
-                }
-            }
-            return exists && !hasProjectPath;
-        }
-    }
-
-    private void migrateLegacyEmbeddings(String table, String idColumn) throws SQLException {
-        List<LegacyEmbedding> legacy = new ArrayList<>();
-        try (Statement statement = connection.createStatement();
-             ResultSet rows = statement.executeQuery("SELECT " + idColumn
-                     + ", embedding_json FROM " + table
-                     + " WHERE embedding_blob IS NULL AND embedding_json IS NOT NULL")) {
-            while (rows.next()) {
-                legacy.add(new LegacyEmbedding(rows.getLong(1), jsonToEmbedding(rows.getString(2))));
-            }
-        }
-        if (legacy.isEmpty()) {
-            return;
-        }
-        try (PreparedStatement update = connection.prepareStatement("UPDATE " + table
-                + " SET embedding_blob = ?, embedding_json = NULL WHERE " + idColumn + " = ?")) {
-            for (LegacyEmbedding row : legacy) {
-                update.setBytes(1, VectorCodec.encode(row.vector()));
-                update.setLong(2, row.id());
-                update.addBatch();
-            }
-            update.executeBatch();
-        }
-    }
-
-    private void addColumnIfMissing(Statement stmt, String table, String column, String definition) throws SQLException {
-        try {
-            stmt.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
-        } catch (SQLException e) {
-            if (!e.getMessage().toLowerCase().contains("duplicate column")) {
-                throw e;
-            }
         }
     }
 
@@ -340,7 +98,7 @@ public class VectorStore implements AutoCloseable {
             ps7.executeUpdate();
             ps8.executeUpdate();
         }
-        invalidateAnnIndex();
+        search.invalidateAnnIndex();
     }
 
     /**
@@ -410,7 +168,7 @@ public class VectorStore implements AutoCloseable {
 
     /** 当前项目已经进入 dirty queue 的规范化文件。 */
     public List<Path> pendingDirtyFiles() throws SQLException {
-        return dirtyProjectFiles();
+        return search.dirtyProjectFiles();
     }
 
     /** classpath 变化时符号版本也会变化，禁止复用旧 epoch 的块。 */
@@ -571,7 +329,7 @@ public class VectorStore implements AutoCloseable {
             clearDirtyFiles();
             deleteShadowIndex(build.targetEpoch());
             connection.commit();
-            invalidateAnnIndex();
+            search.invalidateAnnIndex();
             return true;
         } catch (SQLException e) {
             connection.rollback();
@@ -693,7 +451,7 @@ public class VectorStore implements AutoCloseable {
                     .toAbsolutePath().normalize();
             aliases.add(absolute.toString());
             if (absolute.startsWith(root)) {
-                aliases.add(relativeProjectPath(absolute));
+                aliases.add(search.relativeProjectPath(absolute));
             }
         }
         return List.copyOf(aliases);
@@ -864,7 +622,7 @@ public class VectorStore implements AutoCloseable {
         return false;
     }
 
-    private static String normalizeForMatch(String value) {
+    static String normalizeForMatch(String value) {
         if (value == null) {
             return "";
         }
@@ -974,7 +732,7 @@ public class VectorStore implements AutoCloseable {
             if (manageTransaction) {
                 connection.commit();
             }
-            invalidateAnnIndex();
+            search.invalidateAnnIndex();
         } catch (SQLException e) {
             if (manageTransaction) {
                 connection.rollback();
@@ -1029,134 +787,6 @@ public class VectorStore implements AutoCloseable {
                 connection.setAutoCommit(autoCommit);
             }
         }
-    }
-
-    /**
-     * 语义检索：根据查询向量返回最相似的 TopK 代码块
-     */
-    public List<SearchResult> search(float[] queryEmbedding, int topK) throws SQLException {
-        if (queryEmbedding == null || queryEmbedding.length == 0 || topK <= 0) {
-            return List.of();
-        }
-        long started = System.nanoTime();
-        AnnSnapshot snapshot = ensureAnnSnapshot();
-        List<SearchResult> results = new ArrayList<>();
-        if (snapshot.index() != null) {
-            for (AnnVectorIndex.Neighbor neighbor : snapshot.index().search(queryEmbedding, topK)) {
-                IndexedChunk chunk = snapshot.chunks().get(neighbor.id());
-                if (chunk != null) {
-                    results.add(indexedSearchResult(chunk, neighbor.similarity()));
-                }
-            }
-            lastSearchDiagnostics = new SearchDiagnostics("HNSW", "NONE", snapshot.chunks().size(),
-                    elapsedMillis(started), false, "");
-        } else {
-            for (IndexedChunk chunk : snapshot.chunks().values()) {
-                results.add(indexedSearchResult(chunk, cosineSimilarity(queryEmbedding, chunk.vector())));
-            }
-            results.sort((left, right) -> Double.compare(right.similarity(), left.similarity()));
-            if (results.size() > topK) {
-                results = new ArrayList<>(results.subList(0, topK));
-            }
-            lastSearchDiagnostics = new SearchDiagnostics("EXACT_FALLBACK", "NONE", snapshot.chunks().size(),
-                    elapsedMillis(started), true, snapshot.degradationReason());
-        }
-        return refreshExternalChanges(results);
-    }
-
-    /**
-     * 根据关键词检索代码块（不经过 Embedding，用于精确匹配类名/方法名）
-     */
-    public List<SearchResult> searchByKeyword(String keyword) throws SQLException {
-        if (keyword == null || keyword.isBlank()) {
-            return List.of();
-        }
-        long started = System.nanoTime();
-        boolean useFts = keyword.codePointCount(0, keyword.length()) >= 3;
-        String sql = useFts ? """
-                SELECT c.file_path, c.chunk_type, c.name, c.content,
-                       c.index_epoch, c.symbol_version, c.classpath_epoch
-                FROM code_chunks_fts
-                JOIN code_chunks c ON c.id = code_chunks_fts.rowid
-                WHERE code_chunks_fts MATCH ? AND c.project_path = ?
-                ORDER BY bm25(code_chunks_fts, 0.0, 1.0, 3.0, 1.0), c.name
-                LIMIT 200
-                """ : """
-                SELECT file_path, chunk_type, name, content, index_epoch, symbol_version, classpath_epoch
-                FROM code_chunks
-                WHERE project_path = ? AND (name = ? OR name LIKE ? ESCAPE '\\' OR file_path LIKE ? ESCAPE '\\')
-                ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END, name
-                LIMIT 200
-                """;
-        List<SearchResult> results = new ArrayList<>();
-
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            if (useFts) {
-                ps.setString(1, ftsPhrase(keyword));
-                ps.setString(2, projectPath);
-            } else {
-                String escaped = escapeLike(keyword);
-                ps.setString(1, projectPath);
-                ps.setString(2, keyword);
-                ps.setString(3, escaped + "%");
-                ps.setString(4, "%/" + escaped + "%");
-                ps.setString(5, keyword);
-            }
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    results.add(searchResult(
-                            rs.getString("file_path"),
-                            rs.getString("chunk_type"),
-                            rs.getString("name"),
-                            rs.getString("content"),
-                            0.3,
-                            rs.getString("index_epoch"),
-                            rs.getString("symbol_version"),
-                            rs.getString("classpath_epoch")
-                    ));
-                }
-            }
-        }
-        lastSearchDiagnostics = new SearchDiagnostics("NONE", useFts ? "FTS5_TRIGRAM" : "BTREE_PREFIX",
-                results.size(), elapsedMillis(started), false, "");
-        return mergeDirtyKeywordCandidates(keyword, refreshExternalChanges(results));
-    }
-
-    public List<SearchResult> findChunksByName(String name, int limit) throws SQLException {
-        if (name == null || name.isBlank() || limit <= 0) {
-            return List.of();
-        }
-        String sql = """
-                SELECT file_path, chunk_type, name, content, index_epoch, symbol_version, classpath_epoch FROM code_chunks
-                WHERE project_path = ? AND (name = ? OR name LIKE ? ESCAPE '\\')
-                ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END, chunk_type DESC, name
-                LIMIT ?
-                """;
-        List<SearchResult> results = new ArrayList<>();
-        String escaped = name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
-        String prefixPattern = escaped + "(%";
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            ps.setString(1, projectPath);
-            ps.setString(2, name);
-            ps.setString(3, prefixPattern);
-            ps.setString(4, name);
-            ps.setInt(5, limit);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    results.add(searchResult(
-                            rs.getString("file_path"),
-                            rs.getString("chunk_type"),
-                            rs.getString("name"),
-                            rs.getString("content"),
-                            0.0,
-                            rs.getString("index_epoch"),
-                            rs.getString("symbol_version"),
-                            rs.getString("classpath_epoch")
-                    ));
-                }
-            }
-        }
-        return refreshExternalChanges(results);
     }
 
     /**
@@ -1279,8 +909,8 @@ public class VectorStore implements AutoCloseable {
             statement.setString(1, projectPath);
             try (ResultSet rs = statement.executeQuery()) {
                 while (rs.next()) {
-                    resolveProjectPath(rs.getString(1))
-                            .map(this::relativeProjectPath)
+                    search.resolveProjectPath(rs.getString(1))
+                            .map(search::relativeProjectPath)
                             .ifPresent(indexedPaths::add);
                 }
             }
@@ -1298,7 +928,7 @@ public class VectorStore implements AutoCloseable {
         return new IndexWatchSnapshot(Set.copyOf(indexedPaths), updatedAt);
     }
 
-    private long currentIndexGeneration() throws SQLException {
+    long currentIndexGeneration() throws SQLException {
         try (PreparedStatement ps = connection.prepareStatement(
                 "SELECT generation FROM code_index_state WHERE project_path = ?")) {
             ps.setString(1, projectPath);
@@ -1308,79 +938,7 @@ public class VectorStore implements AutoCloseable {
         }
     }
 
-    private synchronized AnnSnapshot ensureAnnSnapshot() throws SQLException {
-        long generation = currentIndexGeneration();
-        AnnSnapshot current = annSnapshot;
-        if (current != null && current.generation() == generation) {
-            return current;
-        }
-
-        List<AnnVectorIndex.Entry> vectors = new ArrayList<>();
-        Map<Long, IndexedChunk> chunks = new LinkedHashMap<>();
-        try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT id, file_path, chunk_type, name, content, embedding_blob, embedding_json,
-                       index_epoch, symbol_version, classpath_epoch
-                FROM code_chunks
-                WHERE project_path = ? AND (embedding_blob IS NOT NULL OR embedding_json IS NOT NULL)
-                ORDER BY id
-                """)) {
-            statement.setString(1, projectPath);
-            try (ResultSet rows = statement.executeQuery()) {
-                while (rows.next()) {
-                    long id = rows.getLong("id");
-                    byte[] blob = rows.getBytes("embedding_blob");
-                    float[] vector = blob == null
-                            ? jsonToEmbedding(rows.getString("embedding_json"))
-                            : VectorCodec.decode(blob);
-                    vectors.add(new AnnVectorIndex.Entry(id, vector));
-                    chunks.put(id, new IndexedChunk(
-                            rows.getString("file_path"), rows.getString("chunk_type"),
-                            rows.getString("name"), rows.getString("content"), vector,
-                            rows.getString("index_epoch"), rows.getString("symbol_version"),
-                            rows.getString("classpath_epoch")));
-                }
-            }
-        }
-
-        AnnVectorIndex index = null;
-        String degradationReason = "";
-        try {
-            index = AnnVectorIndex.build(vectors);
-        } catch (RuntimeException failure) {
-            degradationReason = "HNSW_BUILD_FAILED: " + failure.getMessage();
-            log.warn("HNSW 索引构建失败，显式降级为精确检索: {}", failure.getMessage());
-        }
-        AnnSnapshot built = new AnnSnapshot(generation, index, Map.copyOf(chunks), degradationReason);
-        annSnapshot = built;
-        return built;
-    }
-
-    private synchronized void invalidateAnnIndex() {
-        annSnapshot = null;
-    }
-
-    private SearchResult indexedSearchResult(IndexedChunk chunk, double similarity) throws SQLException {
-        return searchResult(chunk.filePath(), chunk.chunkType(), chunk.name(), chunk.content(), similarity,
-                chunk.indexEpoch(), chunk.symbolVersion(), chunk.classpathEpoch());
-    }
-
-    private static String ftsPhrase(String keyword) {
-        return "\"" + keyword.strip().replace("\"", "\"\"") + "\"";
-    }
-
-    private static String escapeLike(String value) {
-        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
-    }
-
-    private static long elapsedMillis(long startedNanos) {
-        return Math.max(0L, (System.nanoTime() - startedNanos) / 1_000_000L);
-    }
-
-    private double cosineSimilarity(float[] a, float[] b) {
-        return VectorMath.cosineSimilarity(a, b);
-    }
-
-    private float[] jsonToEmbedding(String json) {
+    float[] jsonToEmbedding(String json) {
         try {
             return mapper.readValue(json, float[].class);
         } catch (JsonProcessingException e) {
@@ -1390,262 +948,9 @@ public class VectorStore implements AutoCloseable {
 
     @Override
     public void close() throws SQLException {
-        invalidateAnnIndex();
+        search.invalidateAnnIndex();
         if (connection != null && !connection.isClosed()) {
             connection.close();
-        }
-    }
-
-    private SearchResult searchResult(String filePath, String chunkType, String name, String content, double similarity) {
-        String symbolVersion = SymbolVersion.from(filePath, chunkType, name, content, classpathEpoch).value();
-        return new SearchResult(filePath, chunkType, name, content, similarity,
-                symbolVersion, classpathEpoch, IndexEpoch.none().value(), List.of());
-    }
-
-    private SearchResult searchResult(String filePath, String chunkType, String name, String content, double similarity,
-                                      String indexEpoch, String symbolVersion, String resultClasspathEpoch) throws SQLException {
-        String effectiveClasspathEpoch = blankToDefault(resultClasspathEpoch, classpathEpoch);
-        String effectiveSymbolVersion = blankToDefault(symbolVersion,
-                SymbolVersion.from(filePath, chunkType, name, content, effectiveClasspathEpoch).value());
-        String effectiveIndexEpoch = blankToDefault(indexEpoch, IndexEpoch.none().value());
-        IndexFreshness freshness = indexFreshness(filePath, effectiveIndexEpoch);
-        return new SearchResult(filePath, chunkType, name, content, similarity,
-                effectiveSymbolVersion,
-                effectiveClasspathEpoch,
-                effectiveIndexEpoch,
-                getInvalidationsForSymbol(SymbolSnapshot.symbolKey(filePath, chunkType, name), 3),
-                freshness);
-    }
-
-    /**
-     * 只校验已经进入最终候选集的块，兜住 IDE/脚本直接修改主项目但未经过工具写入的情况。
-     */
-    private List<SearchResult> refreshExternalChanges(List<SearchResult> results) throws SQLException {
-        if (results == null || results.isEmpty()) return List.of();
-        List<SearchResult> refreshed = new ArrayList<>(results.size());
-        Map<String, LiveFile> liveFiles = new HashMap<>();
-        LinkedHashSet<String> newlyDirty = new LinkedHashSet<>();
-        for (SearchResult result : results) {
-            LiveChunk live = readLiveChunk(result.filePath(), result.chunkType(), result.name(), liveFiles);
-            if (!live.verifiable()) {
-                refreshed.add(result);
-                continue;
-            }
-            boolean changed = live.content().filter(result.content()::equals).isEmpty();
-            if (result.freshness() != IndexFreshness.DIRTY && !changed) {
-                refreshed.add(result);
-                continue;
-            }
-            if (changed) {
-                newlyDirty.add(result.filePath());
-            }
-            String currentContent = live.content().orElse(
-                    "索引命中的代码块已从当前文件中移除，请重新读取文件确认现状。");
-            refreshed.add(new SearchResult(result.filePath(), result.chunkType(), result.name(),
-                    currentContent, result.similarity(), result.symbolVersion(),
-                    result.classpathEpoch(), result.indexEpoch(), result.invalidations(),
-                    IndexFreshness.DIRTY));
-        }
-        if (!newlyDirty.isEmpty()) {
-            try {
-                markDirtyFiles(List.copyOf(newlyDirty));
-            } catch (SQLException e) {
-                log.warn("持久化外部文件索引失效标记失败: {}", e.getMessage());
-            }
-        }
-        return refreshed;
-    }
-
-    /**
-     * 旧索引只能提供已经存在的候选。文件进入 DIRTY 后，再从当前文件实时分块并合并关键词命中，
-     * 使新增方法和新增配置键无需等待下一轮索引也能被精确检索发现。
-     */
-    private List<SearchResult> mergeDirtyKeywordCandidates(String keyword,
-                                                            List<SearchResult> indexedResults)
-            throws SQLException {
-        Map<String, SearchResult> merged = new LinkedHashMap<>();
-        for (SearchResult result : indexedResults) {
-            merged.put(liveResultKey(result.filePath(), result.chunkType(), result.name()), result);
-        }
-
-        for (Path file : dirtyProjectFiles()) {
-            LiveFile liveFile = readLiveFile(file.toString());
-            if (!liveFile.verifiable() || liveFile.rawContent() == null) continue;
-            for (CodeChunk chunk : liveFile.chunks()) {
-                if (!containsKeyword(chunk, keyword)) continue;
-                SearchResult liveResult = liveDirtyResult(chunk);
-                merged.put(liveResultKey(liveResult.filePath(), liveResult.chunkType(), liveResult.name()),
-                        liveResult);
-            }
-        }
-        return List.copyOf(merged.values());
-    }
-
-    private List<Path> dirtyProjectFiles() throws SQLException {
-        String sql = """
-                SELECT file_path FROM code_index_dirty_files
-                WHERE project_path = ?
-                ORDER BY marked_at_ms, file_path
-                """;
-        LinkedHashSet<Path> files = new LinkedHashSet<>();
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, projectPath);
-            try (ResultSet rs = statement.executeQuery()) {
-                while (rs.next()) {
-                    resolveProjectPath(rs.getString(1)).ifPresent(files::add);
-                }
-            }
-        }
-        return List.copyOf(files);
-    }
-
-    private SearchResult liveDirtyResult(CodeChunk chunk) throws SQLException {
-        String symbolVersion = SymbolVersion.from(chunk.filePath(), chunk.chunkType(), chunk.name(),
-                chunk.content(), classpathEpoch).value();
-        return new SearchResult(chunk.filePath(), chunk.chunkType(), chunk.name(), chunk.content(),
-                0.3, symbolVersion, classpathEpoch, currentIndexEpoch(),
-                getInvalidationsForSymbol(SymbolSnapshot.symbolKey(
-                        chunk.filePath(), chunk.chunkType(), chunk.name()), 3),
-                IndexFreshness.DIRTY);
-    }
-
-    private static boolean containsKeyword(CodeChunk chunk, String keyword) {
-        String needle = keyword == null ? "" : keyword.toLowerCase(Locale.ROOT);
-        return chunk.name().toLowerCase(Locale.ROOT).contains(needle)
-                || chunk.filePath().toLowerCase(Locale.ROOT).contains(needle)
-                || chunk.content().toLowerCase(Locale.ROOT).contains(needle);
-    }
-
-    private String liveResultKey(String filePath, String chunkType, String name) {
-        String canonicalPath = resolveProjectPath(filePath)
-                .map(Path::toString)
-                .orElse(filePath == null ? "" : filePath);
-        String logicalName = name == null ? "" : name;
-        if ("file".equals(chunkType)) {
-            int segment = logicalName.lastIndexOf('#');
-            logicalName = segment >= 0 && logicalName.substring(segment + 1).matches("\\d+")
-                    ? "file" + logicalName.substring(segment)
-                    : "file";
-        }
-        return canonicalPath + "#" + chunkType + "#" + logicalName;
-    }
-
-    private LiveChunk readLiveChunk(String filePath, String chunkType, String name,
-                                    Map<String, LiveFile> liveFiles) {
-        LiveFile liveFile = liveFiles.computeIfAbsent(filePath, this::readLiveFile);
-        if (!liveFile.verifiable()) return LiveChunk.unverifiable();
-        if (liveFile.rawContent() == null) return LiveChunk.missing();
-        if ("file".equals(chunkType) && (name == null || !name.matches(".*#\\d+$"))) {
-            return LiveChunk.present(liveFile.rawContent());
-        }
-        for (CodeChunk chunk : liveFile.chunks()) {
-            if (chunk.chunkType().equals(chunkType) && sameChunkName(chunkType, chunk.name(), name)) {
-                return LiveChunk.present(chunk.content());
-            }
-        }
-        return LiveChunk.missing();
-    }
-
-    private LiveFile readLiveFile(String filePath) {
-        try {
-            Path file = resolveProjectPath(filePath).orElse(null);
-            if (file == null) return LiveFile.unverifiable();
-            if (!java.nio.file.Files.isRegularFile(file)) return LiveFile.missing();
-            String rawContent = java.nio.file.Files.readString(file);
-            return new LiveFile(true, rawContent, new CodeChunker().chunkFile(file));
-        } catch (Exception ignored) {
-            return LiveFile.unverifiable();
-        }
-    }
-
-    private Optional<Path> resolveProjectPath(String filePath) {
-        try {
-            Path root = Path.of(projectPath).toAbsolutePath().normalize();
-            if (!java.nio.file.Files.isDirectory(root) || filePath == null || filePath.isBlank()) {
-                return Optional.empty();
-            }
-            Path candidate = Path.of(filePath);
-            Path file = (candidate.isAbsolute() ? candidate : root.resolve(candidate))
-                    .toAbsolutePath().normalize();
-            return file.startsWith(root) ? Optional.of(file) : Optional.empty();
-        } catch (Exception ignored) {
-            return Optional.empty();
-        }
-    }
-
-    private String relativeProjectPath(Path file) {
-        Path root = Path.of(projectPath).toAbsolutePath().normalize();
-        return root.relativize(file.toAbsolutePath().normalize()).toString().replace('\\', '/');
-    }
-
-    private static boolean sameChunkName(String chunkType, String currentName, String indexedName) {
-        if (java.util.Objects.equals(currentName, indexedName)) return true;
-        if (!"file".equals(chunkType) || indexedName == null) return false;
-        int segment = indexedName.lastIndexOf('#');
-        return segment >= 0 && currentName.endsWith(indexedName.substring(segment));
-    }
-
-    private IndexFreshness indexFreshness(String filePath, String resultEpoch) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT 1 FROM code_index_dirty_files
-                WHERE project_path = ? AND file_path = ? LIMIT 1
-                """)) {
-            statement.setString(1, projectPath);
-            statement.setString(2, filePath);
-            try (ResultSet rs = statement.executeQuery()) {
-                if (rs.next()) return IndexFreshness.DIRTY;
-            }
-        }
-        return safeIndexEpoch(resultEpoch).equals(currentIndexEpoch())
-                && "CURRENT".equals(currentIndexStatus())
-                ? IndexFreshness.CURRENT : IndexFreshness.STALE;
-    }
-
-    private String currentIndexStatus() throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT status FROM code_index_state
-                WHERE project_path = ?
-                """)) {
-            statement.setString(1, projectPath);
-            try (ResultSet rs = statement.executeQuery()) {
-                return rs.next() ? rs.getString(1) : "CURRENT";
-            }
-        }
-    }
-
-    private static String safeIndexEpoch(String indexEpoch) {
-        return blankToDefault(indexEpoch, IndexEpoch.none().value());
-    }
-
-    private static String blankToDefault(String value, String defaultValue) {
-        return value == null || value.isBlank() ? defaultValue : value;
-    }
-
-    private record LiveChunk(boolean verifiable, Optional<String> content) {
-        static LiveChunk present(String content) {
-            return new LiveChunk(true, Optional.ofNullable(content));
-        }
-
-        static LiveChunk missing() {
-            return new LiveChunk(true, Optional.empty());
-        }
-
-        static LiveChunk unverifiable() {
-            return new LiveChunk(false, Optional.empty());
-        }
-    }
-
-    private record LiveFile(boolean verifiable, String rawContent, List<CodeChunk> chunks) {
-        LiveFile {
-            chunks = chunks == null ? List.of() : List.copyOf(chunks);
-        }
-
-        static LiveFile missing() {
-            return new LiveFile(true, null, List.of());
-        }
-
-        static LiveFile unverifiable() {
-            return new LiveFile(false, null, List.of());
         }
     }
 
@@ -1653,22 +958,6 @@ public class VectorStore implements AutoCloseable {
      * 带向量的代码块条目
      */
     public record CodeChunkEntry(CodeChunk chunk, float[] embedding) {}
-
-    private record LegacyEmbedding(long id, float[] vector) {
-    }
-
-    private record IndexedChunk(String filePath, String chunkType, String name, String content,
-                                float[] vector, String indexEpoch, String symbolVersion,
-                                String classpathEpoch) {
-    }
-
-    private record AnnSnapshot(long generation, AnnVectorIndex index,
-                               Map<Long, IndexedChunk> chunks, String degradationReason) {
-    }
-
-    public SearchDiagnostics lastSearchDiagnostics() {
-        return lastSearchDiagnostics;
-    }
 
     public record SearchDiagnostics(String vectorBackend, String keywordBackend,
                                     int indexedVectors, long latencyMillis,
@@ -1806,4 +1095,18 @@ public class VectorStore implements AutoCloseable {
      * 索引统计
      */
     public record IndexStats(int chunkCount, int relationCount) {}
+
+    public List<SearchResult> search(float[] queryEmbedding, int topK) throws SQLException {
+        return search.search(queryEmbedding, topK);
+    }
+
+    public List<SearchResult> searchByKeyword(String keyword) throws SQLException {
+        return search.searchByKeyword(keyword);
+    }
+
+    public List<SearchResult> findChunksByName(String name, int limit) throws SQLException {
+        return search.findChunksByName(name, limit);
+    }
+
+    public SearchDiagnostics lastSearchDiagnostics() { return search.lastSearchDiagnostics(); }
 }
