@@ -5,14 +5,14 @@ import com.devcli.memory.MemoryEntry;
 import java.util.List;
 
 /**
- * 把启用 skill 渲染成 system prompt 索引段。
+ * 把启用 Skill 渲染成当轮消息的索引段。
  *
  * 预算约束：
  * - 单条 description ≤ 500 codepoint
  * - Skill 数量不设固定上限，按任务相关排序后在 Token 预算内尽量纳入
  * - 默认预算用于兼容旧调用；生产调用由 ContextProfile 按模型窗口给出
  *
- * 注入位置：每个 Agent / SubAgent 的 system prompt 末尾，独立段。
+ * 注入位置：Agent / SubAgent 的当轮任务消息，不改写 system 前缀。
  */
 public final class SkillIndexFormatter {
 

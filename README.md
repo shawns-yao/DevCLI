@@ -4,7 +4,7 @@
 
 `delete_files` 使用 `paths` 数组明确列出项目相对文件路径，不递归、不展开通配符，并保留目录。每次最多 500 个文件、合计 20MB、单文件 5MB。删除前展示目标、数量、递归范围及恢复限制；审批后文件变化则整批拒绝，应用失败尝试回滚。成功删除不进入回收站，恢复依赖已有快照或备份。
 
-删除文件达到默认 50 个的阈值必须单次确认；低于阈值仅在任务路径授权覆盖时免确认，`dontAsk` 模式下收口为拒绝。配置 `DEVCLI_DELETE_APPROVAL_THRESHOLD` 或 `-Ddevcli.delete.approval.threshold` 可调整为 1–500。检测到 Shell 删除时不复用构建测试授权或全部批准，并提示无法可靠统计目标。检测不是完整 Shell 解析；既有 `apply_patch` 仍走原审批，数量阈值只针对单次 `delete_files`，不跨调用累计。敏感路径保护不因关闭 HITL 而失效。
+删除文件达到默认 50 个的阈值必须单次确认；低于阈值仅在任务路径授权覆盖时免确认，`dontAsk` 模式下收口为拒绝。配置 `DEVCLI_DELETE_APPROVAL_THRESHOLD` 或 `-Ddevcli.delete.approval.threshold` 可调整为 1–500。检测到 Shell 删除时不复用构建测试授权或全部批准，并提示无法可靠统计目标。检测不是完整 Shell 解析；数量阈值只针对单次 `delete_files`，不跨调用累计。敏感路径保护不因关闭 HITL 而失效。
 
 DevCLI 是面向代码仓库的 Java Agent CLI。它将大语言模型、工具、代码检索、任务记忆、隔离工作区、人工审批和运行恢复组织成一个本地开发运行时。
 
@@ -145,7 +145,7 @@ Agent 自身配置单独保护：`.devcli/hooks.json`、`.devcli/mcp.json`、`.d
 
 `/mode plan` 让只读能力上限持续作用于后续轮次：写入、命令和外部副作用工具既不注入模型也不会执行。与 `/plan` 组合时该轮会被直接拒绝（编排必须写入隔离工作区，跑到中途只会得到一片能力拒绝），并消费掉只读标记。`/mode default` 恢复逐个询问。
 
-`/mode auto` 把「默认要问」的动作交给权限分类器判断：只有走完整条求值链、没有任何规则或安全机制要求询问的动作才会送到分类器。显式 `ask` 规则、`delete_files` 删除确认、可识别的 Shell 删除、`apply_patch` 删除或移动、`revert_turn`、浏览器与 MCP 逐次审批都不经过分类器——它们有独立于默认策略的询问理由。分类器只看到工具名、参数、项目路径与当前模式，不继承会话历史与记忆；默认超时 10 秒（`devcli.permission.classifier.timeout.seconds`），执行前会确认工具剩余预算足以覆盖该超时，不足、装配缺失、超时、调用失败或响应不可解析一律拒绝，不猜测。连续失败次数在主 Registry 与项目 fork 间共享，默认达到 3 次（`devcli.permission.classifier.failure.threshold`）后退出 `auto` 并回落 `default`；手动切换模式会重置该计数。提示词在 `prompts/permission-classifier.md`，仅允许 `~/.devcli/prompts/` 的可信用户级覆盖；项目 `.devcli/prompts/permission-classifier.md` 会被忽略，避免仓库内容改写自身审批策略。**分类器误判放行时没有人工兜底**——fail-closed 只兜住「分类器不可用」，兜不住「分类器判断错误」，这是 `auto` 相对 `default` 的固有代价。分类器不覆盖规则层 `allow`：用户写了 `allow` 就是用户的选择；代价是无 specifier 的宽泛 `allow` 会让分类器在该工具上完全不参与。
+`/mode auto` 把「默认要问」的动作交给权限分类器判断：只有走完整条求值链、没有任何规则或安全机制要求询问的动作才会送到分类器。显式 `ask` 规则、`delete_files` 删除确认、可识别的 Shell 删除、`revert_turn`、浏览器与 MCP 逐次审批都不经过分类器——它们有独立于默认策略的询问理由。分类器只看到工具名、参数、项目路径与当前模式，不继承会话历史与记忆；默认超时 10 秒（`devcli.permission.classifier.timeout.seconds`），执行前会确认工具剩余预算足以覆盖该超时，不足、装配缺失、超时、调用失败或响应不可解析一律拒绝，不猜测。连续失败次数在主 Registry 与项目 fork 间共享，默认达到 3 次（`devcli.permission.classifier.failure.threshold`）后退出 `auto` 并回落 `default`；手动切换模式会重置该计数。提示词在 `prompts/permission-classifier.md`，仅允许 `~/.devcli/prompts/` 的可信用户级覆盖；项目 `.devcli/prompts/permission-classifier.md` 会被忽略，避免仓库内容改写自身审批策略。**分类器误判放行时没有人工兜底**——fail-closed 只兜住「分类器不可用」，兜不住「分类器判断错误」，这是 `auto` 相对 `default` 的固有代价。分类器不覆盖规则层 `allow`：用户写了 `allow` 就是用户的选择；代价是无 specifier 的宽泛 `allow` 会让分类器在该工具上完全不参与。
 
 能力范围与任务级授权都随轮次生效并被编排继承：能力范围只能单调收窄（只读 ⊂ 隔离项目 ⊂ 完整），嵌套调用与隔离 fork 都不能放宽外层约束；波次线程池在轮次内新建，因此继承本轮的范围与授权，长生命周期线程池在轮次外创建，不会残留某一轮的约束。
 
@@ -164,7 +164,7 @@ base
 当轮消息：project_context → Skill/MCP 索引 → 记忆索引 → 工作记忆/工作计划 → 用户输入
 ```
 
-system 只包含会话级稳定规则。Project Context、MCP 资源索引、记忆索引、Skill 索引与工作记忆追加到当轮消息；工具定义在执行循环内冻结。MCP 搜索返回 schema 和指纹，固定 call_mcp_tool 执行目标，完整权限与审批管线不变。缓存收益需要真实请求数据验证，当前未做 A/B。
+system 只包含会话级稳定规则。Project Context、MCP 资源索引、记忆索引、Skill 索引与工作记忆追加到当轮消息；工具定义在执行循环内冻结。MCP 搜索返回当前 schema，固定 call_mcp_tool 执行目标，完整权限与审批管线不变。缓存收益需要真实请求数据验证，当前未做 A/B。
 
 上下文压缩先按历史顺序与最近工具结果 Token 预算回收旧输出，也识别重复/被写入覆盖的结果。原文和哈希写盘成功、引用确实更短后才替换，保持工具消息配对。随后生成滚动摘要；工作计划原样保存并恢复，执行证据与计划状态分开。
 

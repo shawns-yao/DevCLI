@@ -10,11 +10,11 @@ For the primary entry point, see `/AGENTS.md`.
 
 ### Tool Call Governance
 
-`delete_files` 增加为第 16 个核心工具，以 `paths` 数组明确指定普通文件；不递归、不删除目录或符号链接、不展开通配符。预检在 Schema 后、HITL 前完成，保存路径及哈希/权限快照；执行复用委派写范围、资源租约、版本闸门、项目提交锁和 PatchSet 整批冲突检查/失败回滚，并发布修改资源与关键工作记忆证据。单文件 5MB、总计 20MB、最多 500 个。成功删除不进入回收站，恢复依赖已有快照或备份。
+`delete_files` 以独立删除工具提供，以 `paths` 数组明确指定普通文件；不递归、不删除目录或符号链接、不展开通配符。预检在 Schema 后、HITL 前完成，保存路径及哈希/权限快照；执行复用委派写范围、资源租约、版本闸门、项目提交锁和 PatchSet 整批冲突检查/失败回滚，并发布修改资源与关键工作记忆证据。单文件 5MB、总计 20MB、最多 500 个。成功删除不进入回收站，恢复依赖已有快照或备份。
 
-HITL 开启时，单次清单数量达到 `DEVCLI_DELETE_APPROVAL_THRESHOLD` / `devcli.delete.approval.threshold`（默认 50，范围 1–500），或任务写路径授权未覆盖清单，均逐次确认；不复用工具/服务器全部批准。审批展示完整目标、数量、非递归说明和恢复限制；审批修改参数时拒绝本次执行，要求重新提交清单。可识别 Shell 删除也逐次确认且不声称统计目标；此检测不是完整 Shell 解析。原 `apply_patch` 审批不变，数量阈值不覆盖补丁、不跨调用累计；关闭 HITL 仍保留路径硬拒绝。
+HITL 开启时，单次清单数量达到 `DEVCLI_DELETE_APPROVAL_THRESHOLD` / `devcli.delete.approval.threshold`（默认 50，范围 1–500），或任务写路径授权未覆盖清单，均逐次确认；不复用工具/服务器全部批准。审批展示完整目标、数量、非递归说明和恢复限制；审批修改参数时拒绝本次执行，要求重新提交清单。可识别 Shell 删除也逐次确认且不声称统计目标；此检测不是完整 Shell 解析。数量阈值按单次 `delete_files` 统计，不跨调用累计；关闭 HITL 仍保留路径硬拒绝。
 
-共享执行内核冻结本次循环的模型工具定义，不再按每轮检索或发现结果裁剪工具列表。MCP 定义通过 search_tools 返回到正文，call_mcp_tool 接收工具名、schema_fingerprint 和参数；目标调用仍走完整管线。Skill 和能力范围在执行时继续校验。显式无工具收尾映射为 Anthropic 的 type=none / OpenAI-compatible 的 tool_choice=none，保留原工具定义。
+共享执行内核冻结本次循环的模型工具定义，不再按每轮检索或发现结果裁剪工具列表。MCP 定义通过 search_tools 返回到正文，call_mcp_tool 仅接收工具名和参数，按当前 schema 校验；目标调用仍走完整管线。Skill 和能力范围在执行时继续校验。显式无工具收尾映射为 Anthropic 的 type=none / OpenAI-compatible 的 tool_choice=none，保留原工具定义。
 
 工具发现与执行同时检查能力范围、显式工具白名单和 Skill 权限。权限拒绝返回当前允许的工具示例；未知工具返回 `UNKNOWN_TOOL` 并提示搜索，不再把不存在的工具误报为快照失效。Schema、业务校验和审批继续走原管线。失败消息附带状态、错误码、retryable 和分类处理建议；不自动修参、不自动重放副作用操作。现有执行范围承担权限约束，尚未新增 diagnosis/repair 业务阶段状态机，也没有以任务关键词推断授权。
 
@@ -177,7 +177,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 每条验收标准必须包含判定信号、`TOOL|HUMAN` 验证方式、验证器和 `applies_to`。目标只能是有效 DAG 节点或 `FINAL`；普通节点只接收自己的标准，Final integration 接收全部标准。缺失字段、重复 ID、未知节点、未知工具或具有项目写入副作用的自动验证器会在执行前拒绝。
 - Planner 输出先做协议与结构校验：支持从前后说明中提取完整 JSON；步骤类型限制为固定枚举，纯读取或检查语义不能声明为 `FILE_WRITE`。解析失败、DAG 无效或阻塞性空工作区纯检查步骤会触发有界修复。修复前清空 Planner 历史，并把原始任务、失败原因、无效输出预览和固定 schema 放入新请求。默认修复 2 次，可通过 `devcli.team.planner.repair.max.attempts` / `DEVCLI_TEAM_PLANNER_REPAIR_MAX_ATTEMPTS` 调整到 `[0, 3]`。
 - Planner 不调用工具；空工作区属于合法状态。目录和文件存在性检查不能成为阻塞实现的独立步骤，必要检查并入首个实现步骤并采用“若不存在则创建”语义。
-- SubAgent 按单次执行保存结构化工具证据。Worker 最终 content 为空但存在 `ToolStatus.SUCCESS` 时，由 Orchestrator 合成有界证据摘要进入 Pre-Review / Reviewer；无论 content 是否为空，只要没有成功工具证据，独立 Worker 协议守卫都会追加一次强制执行上下文，阻止文字方案或伪代码冒充执行结果，并要求文件任务调用 `write_file`、分析任务调用读取工具，并在该请求首轮设置命名 `LlmClient.ToolChoice`：FILE_WRITE / INTEGRATION 选择 `write_file`，COMMAND 选择 `execute_command`，其他类型选择 `list_dir`。Anthropic Messages 请求映射为 `tool_choice: {"type":"tool","name":"..."}`，OpenAI-compatible 请求映射为命名 function choice。FILE_WRITE / INTEGRATION 步骤出现成功 `write_file` 批次后直接以结构化证据结束当前 Worker 执行；强制修复中的指定工具也采用同一完成策略，避免再发起无必要的 LLM 收尾请求。Provider 忽略命名工具选择时，`AgentExecutionEngine` 追加一次严格 JSON 工具信封请求；SubAgent 只接受单一完整 JSON 对象、目标工具名及对象参数，拒绝 reasoning、Markdown、代码围栏、尾随文本和未知字段，解析后仍通过原有工具参数校验、能力范围、HITL 与策略管线。工具失败时才恢复 AUTO 进入下一轮纠正，最终仍无成功证据才返回“执行结果为空”。
+- `/plan` 的每个执行步骤由 DelegationSession 保存结构化工具证据并写入 checkpoint 投影。写入或命令步骤缺少真实成功证据时不得完成或提交；已删除旧 Worker 强制修复、提前结束及独立重试路径。主 Agent 的显式命名工具调用由 RequiredToolProtocol 解析 JSON 信封，随后仍进入工具原有校验和权限管线。
 - SubAgent IOException 返回 ERROR 类型
 - Planner 共享主 ToolRegistry；副作用 Worker 使用 `WorkspaceExecutionSession` 创建隔离 ToolRegistry，Pre-Review 与 Reviewer 在同一隔离目录读取真实产物，MemoryManager 继续共享角色裁剪视图。
 - Plan `Task`、Multi-Agent `ExecutionStep` 和 checkpoint 共用 `ExecutionArtifact`，统一保存 state、output、summary、modifiedResources、error、attempt、startedAt、finishedAt。
@@ -197,7 +197,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 ### HITL System
 
-- 危险工具：write_file(中) / edit_file(中) / apply_patch(中) / execute_command(高) / create_project(中) / revert_turn(高)
+- 危险工具：write_file(中) / edit_file(中) / execute_command(高) / create_project(中) / revert_turn(高)
 - 审批选项：y(批准) / a(全部放行) / n(拒绝) / s(跳过) / m(修改参数)
 - fail-safe：连续 5 次无效输入判为 REJECTED
 - 并发：requestApproval 整体 synchronized
@@ -207,7 +207,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `PathGuard`：路径限定在项目根内（绝对路径外逃 / `..` 穿越 / 符号链接逃逸）
 - Agent 配置保护：共享写入口与 PatchSet 预检、写入前拒绝 `.devcli/hooks.json` / `mcp.json` / `config.json` 和自定义 Hook 文件；审批和任务授权不可覆盖。核对默认用户配置、物理别名和隔离工作区的主项目对应路径；快照恢复跳过配置并提示。普通 `.devcli` 文件不受封禁。此处仅为应用层保护，主机命令、外部 MCP 服务及配置引用脚本仍可能绕过，未新增操作系统沙箱或网络出口控制。
 - `CommandGuard`：fast-fail 黑名单（sudo/rm -rf/mkfs/dd/fork bomb/curl|sh 等）
-- `ResourceLimit`：write_file / edit_file / apply_patch 5MB / execute_command 60s + 8KB 输出
+- `ResourceLimit`：write_file / edit_file 5MB / execute_command 60s + 8KB 输出
 - `AuditLog`：JSONL 字段 timestamp/tool/args/outcome/reason/approver/durationMs
 - 拦截顺序：HitlToolRegistry → ToolRegistry → 策略层。用户无法批准策略拒绝的请求
 
@@ -262,7 +262,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 - 三层加载：jar 内置 < 用户级 ~/.devcli/skills/ < 项目级 .devcli/skills/
 - frontmatter：name(必填) / description(必填,<=500) / version / author / tags / allowedTools / context / paths
-- system prompt 索引段注入到三处提示词末尾，上限 20 个 / 4KB；排序按本进程内使用频率优先、名称兜底
+- Skill 索引追加到当轮消息，上限 20 个 / 4KB；排序按本进程内使用频率优先、名称兜底
 - paths 使用项目相对路径匹配当前用户输入或任务文本中的路径；未声明 paths 的 Skill 始终可见，声明 paths 的 Skill 只在路径命中时进入索引
 - load_skill 工具把 SKILL.md 正文(5KB 截断)写入 SkillContextBuffer，并记录本进程内使用次数
 - buffer 正文一次性消费，最多 3 个 skill body；已加载 Skill 名称、context、allowedTools 和内容摘要保留给压缩后恢复，直到 clear
@@ -388,7 +388,7 @@ ReAct 主循环 / 对话历史 / 工具调用与结果回灌
 规划后执行 / 计划审阅 / DAG 状态推进 / 失败重规划；冲突分波、并行调度和顺序输出归并委托给 `PlanTaskBatchExecutor`，结果摘要由 `PlanTaskExecutionResult` 统一生成，任务能力范围、隔离工作区、资源租约和 PatchSet 生命周期委托给 `PlanTaskWorkspaceExecutor`
 
 ### AgentOrchestrator.java
-Plan 顶层流程、计划确认及 `run/resume` 入口。`PlanCoordinator` 负责计划与 DAG，`ReviewCoordinator` 负责计划和最终验收，`CheckpointCoordinator` 保留恢复与提交对账，`StepExecutionCoordinator` 仅调度步骤并调用统一委派。旧 Worker 身份保留为 checkpoint 与上下文元数据，不再执行独立 Worker 循环。
+Plan 顶层流程、计划确认及 `run/resume` 入口。`PlanCoordinator` 负责计划与 DAG，`ReviewCoordinator` 负责计划和最终验收，`CheckpointCoordinator` 保留恢复与提交对账，`StepExecutionCoordinator` 仅调度步骤并调用统一委派。Worker 仅保存身份字符串和 checkpoint 步骤绑定，不创建 SubAgent 实例，不再执行独立 Worker 循环。
 
 ### AgentExecutionEngine.java
 ReAct / Plan task / SubAgent 共用循环；统一取消和预算检查、LLM 调用、assistant/tool 消息协议、结构化工具错误记录与 IOException 出口；取消或失败时把已经流出的 reasoning / content 写回历史，只补文本、不补 tool_call，避免留下没有配对结果的调用；路径差异通过 Delegate 钩子注入
@@ -421,7 +421,7 @@ ToolRegistry 保留公共装配入口；ToolContract 保存工具值类型，Mcp
 
 ### tool/patch Package
 
-内部 apply_patch API 的解析与 PatchSet 实现保留；模型工具定义不暴露它，模型批次调用拒绝。现有内部 API 和组件测试继续覆盖官方补丁解析、定位、内存编译、版本检查和原子应用。
+`ApplyPatchParser` / `ApplyPatchCompiler` 是内部解析和内存编译 API，结果可交给 PatchSet 应用。`apply_patch` 不注册为工具；不存在专用工具审批或模型名称屏蔽分支。解析、定位、内存编译和原子应用分别由现有组件测试覆盖。
 
 关键契约：不新增写入路径，PatchSet 负责冲突预检、项目级锁、原子替换与回滚；全部 hunk 在写盘前算完，任何一处失败整批不应用（官方实现逐个 hunk 直接写盘、失败只上报已提交部分）；行尾保留文件原有风格（官方默认归一化为 LF）；同一路径在一个补丁里出现两次直接拒绝；新增文件在 POSIX 上取进程默认建文件权限（避免继承临时文件的 `rw-------`）。
 

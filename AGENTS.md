@@ -4,7 +4,7 @@
 
 新增核心工具 `delete_files`，接收 `paths` 数组，仅删除明确的项目相对普通文件，不递归、不展开通配符、保留目录。单次最多 500 个文件、合计 20MB、单文件 5MB；复用路径保护、委派写范围、租约、版本闸门和 PatchSet。审批绑定预检文件哈希，内容变化整批拒绝；不进入回收站，成功后恢复依赖已有快照或备份。
 
-HITL 开启时，未获路径授权或达到批量阈值的删除必须逐次确认，不复用工具级全部批准。阈值默认 50，可通过 `DEVCLI_DELETE_APPROVAL_THRESHOLD` / `-Ddevcli.delete.approval.threshold` 配置为 1–500。可识别的 Shell 删除也强制逐次确认，但不宣称解析全部 Shell 语义或统计目标数；关闭 HITL 不绕过文件工具硬策略。现有 `apply_patch` 删除仍走原补丁审批，不属于该数量阈值；阈值按单次调用统计，不跨调用累计。
+HITL 开启时，未获路径授权或达到批量阈值的删除必须逐次确认，不复用工具级全部批准。阈值默认 50，可通过 `DEVCLI_DELETE_APPROVAL_THRESHOLD` / `-Ddevcli.delete.approval.threshold` 配置为 1–500。可识别的 Shell 删除也强制逐次确认，但不宣称解析全部 Shell 语义或统计目标数；关闭 HITL 不绕过文件工具硬策略。阈值按单次调用统计，不跨调用累计。
 
 仓库给 Agent / 新线程使用的首读入口。详细行为描述见 `docs/agents-reference.md`。
 
@@ -79,7 +79,7 @@ Windows + Git Bash 下必须调用 `mvn.cmd`，不要用 `bin/mvn` 这个 shell 
 
 `AgentOrchestrator` 装配计划工作流；`PlanCoordinator` 处理计划协议，`StepExecutionCoordinator` 只保留依赖调度、既有原位重做和执行产物投影，通过 `DelegationSession` 执行步骤；`ReviewCoordinator` 保留计划/最终验收；`CheckpointCoordinator` 与 `DelegationCheckpoint` 接入同一工作区提交和恢复生命周期。旧独立 Worker 循环、瞬态重试和逐步 Reviewer 重试路径已删除。
 
-Plan 的任务适配由 `PlanTaskBatchExecutor` 负责，Team 的 Worker 适配由 `MultiAgentBatchExecutor` 负责；两者把冲突波次交给 `OrchestrationWaveExecutor`，共用有界并发、异常归属、独立输出缓冲与稳定顺序归并。任务结果及有界摘要由 `PlanTaskExecutionResult` 统一承载；Worker 池、公平锁、Pre-Review、Reviewer、角色记忆和 checkpoint 恢复拓扑仍只属于 Team。
+Plan 的任务适配由 `PlanTaskBatchExecutor` 负责，`/plan` 步骤分波由 `MultiAgentBatchExecutor` 负责；两者共用 `OrchestrationWaveExecutor` 的有界并发、异常归属、输出缓冲与稳定顺序归并。`/plan` 的执行子循环统一委派，计划确认、硬检查、最终审查及 checkpoint 由对应 Coordinator 承担。
 
 计划 DAG 继续使用 `ExecutionGraph` 校验依赖、环和最终集成就绪条件。`ExecutionArtifact` 保存真实终态。Planner 输出结构化验收标准，确定性预检负责拒绝无效计划；独立计划 Reviewer 的语义意见进入用户确认。步骤执行统一委派，最终集成通过 `ReviewCoordinator` 复核验收点；真实硬检查失败继续阻断。
 
@@ -89,11 +89,11 @@ Agent、Plan、Worker 和 Reviewer 的流式输出状态机统一委托 `AgentSt
 
 `SessionMemory` 对计划生成、审查和最终验收仍提供按角色收窄的执行投影；委派子任务只取得冻结规则、Skill 和显式任务上下文，不复制父会话。工具证据继续携带 agent、step、origin sequence 与 context_epoch，按逻辑序拒绝旧执行的迟到证据。
 
-计划批次保留资源冲突分波及只读并发；`SingleWriterScheduling` 把每个写步骤放入独占波次。旧 Worker 身份和步骤绑定继续用于 checkpoint 恢复和上下文装配，实际子循环统一由委派执行，不再由 Worker 池执行第二套写入链路。
+计划批次保留资源冲突分波及只读并发；`SingleWriterScheduling` 把每个写步骤放入独占波次。Worker 仅保存身份字符串与步骤绑定，用于原协议 checkpoint 恢复；不创建 Worker SubAgent、不维护 Worker 历史、fork 模板或实例锁。SubAgent 只承担计划生成与独立审查。
 
 同步写角色仍经过委派写白名单、资源租约、`ContextVersionLedger` 和 PatchSet 版本闸门；同一时刻只有一个写角色。租约竞争处理保留，不能依靠独占调度绕过它。注册表和项目 fork 共用既有租约维护器。
 
-编排任务的父 ToolRegistry 与隔离 fork 共享 `ContextVersionLedger`，按项目相对路径记录文件 generation、整文件指纹和 Java class/method 符号指纹。`write_file` / `edit_file` / `apply_patch` 在租约之后执行确定性版本校验；内容未变化时不推进 generation，也不污染 RAG dirty 集。PatchSet 在项目锁内应用前再次校验，覆盖 `execute_command` 等间接写入。检测到 `STALE_CONTEXT` 后，执行内核发出强类型 `context.refresh` 生命周期事件，自动刷新受影响资源并要求 Worker 基于新内容重新生成修改；刷新后重写同一资源时，PatchSet 基线只对已确认刷新且由该 scope 重写的文件重绑定。非 Java 和 JavaParser 失败的普通 file chunk 使用整文件指纹，`file#N` 分段证据暂不进入写闸门。
+编排任务的父 ToolRegistry 与隔离 fork 共享 `ContextVersionLedger`，按项目相对路径记录文件 generation、整文件指纹和 Java class/method 符号指纹。`write_file` / `edit_file` 在租约之后执行确定性版本校验；内容未变化时不推进 generation，也不污染 RAG dirty 集。PatchSet 在项目锁内应用前再次校验，覆盖 `execute_command` 等间接写入。检测到 `STALE_CONTEXT` 后，执行内核发出强类型 `context.refresh` 生命周期事件，自动刷新受影响资源并要求 Worker 基于新内容重新生成修改；刷新后重写同一资源时，PatchSet 基线只对已确认刷新且由该 scope 重写的文件重绑定。非 Java 和 JavaParser 失败的普通 file chunk 使用整文件指纹，`file#N` 分段证据暂不进入写闸门。
 
 副作用执行协议：工具通过 `ToolEffect` 声明 READ_ONLY / LOCAL_CONTEXT / PROJECT_MUTATION / HOST_PROCESS / EXTERNAL_MUTATION，执行管线按 `ToolAccessScope` 强制能力范围；非隔离任务只能使用只读和本地上下文工具，隔离任务允许项目写入与受限命令，但禁止外部副作用。隔离任务的 `execute_command` 与 Pre-Review 默认进入 Docker，不可用时失败关闭；可显式设置 `DEVCLI_COMMAND_SANDBOX_MODE=HOST_WARN` / `-Ddevcli.command.sandbox.mode=HOST_WARN` 在主机运行第一阶段白名单命令，不做自动回退。`HOST_WARN` 仅允许 Maven 离线执行 `clean/validate/compile/test-compile/test/package/verify`、`javac` 和只读 Git 子命令，拒绝命令行指定的任意 Maven 插件、发布阶段、命令串、管道、重定向、网络工具和写入型 Git 操作，并输出风险提示。默认 Docker 镜像 `maven:3.9.9-eclipse-temurin-17` 必须提前拉取，容器禁网、只读根文件系统并限制能力与资源；可用 `DEVCLI_COMMAND_SANDBOX_USER` / `-Ddevcli.command.sandbox.user` 指定非 root UID:GID。每次运行分配唯一容器名，超时或取消先终止客户端进程树，再用有界 `docker rm -f` 确定性清理容器。MCP 服务端 readOnly 注解默认不可信，只有本地 `trustReadOnlyAnnotations` 或 `readOnlyTools` 才可授权只读，`deniedTools` 不注册，destructive/openWorld 始终视为外部副作用。Plan 副作用步骤使用 `WorkspaceExecutionSession`；工作区后端默认 `auto`，Git 项目使用原生 worktree 并叠加当前未提交、删除、未跟踪和被忽略文件，明确匹配的 `.env`、凭据文件和私钥文件统一过滤，不按普通源码文件名中的 `secret` / `credential` 字样误删，非 Git 目录优先使用文件系统级写时复制；Linux 只接受强制 reflink，Windows 11 24H2 / Windows Server 2025 及以上版本只在 ReFS 上启用系统块克隆，其他平台或失败场景回退有界复制，可通过 `DEVCLI_WORKSPACE_BACKEND=git|cow|copy|auto` 指定。worktree 物化后删除排除目录、符号链接和敏感文件，创建、注销及 prune 均在项目级锁内执行。批准后逐文件流式哈希生成 `PatchSet`，只读取变更文件内容；JVM 公平锁和跨进程文件锁共同串行化写前准备、全量冲突预检、应用和 checkpoint 终态。应用中途失败会回滚并报告未恢复路径；PatchSet 同时校验 afterHash，在 POSIX 文件系统保存完整 rwx 权限并把纯权限变化纳入冲突与恢复对账，其他平台兼容显式可执行标记。工作区创建前清理超过 TTL 且没有活动文件租约的孤儿目录，默认 24 小时，可通过 `DEVCLI_WORKSPACE_ORPHAN_TTL_HOURS` / `-Ddevcli.workspace.orphan.ttl.hours` 调整。worktree 后端单独计量叠加成本（额外复制的未提交/未跟踪字节数，默认 256MB，`DEVCLI_WORKSPACE_OVERLAY_BUDGET_BYTES` / `-Ddevcli.workspace.overlay.budget.bytes`），超预算时告警并列出最大来源；`workspace` 包保持 JDK-only（内存探针用最小 classpath 子进程），故用 `System.Logger`。不按体积自动切 CoW：CoW 子工作区不含 `.git`。写时复制设计见 `docs/filesystem-cow-workspace-design.md`。
 
@@ -115,9 +115,11 @@ Side-Git 快照按 `devcli.snapshot.max` / `DEVCLI_SNAPSHOT_MAX` 保留最近快
 
 职责边界：`agent_work_plan` 是工作意图的唯一来源，保存在 `SessionMemory.taskState`，由 `update_plan` 维护目标和步骤；in_progress 表示当前工作，首个 pending 表示下一步。ReAct 与 `/plan` 共用，压缩和恢复原样携带同一状态；旧 checkpoint 步骤在恢复时导入工作计划。`TaskLedger`、SessionMemory 的工具证据和恢复段是运行投影；`ExecutionArtifact` 仍是执行终态来源，模型计划、模型报告与实际执行证据分开。RollingSummary 只治理上下文，不创建第二份计划。
 
-模型写工具为 `write_file` / `edit_file`，明确文件删除仍用 `delete_files`。新增 `update_plan`、受限的 `read_memory` 和固定的 `call_mcp_tool`；内部 `apply_patch` API 不向模型暴露，模型批次不能调用。`read_file` 同传行范围与字符范围时仍优先行范围；`edit_file` 继续按目标换行风格匹配。
+模型写工具为 `write_file` / `edit_file`，明确文件删除仍用 `delete_files`。新增 `update_plan`、受限的 `read_memory` 和固定的 `call_mcp_tool`；不注册 `apply_patch` 工具，补丁编译仅作为内部 API。`read_file` 同传行范围与字符范围时仍优先行范围；`edit_file` 继续按目标换行风格匹配。
 
-内部 `apply_patch` 保留官方补丁解析及既有 PatchSet 写入链路，用于现有内部 API 和对应组件测试，不作为模型编辑工具。模型提示词只引导 edit_file / write_file；删除工具的审批和路径保护保持现有约束。
+`ApplyPatchParser` / `ApplyPatchCompiler` 保留官方补丁解析与内存编译，产物可交给既有 PatchSet API。`ApplyPatchTool` 及专用审批路径已删除；工具目录、发现和执行管线无需按名称隐藏补丁工具。
+
+工具归属由 `BuiltInToolPolicy.Policy.mainAgentOnly` 显式声明；委派准入、工具发现和执行共用该契约。归属与读写能力分别判断，只读模式的主 Agent 仍可维护工作计划；子 Agent 的角色白名单不能开放主计划和长期记忆入口。
 
 Code RAG 检索链路当前为 keyword + semantic + bounded graph → `RRF（倒数排名融合）` → symbol-aware boost → `CrossEncoderReranker（交叉编码器重排）`。Rerank 默认开启，默认指向本地 Docker 暴露的 OpenAI-compatible `/rerank` endpoint；不可用时自动降级回 RRF 结果，不阻断检索。`/index` 按文件批量生成 chunk embedding；批量请求失败或返回数量异常时逐条降级并保留成功 chunk。`ToolRegistry` 会按项目路径复用 `CodeRetriever` / SQLite 连接，项目路径切换时关闭旧连接。索引替换会为变更和删除的 symbol 生成 `negativeFact`，`search_code` 会输出相关失效事实，并通过工具结果强类型旁路载荷把 evidence 与 negativeFact 传给 `SessionMemory`；展示文本不再嵌入结构化 JSON，旧 JSON 与旧展示文本解析只保留历史兼容。keyword 通道保持 SQLite 索引实现，`grep_code` 作为独立实时精确检索工具存在，不替代 `search_code`，用于类名、方法名、配置键、错误文本和固定字符串片段定位。`grep_code` 的候选文件由 `ProjectFileLister` 决定：git 仓库走 `git ls-files -z --cached --others --exclude-standard`，忽略语义（含嵌套 `.gitignore`、否定模式、全局 excludes）完全交给 git，不在本地重复实现；非 git 目录、git 不可用或命令失败时回落到目录遍历，只用硬编码跳过目录兜底；显式把 `path` 收窄到被忽略目录时回落遍历，尊重用户意图。子进程输出重定向到临时文件再读取，避免大仓库下管道写满导致 `waitFor` 死锁。长文档型 definition 查询直接使用 semantic route，避免 keyword fusion 与 reranker 对文档描述引入排序噪声；短符号查询仍保留 precise-first 链路。
 索引构建开始时记录 `base_epoch` 并标记 dirty 文件；增量构建把未变化代码块及 embedding 复制到 SQLite 影子表，只重新分块和嵌入 dirty 文件，并保守重算项目关系图。影子候选通过校验后，在事务内执行 `base_epoch + generation` CAS 和原子提升；旧构建不能覆盖新 epoch，未提升候选对检索不可见。检索结果标记 `CURRENT` / `STALE` / `DIRTY`；DIRTY 和 STALE 命中默认回读实时内容校验，变化内容重新分块，无法校验时保留警示。项目级 `WatchService` 会把外部文件变化标记为 DIRTY。
@@ -138,7 +140,7 @@ Windows 原生隔离后端通过 `DEVCLI_COMMAND_SANDBOX_MODE=WINDOWS_NATIVE` �
 
 模型调用可靠性链路：Anthropic 与全部 OpenAI-compatible Provider 统一抛出 `LlmException`，错误码覆盖认证、限流、过载、超时、网络、参数、上下文超限、内容过滤、服务端和响应格式错误；只对限流、过载、超时、网络和 5xx 做指数退避有界重试，流式内容开始输出后禁止重试。OpenAI-compatible 默认按标准协商 HTTP/2 与 HTTP/1.1，仅在异常兼容网关上通过 `DEVCLI_LLM_HTTP_PROTOCOL=HTTP_1_1` / `-Ddevcli.llm.http.protocol=HTTP_1_1` 显式降级，非法值失败关闭。工具调用流同时兼容标准增量片段、累积快照和完整字段重复发送，避免工具名或完整 JSON 参数重复拼接。SubAgent 错误消息保留标准错误码和 `retryable` 标记，Orchestrator 不再依赖具体网络错误文案判断瞬时故障。默认 3 次、500ms 初始退避、8s 上限、0.2 jitter，可通过 `DEVCLI_LLM_RETRY_*` 或对应系统属性调整。
 
-工具调用可靠性链路：LLM 先按 reasoning 说明目标、工具选择和参数来源；工具定义使用 JSON Schema 强约束类型、必填项、枚举值和未知字段；`ToolRegistry` 通过 `ToolExecutionPipeline` 分阶段执行取消、工具存在性、能力范围、Skill 权限、参数校验、HITL、审计、策略和结果尺寸治理；并行工具线程显式继承能力范围、资源租约和 Skill buffer 快照，项目 fork 复制 `SkillContextBuffer`，不共享可变状态；工具结果使用 `ToolStatus`、`ToolErrorCode` 和 retryable 结构化表达；内置 Provider 可通过结构化执行器直接返回状态，参数错误、策略拒绝、命令非零退出、超时和取消不再先压成普通文本；ReAct、Plan、SubAgent 的重复错误熔断不再依赖结果文本关键词；执行前通过 `json-schema-validator` + 本地兜底校验内置工具和 MCP 工具参数，失败以 `工具参数校验失败` 回传模型修正；模型工具定义在执行循环内固定；MCP 不预激活到工具列表，`search_tools` 使用目录缓存返回 schema 与指纹，固定 `call_mcp_tool` 执行目标并重新经过完整管线；未知工具会提示先调用 `search_tools`；危险工具继续走 HITL / Policy / AuditLog；工具参数通过稳定语义指纹参与停滞判断，JSON 字段顺序、查询大小写、Unicode 等价字符和冗余空白不会绕过重复检测；正则 pattern 保持大小写敏感，避免错误缓存命中；成功且无图片的 READ_ONLY 工具结果按会话短期缓存，任何非只读工具执行和项目路径切换都会清空缓存；MCP 工具结果被截断或落盘预览时会标记折叠分类；工具结果进入 SessionMemory，最终回答必须用工具证据闭环。
+工具调用可靠性链路：LLM 先按 reasoning 说明目标、工具选择和参数来源；工具定义使用 JSON Schema 强约束类型、必填项、枚举值和未知字段；`ToolRegistry` 通过 `ToolExecutionPipeline` 分阶段执行取消、工具存在性、能力范围、Skill 权限、参数校验、HITL、审计、策略和结果尺寸治理；并行工具线程显式继承能力范围、资源租约和 Skill buffer 快照，项目 fork 复制 `SkillContextBuffer`，不共享可变状态；工具结果使用 `ToolStatus`、`ToolErrorCode` 和 retryable 结构化表达；内置 Provider 可通过结构化执行器直接返回状态，参数错误、策略拒绝、命令非零退出、超时和取消不再先压成普通文本；ReAct、Plan、SubAgent 的重复错误熔断不再依赖结果文本关键词；执行前通过 `json-schema-validator` + 本地兜底校验内置工具和 MCP 工具参数，失败以 `工具参数校验失败` 回传模型修正；模型工具定义在执行循环内固定；MCP 不预激活到工具列表，`search_tools` 使用目录缓存返回当前 schema，固定 `call_mcp_tool` 执行目标并重新经过完整管线；未知工具会提示先调用 `search_tools`；危险工具继续走 HITL / Policy / AuditLog；工具参数通过稳定语义指纹参与停滞判断，JSON 字段顺序、查询大小写、Unicode 等价字符和冗余空白不会绕过重复检测；正则 pattern 保持大小写敏感，避免错误缓存命中；成功且无图片的 READ_ONLY 工具结果按会话短期缓存，任何非只读工具执行和项目路径切换都会清空缓存；MCP 工具结果被截断或落盘预览时会标记折叠分类；工具结果进入 SessionMemory，最终回答必须用工具证据闭环。
 
 工具契约是显式声明，不按工具名推断：`ToolEffect` 只表达资源域（READ_ONLY / LOCAL_CONTEXT / PROJECT_MUTATION / HOST_PROCESS / EXTERNAL_MUTATION），另有正交的破坏性等级 `Destructiveness`（NONE / BENIGN / STRUCTURAL）、幂等性 `Idempotency`（IDEMPOTENT / NON_IDEMPOTENT）和 `cacheable` 缓存资格。内置工具的唯一声明点是 `BuiltInToolPolicy`（effect + approval + audited + 契约三维）；MCP 工具由 `mcpTool` 保守推导，本地只读授权只代表访问等级、服务端 annotations 默认不可信，因此只读授权工具声明为 `BENIGN` + 非幂等 + 不可缓存，其余为 `STRUCTURAL` + 非幂等 + 不可缓存。未声明契约的第三方工具按 effect 取保守默认（只读/本地上下文为 NONE + 幂等 + 可缓存，与历史行为一致），未知工具按外部实质变更 + 非幂等处理。
 
@@ -247,7 +249,7 @@ Execution Trace：ReAct 与 Plan/Team 全路径通过 `RunEventTraceSink` 把结
 - 结构化滚动摘要超过字符上限时执行确定性生命周期 GC；稳定决策和未解决事项不因压缩次数删除，仍超限时保留并告警，不交给 LLM 二次改写
 - `search_code` 结果中的结构化 negativeFact 携带 `oldSymbolVersion` 时，`SessionMemory` 即时清理对应的失效 RAG 证据；旧文本格式保留兼容解析
 - `TaskLedger` 继续投影真实计划执行进度与产物；模型可维护的目标、步骤和下一步统一由 update_plan / agent_work_plan 提供，压缩和恢复不另建计划来源。
-- prompt cache：system 只含会话级稳定规则。Project Context、MCP 资源索引、记忆索引、Skill 索引和工作记忆追加到当轮消息。模型工具定义在执行循环内冻结，不再按轮检索裁剪；MCP 搜索返回 schema 和指纹，通过固定 call_mcp_tool 调用，目标仍走参数、权限、审批与审计管线。无工具收尾使用 ToolChoice.NONE 保留定义前缀。真实缓存收益尚未做 API A/B 验证。
+- prompt cache：system 只含会话级稳定规则。Project Context、MCP 资源索引、记忆索引、Skill 索引和工作记忆追加到当轮消息。模型工具定义在执行循环内冻结，不再按轮检索裁剪；MCP 搜索返回当前 schema，通过固定 call_mcp_tool 调用，目标仍走参数、权限、审批与审计管线。无工具收尾使用 ToolChoice.NONE 保留定义前缀。真实缓存收益尚未做 API A/B 验证。
 
 ### HITL + 策略层
 
@@ -262,7 +264,7 @@ Execution Trace：ReAct 与 Plan/Team 全路径通过 `RunEventTraceSink` 把结
 - 授权分两层，但两层各只有一个载体：**跨会话的持久授权**写在 `~/.devcli/config.json` 的 `permissions.allow` 规则里（见上文规则层），**本轮例外**由 `/grant` 给出、只作用于下一条任务。`permissions.baseline` 与 `TaskGrant.merge` 已删除——它们表达的「持久基线 ∪ 本轮例外」与规则层完全重叠，而并集语义还造成授权只能放宽、不能收紧。该配置文件在 `SensitivePathPolicy` 保护名单内，Agent 工具写路径不能改写它
 - 任务级例外只来自确定性来源（`/grant` 斜杠命令），不接受模型推断：`/grant write` 追加授权写入项目内任意文件、`/grant write <glob>...` 追加给定项目相对路径、`/grant net <域名>...` 追加访问该域名及其子域、`/grant commands` 追加项目构建测试命令、`/grant all` 追加全部、`/grant status` 查看本轮例外/规则层/放行缓存、`/grant off` 取消例外并清空本轮放行缓存，例外只作用于下一条任务（含编排轮）。命令类授权复用 `HostWarnCommandPolicy` 白名单（Maven 生命周期 / javac / 只读 Git），`git push` 等白名单外命令仍必须人工确认
 - 授权 glob 与委派写白名单共用 `WriteGlobSet`：项目相对路径、拒绝绝对路径与 `..`、`dir/**` 语义为「该目录及其所有后代」（Java glob 的 `**` 本身不跨多级目录，这里显式补齐）。改动这套语义会同时影响 `/grant` 与 `delegate_task` 的 `allowed_write_paths`
-- 参数级资源槽的唯一声明点是 `policy.ToolResourceSlot`：`write_file` / `edit_file` → `path`、`delete_files` → `paths`、`create_project` → `name`、`execute_command` → `command`、`web_fetch` → `url`（取 host）。`ApprovalGate` 的判定分支与规则匹配共用这一份映射，避免出现两份会漂移的工具清单；`revert_turn`（批量回写整个工作区）、`apply_patch`（一个 patch 参数里含多个路径，没有单一可信资源槽）和全部 MCP 工具一律回到人工审批，不做猜测
+- 参数级资源槽的唯一声明点是 `policy.ToolResourceSlot`：`write_file` / `edit_file` → `path`、`delete_files` → `paths`、`create_project` → `name`、`execute_command` → `command`、`web_fetch` → `url`（取 host）。`ApprovalGate` 的判定分支与规则匹配共用这一份映射，避免出现两份会漂移的工具清单；`revert_turn`（批量回写整个工作区）和全部 MCP 工具一律回到人工审批，不做猜测
 - `web_fetch` 是需要出口授权的只读工具：`requiresApproval=true` + `audited=true`，命中 `/grant net <域名>` 才自动放行（域名相等或其子域，不支持通配符）；未授权域名逐次确认，`dontAsk` 模式下收口为拒绝；两种情形都仍受 `NetworkPolicy` 的 scheme 白名单与 SSRF 拦截约束。`web_search` 不在该维度内：它的目的地由 provider 配置决定，工具参数里没有可信资源槽。需要确认的只读工具在审批框里标 `🟡 需确认`，不再显示「🟢 安全」
 - 命中授权的自动放行必须可见且可归因：经 `HitlHandler.onTaskGrantAllow` 输出授权理由，不静默通过
 - 带 destructive/openWorld annotations 的 MCP 工具必须逐次 HITL 审批，不复用 tool/server 级全部放行缓存
@@ -272,7 +274,7 @@ Execution Trace：ReAct 与 Plan/Team 全路径通过 `RunEventTraceSink` 把结
 - `/mode plan` 的只读能力上限作用于整轮：只注入 READ_ONLY / LOCAL_CONTEXT 工具，`write_file` / `execute_command` / 外部副作用工具既不暴露也不执行。与编排组合时直接拒绝该轮（编排必须写入隔离工作区，跑到中途只会收获一片 `CAPABILITY_DENIED`），并消费掉只读标记。模式在会话内持续生效，`/mode default` 恢复
 - `/grant` 同样作用于整轮（含编排）：例外随轮次继承，只消除审批提示，不改变能力范围与策略边界。跨会话的持久授权不再由状态栏承载，改用 `permissions.allow` 规则；状态栏改为显示规则层摘要（`docs/adr/0006`）
 - PathGuard 强制路径限定在项目根内
-- 受保护路径由 `SensitivePathPolicy` 在**策略层**拦截，与 HITL 开关无关、也不可被审批放行：`.git` / `.ssh` 整棵目录、`.env` 与 `.env.*`（`allowTemplates=true` 时放行 `.env.example` / `.env.sample` / `.env.template` / `.env.dist`）、`credentials.json` / `service-account.json` / `.netrc` / `.npmrc` / `.pypirc`、`id_rsa*` / `id_ed25519*` 与 `.pem` / `.key` / `.p12` / `.pfx` / `.jks` / `.keystore` / `.ppk`。`write_file` / `edit_file` / `apply_patch` / `create_project` 走 `resolveSafeWritePath`；文件名单与隔离工作区物化共用一份实现（物化传 `allowTemplates=false`，保持既有过滤行为）。`target` / `node_modules` 仍是物化排除项，不是安全边界
+- 受保护路径由 `SensitivePathPolicy` 在**策略层**拦截，与 HITL 开关无关、也不可被审批放行：`.git` / `.ssh` 整棵目录、`.env` 与 `.env.*`（`allowTemplates=true` 时放行 `.env.example` / `.env.sample` / `.env.template` / `.env.dist`）、`credentials.json` / `service-account.json` / `.netrc` / `.npmrc` / `.pypirc`、`id_rsa*` / `id_ed25519*` 与 `.pem` / `.key` / `.p12` / `.pfx` / `.jks` / `.keystore` / `.ppk`。`write_file` / `edit_file` / `create_project` 走 `resolveSafeWritePath`；文件名单与隔离工作区物化共用一份实现（物化传 `allowTemplates=false`，保持既有过滤行为）。`target` / `node_modules` 仍是物化排除项，不是安全边界
 - Agent 配置写保护覆盖 `.devcli/agents/`、`hooks.json`、`mcp.json`、`config.json` 与显式配置路径，复用共享路径和 PatchSet 提交检查；角色提示词不能自行修改能力定义。关闭审批、任务授权和全部批准不放宽保护。主机命令与外部 MCP 不属于完整文件沙箱。
 - `CommandGuard` 只补两条与受保护路径呼应的辅助规则（删除 `.git` 目录、重定向写入凭据或私钥文件），因为 shell 能绕过文件层围栏；它仍不是主防线
 - CommandGuard 是辅助黑名单，不是主防线
@@ -301,7 +303,6 @@ Execution Trace：ReAct 与 Plan/Team 全路径通过 `RunEventTraceSink` 把结
 
 ### Skill
 
-- system prompt 索引段注入三处提示词，上限 20 个 / 4KB
 - Skill frontmatter 支持 `allowedTools`、`context: inline|fork` 和 `paths`；`paths` 会按当前输入或任务文本中的项目相对路径条件激活，`context: fork` 会在加载结果和恢复段标记，提示优先放入 fork / 子任务上下文
 - Skill 索引追加到当轮消息，上限 20 个 / 4KB；按使用频率优先、名称次序排序。目录顺序为 builtin、共享用户目录（`~/.agents/skills`、Codex skills）、`~/.devcli/skills`、项目目录，同名后者覆盖前者；项目目录仍须显式信任。
 - `load_skill` → SkillContextBuffer → 下一轮 user message 前置注入，并记录本进程内使用频率
@@ -433,7 +434,7 @@ ADR 记录的是**当时的取舍**，不是架构合同。判断当前行为以
 
 ## 持续维护约定
 
-公开配对实验包含 `PairedContextDriver`、`MemoryEvidenceDriver`和 `MemoryReaderDriver`，但它们不是完整 Agent 多轮评测。`MemoryEvidenceDriver` 已改用主题 Markdown 隔离目录，尚未评估默认 LLM 相关性选择器的选择质量，不得用于宣称新长期记忆效果。
+公开配对实验包含 `PairedContextDriver`、`MemoryEvidenceDriver` 和 `MemoryReaderDriver`，但它们不是完整 Agent 多轮评测。`MemoryEvidenceDriver` 使用主题 Markdown 隔离目录；默认记忆召回只注入索引，主题通过 `read_memory` 按需读取。现有组件实验不能用于宣称完整长期记忆效果。
 
 AgentDojo 接入状态更新（2026-08-31）：MCP 桥接与生产 `AgentSessionRuntime → ToolExecutionPipeline → 官方 evaluator` 已接通。`benchmarks/agentdojo/run-paired.ps1` 固定四题，启动前写入数据来源、模型、预算、顺序及哈希清单，批次与条件目录禁止复用。驱动必须保留 `search_tools` 和 `read_tool_result`；预激活仅做初筛，不能截断后续发现。显式短词/中文工具查询保留原意，整句预激活另行过滤噪声。`auto-approve` 仅诊断效用和审批开销，`terminal` 复用生产人工审批；baseline 只旁路 HITL，不得声称比较了完整治理开关。本批次不覆盖沙箱或 PatchSet，安全收益仍未完成；不同版本或旧诊断结果不合并。
 
