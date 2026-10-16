@@ -213,7 +213,6 @@ final class ToolProjectAccess {
      * 设置代码检索的项目路径
      */
     void setProjectPath(String projectPath) {
-        registry.ragToolProvider.closeCachedCodeRetriever();
         registry.toolResultCache.clear();
         registry.projectPath = projectPath;
         registry.delegateRoles = DelegateRoleCatalog.load(Path.of(projectPath));

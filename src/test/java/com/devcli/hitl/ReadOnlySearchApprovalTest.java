@@ -45,14 +45,14 @@ class ReadOnlySearchApprovalTest {
     }
 
     @Test
-    void truncatedRagSourceDoesNotAsk() throws Exception {
+    void truncatedGrepSourceDoesNotAsk() throws Exception {
         Handler handler = new Handler();
         try (var registry = registry(handler)) {
-            registry.registerTool(ToolContract.Tool.structured("search_code", "fixture",
+            registry.registerTool(ToolContract.Tool.structured("grep_code", "fixture",
                     JSON.readTree("{\"type\":\"object\"}"), args -> ToolOutput.success(
                             "检索结果:\n   CancellationToken token = context.cancellationToken()...")));
             for (int i = 0; i < 2; i++) {
-                assertTrue(registry.executeToolOutput("search_code", "{}").isSuccess());
+                assertTrue(registry.executeToolOutput("grep_code", "{\"pattern\":\"token\"}").isSuccess());
             }
             assertTrue(handler.requests.isEmpty());
         }

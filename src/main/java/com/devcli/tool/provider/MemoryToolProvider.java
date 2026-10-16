@@ -24,7 +24,7 @@ public final class MemoryToolProvider implements ToolProvider {
         ));
         context.registerTool(ToolContract.Tool.structured(
                 "list_memory",
-                "只读查询当前已持久化的长期记忆条目；当用户想查看、核对或审计系统记住了什么时使用。不要用它检索项目代码，代码问题仍使用 search_code。",
+                "只读查询当前已持久化的长期记忆条目；当用户想查看、核对或审计系统记住了什么时使用。代码定位使用 grep_code。",
                 context.createToolParameters(new ToolParameter("limit", "integer", "最多返回多少条长期记忆，默认 20", false)),
                 args -> listMemory(context, args.get("limit"))
         ));

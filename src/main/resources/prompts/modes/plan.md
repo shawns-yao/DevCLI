@@ -5,4 +5,4 @@
 当前任务类型：{{taskType}}
 任务描述：{{taskDescription}}
 
-如果任务涉及精确符号、配置键或错误文本定位，请优先使用 `grep_code`；涉及理解代码库、调用链或概念查询时，请优先使用 `search_code`。如果是 `ANALYSIS` 或 `VERIFICATION` 类型任务，且上下文已经足够，请直接输出分析结果，不需要调用工具。
+文件名定位使用 `glob`；符号、配置键、错误文本和调用点定位使用 `grep_code`，再用 `read_file` 核对上下文。如果是 `ANALYSIS` 或 `VERIFICATION` 类型任务，且上下文已经足够，请直接输出分析结果，不需要调用工具。

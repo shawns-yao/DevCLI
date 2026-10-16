@@ -100,7 +100,7 @@ public final class BuiltInToolPolicy {
         // 只读但仍依赖外部可变状态（文件、网络、记忆、浏览器态）：不缓存，不假设并发安全。
         register(values, ToolEffect.READ_ONLY, false, false,
                 Destructiveness.NONE, Idempotency.IDEMPOTENT, false, false,
-                "read_file", "list_dir", "search_code", "grep_code",
+                "read_file", "list_dir", "glob", "grep_code",
                 "web_search", "browser_status");
         // 长期记忆与主计划只属于主 Agent；角色白名单不能放宽归属边界。
         register(values, ToolEffect.READ_ONLY, false, false,

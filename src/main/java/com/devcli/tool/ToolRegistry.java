@@ -28,7 +28,6 @@ import com.devcli.tool.provider.FileToolProvider;
 import com.devcli.tool.provider.GrepToolProvider;
 import com.devcli.tool.provider.MemoryToolProvider;
 import com.devcli.tool.provider.ProjectToolProvider;
-import com.devcli.tool.provider.RagToolProvider;
 import com.devcli.tool.provider.ShellToolProvider;
 import com.devcli.tool.provider.SkillToolProvider;
 import com.devcli.tool.provider.SnapshotToolProvider;
@@ -62,7 +61,6 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     static final int MAX_WRITE_FILE_BYTES = 5 * 1024 * 1024;
     static final String PIPELINE_PARSED_ARGUMENTS = "parsedArguments";
     static final String PIPELINE_BROWSER_AUDIT = "browserAuditMetadata";
-    final RagToolProvider ragToolProvider = new RagToolProvider();
     final ToolSearchProvider toolSearchProvider = new ToolSearchProvider();
     final AgentContextTools agentContextTools = new AgentContextTools();
     final long commandTimeoutSeconds;
@@ -160,9 +158,9 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
                         heldMs)));
         new FileToolProvider().register(this);
         new GrepToolProvider().register(this);
+        new com.devcli.tool.provider.GlobToolProvider().register(this);
         new ShellToolProvider().register(this);
         new ProjectToolProvider().register(this);
-        ragToolProvider.register(this);
         new WebToolProvider().register(this);
         new BrowserToolProvider().register(this);
         new MemoryToolProvider().register(this);
@@ -188,18 +186,9 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         closed = true;
         RuntimeException failure = null;
         try {
-            ragToolProvider.close();
-        } catch (RuntimeException e) {
-            failure = e;
-        }
-        try {
             snapshotService.close();
         } catch (RuntimeException e) {
-            if (failure == null) {
-                failure = e;
-            } else {
-                failure.addSuppressed(e);
-            }
+            failure = e;
         }
         try {
             resourceLeaseMaintenanceRegistration.close();

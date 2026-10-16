@@ -20,9 +20,6 @@ import java.util.regex.PatternSyntaxException;
  * Provider 仍需在真正执行前再次校验可变状态，避免校验与执行之间的竞态。</p>
  */
 public final class ToolSemanticValidator {
-    private static final Set<String> SEARCH_MODES = Set.of(
-            "auto", "general", "call_chain", "definition", "error_trace", "config");
-
     private ToolSemanticValidator() {
     }
 
@@ -101,10 +98,10 @@ public final class ToolSemanticValidator {
             case "edit_file" -> validateEditFile(arguments, effective);
             case "list_dir" -> validateDirectory(arguments, effective, "path");
             case "grep_code" -> validateGrep(arguments, effective);
+            case "glob" -> validateGlob(arguments, effective);
             case "create_project" -> validateCreateProject(arguments, effective);
             case "revert_turn" -> validateOptionalInteger(arguments, "offset", 1, Integer.MAX_VALUE);
             case "execute_command" -> validateCommand(arguments);
-            case "search_code" -> validateSearchCode(arguments);
             case "web_search" -> validateWebSearch(arguments);
             case "web_fetch" -> validateWebFetch(arguments);
             case "load_skill" -> validateLoadSkill(arguments);
@@ -275,21 +272,10 @@ public final class ToolSemanticValidator {
         return denyReason == null ? validateOptionalInteger(args, "timeout", 1, 86400) : policy(denyReason);
     }
 
-    private static ValidationResult validateSearchCode(JsonNode args) {
-        ValidationResult result = requireText(args, "query", "query 不能为空");
-        if (!result.valid()) {
-            return result;
-        }
-        result = validateOptionalInteger(args, "top_k", 1, 30);
-        if (!result.valid()) {
-            return result;
-        }
-        String mode = args.path("mode").asText("");
-        if (!mode.isBlank() && !SEARCH_MODES.contains(mode)) {
-            return semantic("search_code.mode 不支持: " + mode
-                    + "，可选值: " + String.join(", ", SEARCH_MODES));
-        }
-        return validateOptionalInteger(args, "graph_depth", 0, 3);
+    private static ValidationResult validateGlob(JsonNode args, Context context) {
+        ValidationResult limit = validateOptionalInteger(args, "limit", 1, 1000);
+        if (!limit.valid()) return limit;
+        return args.has("path") ? validateDirectoryOrFile(args, context, "path") : ValidationResult.ok();
     }
 
     private static ValidationResult validateWebSearch(JsonNode args) {

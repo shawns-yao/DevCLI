@@ -20,7 +20,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <ul>
  *   <li>{@code execute_command "mvn test"} 输出 50K 字符直接占满 conversationHistory</li>
  *   <li>{@code web_fetch} 大网页内容把窗口打爆</li>
- *   <li>{@code search_code} ripgrep 命中数千行无关代码</li>
+ *   <li>{@code grep_code} 命中数千行无关代码</li>
  * </ul>
  *
  * <p><b>三级处理策略</b>（按结果字符数）：
@@ -307,7 +307,7 @@ public final class ToolResultSizeManager {
         int dropped = total - kept;
         return diagnosticPreview(result, kept)
                 + "\n\n...(已截断 " + dropped + " 字符 / 共 " + total
-                + " 字符；使用 search_code 或 grep 进一步过滤可避免截断)";
+                + " 字符；使用 grep_code 收窄 pattern 或 path 可避免截断)";
     }
 
     /**

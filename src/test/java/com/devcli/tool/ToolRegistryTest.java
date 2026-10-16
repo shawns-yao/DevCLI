@@ -368,47 +368,6 @@ class ToolRegistryTest {
     }
 
     @Test
-    void searchCodeIncludesInvalidationForDeletedSymbol(@TempDir Path tempDir) throws Exception {
-        String oldRagDir = System.getProperty("devcli.rag.dir");
-        System.setProperty("devcli.rag.dir", tempDir.resolve("rag").toString());
-        try {
-            try (ToolRegistry registry = new ToolRegistry()) {
-                registry.setProjectPath(tempDir.toString());
-            CodeChunk deleted = CodeChunk.methodChunk("UserService.java", "UserService.findUser",
-                    "public User findUser(Long id) { return null; }", 1, 3);
-            CodeChunk retained = CodeChunk.methodChunk("OrderService.java", "OrderService.list",
-                    "public List<Order> list() { return List.of(); }", 1, 3);
-            try (VectorStore store = new VectorStore(tempDir.toString())) {
-                store.clearProject();
-                store.replaceProjectIndex(
-                        List.of(
-                                new VectorStore.CodeChunkEntry(deleted, new float[]{1.0f, 0.0f}),
-                                new VectorStore.CodeChunkEntry(retained, new float[]{0.0f, 1.0f})),
-                        List.of(),
-                        "idx-old");
-                store.replaceProjectIndex(
-                        List.of(new VectorStore.CodeChunkEntry(retained, new float[]{0.0f, 1.0f})),
-                        List.of(),
-                        "idx-new");
-            }
-
-            String result = registry.executeTool("search_code",
-                    "{\"query\":\"UserService.findUser\",\"top_k\":5,\"mode\":\"definition\"}");
-
-            assertTrue(result.contains("negativeFact: Do not rely on UserService.findUser"), result);
-            assertTrue(result.contains("oldSymbolVersion="), result);
-            assertTrue(result.contains("newSymbolVersion=deleted"), result);
-            }
-        } finally {
-            if (oldRagDir == null) {
-                System.clearProperty("devcli.rag.dir");
-            } else {
-                System.setProperty("devcli.rag.dir", oldRagDir);
-            }
-        }
-    }
-
-    @Test
     void shouldRunCommandInProjectDirectory(@TempDir Path tempDir) {
         ToolRegistry registry = approvedHostRegistry();
         registry.setProjectPath(tempDir.toString());
@@ -811,7 +770,7 @@ class ToolRegistryTest {
 
         assertTrue(tool.description().contains("长期记忆"));
         assertTrue(tool.description().contains("只读"));
-        assertTrue(tool.description().contains("search_code"));
+        assertTrue(tool.description().contains("grep_code"));
     }
 
     @Test
@@ -828,10 +787,10 @@ class ToolRegistryTest {
     void shouldRejectBuiltinToolTypeMismatchBeforeExecution() {
         ToolRegistry registry = new ToolRegistry();
 
-        String result = registry.executeTool("search_code", "{\"query\":\"agent\",\"top_k\":\"5\"}");
+        String result = registry.executeTool("grep_code", "{\"pattern\":\"agent\",\"limit\":\"5\"}");
 
         assertTrue(result.contains("工具参数校验失败"));
-        assertTrue(result.contains("$.top_k must be integer"));
+        assertTrue(result.contains("$.limit must be integer"));
     }
 
     @Test
