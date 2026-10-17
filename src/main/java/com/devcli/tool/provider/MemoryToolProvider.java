@@ -10,11 +10,14 @@ public final class MemoryToolProvider implements ToolProvider {
     public void register(ToolContext context) {
         context.registerTool(ToolContract.Tool.structured(
                 "save_memory",
-                "当且仅当用户明确要求记住长期偏好或稳定事实时调用。默认写当前项目；只有明确跨项目偏好才使用 global。",
+                "保存用户明确要求的稳定事实，或主动提出有证据的 project/feedback 经验；均需单次审批。"
+                        + "intent 默认 agent_experience，不能覆盖已有主题；user_request 仅用于用户明确要求保存或更新。默认写当前项目。",
                 context.createToolParameters(
                         new ToolParameter("fact", "string", "要长期保存的稳定事实或用户偏好", true),
                         new ToolParameter("name", "string", "稳定的主题名；留空时从 fact 首句推导", false),
-                        new ToolParameter("description", "string", "供相关性选择的一句话描述", false),
+                        new ToolParameter("description", "string", "供长期记忆索引使用的一句话描述", false),
+                        new ToolParameter("intent", "string", "保存意图；默认 agent_experience，user_request 必须有用户明确请求", false,
+                                java.util.List.of("user_request", "agent_experience")),
                         new ToolParameter("type", "string", "记忆类型", false,
                                 java.util.List.of("user", "feedback", "project", "reference")),
                         new ToolParameter("scope", "string", "作用域；留空默认当前项目", false,
@@ -32,11 +35,8 @@ public final class MemoryToolProvider implements ToolProvider {
 
     private ToolOutput saveMemory(ToolContext context, java.util.Map<String, String> args) {
         String fact = args.get("fact");
-        if (fact == null || fact.isBlank()) {
-            return ToolOutput.error(ToolErrorCode.INVALID_ARGUMENTS,
-                    "保存长期记忆失败: fact 不能为空", false);
-        }
         String normalized = fact.trim();
+        boolean explicitRequest = "user_request".equals(args.get("intent"));
         ToolContract.MemorySaver saveHandler = context.memorySaveHandler();
         if (saveHandler != null) {
             Integer validDays;
@@ -48,7 +48,7 @@ public final class MemoryToolProvider implements ToolProvider {
             ToolContract.MemorySaveResult saveResult = saveHandler.save(
                     new ToolContract.MemorySaveRequest(normalized, args.get("name"),
                             args.get("description"), args.get("type"), args.get("scope"),
-                            validDays));
+                            validDays, explicitRequest));
             if (saveResult == null) {
                 return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
                         "保存长期记忆失败: 记忆保存器未返回结果", false);
@@ -64,13 +64,8 @@ public final class MemoryToolProvider implements ToolProvider {
                     : saveResult.message();
             return ToolOutput.success(message);
         }
-        java.util.function.Consumer<String> memorySaver = context.memorySaver();
-        if (memorySaver == null) {
-            return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
-                    "保存长期记忆失败: 记忆保存器未初始化", false);
-        }
-        memorySaver.accept(normalized);
-        return ToolOutput.success("已保存到长期记忆");
+        return ToolOutput.error(ToolErrorCode.EXECUTION_FAILED,
+                "保存长期记忆失败: 记忆保存器未初始化", false);
     }
 
     private ToolOutput listMemory(ToolContext context, String limitValue) {

@@ -307,7 +307,7 @@ public final class ToolContract {
     }
 
     public record MemorySaveRequest(String fact, String name, String description,
-                                    String type, String scope, Integer validDays) {
+                                    String type, String scope, Integer validDays, boolean explicitRequest) {
         public MemorySaveRequest {
             fact = fact == null ? "" : fact;
             name = name == null ? "" : name;
@@ -324,11 +324,7 @@ public final class ToolContract {
 
     @FunctionalInterface
     public interface MemorySaver {
-        MemorySaveResult save(String fact);
-
-        default MemorySaveResult save(MemorySaveRequest request) {
-            return save(request == null ? "" : request.fact());
-        }
+        MemorySaveResult save(MemorySaveRequest request);
     }
 
     public record ToolInvocation(String id, String name, String argumentsJson) {}

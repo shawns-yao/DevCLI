@@ -106,9 +106,19 @@ public final class ToolSemanticValidator {
             case "web_fetch" -> validateWebFetch(arguments);
             case "load_skill" -> validateLoadSkill(arguments);
             case "list_memory" -> validatePositiveInteger(arguments, "limit", 1, 10_000);
-            case "save_memory" -> requireText(arguments, "fact", "fact 不能为空");
+            case "save_memory" -> validateMemorySave(arguments);
             default -> ValidationResult.ok();
         };
+    }
+
+    private static ValidationResult validateMemorySave(JsonNode args) {
+        ValidationResult fact = requireText(args, "fact", "fact 不能为空");
+        if (!fact.valid()) return fact;
+        if (!"user_request".equals(args.path("intent").asText())
+                && !java.util.Set.of("project", "feedback").contains(args.path("type").asText())) {
+            return ValidationResult.arguments("主动保存经验必须明确指定 project 或 feedback 类型；user 类型需要用户明确请求");
+        }
+        return ValidationResult.ok();
     }
 
     private static ValidationResult validateReadFile(JsonNode args, Context context) {

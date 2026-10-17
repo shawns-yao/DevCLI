@@ -359,7 +359,7 @@ public class MemoryManager implements AutoCloseable {
      * <p>旧实现是「策略判定 → 敏感确认票据 → 脱敏落库」三段式，判定不通过就整条丢弃，
      * 用户只看到一句「策略需要确认」。现在写入即落盘：成功返回文件名，失败如实返回原因。
      *
-     * @param explicitRequest 是否来自用户明确请求（{@code /save} 或 {@code save_memory}）
+     * @param explicitRequest 是否来自用户明确请求（{@code /save} 或工具的 user_request 意图）；主动经验为 false
      */
     public StoreResult storeFactWithPolicy(String fact, boolean explicitRequest) {
         if (fact == null || fact.isBlank()) {

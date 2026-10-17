@@ -330,7 +330,6 @@ final class ToolAccessContext {
         fork.synchronousWorkerGate = registry.synchronousWorkerGate;
         fork.browserGuard = registry.browserGuard;
         fork.browserConnector = registry.browserConnector;
-        fork.memorySaver = registry.memorySaver;
         fork.memorySaveHandler = registry.memorySaveHandler;
         fork.memoryListHandler = registry.memoryListHandler;
         fork.agentContextTools.copyHandlersFrom(registry.agentContextTools);

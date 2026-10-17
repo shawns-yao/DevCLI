@@ -23,23 +23,12 @@ final class AgentRuntimeSupport {
 
     static void bindMemory(ToolRegistry toolRegistry, MemoryManager memoryManager) {
         toolRegistry.setContextProfile(memoryManager.getContextProfile());
-        toolRegistry.setMemorySaver(memoryManager::storeFact);
-        toolRegistry.setMemorySaveHandler(new ToolContract.MemorySaver() {
-            @Override
-            public ToolContract.MemorySaveResult save(String fact) {
-                MemoryManager.StoreResult result = memoryManager.storeFactWithPolicy(fact, true);
-                return new ToolContract.MemorySaveResult(
-                        result.stored(), result.message(), result.id());
-            }
-
-            @Override
-            public ToolContract.MemorySaveResult save(ToolContract.MemorySaveRequest request) {
-                MemoryManager.StoreResult result = memoryManager.storeTopic(
-                        request.scope(), request.name(), request.description(), request.type(),
-                        request.fact(), request.validDays(), true);
-                return new ToolContract.MemorySaveResult(
-                        result.stored(), result.message(), result.id());
-            }
+        toolRegistry.setMemorySaveHandler(request -> {
+            MemoryManager.StoreResult result = memoryManager.storeTopic(
+                    request.scope(), request.name(), request.description(), request.type(),
+                    request.fact(), request.validDays(), request.explicitRequest());
+            return new ToolContract.MemorySaveResult(
+                    result.stored(), result.message(), result.id());
         });
         toolRegistry.setMemoryListHandler(memoryManager::listLongTermMemory);
         toolRegistry.setAgentContextHandlers(memoryManager::updateWorkPlan, memoryManager::readMemory);

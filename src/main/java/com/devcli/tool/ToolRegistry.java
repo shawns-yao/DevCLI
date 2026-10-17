@@ -78,7 +78,6 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     ContextProfile contextProfile = ContextProfile.from(null);
     BrowserGuard browserGuard;
     BrowserConnector browserConnector;
-    java.util.function.Consumer<String> memorySaver;
     MemorySaver memorySaveHandler;
     MemoryListHandler memoryListHandler;
     SkillRegistry skillRegistry;
@@ -307,10 +306,6 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     @Override
     public com.devcli.tool.environment.ExecutionEnvironment executionEnvironment() { return executionEnvironment; }
-
-    public void setMemorySaver(java.util.function.Consumer<String> memorySaver) {
-        this.memorySaver = memorySaver;
-    }
 
     public void setMemorySaveHandler(MemorySaver memorySaveHandler) {
         this.memorySaveHandler = memorySaveHandler;
@@ -589,8 +584,6 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     protected final ToolOutput validateCommandRequest(ToolExecutionPipeline.Context context) {
         return executionCore.commands.validate(context);
     }
-    @Override
-    public java.util.function.Consumer<String> memorySaver() { return memorySaver; }
     @Override
     public MemorySaver memorySaveHandler() { return memorySaveHandler; }
     @Override

@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 class ToolRegistryTest {
 
@@ -667,15 +668,27 @@ class ToolRegistryTest {
     }
 
     @Test
-    void saveMemoryToolUsesInjectedMemorySaver() {
+    void saveMemoryToolForwardsExplicitUserRequest() {
         ToolRegistry registry = memoryApprovalRegistry();
         List<String> saved = new ArrayList<>();
-        registry.setMemorySaver(saved::add);
+        registry.setMemorySaveHandler(request -> {
+            assertTrue(request.explicitRequest());
+            saved.add(request.fact());
+            return new ToolContract.MemorySaveResult(true, "已保存到长期记忆");
+        });
 
-        String result = registry.executeTool("save_memory", "{\"fact\":\"访问 yuque.com 时复用登录态\"}");
+        String result = registry.executeTool("save_memory", "{\"fact\":\"访问 yuque.com 时复用登录态\",\"intent\":\"user_request\"}");
 
         assertEquals(List.of("访问 yuque.com 时复用登录态"), saved);
         assertTrue(result.contains("已保存到长期记忆"));
+    }
+
+    @Test
+    void proactiveUserMemoryIsRejectedBeforeApproval() {
+        ToolRegistry registry = memoryApprovalRegistry();
+        registry.setMemorySaveHandler(request -> fail("不应写入"));
+        assertEquals(ToolErrorCode.INVALID_ARGUMENTS,
+                registry.executeToolOutput("save_memory", "{\"fact\":\"偏好\",\"type\":\"user\"}").errorCode());
     }
 
     @Test
@@ -684,7 +697,7 @@ class ToolRegistryTest {
         registry.setMemorySaveHandler(fact -> new ToolContract.MemorySaveResult(false,
                 "长期记忆策略跳过: 一次性临时信息"));
 
-        String result = registry.executeTool("save_memory", "{\"fact\":\"今天地铁好挤\"}");
+        String result = registry.executeTool("save_memory", "{\"fact\":\"今天地铁好挤\",\"intent\":\"user_request\"}");
 
         assertTrue(result.contains("长期记忆策略跳过"), result);
     }
@@ -694,17 +707,9 @@ class ToolRegistryTest {
         ToolRegistry registry = memoryApprovalRegistry();
         java.util.concurrent.atomic.AtomicReference<ToolContract.MemorySaveRequest> captured =
                 new java.util.concurrent.atomic.AtomicReference<>();
-        registry.setMemorySaveHandler(new ToolContract.MemorySaver() {
-            @Override
-            public ToolContract.MemorySaveResult save(String fact) {
-                return new ToolContract.MemorySaveResult(false, "unexpected legacy call");
-            }
-
-            @Override
-            public ToolContract.MemorySaveResult save(ToolContract.MemorySaveRequest request) {
-                captured.set(request);
-                return new ToolContract.MemorySaveResult(true, "已保存项目记忆", "build.md");
-            }
+        registry.setMemorySaveHandler(request -> {
+            captured.set(request);
+            return new ToolContract.MemorySaveResult(true, "已保存项目记忆", "build.md");
         });
 
         String result = registry.executeTool("save_memory", """
@@ -716,6 +721,7 @@ class ToolRegistryTest {
         assertEquals("project", captured.get().scope());
         assertEquals("project", captured.get().type());
         assertEquals(30, captured.get().validDays());
+        assertFalse(captured.get().explicitRequest());
     }
 
     @Test
@@ -724,7 +730,7 @@ class ToolRegistryTest {
         registry.setMemorySaveHandler(fact -> new ToolContract.MemorySaveResult(true,
                 "已保存脱敏后的长期记忆"));
 
-        String result = registry.executeTool("save_memory", "{\"fact\":\"token=tok-tool-secret\"}");
+        String result = registry.executeTool("save_memory", "{\"fact\":\"token=tok-tool-secret\",\"intent\":\"user_request\"}");
 
         assertTrue(result.contains("已保存脱敏后的长期记忆"), result);
         assertFalse(result.contains("tok-tool-secret"), result);

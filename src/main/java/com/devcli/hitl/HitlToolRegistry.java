@@ -402,7 +402,9 @@ public class HitlToolRegistry extends ToolRegistry {
                     if (context.executionContext().remainingNanos() == 0) return ToolOutput.timedOut("记忆审批已超时");
                     answer = hitlHandler.requestApproval(ApprovalRequest.of("save_memory",
                             context.argumentsJson(), null, context.invocationId(),
-                            "将持久化以下主题、作用域和内容，可能覆盖同名记忆；仅本次确认有效。"));
+                            "user_request".equals(parsedArgumentsOf(context).path("intent").asText())
+                                    ? "模型声明用户明确要求保存以下主题、作用域和内容，可能更新同名记忆；仅本次确认有效。"
+                                    : "模型主动提出保存以下 project/feedback 经验，不覆盖已有主题；仅本次确认有效。"));
                 } finally {
                     approvalLock.unlock();
                 }
