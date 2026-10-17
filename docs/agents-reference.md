@@ -166,6 +166,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 每轮只注入按预算裁剪的 MEMORY.md 索引；相关性选择器及其模型调用已删除。主题全文通过 read_memory 按 name / scope 读取，默认项目同名主题覆盖全局，不接受任意路径；返回内容页、next_offset 和总字符数。
 - 同作用域自动冲突不覆盖原文；用户显式保存才更新并增加修订号。`/memory organize apply` 只从权威主题文件重建索引
 - 索引沿用主题 updated_at 显示更新时间；使用记忆中的文件、函数、配置和命令前须核实当前状态，更新时间不代表内容仍然有效。保留现有 Evidence epoch 与逻辑序号，不据单写入者假设删减证据机制
+- 主题名、描述和正文共用敏感内容检查，拒绝后不写主题、索引或保存通知；不扫描或改写已有主题
 - `/memory clear` 默认只清**当前写入作用域**（有活动项目清项目，否则清全局）；`/memory clear global` 与 `/memory clear project` 显式指定。全局目录跨项目共享，项目会话里的默认清空不得连带抹掉它，结果会提示如何显式清另一作用域
 - 旧版 `records/` 记忆卡在启动时幂等复制到全局作用域，全部处理成功后写一次性完成标记，后续构造不再重复解析；源文件保留，旧格式缺少可靠项目归属，不自动归入项目
 - RAG 检索审计按 JSONL 保存各召回通道、RRF、rerank、最终结果和降级状态，不保存代码正文；普通 CLI 会话归档默认关闭，启用后 ReAct 保存脱敏模型消息，Plan / Team 保存顶层输入输出，并按配置期限清理
@@ -250,6 +251,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 所有 mcp__ 工具默认走 HITL + AuditLog；带 destructive/openWorld annotations 的 MCP 工具强制逐次审批，不复用 tool/server 级全部放行缓存
 - 第三方描述最多展示 2000 个 Unicode 码点，并标明 UNTRUSTED；schema 仍完整返回以供参数校验。schemaFingerprint 历史字段现覆盖描述、schema 与 annotations，schema 对象键序不影响指纹
 - 已有工具定义变化后，服务及其工具级批量批准失效；下次调用必须单次人工确认当前描述和 schema。审批中再变化则拒绝；隔离 fork 共用根目录的定义校验，不能继续执行旧定义。新增或移除工具同样清除该服务的批量批准
+- 本地 MCP 信任策略变化会重新发布工具能力和执行绑定，撤销只读授权立即生效；旧 fork 及同描述重连前的绑定返回 STALE_TOOL_SNAPSHOT，需重新创建子任务，不能调用旧客户端
 - resources 双轨：虚拟工具 + @-mention 输入层
 - CLI 首屏默认只等待 MCP 启动 8 秒，慢 server 后台继续初始化并保持 `starting`，用 `/mcp` / `/mcp logs <name>` 追踪
 - McpServerManager 记录本进程连接事件：STARTING / READY / ERROR / DISABLED / RECONNECTING / TOOLS_CHANGED，事件携带 server、状态、生命周期版本、工具数量和消息
@@ -273,7 +275,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 三层加载：jar 内置 < 用户级 ~/.devcli/skills/ < 项目级 .devcli/skills/
 - frontmatter：name(必填) / description(必填,<=500) / version / author / tags / allowedTools / context / paths
 - Skill 索引追加到当轮消息，显示 builtin/user/project 来源；单条描述最多 500 个码点，数量按 Token 预算裁剪，排序沿用相关度与使用频率
-- `/skill list` 展示同名覆盖的双方来源与文件，以及描述词面相似提示。英文分词和汉字二元组的 Jaccard 达到 0.75、且双方至少 4 个词项时提示，不额外调用模型，不改变加载或工具权限。描述应明确何时使用、何时不使用；语义冲突仍须报告用户，词面检测不等于冲突判定
+- `/skill list` 展示同名覆盖的双方来源与文件，以及描述词面相似提示。非空描述归一后完全相同即提示；其他描述沿用至少 4 个词项、Jaccard 0.75，中英紧邻时分别分词。不额外调用模型，不改变排序、加载或工具权限。描述应明确何时使用、何时不使用；语义冲突仍须报告用户，词面检测不等于冲突判定
 - paths 使用项目相对路径匹配当前用户输入或任务文本中的路径；未声明 paths 的 Skill 始终可见，声明 paths 的 Skill 只在路径命中时进入索引
 - load_skill 工具把 SKILL.md 正文(5KB 截断)写入 SkillContextBuffer，并记录本进程内使用次数
 - buffer 正文一次性消费，最多 3 个 skill body；已加载 Skill 名称、context、allowedTools 和内容摘要保留给压缩后恢复，直到 clear
