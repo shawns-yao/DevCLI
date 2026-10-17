@@ -15,14 +15,14 @@ import java.util.Map;
  * 压缩对话历史时不会触碰它——第 15 轮压缩后第 20 轮仍能看到当前 step / 已完成 / 待执行 / 失败。
  *
  * <p>定位：projection（投影视图），不是 source of truth。真实执行状态仍由
- * {@code plan.ExecutionPlan} / {@code plan.Task} 拥有；{@code PlanExecuteAgent} 在 task 状态变化时
- * 把进度投影到这里。摘要只引用进度，不拥有任务状态。
+ * {@link com.devcli.plan.ExecutionArtifact} 拥有；计划 Coordinator 在步骤状态变化时
+ * 把进度投影到这里。工作意图由 {@link AgentWorkPlan} 保存，摘要不拥有任务状态。
  *
  * <p>线程安全：所有方法 synchronized（与 {@link SessionMemory} 一致，防御 Multi-Agent 并发回写）。
  */
 public class TaskLedger {
 
-    /** 步骤状态。对齐 {@code plan.Task.TaskStatus}，额外加 SKIPPED 供跳过场景。 */
+    /** 执行进度投影，包含跳过状态；不替代执行产物的真实终态。 */
     public enum StepStatus {
         PENDING, RUNNING, DONE, FAILED, SKIPPED
     }

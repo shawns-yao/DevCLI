@@ -8,13 +8,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 import com.devcli.llm.GLMClient;
 import com.devcli.llm.LlmClient;
-import com.devcli.llm.LlmErrorCode;
-import com.devcli.llm.LlmException;
 import com.devcli.memory.LongTermMemory;
 import com.devcli.memory.MemoryManager;
-import com.devcli.skill.SkillContextBuffer;
 import com.devcli.tool.ToolRegistry;
-import com.devcli.tool.ToolStatus;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -1974,9 +1970,9 @@ class AgentOrchestratorTest {
     @SuppressWarnings("unchecked")
     private static List<AgentOrchestrator.ExecutionStep> invokeRebuildStepsFromCheckpoint(
             AgentOrchestrator orchestrator, AgentCheckpoint checkpoint) throws Exception {
-        Method method = AgentOrchestrator.class.getDeclaredMethod("rebuildStepsFromCheckpoint", AgentCheckpoint.class);
-        method.setAccessible(true);
-        return (List<AgentOrchestrator.ExecutionStep>) method.invoke(orchestrator, checkpoint);
+        Field field = AgentOrchestrator.class.getDeclaredField("checkpointCoordinator");
+        field.setAccessible(true);
+        return ((CheckpointCoordinator) field.get(orchestrator)).rebuildSteps(checkpoint);
     }
 
     private static String invokeBuildStepContext(AgentOrchestrator orchestrator,
@@ -1997,9 +1993,7 @@ class AgentOrchestratorTest {
     }
 
     private static String invokePreviewDependencyResult(String result) throws Exception {
-        Method method = AgentOrchestrator.class.getDeclaredMethod("previewDependencyResult", String.class);
-        method.setAccessible(true);
-        return (String) method.invoke(null, result);
+        return OrchestrationNarrative.previewDependencyResult(result);
     }
 
     private static AgentCheckpoint.RecoveryState invokeRestoreAgentTopology(
@@ -2022,10 +2016,9 @@ class AgentOrchestratorTest {
 
     private static String invokeResolveAssignedWorker(AgentOrchestrator orchestrator,
                                                         String stepId, int preferredIndex) throws Exception {
-        Method method = AgentOrchestrator.class.getDeclaredMethod(
-                "resolveAssignedWorker", String.class, int.class);
-        method.setAccessible(true);
-        return (String) method.invoke(orchestrator, stepId, preferredIndex);
+        Field field = AgentOrchestrator.class.getDeclaredField("stepExecutionCoordinator");
+        field.setAccessible(true);
+        return ((StepExecutionCoordinator) field.get(orchestrator)).resolveAssignedWorker(stepId, preferredIndex);
     }
 
     private static String findSystemByLastUser(List<List<LlmClient.Message>> calls, String userNeedle) {

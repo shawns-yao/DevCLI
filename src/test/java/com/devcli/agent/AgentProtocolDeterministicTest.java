@@ -4,11 +4,6 @@ import static com.devcli.tool.ToolContract.*;
 import com.devcli.tool.ToolContract;
 import com.devcli.llm.GLMClient;
 import com.devcli.llm.LlmClient;
-import com.devcli.memory.LongTermMemory;
-import com.devcli.memory.MemoryManager;
-import com.devcli.plan.ExecutionPlan;
-import com.devcli.plan.Planner;
-import com.devcli.plan.Task;
 import com.devcli.hitl.ApprovalRequest;
 import com.devcli.hitl.ApprovalResult;
 import com.devcli.render.Renderer;
@@ -50,9 +45,9 @@ import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * ReAct、Plan Task 与 SubAgent 的确定性工具协议矩阵。
+ * ReAct 与 SubAgent 的确定性工具协议矩阵。
  *
- * <p>3 条路径 × 4 类场景 × 10 个固定变体，共 120 组。测试只使用脚本模型、
+ * <p>2 条路径 × 4 类场景 × 10 个固定变体，共 80 组。测试只使用脚本模型、
  * 内存工具与门闩调度，不依赖网络、Docker、真实命令或随机延迟。
  */
 class AgentProtocolDeterministicTest {
@@ -96,7 +91,7 @@ class AgentProtocolDeterministicTest {
                 }
             }
         }
-        assertEquals(120, tests.size());
+        assertEquals(80, tests.size());
         return tests.stream();
     }
 
@@ -129,24 +124,6 @@ class AgentProtocolDeterministicTest {
                             agent.conversationHistorySnapshot());
                 } finally {
                     agent.getMemoryManager().close();
-                }
-            }
-            case PLAN_TASK -> {
-                try (MemoryManager memoryManager = new MemoryManager(
-                        llm,
-                        4_096,
-                        128_000,
-                        new LongTermMemory(Path.of(tools.getProjectPath())
-                                .resolve("plan-memory").toFile()))) {
-                    PlanExecuteAgent agent = new PlanExecuteAgent(
-                            llm,
-                            tools,
-                            new SingleTaskPlanner(llm),
-                            memoryManager,
-                            (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.execute(),
-                            sink);
-                    String result = agent.run("执行确定性协议场景");
-                    yield new PathExecution(result, llm.lastMessages());
                 }
             }
             case SUB_AGENT -> {
@@ -248,7 +225,6 @@ class AgentProtocolDeterministicTest {
 
     private enum PathKind {
         REACT,
-        PLAN_TASK,
         SUB_AGENT
     }
 
@@ -517,19 +493,6 @@ class AgentProtocolDeterministicTest {
         }
     }
 
-    private static final class SingleTaskPlanner extends Planner {
-        private SingleTaskPlanner(LlmClient llmClient) {
-            super(llmClient);
-        }
-
-        @Override
-        public ExecutionPlan createPlan(String goal) {
-            ExecutionPlan plan = new ExecutionPlan("protocol-plan", goal);
-            plan.addTask(new Task("protocol-task", "执行确定性工具协议", Task.TaskType.FILE_READ));
-            plan.computeExecutionOrder();
-            return plan;
-        }
-    }
 
     private static final class SilentRenderer implements Renderer {
         private final PrintStream out;

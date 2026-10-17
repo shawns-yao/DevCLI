@@ -75,8 +75,7 @@ public interface Renderer extends AutoCloseable {
     /**
      * 流式输出的目标 PrintStream。
      *
-     * <p>Agent.StreamRenderer / PlanExecuteAgent.TaskStreamRenderer / SubAgent.SubAgentStreamRenderer
-     * 把流式 reasoning / content 写到这里。
+     * <p>AgentStreamPresenter 把流式 reasoning / content 写到这里。
      *
      * <p>对 InlineRenderer / PlainRenderer 而言这就是 {@code System.out}。
      */

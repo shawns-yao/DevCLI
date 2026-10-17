@@ -296,21 +296,6 @@ public final class TerminalMarkdownRenderer {
         needsLineBreakBeforeNextBlock = false;
     }
 
-    private void writeLine(String line) {
-        writeLine(line, BlockType.PARAGRAPH);
-    }
-
-    private void writeLine(String line, BlockType blockType) {
-        out.println(line);
-        lastOutputBlank = line.isBlank();
-        needsLineBreakBeforeNextBlock = blockType != BlockType.ORDERED_LIST_ITEM
-                && blockType != BlockType.UNORDERED_LIST_ITEM
-                && blockType != BlockType.QUOTE;
-        if (!line.isBlank()) {
-            lastBlockType = blockType;
-        }
-    }
-
     private void writeBlankLine() {
         if (!lastOutputBlank) {
             out.println();
@@ -367,5 +352,15 @@ public final class TerminalMarkdownRenderer {
         QUOTE,
         TABLE,
         CODE_BLOCK
+    }
+    private void writeLine(String line, BlockType blockType) {
+        out.println(line);
+        lastOutputBlank = line.isBlank();
+        needsLineBreakBeforeNextBlock = blockType != BlockType.ORDERED_LIST_ITEM
+                && blockType != BlockType.UNORDERED_LIST_ITEM
+                && blockType != BlockType.QUOTE;
+        if (!line.isBlank()) {
+            lastBlockType = blockType;
+        }
     }
 }

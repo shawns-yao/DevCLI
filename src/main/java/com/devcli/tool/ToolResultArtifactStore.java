@@ -292,14 +292,11 @@ public final class ToolResultArtifactStore {
         }
     }
 
-    private static String sha256(byte[] bytes) throws IOException {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-        } catch (NoSuchAlgorithmException e) {
-            throw new IOException("运行环境不支持 SHA-256", e);
-        }
+    public record StoredArtifact(String ref, String sha256, long chars, long bytes) {
     }
 
+    public record ArtifactPage(String content, long offset, String nextCursor, boolean hasMore) {
+    }
     private static String sha256(Path path) throws IOException {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -314,11 +311,5 @@ public final class ToolResultArtifactStore {
         } catch (NoSuchAlgorithmException e) {
             throw new IOException("运行环境不支持 SHA-256", e);
         }
-    }
-
-    public record StoredArtifact(String ref, String sha256, long chars, long bytes) {
-    }
-
-    public record ArtifactPage(String content, long offset, String nextCursor, boolean hasMore) {
     }
 }

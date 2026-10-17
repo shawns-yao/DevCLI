@@ -18,7 +18,6 @@ import java.io.PrintStream;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.function.Supplier;
-import java.util.stream.Collectors;
 
 /**
  * Agent 编排器 - Multi-Agent 系统的"主"
@@ -765,16 +764,6 @@ public class AgentOrchestrator {
         return executeSteps(steps, traceContext);
     }
 
-    /** 兼容旧调用入口，恢复语义统一委托给结构化协议。 */
-    private List<ExecutionStep> rebuildStepsFromCheckpoint(AgentCheckpoint checkpoint) {
-        return checkpointCoordinator.rebuildSteps(checkpoint);
-    }
-
-    /** checkpoint 计划层 + 结构化产物 → 可调度的步骤列表。 */
-    private List<ExecutionStep> rebuildStepsFromCheckpoint(AgentCheckpoint.RecoveryState recovery) {
-        return checkpointCoordinator.rebuildSteps(recovery);
-    }
-
     private void restoreCheckpointArtifactsIntoSessionMemory(AgentCheckpoint.RecoveryState recovery) {
         runState.restoreCheckpointArtifacts(recovery);
         for (Map.Entry<String, ExecutionArtifact> entry : recovery.artifacts().entrySet()) {
@@ -883,10 +872,6 @@ public class AgentOrchestrator {
         checkpointCoordinator.saveStrict();
     }
 
-    private synchronized String resolveAssignedWorker(String stepId, int preferredIndex) {
-        return stepExecutionCoordinator.resolveAssignedWorker(stepId, preferredIndex);
-    }
-
     private synchronized void recordAgentMessage(String agentId, String stepId,
                                                  String phase, AgentMessage message) {
         checkpointCoordinator.recordAgentMessage(agentId, stepId, phase, message);
@@ -905,16 +890,8 @@ public class AgentOrchestrator {
         return reviewCoordinator.runPreReviewHook(step);
     }
 
-    private boolean requiresJavaHardCheck(ExecutionStep step) {
-        return reviewCoordinator.requiresJavaHardCheck(step);
-    }
-
     String buildStepContext(List<ExecutionStep> steps, ExecutionStep currentStep) {
         return orchestrationNarrative.buildStepContext(steps, currentStep);
-    }
-
-    private static String previewDependencyResult(String result) {
-        return OrchestrationNarrative.previewDependencyResult(result);
     }
 
     List<AcceptanceCriterion> acceptanceCriteriaForStep(ExecutionStep step) {

@@ -104,10 +104,6 @@ public class CodeRagBenchmark {
         return -1;
     }
 
-    private boolean matchesAny(VectorStore.SearchResult result, List<ExpectedTarget> targets) {
-        return targets.stream().anyMatch(target -> target.matches(result));
-    }
-
     public record BenchmarkCase(
             String name,
             String query,

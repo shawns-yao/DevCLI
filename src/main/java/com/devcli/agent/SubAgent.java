@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.devcli.hook.HookLifecycle;
 import com.devcli.llm.LlmClient;
-import com.devcli.memory.CompactionContext;
 import com.devcli.memory.CompactionResult;
 import com.devcli.llm.LlmException;
 import com.devcli.llm.LlmTraceLogger;
@@ -322,43 +321,9 @@ public class SubAgent {
         };
     }
 
-    private void maybeCompactHistory(PrintStream out) {
-        maybeCompactHistory(conversationHistory, out);
-    }
-
-    private void maybeCompactHistory(com.devcli.event.ConversationJournal history, PrintStream out) {
-        if (historyCompactor == null) return;
-        ContextProfile profile = toolRegistry == null ? null : toolRegistry.getContextProfile();
-        if (profile == null) return;
-        try {
-            historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(toolRegistry.getProjectPath()));
-            int toolDefinitionTokens = TokenBudget.estimateToolDefinitionsTokens(
-                    toolRegistry.getToolDefinitions());
-            CompactionResult compaction = history.revise("compaction", messages -> historyCompactor.compactIfNeeded(
-                    messages, AgentRuntimeSupport.buildCompactionContext(
-                            profile.historyTriggerTokens(toolDefinitionTokens),
-                            toolRegistry, name)));
-            boolean compacted = compaction.compacted();
-            if (compacted && out != null) {
-                out.println("📦 [" + name + "] 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
-            }
-        } catch (Exception e) {
-            log.warn("[{}] conversationHistory compaction failed", name, e);
-        }
-    }
-
     private String buildSkillIndex() {
         return AgentRuntimeSupport.buildSkillIndex(
                 skillRegistry, currentSkillActivationText, toolRegistry, log);
-    }
-
-    private String prependSkillBodies(String content) {
-        return prependSkillBodies(content, true);
-    }
-
-    private String prependSkillBodies(String content, boolean consumeBuffer) {
-        return AgentRuntimeSupport.prependSkillBodies(
-                skillContextBuffer, content, consumeBuffer);
     }
 
     private static String prependTurnContext(String content, String turnContext) {
@@ -729,22 +694,6 @@ public class SubAgent {
                 hitPct);
     }
 
-    private void injectPendingLspDiagnostics(PrintStream out) {
-        injectPendingLspDiagnostics(conversationHistory, out);
-    }
-
-    private void injectPendingLspDiagnostics(com.devcli.event.ConversationJournal history, PrintStream out) {
-        LspDiagnosticReport report = toolRegistry.flushPendingLspDiagnostics();
-        if (report == null || report.isEmpty()) {
-            return;
-        }
-        history.add(LlmClient.Message.internalUser(report.promptText()));
-        if (out != null) {
-            out.println(report.displayText());
-        }
-        log.info("[{}] injected LSP diagnostics into sub-agent conversation", name);
-    }
-
     private List<ToolExecutionResult> executeToolCalls(List<LlmClient.ToolCall> toolCalls) {
         return executeToolCalls(toolCalls, null);
     }
@@ -786,25 +735,6 @@ public class SubAgent {
             return null;
         }
         return List.of("read_file", "read_tool_result", "list_dir", "grep_code", "execute_command");
-    }
-
-    private void appendImageToolMessages(List<ToolExecutionResult> toolResults) {
-        appendImageToolMessages(conversationHistory, toolResults);
-    }
-
-    private void appendImageToolMessages(com.devcli.event.ConversationJournal history, List<ToolExecutionResult> toolResults) {
-        if (toolResults == null || toolResults.isEmpty()) {
-            return;
-        }
-        for (ToolExecutionResult result : toolResults) {
-            if (!result.hasImageParts()) {
-                continue;
-            }
-            List<LlmClient.ContentPart> parts = new ArrayList<>();
-            parts.add(LlmClient.ContentPart.text("工具 " + result.name() + " 返回了图片内容，请结合上面的工具文本结果分析。"));
-            parts.addAll(result.imageParts());
-            history.add(LlmClient.Message.user(parts, LlmClient.MessageSource.TOOL));
-        }
     }
 
     private static void printToolCalls(PrintStream out, List<LlmClient.ToolCall> toolCalls) {
@@ -937,4 +867,56 @@ public class SubAgent {
         void accept(A a, B b, C c);
     }
 
+    private void maybeCompactHistory(com.devcli.event.ConversationJournal history, PrintStream out) {
+        if (historyCompactor == null) return;
+        ContextProfile profile = toolRegistry == null ? null : toolRegistry.getContextProfile();
+        if (profile == null) return;
+        try {
+            historyCompactor.setMicrocompactOutputRoot(java.nio.file.Path.of(toolRegistry.getProjectPath()));
+            int toolDefinitionTokens = TokenBudget.estimateToolDefinitionsTokens(
+                    toolRegistry.getToolDefinitions());
+            CompactionResult compaction = history.revise("compaction", messages -> historyCompactor.compactIfNeeded(
+                    messages, AgentRuntimeSupport.buildCompactionContext(
+                            profile.historyTriggerTokens(toolDefinitionTokens),
+                            toolRegistry, name)));
+            boolean compacted = compaction.compacted();
+            if (compacted && out != null) {
+                out.println("📦 [" + name + "] 上下文接近窗口上限，已把早期对话压缩为摘要后继续。");
+            }
+        } catch (Exception e) {
+            log.warn("[{}] conversationHistory compaction failed", name, e);
+        }
+    }
+
+    private String prependSkillBodies(String content, boolean consumeBuffer) {
+        return AgentRuntimeSupport.prependSkillBodies(
+                skillContextBuffer, content, consumeBuffer);
+    }
+
+    private void injectPendingLspDiagnostics(com.devcli.event.ConversationJournal history, PrintStream out) {
+        LspDiagnosticReport report = toolRegistry.flushPendingLspDiagnostics();
+        if (report == null || report.isEmpty()) {
+            return;
+        }
+        history.add(LlmClient.Message.internalUser(report.promptText()));
+        if (out != null) {
+            out.println(report.displayText());
+        }
+        log.info("[{}] injected LSP diagnostics into sub-agent conversation", name);
+    }
+
+    private void appendImageToolMessages(com.devcli.event.ConversationJournal history, List<ToolExecutionResult> toolResults) {
+        if (toolResults == null || toolResults.isEmpty()) {
+            return;
+        }
+        for (ToolExecutionResult result : toolResults) {
+            if (!result.hasImageParts()) {
+                continue;
+            }
+            List<LlmClient.ContentPart> parts = new ArrayList<>();
+            parts.add(LlmClient.ContentPart.text("工具 " + result.name() + " 返回了图片内容，请结合上面的工具文本结果分析。"));
+            parts.addAll(result.imageParts());
+            history.add(LlmClient.Message.user(parts, LlmClient.MessageSource.TOOL));
+        }
+    }
 }
