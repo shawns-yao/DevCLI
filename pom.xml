@@ -15,6 +15,7 @@
 
     <properties>
         <maven.compiler.release>17</maven.compiler.release>
+        <maven.compiler.testRelease>21</maven.compiler.testRelease>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.build.outputTimestamp>2026-10-17T00:00:00Z</project.build.outputTimestamp>
         <jacocoArgLine></jacocoArgLine>
@@ -261,7 +262,10 @@
                     <execution>
                         <id>coverage-agent</id>
                         <goals><goal>prepare-agent</goal></goals>
-                        <configuration><propertyName>jacocoArgLine</propertyName></configuration>
+                        <configuration>
+                            <propertyName>jacocoArgLine</propertyName>
+                            <append>false</append>
+                        </configuration>
                     </execution>
                     <execution>
                         <id>coverage-report</id>
@@ -273,7 +277,7 @@
             <plugin>
                 <groupId>org.owasp</groupId>
                 <artifactId>dependency-check-maven</artifactId>
-                <version>12.1.9</version>
+                <version>12.2.2</version>
                 <configuration>
                     <failOnError>true</failOnError>
                     <failBuildOnCVSS>0</failBuildOnCVSS>

@@ -55,7 +55,7 @@ public final class SkillIndexFormatter {
             included++;
         }
         if (included == 0) {
-            Skill first = enabled.getFirst();
+            Skill first = enabled.get(0);
             String minimal = "## 可用 Skills\n- **" + first.name() + "**\n" + footer;
             String text = truncateToTokenBudget(minimal, safeBudget);
             return new FormatResult(text, 1, Math.max(0, enabled.size() - 1),

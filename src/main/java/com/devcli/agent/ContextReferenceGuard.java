@@ -4,7 +4,6 @@ import com.devcli.tool.ToolContract;
 import com.devcli.llm.LlmClient;
 import com.devcli.concurrent.CancellationContext;
 import com.devcli.concurrent.RunContext;
-import com.devcli.tool.ToolRegistry;
 import com.devcli.tool.ToolStatus;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -217,7 +216,7 @@ final class ContextReferenceGuard {
             if (!latestBatch.isEmpty()) return Map.copyOf(latestBatch);
             if (references.isEmpty()) return Map.of();
             List<Map.Entry<String, String>> entries = references.entrySet().stream().toList();
-            Map.Entry<String, String> latest = entries.getLast();
+            Map.Entry<String, String> latest = entries.get(entries.size() - 1);
             return Map.of(latest.getKey(), latest.getValue());
         }
     }

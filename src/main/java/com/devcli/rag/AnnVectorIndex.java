@@ -29,7 +29,7 @@ final class AnnVectorIndex {
         if (entries == null || entries.isEmpty()) {
             return null;
         }
-        int dimensions = entries.getFirst().vector().length;
+        int dimensions = entries.get(0).vector().length;
         if (dimensions == 0) {
             throw new IllegalArgumentException("向量维度不能为 0");
         }
