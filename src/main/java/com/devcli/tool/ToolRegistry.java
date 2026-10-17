@@ -220,39 +220,6 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
 
     public DelegateRoleCatalog delegateRoles() { return delegateRoles; }
 
-    /** 返回工具声明的副作用等级；未知工具按外部副作用保守处理。 */
-    public ToolEffect toolEffect(String name) {
-        Tool tool = activeTool(name);
-        return tool == null ? ToolEffect.EXTERNAL_MUTATION : tool.effect();
-    }
-
-    /** 返回工具声明的破坏性等级；未知工具按实质性外部变更保守处理。 */
-    public Destructiveness toolDestructiveness(String name) {
-        Tool tool = activeTool(name);
-        return tool == null
-                ? Destructiveness.STRUCTURAL
-                : tool.destructiveness();
-    }
-
-    /** 返回工具声明的幂等性；未知工具按不可重试保守处理。 */
-    public Idempotency toolIdempotency(String name) {
-        Tool tool = activeTool(name);
-        return tool == null
-                ? Idempotency.NON_IDEMPOTENT
-                : tool.idempotency();
-    }
-
-    /** 返回工具是否声明可进入短期结果缓存；未知工具不缓存。 */
-    public boolean toolCacheable(String name) {
-        Tool tool = activeTool(name);
-        return tool != null && tool.cacheable();
-    }
-
-    public ToolPresentation toolPresentation(String name) {
-        Tool tool = activeTool(name);
-        return tool == null ? ToolPresentation.generic(name) : tool.presentation();
-    }
-
     Tool activeTool(String name) {
         ToolSnapshot snapshot = access.activeToolSnapshot.get();
         if (snapshot != null) {
@@ -960,31 +927,6 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         return auditLog;
     }
 
-    public boolean requiresApproval(String name) {
-        if (name != null && name.startsWith("mcp__")) {
-            Tool tool = activeTool(name);
-            return tool == null || isMaterialSideEffect(tool.effect());
-        }
-        Optional<BuiltInToolPolicy.Policy> policy = BuiltInToolPolicy.find(name);
-        if (policy.isPresent()) {
-            return policy.get().requiresApproval();
-        }
-        Tool tool = activeTool(name);
-        return tool != null && isMaterialSideEffect(tool.effect());
-    }
-
-    public boolean requiresAudit(String name) {
-        if (name != null && name.startsWith("mcp__")) {
-            return true;
-        }
-        Optional<BuiltInToolPolicy.Policy> policy = BuiltInToolPolicy.find(name);
-        if (policy.isPresent()) {
-            return policy.get().audited();
-        }
-        Tool tool = activeTool(name);
-        return tool != null && isMaterialSideEffect(tool.effect());
-    }
-
     static boolean isMaterialSideEffect(ToolEffect effect) {
         return effect != ToolEffect.READ_ONLY && effect != ToolEffect.LOCAL_CONTEXT;
     }
@@ -1022,28 +964,33 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         return batch.elapsedMillis(startedAtNanos);
     }
 
-    public ToolCancellationCapability toolCancellationCapability(String toolName) {
-        Tool tool = toolName == null ? null : activeTool(toolName);
-        return tool == null
-                ? ToolCancellationCapability.INTERRUPT_ONLY
-                : tool.cancellationCapability();
-    }
-
     public boolean hasTool(String name) {
         return activeTool(name) != null;
     }
 
-    // 记录定义
-    record Param(String name, String type, String description, boolean required,
-                         List<String> enumValues, boolean allowEmpty) {
-        Param(String name, String type, String description, boolean required) {
-            this(name, type, description, required, List.of(), false);
-        }
-
-        Param(String name, String type, String description, boolean required, String... enumValues) {
-            this(name, type, description, required,
-                    enumValues == null || enumValues.length == 0 ? List.of() : List.of(enumValues), false);
-        }
+    public ToolEffect toolEffect(String name) {
+        return executionCore.toolEffect(name);
+    }
+    public Destructiveness toolDestructiveness(String name) {
+        return executionCore.toolDestructiveness(name);
+    }
+    public Idempotency toolIdempotency(String name) {
+        return executionCore.toolIdempotency(name);
+    }
+    public boolean toolCacheable(String name) {
+        return executionCore.toolCacheable(name);
+    }
+    public ToolPresentation toolPresentation(String name) {
+        return executionCore.toolPresentation(name);
+    }
+    public boolean requiresApproval(String name) {
+        return executionCore.requiresApproval(name);
+    }
+    public boolean requiresAudit(String name) {
+        return executionCore.requiresAudit(name);
+    }
+    public ToolCancellationCapability toolCancellationCapability(String toolName) {
+        return executionCore.toolCancellationCapability(toolName);
     }
 
 }

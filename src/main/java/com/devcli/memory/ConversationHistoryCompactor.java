@@ -3,17 +3,12 @@ package com.devcli.memory;
 import java.util.stream.Collectors;
 import com.devcli.context.ContextProfile;
 import com.devcli.llm.LlmClient;
-import com.devcli.tool.ToolResultArtifactStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -37,9 +32,6 @@ public class ConversationHistoryCompactor {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     /** 实验与诊断用：默认保持生产压缩行为，可显式关闭形成 raw 对照。 */
-    public static final String COMPACTION_ENABLED_PROPERTY = "devcli.context.compaction.enabled";
-
-    public static final String COMPACTION_ENABLED_ENV = "DEVCLI_CONTEXT_COMPACTION_ENABLED";
 
     public static final String COMPACTION_METRICS_PROPERTY = "devcli.context.compaction.metrics.enabled";
 
@@ -106,7 +98,7 @@ public class ConversationHistoryCompactor {
 
     private final ContextProjectionBuilder projectionBuilder = new ContextProjectionBuilder();
 
-    /** 六段摘要的程序化垃圾回收（capSummarySize 优先用它裁剪，不调 LLM）。 */
+    /** 六段摘要的程序化垃圾回收（摘要流程优先用它裁剪，不调 LLM）。 */
     final SummaryGarbageCollector summaryGc = new SummaryGarbageCollector();
 
     /** Deterministic facts retained across semantic summary generations. */
@@ -125,7 +117,7 @@ public class ConversationHistoryCompactor {
     private final String boundaryScopeId = UUID.randomUUID().toString();
 
     volatile CompactBoundarySnapshotStore boundarySnapshotStore =
-            new CompactBoundarySnapshotStore(defaultBoundarySnapshotPath());
+            new CompactBoundarySnapshotStore(CompactionPaths.defaultBoundarySnapshotPath());
 
     private volatile CompactionResult lastCompactionResult =
             new CompactionResult(false, List.of(), null, List.of(), 0, 0);
@@ -199,7 +191,7 @@ public class ConversationHistoryCompactor {
     private MicrocompactStats lastMicrocompactStats = MicrocompactStats.empty();
 
     private CompactionTriggerStateStore triggerStateStore =
-            new CompactionTriggerStateStore(defaultCompactionStatePath());
+            new CompactionTriggerStateStore(CompactionPaths.defaultCompactionStatePath());
 
     public record MicrocompactStats(int beforeTokens,
                                     int afterTokens,
@@ -337,13 +329,13 @@ public class ConversationHistoryCompactor {
                 : microcompactOutputRoot.toAbsolutePath().normalize();
         if (this.microcompactOutputRoot != null) {
             this.triggerStateStore = new CompactionTriggerStateStore(
-                    defaultCompactionStatePath(this.microcompactOutputRoot));
+                    CompactionPaths.defaultCompactionStatePath(this.microcompactOutputRoot));
         }
     }
 
     void setCompactionTriggerStatePath(Path statePath) {
         this.triggerStateStore = statePath == null
-                ? new CompactionTriggerStateStore(defaultCompactionStatePath())
+                ? new CompactionTriggerStateStore(CompactionPaths.defaultCompactionStatePath())
                 : new CompactionTriggerStateStore(statePath);
     }
 
@@ -431,7 +423,7 @@ public class ConversationHistoryCompactor {
         int triggerTokens = activeCompactionContext.triggerTokens();
         int preCompactionTokens = TokenBudget.estimateMessagesTokens(history);
         boolean metrics = Boolean.parseBoolean(System.getProperty(COMPACTION_METRICS_PROPERTY, "false"));
-        boolean enabled = isCompactionEnabled(System.getProperties(), System.getenv());
+        boolean enabled = CompactionConfiguration.isCompactionEnabled(System.getProperties(), System.getenv());
         if (metrics) {
             System.err.printf(Locale.ROOT,
                     "[context-compaction] kind=decision enabled=%s historyTokens=%d triggerTokens=%d%n",
@@ -708,7 +700,6 @@ public class ConversationHistoryCompactor {
         return true;
     }
 
-
     private SummaryFinalization finalizeSummary(String summary, List<LlmClient.Message> oldMsgs,
                                                 boolean periodicLifecycleGc) {
         return summaryWorkflow.finalizeSummary(summary, oldMsgs, periodicLifecycleGc);
@@ -739,10 +730,6 @@ public class ConversationHistoryCompactor {
 
     private void configureBoundarySnapshotStore(CompactionContext context) {
         summaryWorkflow.configureBoundarySnapshotStore(context);
-    }
-
-    private static void ageLifecycleItems(RollingSummary summary) {
-        CompactionSummaryWorkflow.ageLifecycleItems(summary);
     }
 
     private CompactBoundaryRuntimeState buildCompactBoundaryRuntimeState(boolean hasPostCompactRestoreContext) {
@@ -959,74 +946,14 @@ public class ConversationHistoryCompactor {
         return summaryWorkflow.summaryInputBudgetTokens();
     }
 
-    private String capSummarySize(String summary) {
-        return summaryWorkflow.capSummarySize(summary);
-    }
-
     String chatOnce(String systemPrompt, String userPrompt) throws IOException {
         return summaryWorkflow.chatOnce(systemPrompt, userPrompt);
-    }
-
-    private String callSummary(List<LlmClient.Message> req, List<LlmClient.Tool> tools) throws IOException {
-        return summaryWorkflow.callSummary(req, tools);
-    }
-
-    private String callSummary(List<LlmClient.Message> req, List<LlmClient.Tool> tools,
-                               int inputBudget) throws IOException {
-        return summaryWorkflow.callSummary(req, tools, inputBudget);
-    }
-
-    private static Path defaultCompactionStatePath() {
-        return ToolResultArtifactStore.rootDirectory().resolve("compaction-trigger-"
-                + UUID.randomUUID().toString().replace("-", "") + ".properties");
-    }
-
-    private static Path defaultBoundarySnapshotPath() {
-        return Path.of(System.getProperty("user.home"), ".devcli", "compaction-boundaries",
-                "boundary-default.json");
-    }
-
-    private static Path defaultCompactionStatePath(Path projectPath) {
-        String fingerprint = sha256(projectPath.toAbsolutePath().normalize().toString());
-        return ToolResultArtifactStore.rootDirectory().resolve("compaction-trigger-" + fingerprint + ".properties");
-    }
-
-    static String sha256(String value) {
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256")
-                    .digest(value.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 不可用", e);
-        }
     }
 
     public int retainRecentTokens() {
         return adaptiveRetainBudget
                 ? ContextProfile.from(llmClient).compactionTailBudgetTokens()
                 : retainRecentTokens;
-    }
-
-    public static boolean isCompactionEnabled(java.util.Properties properties,
-                                              java.util.Map<String, String> environment) {
-        String configured = properties == null ? null : properties.getProperty(COMPACTION_ENABLED_PROPERTY);
-        if ((configured == null || configured.isBlank()) && environment != null) {
-            configured = environment.get(COMPACTION_ENABLED_ENV);
-        }
-        if (configured == null || configured.isBlank()) {
-            return true;
-        }
-        String normalized = configured.trim().toLowerCase(Locale.ROOT);
-        if ("true".equals(normalized) || "1".equals(normalized) || "yes".equals(normalized)
-                || "on".equals(normalized)) {
-            return true;
-        }
-        if ("false".equals(normalized) || "0".equals(normalized) || "no".equals(normalized)
-                || "off".equals(normalized)) {
-            return false;
-        }
-        throw new IllegalArgumentException(COMPACTION_ENABLED_PROPERTY
-                + " must be true|false, got: " + configured);
     }
 
     boolean microcompactOversizeMessages(List<LlmClient.Message> history) {

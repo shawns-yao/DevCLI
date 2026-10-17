@@ -971,7 +971,7 @@ class ConversationHistoryCompactorTest {
 
     @Test
     void disabledCompactionLeavesHistoryUntouchedAndSkipsSummaryModel() {
-        String key = ConversationHistoryCompactor.COMPACTION_ENABLED_PROPERTY;
+        String key = com.devcli.memory.CompactionConfiguration.COMPACTION_ENABLED_PROPERTY;
         String previous = System.getProperty(key);
         AtomicInteger calls = new AtomicInteger();
         ConversationHistoryCompactor compactor = new ConversationHistoryCompactor(null, 2_000, true) {
@@ -995,7 +995,7 @@ class ConversationHistoryCompactorTest {
 
     @Test
     void metricsReportEveryDecisionEvenWhenRawModeDisablesCompaction() {
-        String enabledKey = ConversationHistoryCompactor.COMPACTION_ENABLED_PROPERTY;
+        String enabledKey = com.devcli.memory.CompactionConfiguration.COMPACTION_ENABLED_PROPERTY;
         String metricsKey = ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY;
         String previousEnabled = System.getProperty(enabledKey);
         String previousMetrics = System.getProperty(metricsKey);

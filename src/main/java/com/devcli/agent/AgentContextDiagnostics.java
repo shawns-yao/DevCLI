@@ -194,4 +194,34 @@ final class AgentContextDiagnostics {
         return String.valueOf(tokens);
     }
 
+    /** 把当前预算/耗时/HITL 状态推送给 renderer 状态栏。 */
+    void pushStatus(com.devcli.render.Renderer renderer, AgentBudget budget, long startNanos, String phase, String permissionMode) {
+        try {
+            String model = llmClient == null ? "—" : llmClient.getModelName();
+            long totalTokens = budget == null ? 0L
+                    : (long) (budget.totalInputTokens() + budget.totalOutputTokens());
+            long contextWindow = llmClient == null ? 0L : llmClient.maxContextWindow();
+            long elapsed = (System.nanoTime() - startNanos) / 1_000_000L;
+            String cost = budget == null ? null : com.devcli.context.TokenUsageFormatter.estimatedCostCny(
+                    llmClient,
+                    budget.totalInputTokens(),
+                    budget.totalOutputTokens(),
+                    budget.totalCachedInputTokens());
+            renderer.updateStatus(com.devcli.render.StatusInfo.tokens(
+                    model,
+                    contextWindow,
+                    budget == null ? 0L : budget.totalInputTokens(),
+                    budget == null ? 0L : budget.totalOutputTokens(),
+                    budget == null ? 0L : budget.totalCachedInputTokens(),
+                    cost,
+                    permissionMode,
+                    elapsed,
+                    phase == null || phase.isBlank()
+                            ? (totalTokens > 0 || elapsed > 0 ? "running" : "idle")
+                            : phase));
+        } catch (Exception e) {
+            log.debug("status push failed", e);
+        }
+    }
+
 }

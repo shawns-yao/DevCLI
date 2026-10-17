@@ -5,7 +5,6 @@ import com.devcli.hook.HookLifecycle;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.LlmTraceLogger;
 import com.devcli.context.ContextProfile;
-import com.devcli.context.TokenUsageFormatter;
 import com.devcli.lsp.LspDiagnosticReport;
 import com.devcli.memory.ConversationHistoryCompactor;
 import com.devcli.memory.CompactionContext;
@@ -368,7 +367,7 @@ public class Agent implements AutoCloseable {
                 "model", modelLabel(),
                 "inputChars", userInput == null ? 0 : userInput.length()
         ));
-        pushStatus(budget, startNanos, "running");
+        contextDiagnostics().pushStatus(renderer(), budget, startNanos, "running", permissionModeSupplier.get());
 
         // 主退出条件 = LLM 自己决定（不再调用工具就返回）；
         // budget 仅在 token 用尽 / 检测到死循环 / 超出硬轮数时兜底。
@@ -478,7 +477,7 @@ public class Agent implements AutoCloseable {
                                 "react iteration=" + iteration,
                                 llmClient,
                                 response.reasoningContent());
-                        pushStatus(currentBudget, startNanos, "running");
+                        contextDiagnostics().pushStatus(renderer(), currentBudget, startNanos, "running", permissionModeSupplier.get());
                     }
 
                     @Override
@@ -572,7 +571,7 @@ public class Agent implements AutoCloseable {
                                 response.inputTokens(),
                                 response.outputTokens(),
                                 response.cachedInputTokens());
-                        pushStatus(currentBudget, startNanos, "idle");
+                        contextDiagnostics().pushStatus(renderer(), currentBudget, startNanos, "idle", permissionModeSupplier.get());
                         log.info("ReAct run finished: inputTokens={}, outputTokens={}, reasoningChars={}, answerChars={}",
                                 currentBudget.totalInputTokens(),
                                 currentBudget.totalOutputTokens(),
@@ -600,7 +599,7 @@ public class Agent implements AutoCloseable {
                     public String cancelled(AgentBudget currentBudget) {
                         log.info("ReAct run cancelled");
                         streamRenderer.finish();
-                        pushStatus(currentBudget, startNanos, "idle");
+                        contextDiagnostics().pushStatus(renderer(), currentBudget, startNanos, "idle", permissionModeSupplier.get());
                         return "⏹️ 已取消当前任务。";
                     }
 
@@ -613,7 +612,7 @@ public class Agent implements AutoCloseable {
                                 currentBudget.totalInputTokens() + currentBudget.totalOutputTokens(),
                                 currentBudget.tokenBudget());
                         streamRenderer.finish();
-                        pushStatus(currentBudget, startNanos, "idle");
+                        contextDiagnostics().pushStatus(renderer(), currentBudget, startNanos, "idle", permissionModeSupplier.get());
                         return "❌ " + feedback.render();
                     }
 
@@ -627,7 +626,7 @@ public class Agent implements AutoCloseable {
                     public String failed(IOException error, AgentBudget currentBudget) {
                         log.error("LLM call failed in ReAct loop", error);
                         streamRenderer.finish();
-                        pushStatus(currentBudget, startNanos, "idle");
+                        contextDiagnostics().pushStatus(renderer(), currentBudget, startNanos, "idle", permissionModeSupplier.get());
                         return "❌ " + FailureFeedback.fromReason(
                                 "调用 LLM 失败: " + error.getMessage()).render();
                     }
@@ -883,36 +882,6 @@ public class Agent implements AutoCloseable {
         return toolRegistry;
     }
 
-    /** 把当前预算/耗时/HITL 状态推送给 renderer 状态栏。 */
-    private void pushStatus(AgentBudget budget, long startNanos, String phase) {
-        try {
-            String model = llmClient == null ? "—" : llmClient.getModelName();
-            long totalTokens = budget == null ? 0L
-                    : (long) (budget.totalInputTokens() + budget.totalOutputTokens());
-            long contextWindow = llmClient == null ? 0L : llmClient.maxContextWindow();
-            String permissionMode = permissionModeSupplier.get();
-            long elapsed = (System.nanoTime() - startNanos) / 1_000_000L;
-            String cost = budget == null ? null : TokenUsageFormatter.estimatedCostCny(
-                    llmClient,
-                    budget.totalInputTokens(),
-                    budget.totalOutputTokens(),
-                    budget.totalCachedInputTokens());
-            renderer().updateStatus(StatusInfo.tokens(
-                    model,
-                    contextWindow,
-                    budget == null ? 0L : budget.totalInputTokens(),
-                    budget == null ? 0L : budget.totalOutputTokens(),
-                    budget == null ? 0L : budget.totalCachedInputTokens(),
-                    cost,
-                    permissionMode,
-                    elapsed,
-                    phase == null || phase.isBlank()
-                            ? (totalTokens > 0 || elapsed > 0 ? "running" : "idle")
-                            : phase));
-        } catch (Exception e) {
-            log.debug("status push failed", e);
-        }
-    }
 
     private void appendReasoning(StringBuilder reasoningTranscript, String reasoningContent) {
         if (reasoningContent == null || reasoningContent.isBlank()) {

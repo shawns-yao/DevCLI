@@ -1,4 +1,5 @@
 package com.devcli.memory;
+import static com.devcli.memory.CompactionPaths.sha256;
 
 import com.devcli.llm.LlmClient;
 import java.util.HashSet;

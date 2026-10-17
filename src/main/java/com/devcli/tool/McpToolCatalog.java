@@ -1,6 +1,6 @@
 package com.devcli.tool;
 
-import com.devcli.tool.ToolRegistry.Param;
+import com.devcli.tool.ToolContract.Param;
 
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;

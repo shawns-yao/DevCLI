@@ -1,7 +1,5 @@
 package com.devcli.agent;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
 import com.devcli.plan.ExecutionArtifact;
 import com.devcli.plan.ExecutionGraph;
 import com.devcli.workspace.FileModeSnapshot;
@@ -11,10 +9,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.Files;
-import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -24,7 +20,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.LinkedHashMap;
 import java.util.Set;
-import java.util.UUID;
 
 /**
  * Multi-Agent orchestration checkpoint for failure recovery.
@@ -43,8 +38,6 @@ import java.util.UUID;
  */
 public class AgentCheckpoint {
     private static final Logger log = LoggerFactory.getLogger(AgentCheckpoint.class);
-    private static final ObjectMapper mapper = new ObjectMapper()
-        .enable(SerializationFeature.INDENT_OUTPUT);
     /** 步骤 result 落盘上限：buildStepContext 注入依赖结果最多 800 字符，8KB 足够保真。 */
     public static final int MAX_SUMMARY_LENGTH = 8 * 1024;
     public static final int CURRENT_PROTOCOL_VERSION = 10;
@@ -372,7 +365,7 @@ public class AgentCheckpoint {
         return true;
     }
 
-    private static String normalizeRequired(String value, String field) {
+    static String normalizeRequired(String value, String field) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(field + " is required");
         }
@@ -390,7 +383,7 @@ public class AgentCheckpoint {
     // Checkpoint 操作
     // ─────────────────────────────────────────────────────────
 
-    public void addCompletedStep(String stepId, List<String> modifiedFiles, String summary) {
+    public synchronized void addCompletedStep(String stepId, List<String> modifiedFiles, String summary) {
         if (stepId == null || stepId.isBlank()) {
             return;
         }
@@ -409,7 +402,7 @@ public class AgentCheckpoint {
         timestamp = System.currentTimeMillis();
     }
 
-    public void recordFailure(String error) {
+    public synchronized void recordFailure(String error) {
         this.failedSteps++;
         this.lastError = error;
         this.timestamp = System.currentTimeMillis();
@@ -419,7 +412,7 @@ public class AgentCheckpoint {
      * 记录失败步骤的产物：失败步骤可能已写入文件，保留其 modifiedFiles 供 resume 后对位。
      * 内部已调用 {@link #recordFailure(String)}，调用方不应再单独调用，避免 failedSteps 重复计数。
      */
-    public void addFailedStep(String stepId, List<String> modifiedFiles, String summary) {
+    public synchronized void addFailedStep(String stepId, List<String> modifiedFiles, String summary) {
         if (stepId == null || stepId.isBlank()) {
             return;
         }
@@ -472,151 +465,17 @@ public class AgentCheckpoint {
                 : record.reference();
     }
 
-    private List<AttemptDigestRecord> attemptDigests() {
+    private synchronized List<AttemptDigestRecord> attemptDigests() {
         if (attemptDigests == null) attemptDigests = new ArrayList<>();
         return attemptDigests;
     }
 
-    public synchronized void preparePatchCommit(String stepId, Path projectRoot,
-                                                PatchSet patchSet,
-                                                ExecutionArtifact intendedArtifact) throws IOException {
-        if (stepId == null || stepId.isBlank()) {
-            throw new IllegalArgumentException("stepId is required");
-        }
-        Path root = normalizeProjectRoot(projectRoot);
-        Path journal = patchJournalDir(stepId);
-        deleteTree(journal);
-        PatchJournalPolicy.secureDirectory(journal);
-
-        List<PendingPatchEntry> entries = new ArrayList<>();
-        try {
-            for (PatchSet.FileChange change : patchSet.changes()) {
-                Path target = resolveSafe(root, change.relativePath());
-                String currentHash = currentHash(target);
-                if (!currentHash.equals(change.beforeHash())) {
-                    throw new IOException("PatchSet 写前日志前置版本冲突: " + change.relativePath());
-                }
-                if (!modeMatches(target, change.beforeMode())) {
-                    throw new IOException("PatchSet 写前日志前置权限冲突: " + change.relativePath());
-                }
-                boolean backupPresent = !PatchSet.isMissingHash(change.beforeHash());
-                if (backupPresent) {
-                    Path backup = resolveSafe(journal, change.relativePath());
-                    PatchJournalPolicy.secureDirectory(backup.getParent());
-                    Files.copy(target, backup, StandardCopyOption.REPLACE_EXISTING);
-                    PatchJournalPolicy.secureFile(backup);
-                }
-                entries.add(new PendingPatchEntry(
-                        change.relativePath(), change.type(), change.beforeHash(),
-                        change.afterHash(), backupPresent,
-                        change.beforeMode(), change.afterMode()));
-            }
-            ExecutionArtifact intended = intendedArtifact == null
-                    ? ExecutionArtifact.pending(stepId)
-                    : intendedArtifact.withModifiedResources(
-                    entries.stream().map(PendingPatchEntry::relativePath).toList());
-            pendingPatchCommits().put(stepId,
-                    new PendingPatchCommit(stepId, entries, intended));
-            timestamp = System.currentTimeMillis();
-            saveOrThrow();
-        } catch (Exception e) {
-            pendingPatchCommits().remove(stepId);
-            deleteTree(journal);
-            if (e instanceof IOException ioException) {
-                throw ioException;
-            }
-            throw new IOException("准备 PatchSet 写前日志失败: " + e.getMessage(), e);
-        }
-    }
 
     public synchronized void markPatchCommitTerminal(String stepId) {
         pendingPatchCommits().remove(stepId);
     }
 
-    public synchronized void preserveDeferredPatch(String stepId, PatchSet patchSet,
-                                                   String failureReason) throws IOException {
-        String normalizedStepId = normalizeRequired(stepId, "stepId");
-        if (patchSet == null || patchSet.isEmpty()) {
-            return;
-        }
-        String storageKey = UUID.randomUUID().toString();
-        Path directory = deferredPatchDir(normalizedStepId, storageKey);
-        PatchJournalPolicy.secureDirectory(directory);
-        List<DeferredPatchEntry> entries = new ArrayList<>();
-        DeferredPatch previous = deferredPatches().get(normalizedStepId);
-        try {
-            for (PatchSet.FileChange change : patchSet.changes()) {
-                if (change.type() == PatchSet.ChangeType.DELETE) {
-                    if (!PatchSet.isMissingHash(change.afterHash())) {
-                        throw new IOException("延迟补丁删除项 afterHash 非法: "
-                                + change.relativePath());
-                    }
-                } else {
-                    String actualHash = PatchSet.hash(change.content());
-                    if (!actualHash.equals(change.afterHash())) {
-                        throw new IOException("延迟补丁内容哈希不匹配: "
-                                + change.relativePath());
-                    }
-                    Path contentFile = resolveSafe(directory.resolve("after"),
-                            change.relativePath());
-                    PatchJournalPolicy.secureDirectory(contentFile.getParent());
-                    Files.write(contentFile, change.content());
-                    PatchJournalPolicy.secureFile(contentFile);
-                }
-                entries.add(new DeferredPatchEntry(
-                        change.relativePath(), change.type(), change.beforeHash(),
-                        change.afterHash(), change.beforeMode(), change.afterMode()));
-            }
-            deferredPatches().put(normalizedStepId, new DeferredPatch(
-                    normalizedStepId, storageKey, entries,
-                    failureReason, System.currentTimeMillis()));
-            timestamp = System.currentTimeMillis();
-            saveOrThrow();
-            if (previous != null) {
-                try {
-                    deleteTree(deferredPatchDir(previous.stepId(), previous.storageKey()));
-                } catch (IOException cleanupFailure) {
-                    log.warn("清理旧待验证 PatchSet 失败: step={}, error={}",
-                            normalizedStepId, cleanupFailure.getMessage());
-                }
-            }
-        } catch (Exception e) {
-            if (previous == null) {
-                deferredPatches().remove(normalizedStepId);
-            } else {
-                deferredPatches().put(normalizedStepId, previous);
-            }
-            deleteTree(directory);
-            if (e instanceof IOException ioException) {
-                throw ioException;
-            }
-            throw new IOException("保存待验证 PatchSet 失败: " + e.getMessage(), e);
-        }
-    }
 
-    public synchronized PatchSet loadDeferredPatch(String stepId) throws IOException {
-        String normalizedStepId = normalizeRequired(stepId, "stepId");
-        DeferredPatch deferred = deferredPatches().get(normalizedStepId);
-        if (deferred == null) {
-            return new PatchSet(List.of());
-        }
-        Path directory = deferredPatchDir(deferred.stepId(), deferred.storageKey());
-        List<PatchSet.FileChange> changes = new ArrayList<>();
-        for (DeferredPatchEntry entry : deferred.entries()) {
-            byte[] content = entry.type() == PatchSet.ChangeType.DELETE
-                    ? new byte[0]
-                    : Files.readAllBytes(resolveSafe(directory.resolve("after"),
-                    entry.relativePath()));
-            if (entry.type() != PatchSet.ChangeType.DELETE
-                    && !PatchSet.hash(content).equals(entry.afterHash())) {
-                throw new IOException("待验证 PatchSet 内容损坏: " + entry.relativePath());
-            }
-            changes.add(new PatchSet.FileChange(
-                    entry.relativePath(), entry.type(), entry.beforeHash(), entry.afterHash(),
-                    content, entry.beforeMode(), entry.afterMode()));
-        }
-        return new PatchSet(changes);
-    }
 
     public synchronized boolean hasDeferredPatch(String stepId) {
         return stepId != null && deferredPatches().containsKey(stepId);
@@ -632,143 +491,12 @@ public class AgentCheckpoint {
         }
     }
 
-    synchronized void cleanupDeferredPatchFiles(DeferredPatch deferredPatch) {
-        if (deferredPatch == null) {
-            return;
-        }
-        try {
-            deleteTree(deferredPatchDir(
-                    deferredPatch.stepId(), deferredPatch.storageKey()));
-        } catch (IOException cleanupFailure) {
-            log.warn("清理待验证 PatchSet 失败: step={}, error={}",
-                    deferredPatch.stepId(), cleanupFailure.getMessage());
-        }
-    }
 
-    public synchronized void clearDeferredPatch(String stepId) throws IOException {
-        if (stepId == null || stepId.isBlank()) {
-            return;
-        }
-        DeferredPatch removed = deferredPatches().remove(stepId);
-        if (removed == null) {
-            return;
-        }
-        timestamp = System.currentTimeMillis();
-        try {
-            saveOrThrow();
-        } catch (IOException e) {
-            deferredPatches().put(stepId, removed);
-            throw e;
-        }
-        cleanupDeferredPatchFiles(removed);
-    }
 
-    public synchronized void cleanupPatchJournal(String stepId) {
-        try {
-            deleteTree(patchJournalDir(stepId));
-        } catch (IOException e) {
-            log.warn("清理 PatchSet 写前日志失败: step={}, error={}", stepId, e.getMessage());
-        }
-    }
 
-    public synchronized PatchReconcileResult reconcilePendingPatchCommits(Path projectRoot) throws IOException {
-        Map<String, PatchReconcileAction> actions = new LinkedHashMap<>();
-        Map<String, List<String>> failures = new LinkedHashMap<>();
-        if (pendingPatchCommits().isEmpty()) {
-            return new PatchReconcileResult(actions, failures);
-        }
 
-        Path root = normalizeProjectRoot(projectRoot);
-        List<String> completedJournals = new ArrayList<>();
-        for (PendingPatchCommit pending : new ArrayList<>(pendingPatchCommits().values())) {
-            boolean allBefore = true;
-            boolean allAfter = true;
-            for (PendingPatchEntry entry : pending.entries()) {
-                Path target = resolveSafe(root, entry.relativePath());
-                String current = currentHash(target);
-                allBefore &= current.equals(entry.beforeHash())
-                        && modeMatches(target, entry.beforeMode());
-                allAfter &= current.equals(entry.afterHash())
-                        && modeMatches(target, entry.afterMode());
-            }
 
-            if (allAfter) {
-                promoteCompletedArtifact(pending);
-                pendingPatchCommits().remove(pending.stepId());
-                completedJournals.add(pending.stepId());
-                actions.put(pending.stepId(), PatchReconcileAction.PROMOTED_COMPLETED);
-                continue;
-            }
-            if (allBefore) {
-                pendingPatchCommits().remove(pending.stepId());
-                completedJournals.add(pending.stepId());
-                actions.put(pending.stepId(), PatchReconcileAction.CONTINUE_PENDING);
-                continue;
-            }
-
-            List<String> rollbackFailures = rollbackPendingPatch(root, pending);
-            if (rollbackFailures.isEmpty()) {
-                pendingPatchCommits().remove(pending.stepId());
-                completedJournals.add(pending.stepId());
-                actions.put(pending.stepId(), PatchReconcileAction.ROLLED_BACK);
-            } else {
-                actions.put(pending.stepId(), PatchReconcileAction.ROLLBACK_FAILED);
-                failures.put(pending.stepId(), rollbackFailures);
-            }
-        }
-
-        timestamp = System.currentTimeMillis();
-        saveOrThrow();
-        completedJournals.forEach(this::cleanupPatchJournal);
-        return new PatchReconcileResult(actions, failures);
-    }
-
-    private List<String> rollbackPendingPatch(Path projectRoot, PendingPatchCommit pending) {
-        List<String> failures = new ArrayList<>();
-        List<PendingPatchEntry> entries = new ArrayList<>(pending.entries());
-        entries.sort(Comparator.comparingInt((PendingPatchEntry entry) ->
-                Path.of(entry.relativePath()).getNameCount()).reversed());
-        for (PendingPatchEntry entry : entries) {
-            Path target = resolveSafe(projectRoot, entry.relativePath());
-            try {
-                if (entry.backupPresent()) {
-                    Path backup = resolveSafe(patchJournalDir(pending.stepId()), entry.relativePath());
-                    Files.createDirectories(target.getParent());
-                    Path temporary = Files.createTempFile(
-                            target.getParent(), ".devcli-recovery-", ".tmp");
-                    try {
-                        Files.copy(backup, temporary, StandardCopyOption.REPLACE_EXISTING);
-                        try {
-                            Files.move(temporary, target,
-                                    StandardCopyOption.ATOMIC_MOVE,
-                                    StandardCopyOption.REPLACE_EXISTING);
-                        } catch (IOException atomicFailure) {
-                            Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
-                        }
-                    } finally {
-                        Files.deleteIfExists(temporary);
-                    }
-                } else {
-                    Files.deleteIfExists(target);
-                }
-                if (entry.backupPresent() && entry.beforeMode() != null) {
-                    entry.beforeMode().apply(target);
-                }
-                String restored = currentHash(target);
-                if (!restored.equals(entry.beforeHash())) {
-                    failures.add(entry.relativePath() + ": 回滚后哈希不匹配");
-                } else if (!modeMatches(target, entry.beforeMode())) {
-                    failures.add(entry.relativePath() + ": 回滚后权限不匹配");
-                }
-            } catch (Exception e) {
-                failures.add(entry.relativePath() + ": "
-                        + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
-            }
-        }
-        return failures;
-    }
-
-    private void promoteCompletedArtifact(PendingPatchCommit pending) {
+    synchronized void promoteCompletedArtifact(PendingPatchCommit pending) {
         ExecutionArtifact artifact = pending.intendedArtifact() == null
                 ? ExecutionArtifact.completed(pending.stepId(), "", "",
                 pending.entries().stream().map(PendingPatchEntry::relativePath).toList())
@@ -783,35 +511,35 @@ public class AgentCheckpoint {
         failedArtifacts.remove(pending.stepId());
     }
 
-    private Map<String, PendingPatchCommit> pendingPatchCommits() {
+    synchronized Map<String, PendingPatchCommit> pendingPatchCommits() {
         if (pendingPatchCommits == null) {
             pendingPatchCommits = new HashMap<>();
         }
         return pendingPatchCommits;
     }
 
-    private Map<String, DeferredPatch> deferredPatches() {
+    synchronized Map<String, DeferredPatch> deferredPatches() {
         if (deferredPatches == null) {
             deferredPatches = new HashMap<>();
         }
         return deferredPatches;
     }
 
-    private Map<String, AgentCursorRecord> agentCursors() {
+    private synchronized Map<String, AgentCursorRecord> agentCursors() {
         if (agentCursors == null) {
             agentCursors = new HashMap<>();
         }
         return agentCursors;
     }
 
-    private Map<String, StepAssignmentRecord> stepAssignments() {
+    private synchronized Map<String, StepAssignmentRecord> stepAssignments() {
         if (stepAssignments == null) {
             stepAssignments = new HashMap<>();
         }
         return stepAssignments;
     }
 
-    private void validateAgentState() {
+    synchronized void validateAgentState() {
         List<AgentIdentityRecord> identities = agentIdentities == null ? List.of() : agentIdentities;
         if (identities.isEmpty() && agentCursors().isEmpty() && stepAssignments().isEmpty()) {
             return;
@@ -852,19 +580,19 @@ public class AgentCheckpoint {
         }
     }
 
-    public boolean isStepCompleted(String stepId) {
+    public synchronized boolean isStepCompleted(String stepId) {
         return completedSteps.contains(stepId);
     }
 
-    public boolean isStepSuperseded(String stepId) {
+    public synchronized boolean isStepSuperseded(String stepId) {
         return supersededSteps.contains(stepId);
     }
 
-    public List<String> getCompletedSteps() {
+    public synchronized List<String> getCompletedSteps() {
         return new ArrayList<>(completedSteps);
     }
 
-    public RecoveryState recoveryState() {
+    public synchronized RecoveryState recoveryState() {
         Map<String, ExecutionArtifact> normalized = new LinkedHashMap<>();
         Map<String, StepArtifact> completed = artifacts == null ? Map.of() : artifacts;
         Map<String, StepArtifact> failed = failedArtifacts == null ? Map.of() : failedArtifacts;
@@ -897,37 +625,18 @@ public class AgentCheckpoint {
     /**
      * 保存 Checkpoint 到磁盘（临时文件 + 原子 move，崩溃瞬间不会留下半截 JSON）
      */
-    public void save() {
+    public synchronized void save() {
         try {
-            saveOrThrow();
+            CheckpointFiles.save(this);
         } catch (Exception e) {
             log.error("保存 Checkpoint 失败: {}", e.getMessage(), e);
         }
     }
 
-    public void saveStrict() throws IOException {
-        saveOrThrow();
+    public synchronized void saveStrict() throws IOException {
+        CheckpointFiles.save(this);
     }
 
-    private void saveOrThrow() throws IOException {
-        Path checkpointDir = getCheckpointDir();
-        Files.createDirectories(checkpointDir);
-
-        validateAgentState();
-        Path checkpointFile = checkpointDir.resolve(orchestrationId + ".json");
-        Path tempFile = checkpointDir.resolve(orchestrationId + ".json.tmp");
-        mapper.writeValue(tempFile.toFile(), this);
-        try {
-            Files.move(tempFile, checkpointFile,
-                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        } catch (IOException atomicUnsupported) {
-            Files.move(tempFile, checkpointFile, StandardCopyOption.REPLACE_EXISTING);
-        }
-
-        log.info("Checkpoint 已保存: {} (已完成: {}/{} 步)",
-                orchestrationId, completedSteps.size(), planSteps.isEmpty()
-                        ? completedSteps.size() + failedSteps : planSteps.size());
-    }
 
     /**
      * 从磁盘加载 Checkpoint
@@ -936,33 +645,6 @@ public class AgentCheckpoint {
         return loadResult(orchestrationId).checkpoint();
     }
 
-    public static LoadResult loadResult(String orchestrationId) {
-        try {
-            Path checkpointFile = getCheckpointDir().resolve(orchestrationId + ".json");
-            if (!Files.exists(checkpointFile)) {
-                log.warn("Checkpoint 不存在: {}", orchestrationId);
-                return new LoadResult(LoadStatus.NOT_FOUND, null, "checkpoint 不存在");
-            }
-
-            AgentCheckpoint checkpoint = mapper.readValue(checkpointFile.toFile(), AgentCheckpoint.class);
-            int loadedVersion = checkpoint.protocolVersion <= 0 ? 1 : checkpoint.protocolVersion;
-            if (loadedVersion > CURRENT_PROTOCOL_VERSION) {
-                String message = "checkpoint 协议版本不兼容：文件版本 " + loadedVersion
-                        + "，当前版本 " + CURRENT_PROTOCOL_VERSION;
-                log.error("拒绝加载未来版本 Checkpoint: {} (文件版本: {}, 当前版本: {})",
-                        orchestrationId, loadedVersion, CURRENT_PROTOCOL_VERSION);
-                return new LoadResult(LoadStatus.INCOMPATIBLE, null, message);
-            }
-            checkpoint.normalizeState();
-            log.info("Checkpoint 已加载: {} (协议版本: {}, 已完成: {} 步)",
-                orchestrationId, loadedVersion, checkpoint.completedSteps.size());
-            return new LoadResult(LoadStatus.LOADED, checkpoint, "");
-        } catch (Exception e) {
-            log.error("加载 Checkpoint 失败: {}", e.getMessage(), e);
-            return new LoadResult(LoadStatus.INVALID, null,
-                    e.getMessage() == null ? "checkpoint 无法解析" : e.getMessage());
-        }
-    }
 
     /**
      * 加载最近一次保存的 Checkpoint；目录为空或全部不可解析时返回 null。
@@ -983,52 +665,19 @@ public class AgentCheckpoint {
     /**
      * 删除 Checkpoint（orchestration 成功完成后）
      */
-    public void delete() {
+    public synchronized void delete() {
         try {
             Path checkpointFile = getCheckpointDir().resolve(orchestrationId + ".json");
             if (Files.exists(checkpointFile)) {
                 Files.delete(checkpointFile);
                 log.info("Checkpoint 已删除: {}", orchestrationId);
             }
-            deleteTree(patchJournalRoot());
+            CheckpointPatchJournal.deleteTree(new CheckpointPatchJournal(this).patchJournalRoot());
         } catch (Exception e) {
             log.warn("删除 Checkpoint 失败: {}", e.getMessage());
         }
     }
 
-    /**
-     * 列出所有可恢复的 Checkpoint
-     */
-    public static List<CheckpointInfo> listAvailable() {
-        List<CheckpointInfo> checkpoints = new ArrayList<>();
-        try {
-            Path checkpointDir = getCheckpointDir();
-            if (!Files.exists(checkpointDir)) {
-                return checkpoints;
-            }
-
-            try (var paths = Files.list(checkpointDir)) {
-                paths.filter(p -> p.toString().endsWith(".json"))
-                    .forEach(p -> {
-                        try {
-                            AgentCheckpoint cp = mapper.readValue(p.toFile(), AgentCheckpoint.class);
-                            checkpoints.add(new CheckpointInfo(
-                                cp.orchestrationId,
-                                cp.goal,
-                                cp.completedSteps.size(),
-                                cp.failedSteps,
-                                Instant.ofEpochMilli(cp.timestamp)
-                            ));
-                        } catch (Exception e) {
-                            log.warn("读取 Checkpoint 失败: {}", p.getFileName());
-                        }
-                    });
-            }
-        } catch (Exception e) {
-            log.error("列出 Checkpoint 失败: {}", e.getMessage());
-        }
-        return checkpoints;
-    }
 
     public record CheckpointInfo(
         String orchestrationId,
@@ -1052,7 +701,7 @@ public class AgentCheckpoint {
         }
     }
 
-    private void normalizeState() {
+    synchronized void normalizeState() {
         if (completedSteps == null) completedSteps = new ArrayList<>();
         if (supersededSteps == null) supersededSteps = new ArrayList<>();
         if (artifacts == null) artifacts = new HashMap<>();
@@ -1070,82 +719,14 @@ public class AgentCheckpoint {
         validateAgentState();
     }
 
-    private Path patchJournalRoot() {
-        String safeId = orchestrationId == null || orchestrationId.isBlank()
-                ? "checkpoint"
-                : orchestrationId.replaceAll("[^a-zA-Z0-9._-]", "-");
-        return getCheckpointDir().resolve(safeId + ".patch-journal");
-    }
 
-    private Path patchJournalDir(String stepId) {
-        String safeStep = stepId == null || stepId.isBlank()
-                ? "step"
-                : stepId.replaceAll("[^a-zA-Z0-9._-]", "-");
-        Path root = patchJournalRoot().normalize();
-        Path journal = root.resolve("step-" + safeStep).normalize();
-        if (journal.equals(root) || !journal.startsWith(root)) {
-            throw new IllegalArgumentException("invalid patch journal step id");
-        }
-        return journal;
-    }
 
-    private Path deferredPatchDir(String stepId, String storageKey) {
-        String safeStep = stepId == null || stepId.isBlank()
-                ? "step"
-                : stepId.replaceAll("[^a-zA-Z0-9._-]", "-");
-        String safeStorage = storageKey == null || storageKey.isBlank()
-                ? "legacy"
-                : storageKey.replaceAll("[^a-zA-Z0-9._-]", "-");
-        Path root = patchJournalRoot().normalize();
-        Path directory = root.resolve("deferred-step-" + safeStep + "-" + safeStorage).normalize();
-        if (directory.equals(root) || !directory.startsWith(root)) {
-            throw new IllegalArgumentException("invalid deferred patch step id");
-        }
-        return directory;
-    }
 
-    private static Path normalizeProjectRoot(Path projectRoot) {
-        if (projectRoot == null) {
-            throw new IllegalArgumentException("projectRoot is required");
-        }
-        return projectRoot.toAbsolutePath().normalize();
-    }
 
-    private static Path resolveSafe(Path root, String relativePath) {
-        Path relative = Path.of(relativePath);
-        if (relative.isAbsolute()) {
-            throw new IllegalArgumentException("patch journal path must be relative: " + relativePath);
-        }
-        Path resolved = root.resolve(relative).normalize();
-        if (resolved.equals(root) || !resolved.startsWith(root)) {
-            throw new IllegalArgumentException("patch journal path escapes root: " + relativePath);
-        }
-        return resolved;
-    }
 
-    private static String currentHash(Path path) {
-        try {
-            if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
-                return "<missing>";
-            }
-            return PatchSet.hash(Files.readAllBytes(path));
-        } catch (IOException e) {
-            return "<unreadable>";
-        }
-    }
 
-    private static void deleteTree(Path root) throws IOException {
-        if (root == null || !Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
-            return;
-        }
-        try (var stream = Files.walk(root)) {
-            for (Path path : stream.sorted(Comparator.reverseOrder()).toList()) {
-                Files.deleteIfExists(path);
-            }
-        }
-    }
 
-    private static Path getCheckpointDir() {
+    static Path getCheckpointDir() {
         // 测试与多实例场景可通过 -Ddevcli.checkpoint.dir 重定向，避免写用户主目录
         String override = System.getProperty("devcli.checkpoint.dir");
         if (override != null && !override.isBlank()) {
@@ -1159,201 +740,191 @@ public class AgentCheckpoint {
     // Getters / Setters
     // ─────────────────────────────────────────────────────────
 
-    public int getProtocolVersion() {
+    public synchronized int getProtocolVersion() {
         return protocolVersion;
     }
 
-    public void setProtocolVersion(int protocolVersion) {
+    public synchronized void setProtocolVersion(int protocolVersion) {
         this.protocolVersion = protocolVersion;
     }
 
-    public String getOrchestrationId() {
+    public synchronized String getOrchestrationId() {
         return orchestrationId;
     }
 
-    public void setOrchestrationId(String orchestrationId) {
+    public synchronized void setOrchestrationId(String orchestrationId) {
         this.orchestrationId = orchestrationId;
     }
 
-    public String getGoal() {
+    public synchronized String getGoal() {
         return goal;
     }
 
-    public void setGoal(String goal) {
+    public synchronized void setGoal(String goal) {
         this.goal = goal;
     }
 
-    public List<PlanStep> getPlanSteps() {
+    public synchronized List<PlanStep> getPlanSteps() {
         return planSteps;
     }
 
-    public void setPlanSteps(List<PlanStep> planSteps) {
+    public synchronized void setPlanSteps(List<PlanStep> planSteps) {
         this.planSteps = planSteps == null ? new ArrayList<>() : planSteps;
     }
 
-    public List<CriterionRecord> getAcceptanceCriteria() {
+    public synchronized List<CriterionRecord> getAcceptanceCriteria() {
         return acceptanceCriteria;
     }
 
-    public void setAcceptanceCriteria(List<CriterionRecord> acceptanceCriteria) {
+    public synchronized void setAcceptanceCriteria(List<CriterionRecord> acceptanceCriteria) {
         this.acceptanceCriteria = acceptanceCriteria == null ? new ArrayList<>() : acceptanceCriteria;
     }
 
-    public void setCompletedSteps(List<String> completedSteps) {
+    public synchronized void setCompletedSteps(List<String> completedSteps) {
         this.completedSteps = completedSteps;
     }
 
-    public List<String> getSupersededSteps() {
+    public synchronized List<String> getSupersededSteps() {
         return supersededSteps;
     }
 
-    public void setSupersededSteps(List<String> supersededSteps) {
+    public synchronized void setSupersededSteps(List<String> supersededSteps) {
         this.supersededSteps = supersededSteps == null ? new ArrayList<>() : supersededSteps;
     }
 
-    public Map<String, StepArtifact> getArtifacts() {
+    public synchronized Map<String, StepArtifact> getArtifacts() {
         return artifacts;
     }
 
-    public void setArtifacts(Map<String, StepArtifact> artifacts) {
+    public synchronized void setArtifacts(Map<String, StepArtifact> artifacts) {
         this.artifacts = artifacts;
     }
 
-    public Map<String, StepArtifact> getFailedArtifacts() {
+    public synchronized Map<String, StepArtifact> getFailedArtifacts() {
         return failedArtifacts;
     }
 
-    public void setFailedArtifacts(Map<String, StepArtifact> failedArtifacts) {
+    public synchronized void setFailedArtifacts(Map<String, StepArtifact> failedArtifacts) {
         this.failedArtifacts = failedArtifacts == null ? new HashMap<>() : failedArtifacts;
     }
 
-    private static boolean modeMatches(Path path, FileModeSnapshot expected) {
-        if (expected == null) {
-            return true;
-        }
-        try {
-            return expected.matches(path);
-        } catch (IOException e) {
-            return false;
-        }
-    }
 
-    public Map<String, Integer> getRedoCounts() {
+    public synchronized Map<String, Integer> getRedoCounts() {
         return Map.copyOf(redoCounts());
     }
 
-    public void setRedoCounts(Map<String, Integer> redoCounts) {
+    public synchronized void setRedoCounts(Map<String, Integer> redoCounts) {
         this.redoCounts = redoCounts == null ? new HashMap<>() : new HashMap<>(redoCounts);
     }
 
-    public List<RedoAttemptRecord> getRedoAttempts() {
+    public synchronized List<RedoAttemptRecord> getRedoAttempts() {
         return List.copyOf(redoAttempts());
     }
 
-    public List<AttemptDigestRecord> getAttemptDigests() {
+    public synchronized List<AttemptDigestRecord> getAttemptDigests() {
         return List.copyOf(attemptDigests());
     }
 
-    public void setRedoAttempts(List<RedoAttemptRecord> redoAttempts) {
+    public synchronized void setRedoAttempts(List<RedoAttemptRecord> redoAttempts) {
         this.redoAttempts = redoAttempts == null ? new ArrayList<>() : new ArrayList<>(redoAttempts);
     }
 
-    public Set<String> getRedoPendingSteps() {
+    public synchronized Set<String> getRedoPendingSteps() {
         return Set.copyOf(redoPendingSteps());
     }
 
-    public void setRedoPendingSteps(Set<String> redoPendingSteps) {
+    public synchronized void setRedoPendingSteps(Set<String> redoPendingSteps) {
         this.redoPendingSteps = redoPendingSteps == null ? new HashSet<>() : new HashSet<>(redoPendingSteps);
     }
 
-    public Map<String, PendingPatchCommit> getPendingPatchCommits() {
+    public synchronized Map<String, PendingPatchCommit> getPendingPatchCommits() {
         return pendingPatchCommits();
     }
 
-    public void setPendingPatchCommits(Map<String, PendingPatchCommit> pendingPatchCommits) {
+    public synchronized void setPendingPatchCommits(Map<String, PendingPatchCommit> pendingPatchCommits) {
         this.pendingPatchCommits = pendingPatchCommits == null ? new HashMap<>() : pendingPatchCommits;
     }
 
-    public Map<String, DeferredPatch> getDeferredPatches() {
+    public synchronized Map<String, DeferredPatch> getDeferredPatches() {
         return Map.copyOf(deferredPatches());
     }
 
-    public void setDeferredPatches(Map<String, DeferredPatch> deferredPatches) {
+    public synchronized void setDeferredPatches(Map<String, DeferredPatch> deferredPatches) {
         this.deferredPatches = deferredPatches == null
                 ? new HashMap<>() : new HashMap<>(deferredPatches);
     }
 
-    public List<AgentIdentityRecord> getAgentIdentities() {
+    public synchronized List<AgentIdentityRecord> getAgentIdentities() {
         return agentIdentities == null ? List.of() : List.copyOf(agentIdentities);
     }
 
-    public void setAgentIdentities(List<AgentIdentityRecord> agentIdentities) {
+    public synchronized void setAgentIdentities(List<AgentIdentityRecord> agentIdentities) {
         this.agentIdentities = agentIdentities == null ? new ArrayList<>() : new ArrayList<>(agentIdentities);
     }
 
-    public Map<String, AgentCursorRecord> getAgentCursors() {
+    public synchronized Map<String, AgentCursorRecord> getAgentCursors() {
         return Map.copyOf(agentCursors());
     }
 
-    public void setAgentCursors(Map<String, AgentCursorRecord> agentCursors) {
+    public synchronized void setAgentCursors(Map<String, AgentCursorRecord> agentCursors) {
         this.agentCursors = agentCursors == null ? new HashMap<>() : new HashMap<>(agentCursors);
     }
 
-    public Map<String, StepAssignmentRecord> getStepAssignments() {
+    public synchronized Map<String, StepAssignmentRecord> getStepAssignments() {
         return Map.copyOf(stepAssignments());
     }
 
-    public void setStepAssignments(Map<String, StepAssignmentRecord> stepAssignments) {
+    public synchronized void setStepAssignments(Map<String, StepAssignmentRecord> stepAssignments) {
         this.stepAssignments = stepAssignments == null ? new HashMap<>() : new HashMap<>(stepAssignments);
     }
 
-    public long getMessageSequence() {
+    public synchronized long getMessageSequence() {
         return messageSequence;
     }
 
-    public void setMessageSequence(long messageSequence) {
+    public synchronized void setMessageSequence(long messageSequence) {
         this.messageSequence = Math.max(0, messageSequence);
     }
 
-    public long getTimestamp() {
+    public synchronized long getTimestamp() {
         return timestamp;
     }
 
-    public void setTimestamp(long timestamp) {
+    public synchronized void setTimestamp(long timestamp) {
         this.timestamp = timestamp;
     }
 
-    public int getFailedSteps() {
+    public synchronized int getFailedSteps() {
         return failedSteps;
     }
 
-    public void setFailedSteps(int failedSteps) {
+    public synchronized void setFailedSteps(int failedSteps) {
         this.failedSteps = failedSteps;
     }
 
-    public String getLastError() {
+    public synchronized String getLastError() {
         return lastError;
     }
 
-    public void setLastError(String lastError) {
+    public synchronized void setLastError(String lastError) {
         this.lastError = lastError;
     }
 
-    private Map<String, Integer> redoCounts() {
+    private synchronized Map<String, Integer> redoCounts() {
         if (redoCounts == null) {
             redoCounts = new HashMap<>();
         }
         return redoCounts;
     }
 
-    private List<RedoAttemptRecord> redoAttempts() {
+    private synchronized List<RedoAttemptRecord> redoAttempts() {
         if (redoAttempts == null) {
             redoAttempts = new ArrayList<>();
         }
         return redoAttempts;
     }
 
-    private Set<String> redoPendingSteps() {
+    private synchronized Set<String> redoPendingSteps() {
         if (redoPendingSteps == null) {
             redoPendingSteps = new HashSet<>();
         }
@@ -1365,5 +936,43 @@ public class AgentCheckpoint {
         return normalized.length() <= MAX_SUMMARY_LENGTH
                 ? normalized
                 : normalized.substring(0, MAX_SUMMARY_LENGTH) + "...(截断)";
+    }
+    public synchronized void preparePatchCommit(String stepId, Path projectRoot,
+                                                PatchSet patchSet,
+                                                ExecutionArtifact intendedArtifact) throws IOException {
+        new CheckpointPatchJournal(this).preparePatchCommit(stepId, projectRoot, patchSet, intendedArtifact);
+    }
+
+    public synchronized void preserveDeferredPatch(String stepId, PatchSet patchSet,
+                                                   String failureReason) throws IOException {
+        new CheckpointPatchJournal(this).preserveDeferredPatch(stepId, patchSet, failureReason);
+    }
+
+    public synchronized PatchSet loadDeferredPatch(String stepId) throws IOException {
+        return new CheckpointPatchJournal(this).loadDeferredPatch(stepId);
+    }
+
+    synchronized void cleanupDeferredPatchFiles(DeferredPatch deferredPatch) {
+        new CheckpointPatchJournal(this).cleanupDeferredPatchFiles(deferredPatch);
+    }
+
+    public synchronized void clearDeferredPatch(String stepId) throws IOException {
+        new CheckpointPatchJournal(this).clearDeferredPatch(stepId);
+    }
+
+    public synchronized void cleanupPatchJournal(String stepId) {
+        new CheckpointPatchJournal(this).cleanupPatchJournal(stepId);
+    }
+
+    public synchronized PatchReconcileResult reconcilePendingPatchCommits(Path projectRoot) throws IOException {
+        return new CheckpointPatchJournal(this).reconcilePendingPatchCommits(projectRoot);
+    }
+
+    public static LoadResult loadResult(String orchestrationId) {
+        return CheckpointFiles.loadResult(orchestrationId);
+    }
+
+    public static List<CheckpointInfo> listAvailable() {
+        return CheckpointFiles.listAvailable();
     }
 }

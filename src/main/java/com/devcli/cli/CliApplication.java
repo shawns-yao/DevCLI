@@ -24,9 +24,7 @@ import com.devcli.render.RendererFactory;
 import com.devcli.render.inline.InlineRenderer;
 import com.devcli.render.inline.FixedInputLineReader;
 import com.devcli.render.inline.TerminalCapabilities;
-import com.devcli.mcp.McpServer;
 import com.devcli.mcp.McpServerManager;
-import com.devcli.mcp.McpServerStatus;
 import com.devcli.mcp.mention.AtMentionExpander;
 import com.devcli.rag.CodeIndex;
 import com.devcli.policy.PermissionMode;
@@ -173,40 +171,10 @@ final class CliApplication {
             AtMentionExpander mentionExpander = new AtMentionExpander(mcpServerManager, Path.of("."));
             LocalPathMentionExpander localPathMentionExpander = new LocalPathMentionExpander(Path.of("."));
 
-            // === Skill 系统初始化 ===
-            Path home = Path.of(System.getProperty("user.home"));
-            Path skillsCacheDir = home.resolve(".devcli/skills-cache");
-            Path userSkillsDir = home.resolve(".devcli/skills");
-            Path projectSkillsDir = Path.of(".devcli/skills").toAbsolutePath();
-            try {
-                new com.devcli.skill.SkillBuiltinExtractor(skillsCacheDir,
-                        diagnostic -> TRACE_SINK.emit(new com.devcli.event.RunEvent.CustomMessage(
-                                "skill.diagnostic", diagnostic.message(), java.util.Map.of(
-                                "code", diagnostic.code(), "path", diagnostic.path())))).extractAll();
-            } catch (Exception e) {
-                startupNote = appendStartupNote(startupNote, "内置 skill 解压失败: " + e.getMessage());
-            }
-            com.devcli.skill.SkillStateStore skillStateStore = new com.devcli.skill.SkillStateStore(home.resolve(".devcli/skills.json"));
-            skillStateStore.setDiagnosticSink(diagnostic -> TRACE_SINK.emit(
-                    new com.devcli.event.RunEvent.CustomMessage(
-                            "skill.diagnostic", diagnostic.message(), java.util.Map.of(
-                            "code", diagnostic.code(), "path", diagnostic.path()))));
-            com.devcli.skill.SkillRegistry skillRegistry = new com.devcli.skill.SkillRegistry(
-                    skillsCacheDir, userSkillsDir, projectSkillsDir, skillStateStore,
-                    com.devcli.skill.SkillRegistry.sharedUserDirectories(home));
-            skillRegistry.setAvailableDependencies(
-                    () -> hitlToolRegistry.searchableTools().stream()
-                            .map(com.devcli.tool.ToolContract.Tool::name)
-                            .collect(java.util.stream.Collectors.toUnmodifiableSet()),
-                    () -> mcpServerManager.servers().stream()
-                            .filter(server -> server.status() == com.devcli.mcp.McpServerStatus.READY)
-                            .map(com.devcli.mcp.McpServer::name)
-                            .collect(java.util.stream.Collectors.toUnmodifiableSet()));
-            skillRegistry.setDiagnosticSink(diagnostic -> TRACE_SINK.emit(
-                    new com.devcli.event.RunEvent.CustomMessage(
-                            "skill.diagnostic", diagnostic.message(), java.util.Map.of(
-                            "code", diagnostic.code(), "path", diagnostic.path()))));
-            skillRegistry.reload();
+            var skillStartup = CliSkillStartup.load(hitlToolRegistry, mcpServerManager, TRACE_SINK);
+            SkillRegistry skillRegistry = skillStartup.registry();
+            var skillStateStore = skillStartup.stateStore();
+            startupNote = appendStartupNote(startupNote, skillStartup.note());
             skillRegistryRef.set(skillRegistry);
             skillRegistry.allSkills().forEach(skill -> extensionRegistry.registerOrReplace(
                     ExtensionRegistry.fromSkill(skill)));

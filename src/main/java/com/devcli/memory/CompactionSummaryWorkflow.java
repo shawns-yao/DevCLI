@@ -312,7 +312,7 @@ final class CompactionSummaryWorkflow {
         }
         String sessionId = input.sessionId();
         if (sessionId.isBlank() && snapshot != null) sessionId = snapshot.taskId();
-        if (sessionId.isBlank()) sessionId = "session-" + ConversationHistoryCompactor.sha256(projectId).substring(0, 12);
+        if (sessionId.isBlank()) sessionId = "session-" + CompactionPaths.sha256(projectId).substring(0, 12);
         long epoch = input.contextEpoch() > 0 ? input.contextEpoch()
                 : snapshot == null ? cursor.eventEnd() : snapshot.sequence();
         long historySequence = input.historySequence() > 0 ? input.historySequence()
@@ -337,7 +337,7 @@ final class CompactionSummaryWorkflow {
         String project = context.projectId().isBlank() ? "default" : context.projectId();
         String session = context.sessionId().isBlank() ? "default" : context.sessionId();
         Path root = Path.of(System.getProperty("user.home"), ".devcli", "compaction-boundaries");
-        Path target = root.resolve("boundary-" + ConversationHistoryCompactor.sha256(project + "\n" + session) + ".json");
+        Path target = root.resolve("boundary-" + CompactionPaths.sha256(project + "\n" + session) + ".json");
         if (!target.equals(this.context.boundarySnapshotStore.file())) {
             this.context.boundarySnapshotStore = new CompactBoundarySnapshotStore(target);
         }

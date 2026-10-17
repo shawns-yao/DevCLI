@@ -1,7 +1,5 @@
 package com.devcli.memory;
 
-import com.devcli.rag.RagEvidencePayload;
-import com.devcli.rag.RagEvidenceSideChannel;
 import com.devcli.policy.SensitiveDataRedactor;
 import com.devcli.tool.ToolResultArtifact;
 import com.devcli.tool.CommandResultMetadata;
@@ -12,6 +10,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
+import java.util.Set;
+import static com.devcli.memory.SessionEvidenceText.*;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -22,8 +22,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * 当前任务的会话记忆。
@@ -33,13 +31,13 @@ import java.util.regex.Pattern;
  *
  * <p>SessionMemory 是短期记忆的唯一深 Module：
  * <ul>
- *   <li>不参与 LLM messages 数组（messages 由 {@code Agent.conversationHistory} 维护）</li>
+ *   <li>不参与 LLM messages 数组（messages 由会话日志渲染）</li>
  *   <li>作为<b>派生视图</b>前置到当轮 user 消息，解决"摘要泛化掉精确实体"的痛点</li>
  *   <li>仅当前会话有效，不跨 session 持久化</li>
  *   <li>三类内容互不重叠：</li>
  * </ul>
  *
- * <p>内部只有两个区域：
+ * <p>状态分为两个区域：
  * <ol>
  *   <li><b>WorkState</b>：目标、计划、步骤、约束、根因、修改文件和下一步动作，按键覆盖或按状态机推进。</li>
  *   <li><b>EvidenceJournal</b>：工具证据按重要性和 Token 预算增量合并，失败保留摘要，可再生结果保留引用。</li>
@@ -63,15 +61,6 @@ public class SessionMemory {
     public static final int TOOL_RESULT_RENDER_CHARS = 1_500;
     public static final int DEFAULT_MAX_RAG_EVIDENCE = 8;
     // Bug #9 修复：第一个捕获组改为 \w+，只匹配 chunkType (method/class/file)
-    // 避免在 Windows 路径 C:\Users\... 时被盘符冒号截断
-    private static final Pattern SEARCH_RESULT_HEADER = Pattern.compile(
-            "^\\s*\\d+\\. \\[(\\w+):([^\\]]+)] \\(相似度: ([^)]+)\\) (.+)$");
-    private static final Pattern SEARCH_RESULT_EVIDENCE = Pattern.compile(
-            "^\\s*evidence: symbolVersion=([^,]+), (?:indexEpoch=([^,]+), )?classpathEpoch=(.+)$");
-    private static final Pattern SEARCH_RESULT_NEGATIVE_FACT = Pattern.compile("^\\s*negativeFact: (.+)$");
-    /** 从 negativeFact 行提取被失效的旧 symbolVersion，用于即时清理对应的过期 RAG 证据。 */
-    private static final Pattern NEGATIVE_FACT_OLD_SYMBOL_VERSION = Pattern.compile("oldSymbolVersion=([^,\\s]+)");
-    private static final Pattern PATH_ARG = Pattern.compile("\"path\"\\s*:\\s*\"([^\"]+)\"");
 
     private final int maxToolResults;
     private final int evidenceTokenBudget;
@@ -219,7 +208,7 @@ public class SessionMemory {
                         item.originSequence, item.contextEpoch, item.artifact,
                         item.status, item.observedText))
                 .toList();
-        return new SessionSnapshot(Map.copyOf(taskState), List.copyOf(evidence),
+        return new SessionSnapshot(Collections.unmodifiableMap(new LinkedHashMap<>(taskState)), List.copyOf(evidence),
                 List.copyOf(modifiedFiles), List.copyOf(attemptDigests.values()),
                 taskLedger.render(), localSequence, taskId, taskEnded,
                 volatileFacts.stream().map(KeyFact::snapshot).toList(),
@@ -425,82 +414,9 @@ public class SessionMemory {
     private void foldCriticalEvidence(ToolEvidence evidence) {
         StringBuilder summary = new StringBuilder("关键工具证据已折叠: ")
                 .append(evidence.toolName).append("，引用: ").append(evidence.reference).append('\n');
-        appendRecoveryReference(summary, evidence);
+        SessionMemoryRenderer.appendRecoveryReference(summary, evidence);
         addKeyEvent(summary.toString(),
                 evidence.importance, evidence.agentId, evidence.stepId, evidence.sequence);
-    }
-
-    private static EvidenceKind classifyEvidence(String toolName, String result, ToolStatus status,
-                                                 CommandResultMetadata commandMetadata) {
-        if (status != null && status != ToolStatus.SUCCESS) {
-            return EvidenceKind.FAILURE;
-        }
-        if (commandMetadata != null
-                && (commandMetadata.timedOut() || commandMetadata.cancelled()
-                || commandMetadata.exitCode() != 0)) {
-            return EvidenceKind.FAILURE;
-        }
-        String normalized = result == null ? "" : result.toLowerCase(Locale.ROOT);
-        if (normalized.contains("negativefact") || "write_file".equals(toolName)
-                || "edit_file".equals(toolName)
-                || "delete_files".equals(toolName)
-                || "create_project".equals(toolName) || isPassingTestResult(toolName, normalized)) {
-            return EvidenceKind.CRITICAL;
-        }
-        if (looksLikeFailure(normalized)) return EvidenceKind.FAILURE;
-        if ("execute_command".equals(toolName)) return EvidenceKind.MILESTONE;
-        if ("read_file".equals(toolName) || "list_dir".equals(toolName)
-                || "search_code".equals(toolName) || "grep_code".equals(toolName)) {
-            return EvidenceKind.REGENERABLE;
-        }
-        return EvidenceKind.ORDINARY;
-    }
-
-    private static int baselineImportance(EvidenceKind kind, String toolName, String result) {
-        return switch (kind) {
-            case CRITICAL -> 95;
-            case FAILURE -> 82;
-            case MILESTONE -> 65;
-            case ORDINARY -> 40;
-            case REGENERABLE -> 18;
-        };
-    }
-
-    private static boolean looksLikeFailure(String normalized) {
-        return normalized.contains("toolstatus=error") || normalized.contains("execution_failed")
-                || normalized.contains("build failure") || normalized.contains("失败")
-                || normalized.contains("exception") || normalized.contains("error:");
-    }
-
-    private static boolean isPassingTestResult(String toolName, String normalized) {
-        return "execute_command".equals(toolName)
-                && (normalized.contains("build success") || normalized.contains("tests run:")
-                && !normalized.contains("failures: 1") && !normalized.contains("errors: 1"));
-    }
-
-    private static String evidenceReference(String toolName, String argsJson, String result) {
-        if (MicrocompactBoundary.isBoundary(result)) {
-            String storedPath = MicrocompactBoundary.storedPath(result);
-            if (!storedPath.isBlank()) return storedPath;
-        }
-        String path = extractPath(argsJson);
-        if (!path.isBlank()) return path;
-        return toolName + ":" + Integer.toHexString((argsJson + "\n" + result).hashCode());
-    }
-
-    private static String normalizeEvidenceResult(EvidenceKind kind, String toolName, String argsJson,
-                                                  String result, String reference) {
-        return switch (kind) {
-            case FAILURE -> "尝试内容: " + toolName + " " + truncate(argsJson, 180)
-                    + "\n失败原因: " + truncate(result.replaceAll("\\s+", " "), 900)
-                    + "\n避免重复: 未改变前置条件前不要重复同一调用"
-                    + "\n引用: " + reference;
-            case REGENERABLE -> "可再生成证据，摘要: "
-                    + truncate(result.replaceAll("\\s+", " "), 260) + "\n引用: " + reference;
-            case ORDINARY -> truncate(result, 700) + "\n引用: " + reference;
-            case MILESTONE -> truncate(result, 1_000) + "\n引用: " + reference;
-            case CRITICAL -> truncate(result, TOOL_RESULT_RENDER_CHARS) + "\n引用: " + reference;
-        };
     }
 
     private void applyStateChange(String key, String value, long sequence) {
@@ -619,362 +535,6 @@ public class SessionMemory {
     // 派生视图：前置到当轮 user 消息
     // ─────────────────────────────────────────────────────────
 
-    /**
-     * 渲染为动态上下文的一段 Markdown。空内容返回空串。
-     */
-    public synchronized String renderForPrompt() {
-        return renderForPrompt(SessionView.FULL, DEFAULT_EVIDENCE_TOKEN_BUDGET);
-    }
-
-    /**
-     * 按 Agent 角色渲染工作记忆派生视图，避免 Multi-Agent 三角色共享同一份运行态证据。
-     */
-    public synchronized String renderForPrompt(SessionView view) {
-        return renderForPrompt(view, DEFAULT_EVIDENCE_TOKEN_BUDGET);
-    }
-
-    public synchronized String renderForPrompt(SessionView view, int tokenBudget) {
-        SessionView effectiveView = view == null ? SessionView.FULL : view;
-        int effectiveBudget = Math.max(256, tokenBudget);
-        StringBuilder sb = new StringBuilder();
-        // 硬约束不参与裁剪；超出软预算时不再追加普通投影。
-        appendProtectedConstraintSection(sb);
-        String ledger = taskLedger.render();
-        String workPlan = AgentWorkPlan.render(taskState.get(AgentWorkPlan.STATE_KEY));
-        if (!workPlan.isEmpty()) sb.append(workPlan).append("\n\n");
-        if (!ledger.isEmpty()) {
-            appendBudgeted(sb, ledger, effectiveBudget);
-        }
-        if (!taskState.isEmpty()) {
-            StringBuilder section = new StringBuilder("### 当前任务状态\n\n");
-            if (!taskId.isBlank()) {
-                section.append("- task_id: ").append(taskId)
-                        .append(taskEnded ? " (已结束)" : " (进行中)").append('\n');
-            }
-            for (Map.Entry<String, String> e : taskState.entrySet()) {
-                if (AgentWorkPlan.STATE_KEY.equals(e.getKey())) continue;
-                section.append("- ").append(e.getKey()).append(": ").append(e.getValue()).append('\n');
-            }
-            appendBudgeted(sb, section.toString(), effectiveBudget);
-        }
-        if (!modifiedFiles.isEmpty()) {
-            StringBuilder section = new StringBuilder("### 已修改文件集合\n\n");
-            for (String file : modifiedFiles) section.append("- `").append(file).append("`\n");
-            appendBudgeted(sb, section.toString(), effectiveBudget);
-        }
-        List<ToolEvidence> rankedToolEvidence = new ArrayList<>();
-        if (shouldRenderToolEvidence(effectiveView)) {
-            rankedToolEvidence.addAll(recentToolResults);
-            rankedToolEvidence.sort((left, right) -> {
-                int byImportance = Integer.compare(retentionPriority(right), retentionPriority(left));
-                return byImportance != 0 ? byImportance : Long.compare(right.sequence, left.sequence);
-            });
-            appendToolEvidence(sb, rankedToolEvidence.stream()
-                    .filter(evidence -> retentionPriority(evidence) >= 70)
-                    .toList(), "### 关键工具证据（精确实体来源）", effectiveBudget);
-        }
-        if (shouldRenderToolEvidence(effectiveView) && !attemptDigests.isEmpty()) {
-            StringBuilder section = new StringBuilder("### 已尝试但失败的方案\n\n");
-            for (AttemptDigestSnapshot attempt : attemptDigests.values()) {
-                section.append("- ").append(truncate(attempt.digest(), 700).replace("\n", "; ")).append('\n');
-            }
-            appendBudgeted(sb, section.toString(), effectiveBudget);
-        }
-        if (shouldRenderVolatileFacts(effectiveView) && !volatileFacts.isEmpty()) {
-            StringBuilder section = new StringBuilder("### 本会话已发生的关键事件（避免重复执行）\n\n");
-            List<KeyFact> ranked = new ArrayList<>(volatileFacts);
-            ranked.sort((left, right) -> {
-                int byImportance = Integer.compare(right.importance, left.importance);
-                return byImportance != 0 ? byImportance : Long.compare(right.sequence, left.sequence);
-            });
-            for (KeyFact fact : ranked) {
-                section.append("- ").append(fact.description);
-                appendOrigin(section, fact.agentId, fact.stepId);
-                section.append('\n');
-            }
-            appendBudgeted(sb, section.toString(), effectiveBudget);
-        }
-        if (shouldRenderToolEvidence(effectiveView) && !ragEvidenceMemory.isEmpty()) {
-            StringBuilder section = new StringBuilder("### RAG 证据记忆（绑定 SymbolVersion）\n\n");
-            List<RagEvidence> reversed = new ArrayList<>(ragEvidenceMemory);
-            Collections.reverse(reversed);
-            for (RagEvidence evidence : reversed) {
-                section.append("- [").append(evidence.chunkType()).append(':').append(evidence.symbolName()).append("] ")
-                        .append(evidence.filePath())
-                        .append(" | symbolVersion=").append(evidence.symbolVersion())
-                        .append(" | indexEpoch=").append(evidence.indexEpoch())
-                        .append(" | classpathEpoch=").append(evidence.classpathEpoch());
-                if (!evidence.query().isBlank()) {
-                    section.append(" | query=").append(evidence.query());
-                }
-                section.append('\n');
-            }
-            appendBudgeted(sb, section.toString(), effectiveBudget);
-        }
-        if (!rankedToolEvidence.isEmpty()) {
-            appendToolEvidence(sb, rankedToolEvidence.stream()
-                    .filter(evidence -> retentionPriority(evidence) < 70)
-                    .toList(), "### 普通工具证据（精确实体来源）", effectiveBudget);
-        }
-        return sb.toString().trim();
-    }
-
-    private static void appendToolEvidence(StringBuilder target, List<ToolEvidence> evidence,
-                                           String heading, int tokenBudget) {
-        if (evidence.isEmpty() || !appendBudgeted(target, heading, tokenBudget)) return;
-        for (ToolEvidence item : evidence) {
-            StringBuilder rendered = new StringBuilder("- **").append(item.toolName).append("**")
-                    .append(" [").append(item.kind).append('/').append(item.importance).append("]");
-            appendOrigin(rendered, item.agentId, item.stepId);
-            if (item.originSequence > 0) {
-                rendered.append(" [origin=").append(item.originSequence).append(']');
-            }
-            if (item.contextEpoch > 0) {
-                rendered.append(" [context_epoch=").append(item.contextEpoch).append(']');
-            }
-            if (!item.argsJson.isBlank()) {
-                rendered.append(" args: `").append(truncate(item.argsJson, 120)).append('`');
-            }
-            rendered.append('\n');
-            appendRecoveryReference(rendered, item);
-            rendered.append("  ```\n  ").append(truncate(item.result, TOOL_RESULT_RENDER_CHARS)
-                    .replace("\n", "\n  ")).append("\n  ```\n");
-            if (!appendBudgeted(target, rendered.toString(), tokenBudget)) break;
-        }
-    }
-
-    private static void appendRecoveryReference(StringBuilder target, ToolEvidence evidence) {
-        if (evidence.artifact != null && !evidence.artifact.artifactRef().isBlank()) {
-            target.append("  read_tool_result result_ref=")
-                    .append(evidence.artifact.artifactRef()).append(" offset=0\n");
-        }
-    }
-
-    private static boolean appendBudgeted(StringBuilder target, String section, int tokenBudget) {
-        if (section == null || section.isBlank()) return true;
-        int used = MemoryEntry.estimateTokens(target.toString());
-        int remaining = tokenBudget - used;
-        if (remaining <= 0) return false;
-        String normalized = section.trim();
-        String addition = target.isEmpty() ? normalized : "\n\n" + normalized;
-        if (MemoryEntry.estimateTokens(addition) <= remaining) {
-            target.append(addition);
-            return true;
-        }
-        String prefix = target.isEmpty() ? "" : "\n\n";
-        String marker = "\n[本区其余内容已按 Token 预算压缩]";
-        int contentBudget = remaining
-                - MemoryEntry.estimateTokens(prefix)
-                - MemoryEntry.estimateTokens(marker);
-        String fitted = fitWithinTokens(normalized, contentBudget);
-        if (fitted.isBlank()) return false;
-        target.append(prefix).append(fitted).append(marker);
-        return false;
-    }
-
-    private static String fitWithinTokens(String value, int tokenBudget) {
-        if (value == null || value.isBlank() || tokenBudget <= 0) return "";
-        if (MemoryEntry.estimateTokens(value) <= tokenBudget) return value;
-        int low = 0;
-        int high = value.length();
-        while (low < high) {
-            int mid = (low + high + 1) >>> 1;
-            if (MemoryEntry.estimateTokens(value.substring(0, mid)) <= tokenBudget) low = mid;
-            else high = mid - 1;
-        }
-        return value.substring(0, low).trim();
-    }
-
-    private static void appendOrigin(StringBuilder target, String agentId, String stepId) {
-        if ((agentId == null || agentId.isBlank()) && (stepId == null || stepId.isBlank())) return;
-        target.append(" [来自 ");
-        if (agentId != null && !agentId.isBlank()) target.append(agentId);
-        if (stepId != null && !stepId.isBlank()) {
-            if (agentId != null && !agentId.isBlank()) target.append('/');
-            target.append(stepId);
-        }
-        target.append(']');
-    }
-
-    /**
-     * 压缩后恢复 messages 的结构化短上下文。
-     *
-     * <p>这里不复用完整 {@link #renderForPrompt()}，避免把大段工具输出再次写回
-     * conversationHistory。恢复段只保留可定位实体：文件路径、未完成子任务、短工具引用和 RAG epoch。
-     */
-    public synchronized String renderForPostCompactRestore() {
-        return renderForPostCompactRestore(SessionView.FULL);
-    }
-
-    public synchronized String renderForPostCompactRestore(SessionView view) {
-        SessionView effectiveView = view == null ? SessionView.FULL : view;
-        StringBuilder sb = new StringBuilder();
-        String workPlan = AgentWorkPlan.render(taskState.get(AgentWorkPlan.STATE_KEY));
-        if (!workPlan.isEmpty()) sb.append(workPlan).append("\n\n");
-        if (shouldRenderToolEvidence(effectiveView)) {
-            appendRecentFileSection(sb);
-        }
-        appendProtectedConstraintSection(sb);
-        appendOpenTaskSection(sb);
-        if (shouldRenderToolEvidence(effectiveView)) {
-            appendKeyToolReferenceSection(sb);
-            appendRagEpochSection(sb);
-        }
-        return sb.toString().trim();
-    }
-
-    private void appendRecentFileSection(StringBuilder sb) {
-        LinkedHashMap<String, String> files = new LinkedHashMap<>();
-        for (ToolEvidence ev : recentToolResults) {
-            if (!"read_file".equals(ev.toolName) && !"write_file".equals(ev.toolName)
-                    && !"edit_file".equals(ev.toolName)) {
-                continue;
-            }
-            String path = extractPath(ev.argsJson);
-            if (path.isBlank()) {
-                continue;
-            }
-            files.remove(path);
-            files.put(path, ev.toolName);
-        }
-        if (files.isEmpty()) {
-            return;
-        }
-        appendSectionBreak(sb);
-        sb.append("### 最近读写文件\n\n");
-        List<Map.Entry<String, String>> entries = new ArrayList<>(files.entrySet());
-        Collections.reverse(entries);
-        for (Map.Entry<String, String> entry : entries) {
-            sb.append("- ").append(entry.getValue()).append(": `").append(entry.getKey()).append("`\n");
-        }
-    }
-
-    private void appendOpenTaskSection(StringBuilder sb) {
-        String ledger = taskLedger.renderPostCompactRestore();
-        if (taskState.isEmpty() && ledger.isBlank()) {
-            return;
-        }
-        appendSectionBreak(sb);
-        sb.append("### 未完成子任务状态\n\n");
-        if (!ledger.isBlank()) {
-            sb.append(ledger).append('\n');
-        }
-        for (Map.Entry<String, String> entry : taskState.entrySet()) {
-            sb.append("- ").append(entry.getKey()).append(": ").append(entry.getValue()).append('\n');
-        }
-    }
-
-    private void appendKeyToolReferenceSection(StringBuilder sb) {
-        if (recentToolResults.isEmpty()) {
-            return;
-        }
-        appendSectionBreak(sb);
-        sb.append("### 关键工具结果引用\n\n");
-        List<ToolEvidence> reversed = new ArrayList<>(recentToolResults);
-        Collections.reverse(reversed);
-        LinkedHashSet<String> renderedMicrocompactReferences = new LinkedHashSet<>();
-        int count = 0;
-        for (ToolEvidence ev : reversed) {
-            if (count >= 5) {
-                break;
-            }
-            String microcompactKey = microcompactReferenceKey(ev.result);
-            if (!microcompactKey.isBlank() && !renderedMicrocompactReferences.add(microcompactKey)) {
-                continue;
-            }
-            sb.append("- **").append(ev.toolName).append("**");
-            if (!ev.argsJson.isBlank()) {
-                sb.append(" args: `").append(truncate(ev.argsJson, 120)).append('`');
-            }
-            String result = renderToolResultReference(ev.result);
-            if (!result.isBlank()) {
-                sb.append(" -> ").append(result);
-            }
-            sb.append('\n');
-            appendRecoveryReference(sb, ev);
-            count++;
-        }
-    }
-
-    private static String renderToolResultReference(String result) {
-        if (result == null || result.isBlank()) {
-            return "";
-        }
-        if (!MicrocompactBoundary.isBoundary(result)) {
-            return truncate(result, 240).replaceAll("\\s+", " ").trim();
-        }
-        String toolCallId = MicrocompactBoundary.toolCallId(result);
-        String originalChars = MicrocompactBoundary.originalChars(result);
-        String storedPath = MicrocompactBoundary.storedPath(result);
-        StringBuilder sb = new StringBuilder("microcompact tool_result");
-        if (!toolCallId.isBlank()) {
-            sb.append(" toolCallId=").append(toolCallId);
-        }
-        if (!originalChars.isBlank()) {
-            sb.append(" originalChars=").append(originalChars);
-        }
-        if (!storedPath.isBlank()) {
-            sb.append(" storedPath=").append(storedPath);
-        }
-        return sb.toString();
-    }
-
-    private static String microcompactReferenceKey(String result) {
-        if (!MicrocompactBoundary.isBoundary(result)) {
-            return "";
-        }
-        String storedPath = MicrocompactBoundary.storedPath(result);
-        if (!storedPath.isBlank()) {
-            return "storedPath=" + storedPath;
-        }
-        String toolCallId = MicrocompactBoundary.toolCallId(result);
-        return toolCallId.isBlank() ? "" : "toolCallId=" + toolCallId;
-    }
-
-    private void appendRagEpochSection(StringBuilder sb) {
-        if (ragEvidenceMemory.isEmpty()) {
-            return;
-        }
-        appendSectionBreak(sb);
-        sb.append("### RAG 证据 epoch\n\n");
-        List<RagEvidence> reversed = new ArrayList<>(ragEvidenceMemory);
-        Collections.reverse(reversed);
-        for (RagEvidence evidence : reversed) {
-            sb.append("- [").append(evidence.chunkType()).append(':').append(evidence.symbolName()).append("] ")
-                    .append(evidence.filePath())
-                    .append(" | symbolVersion=").append(evidence.symbolVersion())
-                    .append(" | indexEpoch=").append(evidence.indexEpoch())
-                    .append(" | classpathEpoch=").append(evidence.classpathEpoch());
-            if (!evidence.query().isBlank()) {
-                sb.append(" | query=").append(evidence.query());
-            }
-            sb.append('\n');
-        }
-    }
-
-    private static void appendSectionBreak(StringBuilder sb) {
-        if (!sb.isEmpty()) {
-            sb.append('\n');
-        }
-    }
-
-    private static boolean shouldRenderVolatileFacts(SessionView view) {
-        return view == SessionView.FULL || view == SessionView.PLANNER || view == SessionView.WORKER;
-    }
-
-    private void appendProtectedConstraintSection(StringBuilder sb) {
-        if (protectedConstraints.isEmpty()) return;
-        appendSectionBreak(sb);
-        sb.append("### 用户硬约束\n\n");
-        for (String constraint : protectedConstraints.values()) {
-            sb.append("- ").append(constraint).append('\n');
-        }
-    }
-
-    private static boolean shouldRenderToolEvidence(SessionView view) {
-        return view == SessionView.FULL || view == SessionView.WORKER || view == SessionView.REVIEWER;
-    }
-
     /** 状态摘要给 /memory 命令显示。 */
     public synchronized String getStatusSummary() {
         return String.format(Locale.ROOT,
@@ -1059,109 +619,6 @@ public class SessionMemory {
                 || !taskLedger.isEmpty();
     }
 
-    private void recordRagEvidenceIfPresent(String toolName, String argsJson, String result,
-                                            List<ToolSideChannel> sideChannels) {
-        if (!"search_code".equals(toolName) || result == null || result.isBlank()) {
-            return;
-        }
-        boolean typedPayloadPresent = false;
-        if (sideChannels != null) {
-            for (ToolSideChannel sideChannel : sideChannels) {
-                if (sideChannel instanceof RagEvidenceSideChannel ragEvidence) {
-                    typedPayloadPresent = true;
-                    recordRagEvidencePayload(ragEvidence.payload());
-                }
-            }
-        }
-        if (typedPayloadPresent) {
-            return;
-        }
-        RagEvidencePayload.Payload payload = RagEvidencePayload.extract(result);
-        if (!payload.evidence().isEmpty() || !payload.negativeFacts().isEmpty()) {
-            recordRagEvidencePayload(payload);
-            return;
-        }
-        recordLegacyRagEvidenceIfPresent(argsJson, result);
-    }
-
-    private void recordRagEvidencePayload(RagEvidencePayload.Payload payload) {
-        if (payload == null) {
-            return;
-        }
-        for (RagEvidencePayload.Evidence evidence : payload.evidence()) {
-            addRagEvidence(new RagEvidence(
-                    evidence.filePath(),
-                    evidence.symbolName(),
-                    evidence.chunkType(),
-                    evidence.symbolVersion(),
-                    evidence.classpathEpoch(),
-                    evidence.indexEpoch(),
-                    evidence.query(),
-                    evidence.similarity(),
-                    Instant.now()));
-        }
-        for (RagEvidencePayload.NegativeFact negativeFact : payload.negativeFacts()) {
-            String rendered = negativeFact.renderForMemory();
-            addVolatileFact("NegativeFact（负向事实）: " + rendered);
-            pruneEvidenceForOldSymbolVersion(negativeFact.oldSymbolVersion());
-        }
-    }
-
-    private void recordLegacyRagEvidenceIfPresent(String argsJson, String result) {
-        String query = extractQuery(argsJson);
-        String[] lines = result.split("\\R");
-        PendingRagEvidence pending = null;
-        for (String line : lines) {
-            Matcher headerMatcher = SEARCH_RESULT_HEADER.matcher(line);
-            if (headerMatcher.matches()) {
-                pending = new PendingRagEvidence(
-                        headerMatcher.group(1).trim(),
-                        headerMatcher.group(2).trim(),
-                        safeParseDouble(headerMatcher.group(3).trim()),
-                        headerMatcher.group(4).trim());
-                continue;
-            }
-            Matcher evidenceMatcher = SEARCH_RESULT_EVIDENCE.matcher(line);
-            if (pending != null && evidenceMatcher.matches()) {
-                addRagEvidence(new RagEvidence(
-                        pending.filePath,
-                        pending.symbolName,
-                        pending.chunkType,
-                        evidenceMatcher.group(1).trim(),
-                        evidenceMatcher.group(3).trim(),
-                        evidenceMatcher.group(2) == null ? "none" : evidenceMatcher.group(2).trim(),
-                        query,
-                        pending.similarity,
-                        Instant.now()));
-                pending = null;
-                continue;
-            }
-            Matcher negativeFactMatcher = SEARCH_RESULT_NEGATIVE_FACT.matcher(line);
-            if (negativeFactMatcher.matches()) {
-                String negativeFact = negativeFactMatcher.group(1).trim();
-                addVolatileFact("NegativeFact（负向事实）: " + negativeFact);
-                pruneEvidenceForNegativeFact(negativeFact);
-            }
-        }
-    }
-
-    /**
-     * negativeFact 表明某个旧 symbolVersion 已失效；立即清理引用该版本的 RAG 证据，
-     * 避免过期证据继续留在注入上下文里误导模型（不再依赖外部维护服务触发）。
-     * 行内没有结构化 oldSymbolVersion= 字段时不做任何清理。
-     */
-    private void pruneEvidenceForNegativeFact(String negativeFact) {
-        if (negativeFact == null || negativeFact.isBlank()) {
-            return;
-        }
-        Matcher matcher = NEGATIVE_FACT_OLD_SYMBOL_VERSION.matcher(negativeFact);
-        if (!matcher.find()) {
-            return;
-        }
-        String oldSymbolVersion = matcher.group(1).trim();
-        pruneEvidenceForOldSymbolVersion(oldSymbolVersion);
-    }
-
     private void pruneEvidenceForOldSymbolVersion(String oldSymbolVersion) {
         if (oldSymbolVersion == null) {
             return;
@@ -1188,35 +645,6 @@ public class SessionMemory {
         while (ragEvidenceMemory.size() > maxRagEvidence) {
             ragEvidenceMemory.removeFirst();
         }
-    }
-
-    private static String extractQuery(String argsJson) {
-        if (argsJson == null || argsJson.isBlank()) {
-            return "";
-        }
-        Matcher matcher = Pattern.compile("\"query\"\\s*:\\s*\"([^\"]+)\"").matcher(argsJson);
-        return matcher.find() ? matcher.group(1) : "";
-    }
-
-    private static String extractPath(String argsJson) {
-        if (argsJson == null || argsJson.isBlank()) {
-            return "";
-        }
-        Matcher matcher = PATH_ARG.matcher(argsJson);
-        return matcher.find() ? matcher.group(1) : "";
-    }
-
-    private static double safeParseDouble(String value) {
-        try {
-            return Double.parseDouble(value);
-        } catch (NumberFormatException e) {
-            return 0.0;
-        }
-    }
-
-    private static String truncate(String s, int maxChars) {
-        if (s == null) return "";
-        return s.length() <= maxChars ? s : s.substring(0, maxChars) + "...(truncated)";
     }
 
     /** 单条工具调用证据。 */
@@ -1467,5 +895,36 @@ public class SessionMemory {
                               double similarity,
                               Instant capturedAt) {}
 
-    private record PendingRagEvidence(String chunkType, String symbolName, double similarity, String filePath) {}
+    public synchronized String renderForPrompt() {
+        return renderForPrompt(SessionView.FULL);
+    }
+
+    public synchronized String renderForPrompt(SessionView view) {
+        return renderForPrompt(view, DEFAULT_EVIDENCE_TOKEN_BUDGET);
+    }
+
+    public synchronized String renderForPrompt(SessionView view, int tokenBudget) {
+        return renderer().renderForPrompt(view, tokenBudget);
+    }
+
+    public synchronized String renderForPostCompactRestore() {
+        return renderForPostCompactRestore(SessionView.FULL);
+    }
+
+    public synchronized String renderForPostCompactRestore(SessionView view) {
+        return renderer().renderForPostCompactRestore(view);
+    }
+
+    private SessionMemoryRenderer renderer() {
+        Set<String> running = taskLedger.entries().stream()
+                .filter(entry -> entry.status() == TaskLedger.StepStatus.RUNNING)
+                .map(entry -> entry.stepId()).collect(java.util.stream.Collectors.toUnmodifiableSet());
+        return new SessionMemoryRenderer(snapshot(), List.copyOf(recentToolResults), List.copyOf(ragEvidenceMemory),
+                running, taskLedger.renderPostCompactRestore());
+    }
+
+    private void recordRagEvidenceIfPresent(String toolName, String argsJson, String result, List<ToolSideChannel> sideChannels) {
+        new SessionRagEvidenceParser(this::addRagEvidence, this::addVolatileFact, this::pruneEvidenceForOldSymbolVersion)
+                .record(toolName, argsJson, result, sideChannels);
+    }
 }

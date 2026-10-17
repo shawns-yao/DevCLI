@@ -26,6 +26,7 @@ import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import static com.devcli.memory.ConversationHistoryCompactor.*;
+import static com.devcli.memory.CompactionPaths.sha256;
 
 /** 按 Token 保留预算回收旧工具结果，原文成功落盘后才替换引用。 */
 final class ToolResultCompactor {

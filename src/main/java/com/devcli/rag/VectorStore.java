@@ -11,7 +11,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.LinkedHashSet;
 import java.util.Set;
 import static com.devcli.rag.VectorSearch.safeIndexEpoch;
 import static com.devcli.rag.VectorSearch.blankToDefault;
@@ -20,6 +19,7 @@ import static com.devcli.rag.VectorSearch.blankToDefault;
 public class VectorStore implements AutoCloseable {
 
     private final VectorSearch search;
+    private final VectorIndexState indexState;
 
     private static final Logger log = LoggerFactory.getLogger(VectorStore.class);
 
@@ -45,6 +45,7 @@ public class VectorStore implements AutoCloseable {
         applyConcurrencyPragmas();
         new VectorStoreSchema(connection, this::jsonToEmbedding).initialize();
         search = new VectorSearch(connection, projectPath, classpathEpoch, this);
+        indexState = new VectorIndexState(connection, projectPath, search);
     }
 
     /**
@@ -141,7 +142,7 @@ public class VectorStore implements AutoCloseable {
             throw new IllegalArgumentException("shadow target epoch must not be none");
         }
         ShadowIndexMode effectiveMode = mode == null ? ShadowIndexMode.FULL : mode;
-        List<String> dirtyAliases = dirtyPathAliases(dirtyFiles == null ? List.of() : dirtyFiles);
+        List<String> dirtyAliases = indexState.dirtyPathAliases(dirtyFiles == null ? List.of() : dirtyFiles);
         ShadowIndexBuild build = new ShadowIndexBuild(
                 currentIndexEpoch(), currentIndexGeneration(), safeTargetEpoch, effectiveMode);
 
@@ -154,8 +155,8 @@ public class VectorStore implements AutoCloseable {
                 deleteShadowChunksForFiles(safeTargetEpoch, dirtyAliases);
             }
             insertShadowState(build);
-            upsertIndexState(build.baseEpoch(), "BUILDING", false);
-            insertDirtyFiles(dirtyAliases);
+            indexState.upsertIndexState(build.baseEpoch(), "BUILDING", false);
+            indexState.insertDirtyFiles(dirtyAliases);
             connection.commit();
             return new ShadowIndexSession(build);
         } catch (SQLException e) {
@@ -325,8 +326,8 @@ public class VectorStore implements AutoCloseable {
             List<SymbolInvalidation> invalidations = diffInvalidations(
                     oldSnapshots, getSymbolSnapshots(), build.targetEpoch());
             insertInvalidations(invalidations);
-            upsertIndexState(build.targetEpoch(), "CURRENT", true);
-            clearDirtyFiles();
+            indexState.upsertIndexState(build.targetEpoch(), "CURRENT", true);
+            indexState.clearDirtyFiles();
             deleteShadowIndex(build.targetEpoch());
             connection.commit();
             search.invalidateAnnIndex();
@@ -411,8 +412,8 @@ public class VectorStore implements AutoCloseable {
         boolean autoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
         try {
-            insertDirtyFiles(filePaths);
-            upsertIndexState(currentIndexEpoch(), "STALE", true);
+            indexState.insertDirtyFiles(filePaths);
+            indexState.upsertIndexState(currentIndexEpoch(), "STALE", true);
             connection.commit();
         } catch (SQLException e) {
             connection.rollback();
@@ -422,70 +423,9 @@ public class VectorStore implements AutoCloseable {
         }
     }
 
-    private void insertDirtyFiles(List<String> filePaths) throws SQLException {
-        String sql = """
-                INSERT INTO code_index_dirty_files(project_path, file_path, marked_at_ms)
-                VALUES (?, ?, ?)
-                ON CONFLICT(project_path, file_path) DO UPDATE SET marked_at_ms=excluded.marked_at_ms
-                """;
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            long markedAt = System.currentTimeMillis();
-            for (String filePath : dirtyPathAliases(filePaths)) {
-                statement.setString(1, projectPath);
-                statement.setString(2, filePath);
-                statement.setLong(3, markedAt);
-                statement.addBatch();
-            }
-            statement.executeBatch();
-        }
-    }
 
-    private List<String> dirtyPathAliases(List<String> filePaths) {
-        LinkedHashSet<String> aliases = new LinkedHashSet<>();
-        Path root = Path.of(projectPath).toAbsolutePath().normalize();
-        for (String filePath : filePaths) {
-            if (filePath == null || filePath.isBlank()) continue;
-            Path candidate = Path.of(filePath);
-            aliases.add(filePath);
-            Path absolute = (candidate.isAbsolute() ? candidate : root.resolve(candidate))
-                    .toAbsolutePath().normalize();
-            aliases.add(absolute.toString());
-            if (absolute.startsWith(root)) {
-                aliases.add(search.relativeProjectPath(absolute));
-            }
-        }
-        return List.copyOf(aliases);
-    }
 
-    private void upsertIndexState(String epoch, String status, boolean incrementGeneration)
-            throws SQLException {
-        String sql = """
-                INSERT INTO code_index_state(project_path, active_epoch, status, generation, updated_at_ms)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(project_path) DO UPDATE SET
-                    active_epoch=excluded.active_epoch,
-                    status=excluded.status,
-                    generation=code_index_state.generation + ?,
-                    updated_at_ms=excluded.updated_at_ms
-                """;
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, projectPath);
-            statement.setString(2, safeIndexEpoch(epoch));
-            statement.setString(3, status);
-            statement.setInt(4, incrementGeneration ? 1 : 0);
-            statement.setLong(5, System.currentTimeMillis());
-            statement.setInt(6, incrementGeneration ? 1 : 0);
-            statement.executeUpdate();
-        }
-    }
 
-    private void clearDirtyFiles() throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "DELETE FROM code_index_dirty_files WHERE project_path = ?")) {
-            statement.setString(1, projectPath);
-            statement.executeUpdate();
-        }
-    }
 
     private void clearChunksAndRelations() throws SQLException {
         String deleteChunks = "DELETE FROM code_chunks WHERE project_path = ?";
@@ -874,69 +814,8 @@ public class VectorStore implements AutoCloseable {
         return new IndexStats(chunks, relations);
     }
 
-    public String currentIndexEpoch() throws SQLException {
-        try (PreparedStatement ps = connection.prepareStatement(
-                "SELECT active_epoch FROM code_index_state WHERE project_path = ?")) {
-            ps.setString(1, projectPath);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) return safeIndexEpoch(rs.getString(1));
-            }
-        }
-        String sql = """
-                SELECT index_epoch
-                FROM code_chunks
-                WHERE project_path = ?
-                ORDER BY id DESC
-                LIMIT 1
-                """;
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            ps.setString(1, projectPath);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    return safeIndexEpoch(rs.getString("index_epoch"));
-                }
-            }
-        }
-        return IndexEpoch.none().value();
-    }
 
-    IndexWatchSnapshot indexWatchSnapshot() throws SQLException {
-        LinkedHashSet<String> indexedPaths = new LinkedHashSet<>();
-        try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT DISTINCT file_path FROM code_chunks
-                WHERE project_path = ?
-                """)) {
-            statement.setString(1, projectPath);
-            try (ResultSet rs = statement.executeQuery()) {
-                while (rs.next()) {
-                    search.resolveProjectPath(rs.getString(1))
-                            .map(search::relativeProjectPath)
-                            .ifPresent(indexedPaths::add);
-                }
-            }
-        }
-        long updatedAt = 0L;
-        try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT updated_at_ms FROM code_index_state
-                WHERE project_path = ?
-                """)) {
-            statement.setString(1, projectPath);
-            try (ResultSet rs = statement.executeQuery()) {
-                if (rs.next()) updatedAt = Math.max(0L, rs.getLong(1));
-            }
-        }
-        return new IndexWatchSnapshot(Set.copyOf(indexedPaths), updatedAt);
-    }
 
-    long currentIndexGeneration() throws SQLException {
-        try (PreparedStatement ps = connection.prepareStatement(
-                "SELECT generation FROM code_index_state WHERE project_path = ?")) {
-            ps.setString(1, projectPath);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? Math.max(0, rs.getLong(1)) : 0;
-            }
-        }
-    }
 
     float[] jsonToEmbedding(String json) {
         try {
@@ -1039,7 +918,7 @@ public class VectorStore implements AutoCloseable {
                 deleteShadowIndex(build.targetEpoch());
                 if (build.baseEpoch().equals(currentIndexEpoch())
                         && build.baseGeneration() == currentIndexGeneration()) {
-                    upsertIndexState(build.baseEpoch(), "STALE", false);
+                    indexState.upsertIndexState(build.baseEpoch(), "STALE", false);
                 }
             }
         }
@@ -1109,4 +988,7 @@ public class VectorStore implements AutoCloseable {
     }
 
     public SearchDiagnostics lastSearchDiagnostics() { return search.lastSearchDiagnostics(); }
+    public String currentIndexEpoch() throws SQLException { return indexState.currentIndexEpoch(); }
+    IndexWatchSnapshot indexWatchSnapshot() throws SQLException { return indexState.indexWatchSnapshot(); }
+    long currentIndexGeneration() throws SQLException { return indexState.currentIndexGeneration(); }
 }

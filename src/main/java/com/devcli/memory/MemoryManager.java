@@ -5,20 +5,14 @@ import com.devcli.llm.LlmClient;
 import com.devcli.context.ContextProfile;
 import com.devcli.policy.SensitiveDataRedactor;
 import com.devcli.tool.ToolSideChannel;
-import com.devcli.tool.ToolRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
@@ -42,33 +36,13 @@ public class MemoryManager implements AutoCloseable {
     public static final String SESSION_PRE_SUMMARY_ENABLED_PROPERTY =
             "devcli.context.pre-summary.enabled";
     private static final Logger log = LoggerFactory.getLogger(MemoryManager.class);
-    private static final int SESSION_PRE_SUMMARY_TOKEN_DELTA = 2_000;
-    private static final int SESSION_PRE_SUMMARY_TOOL_CALLS = 4;
-    private static final int SESSION_PRE_SUMMARY_LARGE_TOOL_CHARS = 12_000;
-    private static final long SESSION_PRE_SUMMARY_FAILURE_COOLDOWN_MILLIS = 30_000L;
     /** 索引段落标题；其 token 也要从本轮记忆预算里扣掉。 */
     private static final String INDEX_HEADER = "## 长期记忆\n\n需要正文时调用 read_memory，传入索引中的主题名。\n\n";
     private final SessionMemory sessionMemory;
     private final CompactionSummaryCache compactionSummaryCache;
-    private final ConversationHistoryCompactor sessionPreSummaryCompactor;
+    private final SessionPreSummaryScheduler preSummary;
     private final LongTermMemory longTermMemory;
-    private final ExecutorService sessionPreSummaryExecutor;
-    /** 后台预摘要最多保留一个运行中任务和一个最新待处理任务。 */
-    private final Object sessionPreSummaryScheduleLock = new Object();
-    private SessionPreSummaryTask runningSessionPreSummary;
-    private SessionPreSummaryTask pendingSessionPreSummary;
-    private boolean sessionPreSummaryClosed;
-    private long sessionPreSummaryRequestVersion;
-    private long sessionPreSummaryCommittedVersion;
-    private long sessionPreSummaryInvalidatedVersion;
-    private final AtomicLong preSummaryFullCount = new AtomicLong();
-    private final AtomicLong preSummaryIncrementalCount = new AtomicLong();
-    private final AtomicLong preSummaryFailureCount = new AtomicLong();
     private final AtomicLong sessionEventSequence = new AtomicLong();
-    private volatile SessionPreSummaryMetrics lastPreSummaryMetrics = SessionPreSummaryMetrics.empty();
-    private volatile String preSummaryFailureFingerprint = "";
-    private volatile long preSummaryFailureUntilMillis;
-    private LlmClient llmClient;
     private TokenBudget tokenBudget;
     private ContextProfile contextProfile;
     /** 当前会话显式忽略记忆 flag。用户说"忘记记忆"/"别管记忆"时设为 true。 */
@@ -76,7 +50,7 @@ public class MemoryManager implements AutoCloseable {
     private volatile Supplier<String> ruleContextSupplier = () -> "";
 
     public void setSummaryToolsSupplier(java.util.function.Supplier<List<LlmClient.Tool>> supplier) {
-        sessionPreSummaryCompactor.setSummaryToolsSupplier(supplier);
+        preSummary.setSummaryToolsSupplier(supplier);
     }
 
     public MemoryManager(LlmClient llmClient) {
@@ -97,30 +71,17 @@ public class MemoryManager implements AutoCloseable {
     }
 
     private MemoryManager(LlmClient llmClient, ContextProfile contextProfile, LongTermMemory longTermMemory) {
-        this.llmClient = llmClient;
         this.contextProfile = contextProfile;
         this.sessionMemory = new SessionMemory();
         this.compactionSummaryCache = new CompactionSummaryCache();
-        this.sessionPreSummaryCompactor = new ConversationHistoryCompactor(llmClient);
-        this.sessionPreSummaryCompactor.setSummaryUsageConsumer(this::recordPreSummaryUsage);
         this.longTermMemory = longTermMemory != null ? longTermMemory : new LongTermMemory();
         this.tokenBudget = new TokenBudget(contextProfile.maxContextWindow());
-        this.sessionPreSummaryExecutor = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "devcli-session-pre-summary");
-            t.setDaemon(true);
-            return t;
-        });
+        this.preSummary = new SessionPreSummaryScheduler(
+                llmClient, compactionSummaryCache, () -> tokenBudget, () -> this.contextProfile);
     }
 
     public void setLlmClient(LlmClient llmClient) {
-        synchronized (sessionPreSummaryScheduleLock) {
-            sessionPreSummaryInvalidatedVersion = ++sessionPreSummaryRequestVersion;
-            this.llmClient = llmClient;
-            this.compactionSummaryCache.clearPreSummary();
-            clearPreSummaryFailure();
-            this.sessionPreSummaryCompactor.setLlmClient(llmClient);
-            applyContextProfile(ContextProfile.from(llmClient));
-        }
+        preSummary.setLlmClient(llmClient, () -> applyContextProfile(ContextProfile.from(llmClient)));
     }
 
     public void applyContextProfile(ContextProfile contextProfile) {
@@ -302,7 +263,7 @@ public class MemoryManager implements AutoCloseable {
     // TaskLedger（计划执行进度投影，注入 SessionMemory）
     // ─────────────────────────────────────────────────────────
 
-    /** 设置当前计划及全部步骤（PlanExecuteAgent 在计划创建后调用，覆盖旧账本）。 */
+    /** 计划 Coordinator 创建计划后更新进度投影，覆盖旧账本。 */
     public void setTaskLedgerPlan(String planId, String goal, Map<String, String> stepIdToDesc) {
         sessionMemory.accept(new SessionMemory.PlanChanged(
                 planId, goal, stepIdToDesc, "planner", "",
@@ -607,17 +568,8 @@ public class MemoryManager implements AutoCloseable {
     /**
      * 构建用于 LLM 的长期记忆上下文。
      *
-     * <p>两段：
-     * <ol>
-     *   <li><b>索引</b>（{@code MEMORY.md}）——总是注入。它告诉模型「有哪些记忆、每条讲什么、
-     *       文件在哪」，模型可自行读取全文。先按 200 行 / 25000 字节截断，再按本轮预算裁剪。</li>
-     *   <li><b>全文</b>——仅在选择器开启时，由 LLM 从候选里挑出相关条目后注入，
-     *       并附上年龄与核对要求；同一会话不重复注入同一条，放不下的整条跳过。</li>
-     * </ol>
-     *
-     * <p><b>索引与全文共享同一个预算</b>：索引自身上限（25000 字节，中文约 5500 tokens）
-     * 可能远大于本轮预算（{@code ContextProfile.memoryContextTokens()}，500–5000 tokens），
-     * 所以索引必须先按预算裁剪，剩余额度才给全文——否则索引会静默超出预算一个数量级。
+     * <p>只注入 {@code MEMORY.md} 索引，先受 200 行 / 25000 字节上限约束，再按本轮
+     * Token 预算裁剪。需要主题正文时由模型调用受限的 {@code read_memory}，不调用选择器。
      *
      * <p>返回值由调用方前置到<b>当轮 user 消息</b>（{@code Agent#buildTurnContext}），
      * 不注入 system prompt。
@@ -685,7 +637,7 @@ public class MemoryManager implements AutoCloseable {
 
     /**
      * 渲染 SessionMemory 派生视图为当轮 user 消息段落。
-     * Agent / PlanExecuteAgent / SubAgent 通过这条路径把工作记忆注入给 LLM。
+     * Agent / SubAgent 通过这条路径把工作记忆注入给 LLM。
      */
     public String buildSessionMemorySection() {
         if (memoryIgnored) {
@@ -751,319 +703,17 @@ public class MemoryManager implements AutoCloseable {
         return epochs.isEmpty() ? "none" : String.join(", ", epochs);
     }
 
-    /**
-     * turn 结束后的会话预摘要维护入口。
-     *
-     * <p>该入口只维护当前进程内 SessionMemory，不写长期记忆。触发条件保持保守：
-     * token 增量、工具调用次数或单个大工具结果达到阈值时才调用 LLM 生成预摘要。
-     */
-    public SessionPreSummaryMaintenanceResult maintainSessionPreSummaryAfterTurn(
-            List<LlmClient.Message> history,
-            int turnToolCalls,
-            int largestToolResultChars) {
-        long requestVersion;
-        synchronized (sessionPreSummaryScheduleLock) {
-            if (sessionPreSummaryClosed) {
-                return SessionPreSummaryMaintenanceResult.SKIPPED_DISABLED;
-            }
-            requestVersion = ++sessionPreSummaryRequestVersion;
-        }
-        return maintainSessionPreSummaryForCoveredHistory(
-                history, turnToolCalls, largestToolResultChars, requestVersion);
-    }
 
-    private SessionPreSummaryMaintenanceResult maintainSessionPreSummaryForCoveredHistory(
-            List<LlmClient.Message> history,
-            int turnToolCalls,
-            int largestToolResultChars,
-            long requestVersion) {
-        if (!isValidPreSummaryResult(requestVersion)) {
-            return SessionPreSummaryMaintenanceResult.SKIPPED_SUPERSEDED;
-        }
-        if (!Boolean.parseBoolean(System.getProperty(SESSION_PRE_SUMMARY_ENABLED_PROPERTY, "true"))) {
-            return SessionPreSummaryMaintenanceResult.SKIPPED_DISABLED;
-        }
-        if (!ConversationHistoryCompactor.isCompactionEnabled(System.getProperties(), System.getenv())) {
-            return SessionPreSummaryMaintenanceResult.SKIPPED_DISABLED;
-        }
-        if (llmClient == null || history == null || history.isEmpty()) {
-            return SessionPreSummaryMaintenanceResult.SKIPPED_EMPTY_HISTORY;
-        }
-        int systemEnd = "system".equals(history.get(0).role()) ? 1 : 0;
-        if (history.size() <= systemEnd) {
-            return SessionPreSummaryMaintenanceResult.SKIPPED_EMPTY_HISTORY;
-        }
-        List<LlmClient.Message> coveredMessages = new ArrayList<>(history.subList(systemEnd, history.size()));
-        String coveredFingerprint = CompactionSummaryCache.fingerprintOf(coveredMessages);
-        if (isPreSummaryFailureCoolingDown(coveredFingerprint)) {
-            return SessionPreSummaryMaintenanceResult.SKIPPED_FAILURE_COOLDOWN;
-        }
-        if (compactionSummaryCache.findReusablePreSummary(coveredMessages, llmClient).isPresent()) {
-            return SessionPreSummaryMaintenanceResult.SKIPPED_ALREADY_CURRENT;
-        }
-        int tokenEstimate = TokenBudget.estimateMessagesTokens(coveredMessages);
-        int previousTokenEstimate = compactionSummaryCache.currentPreSummary()
-                .map(CompactionSummaryCache.PreSummary::tokenEstimate)
-                .orElse(0);
-        int tokenDelta = tokenEstimate - previousTokenEstimate;
-        boolean triggered = tokenDelta >= SESSION_PRE_SUMMARY_TOKEN_DELTA
-                || turnToolCalls >= SESSION_PRE_SUMMARY_TOOL_CALLS
-                || largestToolResultChars >= SESSION_PRE_SUMMARY_LARGE_TOOL_CHARS;
-        if (!triggered) {
-            return SessionPreSummaryMaintenanceResult.SKIPPED_BELOW_THRESHOLD;
-        }
-        try {
-            Optional<CompactionSummaryCache.PreSummary> incrementalBase =
-                    compactionSummaryCache.findExtendablePreSummary(coveredMessages, llmClient);
-            String maintenanceMode;
-            int deltaMessageCount;
-            int inputTokenEstimate;
-            String summary;
-            if (incrementalBase.isPresent()) {
-                CompactionSummaryCache.PreSummary base = incrementalBase.get();
-                List<LlmClient.Message> deltaMessages =
-                        coveredMessages.subList(base.messageCount(), coveredMessages.size());
-                maintenanceMode = "incremental";
-                deltaMessageCount = deltaMessages.size();
-                inputTokenEstimate = TokenBudget.estimateMessagesTokens(deltaMessages)
-                        + MemoryEntry.estimateTokens(base.summary());
-                if (preSummaryInputExceedsBudget(inputTokenEstimate)) {
-                    recordPreSummaryFailure(requestVersion, coveredFingerprint, true);
-                    return SessionPreSummaryMaintenanceResult.SKIPPED_INPUT_TOO_LARGE;
-                }
-                summary = sessionPreSummaryCompactor.summarizeIncremental(
-                        base.summary(), deltaMessages);
-            } else {
-                maintenanceMode = "full";
-                deltaMessageCount = coveredMessages.size();
-                inputTokenEstimate = TokenBudget.estimateMessagesTokens(coveredMessages);
-                if (preSummaryInputExceedsBudget(inputTokenEstimate)) {
-                    recordPreSummaryFailure(requestVersion, coveredFingerprint, true);
-                    return SessionPreSummaryMaintenanceResult.SKIPPED_INPUT_TOO_LARGE;
-                }
-                summary = sessionPreSummaryCompactor.summarizePrefix(history);
-            }
-            if (summary == null || summary.isBlank()) {
-                recordPreSummaryFailure(requestVersion, coveredFingerprint, true);
-                return SessionPreSummaryMaintenanceResult.FAILED;
-            }
-            RollingSummary structured = RollingSummary.parse(summary);
-            if (structured.isEmpty()) {
-                recordPreSummaryFailure(requestVersion, coveredFingerprint, true);
-                return SessionPreSummaryMaintenanceResult.FAILED;
-            }
-            summary = structured.render();
-            CompactionSemanticGuard.Validation validation = CompactionSemanticGuard.validateAndRepair(
-                    coveredMessages, summary, ConversationHistoryCompactor.MAX_SUMMARY_CHARS);
-            summary = validation.repairedSummary();
-            structured = RollingSummary.parse(summary);
-            if (structured.isEmpty()) {
-                recordPreSummaryFailure(requestVersion, coveredFingerprint, true);
-                return SessionPreSummaryMaintenanceResult.FAILED;
-            }
-            summary = structured.render();
-            if (summary.length() > ConversationHistoryCompactor.MAX_SUMMARY_CHARS) {
-                recordPreSummaryFailure(requestVersion, coveredFingerprint, true);
-                return SessionPreSummaryMaintenanceResult.FAILED;
-            }
-            synchronized (sessionPreSummaryScheduleLock) {
-                if (!isValidPreSummaryResult(requestVersion)) {
-                    return SessionPreSummaryMaintenanceResult.SKIPPED_SUPERSEDED;
-                }
-                compactionSummaryCache.recordPreSummary(coveredMessages, summary, llmClient);
-                sessionPreSummaryCommittedVersion = requestVersion;
-                clearPreSummaryFailure();
-                if ("incremental".equals(maintenanceMode)) {
-                    preSummaryIncrementalCount.incrementAndGet();
-                } else {
-                    preSummaryFullCount.incrementAndGet();
-                }
-                lastPreSummaryMetrics = new SessionPreSummaryMetrics(
-                        maintenanceMode,
-                        coveredMessages.size(),
-                        deltaMessageCount,
-                        inputTokenEstimate,
-                        summary.length(),
-                        preSummaryFullCount.get(),
-                        preSummaryIncrementalCount.get(),
-                        preSummaryFailureCount.get(),
-                        Instant.now());
-            }
-            return SessionPreSummaryMaintenanceResult.MAINTAINED;
-        } catch (IOException | RuntimeException e) {
-            boolean deterministic = !(e instanceof com.devcli.llm.LlmException failure && failure.retryable());
-            recordPreSummaryFailure(requestVersion, coveredFingerprint, deterministic);
-            if (e instanceof com.devcli.llm.LlmException failure && Boolean.parseBoolean(System.getProperty(
-                    ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY, "false"))) {
-                System.err.printf(java.util.Locale.ROOT,
-                        "[context-compaction] kind=pre-summary-error code=%s status=%d%n",
-                        failure.code(), failure.statusCode());
-            }
-            log.warn("session pre-summary maintenance failed", e);
-            return SessionPreSummaryMaintenanceResult.FAILED;
-        }
-    }
 
-    private boolean isPreSummaryFailureCoolingDown(String fingerprint) {
-        if (fingerprint == null || fingerprint.isBlank()) {
-            return false;
-        }
-        long until = preSummaryFailureUntilMillis;
-        if (until <= System.currentTimeMillis()) {
-            clearPreSummaryFailure();
-            return false;
-        }
-        return fingerprint.equals(preSummaryFailureFingerprint);
-    }
 
-    private boolean isValidPreSummaryResult(long requestVersion) {
-        synchronized (sessionPreSummaryScheduleLock) {
-            return !sessionPreSummaryClosed
-                    && requestVersion > sessionPreSummaryInvalidatedVersion
-                    && requestVersion > sessionPreSummaryCommittedVersion;
-        }
-    }
 
-    private void recordPreSummaryFailure(long requestVersion, String fingerprint, boolean deterministic) {
-        synchronized (sessionPreSummaryScheduleLock) {
-            if (!isValidPreSummaryResult(requestVersion)) {
-                return;
-            }
-            preSummaryFailureCount.incrementAndGet();
-            if (deterministic && fingerprint != null && !fingerprint.isBlank()) {
-                preSummaryFailureFingerprint = fingerprint;
-                preSummaryFailureUntilMillis = System.currentTimeMillis()
-                        + SESSION_PRE_SUMMARY_FAILURE_COOLDOWN_MILLIS;
-            }
-        }
-    }
 
-    private void clearPreSummaryFailure() {
-        preSummaryFailureFingerprint = "";
-        preSummaryFailureUntilMillis = 0L;
-    }
 
-    private boolean preSummaryInputExceedsBudget(int inputTokenEstimate) {
-        boolean exceeded = inputTokenEstimate
-                > Math.max(256, contextProfile.compressionTriggerTokens());
-        if (exceeded) {
-            log.info("skip session pre-summary because source exceeds the local input budget");
-        }
-        return exceeded;
-    }
 
-    private void recordPreSummaryUsage(LlmClient.ChatResponse response) {
-        if (response == null) return;
-        recordTokenUsage(response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
-        if (!Boolean.parseBoolean(System.getProperty(
-                ConversationHistoryCompactor.COMPACTION_METRICS_PROPERTY, "false"))) {
-            return;
-        }
-        System.err.printf(java.util.Locale.ROOT,
-                "[context-compaction] kind=pre-summary-call inputTokens=%d outputTokens=%d cachedInputTokens=%d%n",
-                response.inputTokens(), response.outputTokens(), response.cachedInputTokens());
-    }
 
-    public CompletableFuture<SessionPreSummaryMaintenanceResult> maintainSessionPreSummaryAfterTurnAsync(
-            List<LlmClient.Message> history,
-            int turnToolCalls,
-            int largestToolResultChars) {
-        return maintainSessionPreSummaryAfterTurnAsync(history, turnToolCalls, largestToolResultChars,
-                contextProfile.compressionTriggerTokens(), () -> true, response -> { });
-    }
 
-    public CompletableFuture<SessionPreSummaryMaintenanceResult> maintainSessionPreSummaryAfterTurnAsync(
-            List<LlmClient.Message> history, int turnToolCalls, int largestToolResultChars,
-            int triggerTokens, java.util.function.BooleanSupplier callGuard,
-            java.util.function.Consumer<LlmClient.ChatResponse> usageConsumer) {
-        SessionPreSummaryTask task;
-        SessionPreSummaryTask superseded = null;
-        synchronized (sessionPreSummaryScheduleLock) {
-            List<LlmClient.Message> snapshot = sessionPreSummaryCompactor.preSummaryHistory(history, triggerTokens);
-            long requestVersion = sessionPreSummaryClosed ? -1 : ++sessionPreSummaryRequestVersion;
-            task = new SessionPreSummaryTask(
-                    snapshot, turnToolCalls, largestToolResultChars, callGuard, usageConsumer,
-                    requestVersion);
-            if (sessionPreSummaryClosed) {
-                task.complete(SessionPreSummaryMaintenanceResult.SKIPPED_DISABLED);
-                return task.result;
-            }
-            if (runningSessionPreSummary == null) {
-                runningSessionPreSummary = task;
-                sessionPreSummaryExecutor.execute(task);
-            } else {
-                superseded = pendingSessionPreSummary;
-                pendingSessionPreSummary = task;
-            }
-        }
-        if (superseded != null) {
-            superseded.complete(SessionPreSummaryMaintenanceResult.SKIPPED_SUPERSEDED);
-        }
-        return task.result;
-    }
 
-    private final class SessionPreSummaryTask implements Runnable {
-        private final List<LlmClient.Message> history;
-        private final int turnToolCalls;
-        private final int largestToolResultChars;
-        private final java.util.function.BooleanSupplier callGuard;
-        private final java.util.function.Consumer<LlmClient.ChatResponse> usageConsumer;
-        private final long requestVersion;
-        private final CompletableFuture<SessionPreSummaryMaintenanceResult> result =
-                new CompletableFuture<>();
 
-        private SessionPreSummaryTask(List<LlmClient.Message> history,
-                                     int turnToolCalls,
-                                     int largestToolResultChars,
-                                     java.util.function.BooleanSupplier callGuard,
-                                     java.util.function.Consumer<LlmClient.ChatResponse> usageConsumer,
-                                     long requestVersion) {
-            this.history = history;
-            this.turnToolCalls = turnToolCalls;
-            this.largestToolResultChars = largestToolResultChars;
-            this.callGuard = callGuard;
-            this.usageConsumer = usageConsumer;
-            this.requestVersion = requestVersion;
-        }
-
-        @Override
-        public void run() {
-            try {
-                sessionPreSummaryCompactor.setSummaryCallGuard(callGuard);
-                sessionPreSummaryCompactor.setSummaryUsageConsumer(response -> {
-                    recordPreSummaryUsage(response);
-                    usageConsumer.accept(response);
-                });
-                complete(maintainSessionPreSummaryForCoveredHistory(
-                        history, turnToolCalls, largestToolResultChars, requestVersion));
-            } catch (Throwable error) {
-                result.completeExceptionally(error);
-            } finally {
-                sessionPreSummaryCompactor.setSummaryCallGuard(null);
-                sessionPreSummaryCompactor.setSummaryUsageConsumer(MemoryManager.this::recordPreSummaryUsage);
-                scheduleNextPreSummary(this);
-            }
-        }
-
-        private void complete(SessionPreSummaryMaintenanceResult maintenanceResult) {
-            result.complete(maintenanceResult);
-        }
-    }
-
-    private void scheduleNextPreSummary(SessionPreSummaryTask completed) {
-        synchronized (sessionPreSummaryScheduleLock) {
-            if (runningSessionPreSummary != completed) {
-                return;
-            }
-            runningSessionPreSummary = null;
-            if (sessionPreSummaryClosed || pendingSessionPreSummary == null) {
-                return;
-            }
-            runningSessionPreSummary = pendingSessionPreSummary;
-            pendingSessionPreSummary = null;
-            sessionPreSummaryExecutor.execute(runningSessionPreSummary);
-        }
-    }
 
     /**
      * 为 Multi-Agent 角色构建隔离后的工作记忆视图。
@@ -1131,11 +781,7 @@ public class MemoryManager implements AutoCloseable {
     /** 清空工作记忆（用于 /clear 命令；长期记忆保持不变）。 */
     public void clearShortTerm() {
         sessionMemory.clear();
-        synchronized (sessionPreSummaryScheduleLock) {
-            sessionPreSummaryInvalidatedVersion = ++sessionPreSummaryRequestVersion;
-            compactionSummaryCache.clearPreSummary();
-            clearPreSummaryFailure();
-        }
+        preSummary.clear();
         sessionEventSequence.set(0);
         memoryIgnored = false;
     }
@@ -1182,7 +828,7 @@ public class MemoryManager implements AutoCloseable {
      * 获取记忆系统的整体状态
      */
     public String getSystemStatus() {
-        SessionPreSummaryMetrics metrics = lastPreSummaryMetrics;
+        SessionPreSummaryMetrics metrics = preSummary.metrics();
         return "上下文策略: " + contextProfile.summary() + "\n" +
                 sessionMemory.getStatusSummary() + "\n" +
                 longTermMemory.getStatusSummary() + "\n" +
@@ -1212,7 +858,7 @@ public class MemoryManager implements AutoCloseable {
     public LongTermMemory getLongTermMemory() { return longTermMemory; }
     public TokenBudget getTokenBudget() { return tokenBudget; }
     public ContextProfile getContextProfile() { return contextProfile; }
-    public SessionPreSummaryMetrics getSessionPreSummaryMetrics() { return lastPreSummaryMetrics; }
+    public SessionPreSummaryMetrics getSessionPreSummaryMetrics() { return preSummary.metrics(); }
 
     public record SessionPreSummaryMetrics(String mode, int coveredMessages, int deltaMessages,
                                            int inputTokenEstimate, int summaryChars,
@@ -1235,25 +881,28 @@ public class MemoryManager implements AutoCloseable {
         FAILED
     }
 
-    /**
-     * 关闭底层记忆资源。Main 长进程不需要主动调（JVM 退出释放）；
-     * 主要给单元测试用，及时释放文件句柄与后台线程，避免阻碍 @TempDir 清理。
-     */
+    /** 关闭预摘要调度器和长期记忆资源。 */
     @Override
     public void close() {
-        SessionPreSummaryTask discarded;
-        synchronized (sessionPreSummaryScheduleLock) {
-            sessionPreSummaryClosed = true;
-            sessionPreSummaryInvalidatedVersion = ++sessionPreSummaryRequestVersion;
-            discarded = pendingSessionPreSummary;
-            pendingSessionPreSummary = null;
-            sessionPreSummaryExecutor.shutdownNow();
-        }
-        if (discarded != null) {
-            discarded.complete(SessionPreSummaryMaintenanceResult.SKIPPED_SUPERSEDED);
-        }
-        if (longTermMemory != null) {
-            longTermMemory.close();
-        }
+        preSummary.close();
+        longTermMemory.close();
+    }
+
+    public SessionPreSummaryMaintenanceResult maintainSessionPreSummaryAfterTurn(
+            List<LlmClient.Message> history, int turnToolCalls, int largestToolResultChars) {
+        return preSummary.maintainSessionPreSummaryAfterTurn(history, turnToolCalls, largestToolResultChars);
+    }
+
+    public CompletableFuture<SessionPreSummaryMaintenanceResult> maintainSessionPreSummaryAfterTurnAsync(
+            List<LlmClient.Message> history, int turnToolCalls, int largestToolResultChars) {
+        return preSummary.maintainSessionPreSummaryAfterTurnAsync(history, turnToolCalls, largestToolResultChars);
+    }
+
+    public CompletableFuture<SessionPreSummaryMaintenanceResult> maintainSessionPreSummaryAfterTurnAsync(
+            List<LlmClient.Message> history, int turnToolCalls, int largestToolResultChars,
+            int triggerTokens, java.util.function.BooleanSupplier callGuard,
+            java.util.function.Consumer<LlmClient.ChatResponse> usageConsumer) {
+        return preSummary.maintainSessionPreSummaryAfterTurnAsync(
+                history, turnToolCalls, largestToolResultChars, triggerTokens, callGuard, usageConsumer);
     }
 }

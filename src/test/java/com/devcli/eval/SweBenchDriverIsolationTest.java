@@ -2,7 +2,6 @@ package com.devcli.eval;
 
 import com.devcli.agent.Agent;
 import com.devcli.llm.LlmClient;
-import com.devcli.memory.ConversationHistoryCompactor;
 import com.devcli.memory.TokenBudget;
 import com.devcli.event.RunEvent;
 import com.devcli.tool.ToolRegistry;
@@ -163,14 +162,14 @@ class SweBenchDriverIsolationTest {
 
     @Test
     void compactionSwitchDefaultsOnAndCanBeDisabled() {
-        assertTrue(ConversationHistoryCompactor.isCompactionEnabled(new Properties(), Map.of()));
+        assertTrue(com.devcli.memory.CompactionConfiguration.isCompactionEnabled(new Properties(), Map.of()));
         Properties disabled = new Properties();
-        disabled.setProperty(ConversationHistoryCompactor.COMPACTION_ENABLED_PROPERTY, "false");
-        assertTrue(!ConversationHistoryCompactor.isCompactionEnabled(
+        disabled.setProperty(com.devcli.memory.CompactionConfiguration.COMPACTION_ENABLED_PROPERTY, "false");
+        assertTrue(!com.devcli.memory.CompactionConfiguration.isCompactionEnabled(
                 disabled, Map.of()));
-        disabled.setProperty(ConversationHistoryCompactor.COMPACTION_ENABLED_PROPERTY, "invalid");
+        disabled.setProperty(com.devcli.memory.CompactionConfiguration.COMPACTION_ENABLED_PROPERTY, "invalid");
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
-                () -> ConversationHistoryCompactor.isCompactionEnabled(disabled, Map.of()));
+                () -> com.devcli.memory.CompactionConfiguration.isCompactionEnabled(disabled, Map.of()));
     }
 
     @Test

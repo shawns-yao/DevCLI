@@ -58,6 +58,8 @@ jobs:
           cache: maven
       - name: Check formatting and new SpotBugs findings
         run: ./mvnw -B -DskipTests compile spotless:check spotbugs:check
+      - name: Enforce production source size
+        run: python scripts/check-source-size.py
       - name: Validate frozen CLI regression controller
         run: python -m unittest discover -s benchmarks/swebench-cli -p 'test_*.py'
       - uses: actions/upload-artifact@v4
@@ -80,8 +82,8 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: target/dependency-check-data
-          key: dependency-check-12.1.9-${{ github.run_id }}
-          restore-keys: dependency-check-12.1.9-
+          key: dependency-check-12.2.2-${{ github.run_id }}
+          restore-keys: dependency-check-12.2.2-
       - name: Scan dependencies
         run: ./mvnw -B dependency-check:check
       - uses: actions/upload-artifact@v4

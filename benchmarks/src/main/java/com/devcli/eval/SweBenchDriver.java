@@ -7,7 +7,6 @@ import com.devcli.config.DevCliConfig;
 import com.devcli.llm.LlmClient;
 import com.devcli.llm.LlmClientFactory;
 import com.devcli.llm.ModelCapabilityRegistry;
-import com.devcli.memory.ConversationHistoryCompactor;
 import com.devcli.memory.TokenBudget;
 import com.devcli.runtime.AgentSessionRuntime;
 import com.devcli.event.RunEvent;
@@ -105,8 +104,8 @@ public final class SweBenchDriver {
                 + environmentFingerprint(System.getProperties(), System.getenv()) + "}"
                 + " memoryScope=isolated toolScope=ISOLATED_PROJECT");
         UsageCollector usage = new UsageCollector(outFile.toAbsolutePath().getParent().resolve("conversation.jsonl"));
-        String previousCompaction = System.getProperty(ConversationHistoryCompactor.COMPACTION_ENABLED_PROPERTY);
-        System.setProperty(ConversationHistoryCompactor.COMPACTION_ENABLED_PROPERTY,
+        String previousCompaction = System.getProperty(com.devcli.memory.CompactionConfiguration.COMPACTION_ENABLED_PROPERTY);
+        System.setProperty(com.devcli.memory.CompactionConfiguration.COMPACTION_ENABLED_PROPERTY,
                 Boolean.toString("compact".equals(contextMode)));
         String out;
         try {
@@ -118,9 +117,9 @@ public final class SweBenchDriver {
             };
         } finally {
             if (previousCompaction == null) {
-                System.clearProperty(ConversationHistoryCompactor.COMPACTION_ENABLED_PROPERTY);
+                System.clearProperty(com.devcli.memory.CompactionConfiguration.COMPACTION_ENABLED_PROPERTY);
             } else {
-                System.setProperty(ConversationHistoryCompactor.COMPACTION_ENABLED_PROPERTY, previousCompaction);
+                System.setProperty(com.devcli.memory.CompactionConfiguration.COMPACTION_ENABLED_PROPERTY, previousCompaction);
             }
         }
         long elapsed = System.currentTimeMillis() - started;

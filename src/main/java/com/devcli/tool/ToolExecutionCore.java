@@ -316,4 +316,69 @@ final class ToolExecutionCore {
             return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED, denied.getMessage());
         }
     }
+    /** 返回工具声明的副作用等级；未知工具按外部副作用保守处理。 */
+    ToolEffect toolEffect(String name) {
+        Tool tool = registry.activeTool(name);
+        return tool == null ? ToolEffect.EXTERNAL_MUTATION : tool.effect();
+    }
+
+    /** 返回工具声明的破坏性等级；未知工具按实质性外部变更保守处理。 */
+    Destructiveness toolDestructiveness(String name) {
+        Tool tool = registry.activeTool(name);
+        return tool == null
+                ? Destructiveness.STRUCTURAL
+                : tool.destructiveness();
+    }
+
+    /** 返回工具声明的幂等性；未知工具按不可重试保守处理。 */
+    Idempotency toolIdempotency(String name) {
+        Tool tool = registry.activeTool(name);
+        return tool == null
+                ? Idempotency.NON_IDEMPOTENT
+                : tool.idempotency();
+    }
+
+    /** 返回工具是否声明可进入短期结果缓存；未知工具不缓存。 */
+    boolean toolCacheable(String name) {
+        Tool tool = registry.activeTool(name);
+        return tool != null && tool.cacheable();
+    }
+
+    ToolPresentation toolPresentation(String name) {
+        Tool tool = registry.activeTool(name);
+        return tool == null ? ToolPresentation.generic(name) : tool.presentation();
+    }
+
+    boolean requiresApproval(String name) {
+        if (name != null && name.startsWith("mcp__")) {
+            Tool tool = registry.activeTool(name);
+            return tool == null || ToolRegistry.isMaterialSideEffect(tool.effect());
+        }
+        Optional<BuiltInToolPolicy.Policy> policy = BuiltInToolPolicy.find(name);
+        if (policy.isPresent()) {
+            return policy.get().requiresApproval();
+        }
+        Tool tool = registry.activeTool(name);
+        return tool != null && ToolRegistry.isMaterialSideEffect(tool.effect());
+    }
+
+    boolean requiresAudit(String name) {
+        if (name != null && name.startsWith("mcp__")) {
+            return true;
+        }
+        Optional<BuiltInToolPolicy.Policy> policy = BuiltInToolPolicy.find(name);
+        if (policy.isPresent()) {
+            return policy.get().audited();
+        }
+        Tool tool = registry.activeTool(name);
+        return tool != null && ToolRegistry.isMaterialSideEffect(tool.effect());
+    }
+
+    ToolCancellationCapability toolCancellationCapability(String toolName) {
+        Tool tool = toolName == null ? null : registry.activeTool(toolName);
+        return tool == null
+                ? ToolCancellationCapability.INTERRUPT_ONLY
+                : tool.cancellationCapability();
+    }
+
 }
