@@ -51,6 +51,6 @@ Wrapper 固定 Maven 版本和发行包 SHA-256。POM 固定构建插件与归�
 
 ## 行为证据
 
-固定真实任务必须通过 JAR 的 `-p` 入口执行。模型执行完成、补丁非空、局部测试通过都不等于官方 SWE-bench resolved。公开评测与组件测试的边界见 `benchmark-evaluation.md`。
+固定真实任务通过 JAR 的 `-p` 入口执行，见 [20 个 Java 任务回归入口](../benchmarks/swebench-cli/README.md)。模型执行完成、补丁非空、局部测试通过都不等于官方 SWE-bench resolved。公开评测与组件测试的边界见 `benchmark-evaluation.md`。
 
 报告提交时的命令、退出状态、测试数量与跳过项；未执行的 CI 平台、外部扫描或付费模型任务必须明确标注。遇到失败先判断陈旧测试、产品回归或已确认的外部故障，不因测试失败扩大基线或删掉有效用例。

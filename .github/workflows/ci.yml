@@ -58,6 +58,8 @@ jobs:
           cache: maven
       - name: Check formatting and new SpotBugs findings
         run: ./mvnw -B -DskipTests compile spotless:check spotbugs:check
+      - name: Validate frozen CLI regression controller
+        run: python -m unittest discover -s benchmarks/swebench-cli -p 'test_*.py'
       - uses: actions/upload-artifact@v4
         if: always()
         with:

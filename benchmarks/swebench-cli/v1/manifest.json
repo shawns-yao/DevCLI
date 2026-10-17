@@ -1,0 +1,42 @@
+{
+  "dataset": "SWE-bench/SWE-bench_Multilingual",
+  "revision": "846e647b9f33c0b51b739d005d13d85493c9af09",
+  "artifact_url": "https://huggingface.co/datasets/SWE-bench/SWE-bench_Multilingual/resolve/846e647b9f33c0b51b739d005d13d85493c9af09/data/test-00000-of-00001.parquet",
+  "artifact_sha256": "92abca7cb527b41a9f66d03a26ce441ff7319e3a49f985998fd56be4bb9b08b2",
+  "cases_sha256": "99e077b1c6926628a4c0f5d9891ab2a1205a5814b1cfd50768e7a7ef1a88f22b",
+  "selection": "Java repositories in listed order, round-robin taking instance_id ascending; first 20; independent of outcomes",
+  "repositories": [
+    "apache/druid",
+    "apache/lucene",
+    "google/gson",
+    "javaparser/javaparser",
+    "projectlombok/lombok",
+    "reactivex/rxjava"
+  ],
+  "source_total": 300,
+  "java_total": 43,
+  "count": 20,
+  "license": "MIT dataset; source repositories retain their own licenses",
+  "instance_ids": [
+    "apache__druid-13704",
+    "apache__lucene-11760",
+    "google__gson-1014",
+    "javaparser__javaparser-4538",
+    "projectlombok__lombok-2792",
+    "reactivex__rxjava-7597",
+    "apache__druid-14092",
+    "apache__lucene-12022",
+    "google__gson-1093",
+    "javaparser__javaparser-4561",
+    "projectlombok__lombok-3009",
+    "apache__druid-14136",
+    "apache__lucene-12196",
+    "google__gson-1100",
+    "projectlombok__lombok-3042",
+    "apache__druid-15402",
+    "apache__lucene-12212",
+    "google__gson-2024",
+    "projectlombok__lombok-3052",
+    "apache__druid-16875"
+  ]
+}
