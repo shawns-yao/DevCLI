@@ -174,8 +174,8 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 ### Plan Multi-Agent
 
 - `/plan` 保留计划确认和 checkpoint 恢复；执行步骤进入统一委派。资源分波保留只读并发，写步骤独占波次；原命令解析别名不变。
-- `MultiAgentBatchExecutor` 委托 `OrchestrationWaveExecutor` 完成有界并发、异常归属、输出隔离和稳定顺序归并；`PlanExecuteAgent` 与 STANDARD profile 仅保留内部兼容，不进入 CLI 路由。
-- 三角色：Planner / Worker(默认 2 个) / Reviewer
+- `MultiAgentBatchExecutor` 委托 `OrchestrationWaveExecutor` 完成有界并发、异常归属、输出隔离和稳定顺序归并；旧 PlanExecuteAgent 执行路径已删除。
+- 入口职责：Planner 规划、同步 Worker 修改、Reviewer 审查；步骤写入独占调度
 - 流程：规划与确定性预检 → Reviewer 计划语义建议 → 用户确认 → 按依赖分配 Worker → Pre-Review 硬检查 / 产物 Reviewer 建议 → 归并
 - 计划 Reviewer 使用独立、无工具上下文，逐项输出需求覆盖、节点引用、验收标准评审和结构化问题；critical/high 标准必须给出反例输入及预期失败信号。输出前后允许少量说明文本，只提取包含 `approved` 的完整合法 JSON 对象；无法提取时进行一次协议修复。拒绝、协议损坏和模型故障均作为可见建议，不阻断已通过确定性预检的计划。可选的独立 Provider / 模型通过 `DEVCLI_TEAM_REVIEWER_PROVIDER` / `DEVCLI_TEAM_REVIEWER_MODEL` 配置。
 - 每条验收标准必须包含判定信号、`TOOL|HUMAN` 验证方式、验证器和 `applies_to`。目标只能是有效 DAG 节点或 `FINAL`；普通节点只接收自己的标准，Final integration 接收全部标准。缺失字段、重复 ID、未知节点、未知工具或具有项目写入副作用的自动验证器会在执行前拒绝。
@@ -222,7 +222,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 并发宽度只作用于只读工具：副作用工具在工作区级公平锁内串行，调高上限不会放宽写入互斥
 - 并行执行线程显式继承调用方的 `ToolAccessScope`、资源租约步骤和 SkillContextBuffer 快照，避免 ThreadLocal 回退到 FULL 或丢失修改文件归属
 - `search_tools` 缓存键包含当前能力范围，不能从 FULL 缓存泄露副作用工具到只读任务
-- Agent/PlanExecuteAgent/SubAgent 三条路径都走 executeTools()
+- Agent、DelegationChildLoop 和 SubAgent 都走 executeTools()
 
 ### Tool Result Size Management
 
@@ -277,7 +277,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 - ConversationHistoryCompactor 压缩成功后会在摘要确认消息之后、保留尾部之前插入 `[压缩后恢复上下文]`
 - `SessionMemory` 的恢复段不复用完整 system prompt 视图，而是按最近读写文件、未完成子任务状态、关键工具结果引用、RAG 证据 epoch 输出短结构化上下文；代码与图片归约元数据会随内容进入摘要输入，图片身份以字节 SHA-256 为准
-- Agent / PlanExecuteAgent / SubAgent 会在恢复段追加 MCP 工具状态和本地 SkillContextBuffer 的已加载 Skill、context、allowedTools 与内容摘要
+- Agent / DelegationChildLoop / SubAgent 会在恢复段追加 MCP 工具状态和本地 SkillContextBuffer 的已加载 Skill、context、allowedTools 与内容摘要
 - 恢复段通过 `PostCompactRestoreContext` 做统一预算控制和行级去重；SubAgent 恢复区使用 Planner / Worker / Reviewer 角色视图裁剪，Planner 不携带工具证据，Reviewer 不携带会话临时事件
 - 默认 Agent 不新增 search_code 工具证据；历史 RAG 旁路载荷及 negativeFact 清理仍保留。显式索引与检索组件独立于模型工具目录。
 
@@ -303,7 +303,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 重定向输入默认 UTF-8；`DEVCLI_TERMINAL_ENCODING` 可覆盖旧式控制台编码，`DEVCLI_TERMINAL_FORCE_ANSI=true` 可为误判终端启用 xterm-256color
 - plain / inline 的 HITL 后续文本复用主 LineReader；inline 首选项继续通过 raw mode 单键读取，避免独立 BufferedReader 抢读残留换行
 - InlineRenderer 不使用独立 JLine `Display.update()` 维护 thinking 临时区；真实终端验证发现独立 Display 会在 transcript/status 输出后从错误位置向上清屏。当前实现用固定高度 live 区重写自身行，content/tool 边界先清理 live 区再追加 transcript。
-- 交互期输出优先走 `Renderer.stream()`；`Main`、`PlanExecuteAgent`、`Planner`、`AgentOrchestrator` 都可接收同一个 renderer 输出流，避免绕过 inline renderer 直接写 stdout
+- 交互期输出优先走 `Renderer.stream()`；`CliApplication`、`Agent`、`AgentOrchestrator` 和规划审查适配器共用 renderer 输出流，避免绕过 inline renderer 直接写 stdout
 - `CodeIndex` 通过 `ProgressListener` 上报索引开始 / 文件数量 / 进度 / 完成或失败，`/index` 绑定当前 renderer 输出流；索引阶段按文件批量生成 chunk embedding，批量失败或返回数量异常时逐条降级并保留成功 chunk；内部异常细节写 logger
 
 ### LSP Diagnostics (Phase 17)
@@ -383,39 +383,52 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 代码元数据包括文件路径、增删行统计与 diff 指纹、符号、编译位置，以及 `rag_epoch` / `index_epoch` / `symbol_version` / `classpath_epoch`；原文引用仍由工具结果或落盘附件提供。
 - 图片元数据包括来源、MIME、尺寸和图片字节 SHA-256；base64 或本地文件均按解码后的字节计算，无法取得字节时不回退到描述文本哈希。当前模型支持视觉时在进入循环时生成一次描述，计入共享预算和请求审计；不支持视觉则明确缺失描述。删除未接线的 setImageSummarySupplier。
 
+## 代码质量与职责更新（2026-10-17）
+
+构建、静态检查、覆盖率和依赖规则统一见 [质量门禁](quality-gates.md)。生产源码要求 Java 17，构建与测试使用 JDK 21；版本从 POM 生成。固定 20 个公开 Java 原始任务经真实 `-p` 入口回归，见 [样本与运行说明](../benchmarks/swebench-cli/README.md)，本轮不付费运行。
+
+旧 `PlanExecuteAgent`、`Planner`、`ExecutionPlan`、`Task` 和专用批处理、工作区适配没有生产入口，已一起删除；当前 `/plan` 仍经 AgentOrchestrator 和 DelegationSession。SubAgent 的规划及审查调用、显式 RAG 索引和检索有调用者，继续保留。
+
+| 状态或入口所有者 | 提取职责 |
+| --- | --- |
+| SessionMemory | SessionMemoryRenderer 消费不可变快照；SessionEvidenceText 处理证据摘要，SessionRagEvidenceParser 解析旧证据，不另存状态 |
+| MemoryManager | SessionPreSummaryScheduler 管理既有预摘要排队、失效和关闭，共享原缓存和 TokenBudget |
+| ConversationHistoryCompactor | CompactionPaths 负责持久化命名，CompactionConfiguration 解析现有开关；结果回收和摘要仍各用既有组件 |
+| DelegationSession | DelegationChildLoop 适配统一执行内核、独立历史和结果报告，工作区提交仍由 Session 管理 |
+| AgentCheckpoint | CheckpointFiles 原子保存和加载 JSON，CheckpointPatchJournal 处理补丁文件及对账；保留协议 10，状态访问统一使用 checkpoint 监视器 |
+| ToolRegistry | 工具合同查询和审批元数据由 ToolExecutionCore 承担，参数值类型归 ToolContract；目录仍由 McpToolCatalog 管理 |
+| RuntimeThreadStore | RuntimeSchema 持有原表结构，先查现有列再执行迁移，不吞掉结构错误 |
+| VectorStore | VectorIndexState 使用同一连接和事务维护版本及 dirty 文件，原子影子提升仍由 VectorStore 调度 |
+
+生成的 `logs/`、`Data/processed/` 和根目录历史评测 JSON 停止跟踪，保留本地文件；公开来源清单和固定输入继续提交。详细决策见 [ADR 0025](adr/0025-机械质量门禁与存量职责清理.md)。
+
 ---
 
 ## Core File Descriptions
 
 ### Main.java
-CLI 入口 / Banner / .env 读取 / 日志初始化 / 模式切换 / JLine raw mode
+入口分发；交互启动与循环由 CliApplication 承担，Skill 启动由 CliSkillStartup 承担
 
 ### Agent.java
-ReAct 主循环 / 对话历史 / 工具调用与结果回灌
+ReAct 执行适配；事件日志渲染消息视图，诊断和状态栏由 AgentContextDiagnostics 承担
 
-### PlanExecuteAgent.java
-规划后执行 / 计划审阅 / DAG 状态推进 / 失败重规划；冲突分波、并行调度和顺序输出归并委托给 `PlanTaskBatchExecutor`，结果摘要由 `PlanTaskExecutionResult` 统一生成，任务能力范围、隔离工作区、资源租约和 PatchSet 生命周期委托给 `PlanTaskWorkspaceExecutor`
 
 ### AgentOrchestrator.java
 Plan 顶层流程、计划确认及 `run/resume` 入口。`PlanCoordinator` 负责计划与 DAG，`ReviewCoordinator` 负责计划和最终验收，`CheckpointCoordinator` 保留恢复与提交对账，`StepExecutionCoordinator` 仅调度步骤并调用统一委派。Worker 仅保存身份字符串和 checkpoint 步骤绑定，不创建 SubAgent 实例，不再执行独立 Worker 循环。
 
 ### AgentExecutionEngine.java
-ReAct / Plan task / SubAgent 共用循环；统一取消和预算检查、LLM 调用、assistant/tool 消息协议、结构化工具错误记录与 IOException 出口；取消或失败时把已经流出的 reasoning / content 写回历史，只补文本、不补 tool_call，避免留下没有配对结果的调用；路径差异通过 Delegate 钩子注入
+ReAct / 委派子任务 / SubAgent 共用循环；统一取消和预算检查、LLM 调用、assistant/tool 消息协议、结构化工具错误记录与 IOException 出口；取消或失败时把已经流出的 reasoning / content 写回历史，只补文本、不补 tool_call，避免留下没有配对结果的调用；路径差异通过 Delegate 钩子注入
 
 ### SubAgent.java
 计划生成、计划语义审查及最终验收使用的执行适配器；循环委托 AgentExecutionEngine。默认 ReAct 和 `/plan` 步骤的子任务使用 DelegationSession；角色定义由 DelegateRoleCatalog 加载。
 
-### Planner.java
-LLM 生成计划 JSON / 简单任务最小计划 / 重编号 task_1..N / 依赖计算
 
 ### ExecutionGraph.java
 Plan / Multi-Agent 共用 DAG 调度与校验；统一普通节点和最终集成节点的就绪规则、缺失依赖检测、环检测和拓扑排序
 
 ### ExecutionArtifact.java
-Plan Task / Multi-Agent ExecutionStep / checkpoint 共用任务产物；统一状态、输出、摘要、修改资源、错误、尝试次数与执行时间
+Plan ExecutionStep / 委派 / checkpoint 共用任务产物；统一状态、输出、摘要、修改资源、错误、尝试次数与执行时间
 
-### ExecutionPlan.java
-任务状态 / 进度可视化；可执行任务判定和拓扑排序委托给 ExecutionGraph
 
 ### AgentCheckpoint.java
 checkpoint 协议版本 10；通过 RecoveryState 恢复共享 ExecutionArtifact、验收方式、验证器与适用节点、稳定子代理身份、步骤分配、单调消息游标、最小摘要、按步骤归属的有界 AttemptDigest、已消耗的在位重做次数和失败现场，保存 PatchSet 写前日志、待验证 PatchSet 附件、文件权限与原文件备份，恢复时按文件内容和权限对账并保持原 Worker 绑定和原重做额度；旧协议缺失适用节点时迁移为 `FINAL`，缺失验证字段时转为人工确认，损坏身份拓扑或未来版本明确拒绝
@@ -524,4 +537,4 @@ Java IT 报告默认写入 `target/benchmark-reports/`，三模式脚本写入 I
 
 常规测试不覆盖真实 LLM、真实 Embedding API、真实 MCP server 和终端完整手工体验；对应真实链路通过显式启用的 benchmark 或手工验收执行。
 
-完整测试类列表：CliCommandParserTest / MainBrowserCommandTest / PlanReviewInputParserTest / MainInputNormalizationTest / ExecutionPlanTest / MemoryEntryTest / ConversationMemoryTest / LongTermMemoryTest / MemoryRetrieverTest / MemoryManagerTest / ExplicitMemoryHintsTest / ContextProfileTest / PlanExecuteAgentTest / AgentMemoryHintTest / AgentRoleTest / AgentMessageTest / AgentOrchestratorTest / EmbeddingClientTest / SearchResultTest / NetworkPolicyTest / HtmlExtractorTest / WebFetcherTest / SearchProviderFactoryTest / ZhipuSearchProviderTest / VectorStoreTest / CodeChunkerTest / CodeAnalyzerTest / CodeIndexTest / ApprovalPolicyTest / ApprovalResultTest / HitlToolRegistryTest / TerminalHitlHandlerTest / ToolRegistryTest / BrowserSessionTest / BrowserConnectivityCheckTest / SensitivePagePolicyTest / BrowserGuardTest / McpSchemaSanitizerTest / McpConfigLoaderTest / JsonRpcClientTest / McpToolBridgeTest / McpResourceCacheTest / AtMentionParserTest / AtMentionExpanderTest / AtMentionCompleterTest / NotificationRouterTest / PathGuardTest / CommandGuardTest / AuditLogTest / SkillFrontmatterParserTest / SkillRegistryTest / SkillStateStoreTest / SkillBuiltinExtractorTest / SkillContextBufferTest / SkillIndexFormatterTest / LoadSkillToolTest / SkillCommandHandlerTest
+当前测试集合以 `src/test/java/` 和 POM profile 为准，报告见 `target/surefire-reports/` 与 `target/site/jacoco/`；不手工维护会过期的类名清单。

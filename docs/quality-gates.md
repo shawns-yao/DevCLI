@@ -4,7 +4,7 @@
 
 ## 命令与覆盖
 
-使用仓库的 Maven Wrapper（3.9.11），JDK 17+；CI 固定 JDK 21。下表以 Unix shell 表示，Windows PowerShell 使用 `.\mvnw.cmd`。
+使用仓库的 Maven Wrapper（3.9.11）和 JDK 21 构建、测试；生产源码以 `--release 17` 编译，测试源码沿用现有 Java 21 API。运行环境为 Java 17+，CI 固定 JDK 21。下表以 Unix shell 表示，Windows PowerShell 使用 `.\mvnw.cmd`。
 
 | 门禁 | 命令 | 覆盖范围 |
 | --- | --- | --- |
@@ -13,6 +13,7 @@
 | 终端 | `./mvnw test -Pphase16-smoke` | 终端、渲染、输入解析改动叠加 |
 | 全量 | `./mvnw test` | 跨模块、公共接口、持久化协议、发布前 |
 | 格式 | `./mvnw spotless:check` | CI 检查，不自动改写源码 |
+| 文件规模 | `python scripts/check-source-size.py` | 全部生产 Java 文件不超过 1000 行，无豁免清单 |
 | 静态检查 | `./mvnw -DskipTests compile spotbugs:check` | 新增 SpotBugs 告警阻断 |
 | 依赖 | `./mvnw dependency-check:check` | 已知漏洞与扫描失败均阻断 |
 | 打包 | `./mvnw package -DskipTests` | 构建 JAR，不代表测试或静态检查通过 |
@@ -37,13 +38,15 @@ Java 生产文件目标为最多 1000 行。拆分按真实职责，不通过删
 
 ## 覆盖率
 
-JaCoCo 0.8.14 在测试进程启动时装载 agent，在 test 阶段生成 `target/site/jacoco/index.html` 和 `jacoco.xml`；所有 Surefire profile 保留 UTF-8 与 agent 参数。没有百分比门槛，也不为凑数增加镜像实现的测试。
+JaCoCo 0.8.14 在测试进程启动时装载 agent，在 test 阶段生成 `target/site/jacoco/index.html` 和 `jacoco.xml`；所有 Surefire profile 保留 UTF-8 与 agent 参数。`append=false` 让当前单 fork 测试批次覆盖旧执行数据，避免本地先跑全量、再跑 quick / 终端时得到混合覆盖率。CI 各 suite 使用独立 job。没有百分比门槛，也不为凑数增加镜像实现的测试。
 
 报告只描述本次已执行测试覆盖的代码。quick、全量、定向报告分开看；测试替身不证明真实模型或外部服务效果。
 
 ## 依赖与可复现构建
 
 Dependabot 每周检查 Maven 和 GitHub Actions。OWASP Dependency-Check 的 CVSS 门槛为 0，不接受已识别漏洞；数据更新失败同样失败，不降级成“通过”。唯一数据源是 NVD 官方按年压缩 feed（包含 modified 更新），不依赖 API Key；使用插件已有的 `.meta` 更新时间检查。扫描缓存和报告放在 `target/`，不提交。
+
+插件使用 12.2.2，修复 12.1.9 无法保存长 Mozilla CVE 引用 URL 的数据库缺陷。该失败是扫描设施问题，不能报告为依赖无漏洞；依据见 [官方变更记录](https://github.com/dependency-check/DependencyCheck/blob/main/CHANGELOG.md#version-1222-2026-05-03)。
 
 Wrapper 固定 Maven 版本和发行包 SHA-256。POM 固定构建插件与归档时间；只对 `devcli-build.properties` 过滤 Maven 版本，提示词和其他资源不做变量替换。Banner 由该资源读取版本，启动脚本由 POM 读取产物名。字节一致性需在同一 JDK 和依赖环境中验证，不将版本锁定本身描述成已证明所有平台产物完全一致。
 
