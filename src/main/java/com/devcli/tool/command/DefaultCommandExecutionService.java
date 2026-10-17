@@ -245,9 +245,13 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
                 CancellationToken.Registration.NO_OP;
         try {
             request.executionContext().throwIfCancelled();
+            if (request.executionContext().remainingNanos() == 0) {
+                return Result.timedOut("准备工作区期间命令期限已到，未启动进程");
+            }
             ProcessBuilder builder = new ProcessBuilder(command);
             builder.directory(request.projectRoot().toFile());
             builder.redirectErrorStream(true);
+            CommandEnvironment.filter(builder.environment());
             process = windowsNative
                     ? com.devcli.sandbox.WindowsSandboxProcess.start(command, request.projectRoot(), true,
                             request.timeoutSeconds(), request.executionContext()::isCancelled, true)
@@ -354,39 +358,39 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
     private record CapturedOutput(String text, com.devcli.tool.ToolResultArtifact artifact, boolean incomplete) {}
 
     private static CapturedOutput readOutput(Process process) throws IOException {
-        StringBuilder head = new StringBuilder();
-        StringBuilder tail = new StringBuilder();
+        StringBuilder captured = new StringBuilder();
         boolean incomplete = false;
         try (var stored = com.devcli.tool.ToolResultArtifactStore.openWriter("command");
              var reader = new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8)) {
             char[] buffer = new char[4096];
             int count;
-            long chars = 0;
             while ((count = reader.read(buffer)) >= 0) {
                 if (Thread.currentThread().isInterrupted()) throw new IOException("命令输出读取已取消");
-                String chunk = new String(buffer, 0, count);
-                if (!stored.append(chunk)) {
+                int remaining = (int) com.devcli.tool.ToolResultArtifactStore.MAX_ARTIFACT_CHARS - captured.length();
+                captured.append(buffer, 0, Math.min(remaining, count));
+                if (count > remaining) {
                     incomplete = true;
                     signalProcessTree(process);
                     break;
                 }
-                chars += count;
-                int remaining = MAX_COMMAND_OUTPUT_CHARS - head.length();
-                if (remaining > 0) head.append(chunk, 0, Math.min(remaining, chunk.length()));
-                tail.append(chunk);
-                if (tail.length() > 1000) tail.delete(0, tail.length() - 1000);
             }
+            // 扫描同一份有界完整快照，跨读取块的密钥、私钥和分页切片不能绕过脱敏。
+            String sanitized = com.devcli.policy.SensitiveContentPolicy.inspect(captured.toString()).sanitized();
+            stored.append(sanitized);
             var artifact = stored.finish();
-            String text = chars <= MAX_COMMAND_OUTPUT_CHARS ? head.toString()
-                    : head.substring(0, 1500) + "\n[中间日志已落盘]\n" + tail;
+            String text = sanitized.length() <= MAX_COMMAND_OUTPUT_CHARS ? sanitized
+                    : sanitized.substring(0, 1500) + "\n[中间日志已脱敏落盘]\n"
+                    + sanitized.substring(sanitized.length() - 1000);
             text += "\n[result_ref=" + artifact.ref() + ", offset=0, output_complete=" + !incomplete + "]";
             if (incomplete) text += "\n[输出超过存储配额，已终止命令；引用仅包含已接收部分，结果不完整]";
             return new CapturedOutput(text, new com.devcli.tool.ToolResultArtifact(
                     "PERSISTED_PREVIEW", artifact.chars(), artifact.bytes(),
-                    (int) Math.min(chars, MAX_COMMAND_OUTPUT_CHARS), artifact.ref(), "0", artifact.sha256()), incomplete);
+                    Math.min(sanitized.length(), MAX_COMMAND_OUTPUT_CHARS), artifact.ref(), "0", artifact.sha256()), incomplete);
         } catch (IOException failure) {
             signalProcessTree(process);
-            return new CapturedOutput(head + "\n[命令输出存储失败，已终止命令；原文不可恢复，结果不完整]",
+            String safe = com.devcli.policy.SensitiveContentPolicy.inspect(captured.toString()).sanitized();
+            return new CapturedOutput(safe.substring(0, Math.min(safe.length(), MAX_COMMAND_OUTPUT_CHARS))
+                    + "\n[命令输出存储失败，已终止命令；原文不可恢复，结果不完整]",
                     null, true);
         }
     }
@@ -461,10 +465,11 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
     private static void removeDockerContainer(Config config, String containerName) {
         Process cleanup = null;
         try {
-            cleanup = new ProcessBuilder(dockerCleanupCommand(config, containerName))
+            ProcessBuilder builder = new ProcessBuilder(dockerCleanupCommand(config, containerName))
                     .redirectOutput(ProcessBuilder.Redirect.DISCARD)
-                    .redirectError(ProcessBuilder.Redirect.DISCARD)
-                    .start();
+                    .redirectError(ProcessBuilder.Redirect.DISCARD);
+            CommandEnvironment.filter(builder.environment());
+            cleanup = builder.start();
             if (!cleanup.waitFor(5, TimeUnit.SECONDS)) {
                 cleanup.destroyForcibly();
             }
