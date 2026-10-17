@@ -133,6 +133,12 @@ final class ToolExecutionCore {
         }
         McpRegisteredTool mcpTool = registry.activeMcpTool(context.name());
         if (mcpTool != null) {
+            ToolOutput stale = registry.catalog.definitions.verify(context);
+            if (stale != null) return stale;
+            if (registry.catalog.definitions.needsApproval(context)) {
+                return ToolOutput.rejected(ToolErrorCode.HITL_REJECTED,
+                        "MCP 定义已变化，需要可用的人工审批通道重新确认，未执行");
+            }
             ToolOutput output = mcpTool.invoker().invoke(
                     context.argumentsJson(), context.executionContext());
             if (registry.browserGuard != null) {

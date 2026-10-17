@@ -17,6 +17,13 @@ import static com.devcli.tool.ToolContract.*;
 
 /** 项目文件访问、版本登记、写入观察与既有 LSP 诊断。 */
 final class ToolProjectAccess {
+    String currentRagIndexEpochSnapshot() {
+        try (com.devcli.rag.VectorStore store = new com.devcli.rag.VectorStore(registry.projectPath)) {
+            return store.currentIndexEpoch();
+        } catch (Exception e) {
+            return "none";
+        }
+    }
     private final ToolRegistry registry;
     ToolProjectAccess(ToolRegistry registry) { this.registry = registry; }
     /** 项目相对路径键；路径越界或无法解析时返回 null（调用方按人工审批处理）。 */

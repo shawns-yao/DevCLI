@@ -17,6 +17,8 @@ final class ToolPipelineAssembly {
     ToolPipelineAssembly(ToolRegistry registry) { this.registry = registry; }
     void configureExecutionPipeline() {
         registry.executionPipeline.register(ToolExecutionPipeline.Stage.HITL, (context, chain) -> {
+            ToolOutput stale = registry.catalog.definitions.bind(context, registry.activeMcpTool(context.name()));
+            if (stale != null) return stale;
             ToolOutput denied = registry.executionCore.commands.validate(context);
             if (denied != null) registry.recordToolAudit(AuditLog.AuditEntry.denyByPolicy(
                     context.name(), context.argumentsJson(), denied.text(), 0), context);

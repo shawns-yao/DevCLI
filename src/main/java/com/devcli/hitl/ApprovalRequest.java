@@ -24,24 +24,31 @@ public record ApprovalRequest(
         boolean contentReview,
         boolean redactionAllowed,
         boolean hostExecution,
-        String commandAllowRule
+        String commandAllowRule,
+        boolean definitionReview
 ) {
     public ApprovalRequest(String toolName, String arguments, String dangerLevel,
                            String riskDescription, String suggestion, String callerContext,
                            String sensitiveNotice) {
         this(toolName, arguments, dangerLevel, riskDescription, suggestion, callerContext,
-                sensitiveNotice, false, false, false, null);
+                sensitiveNotice, false, false, false, null, false);
     }
 
     public ApprovalRequest(String toolName, String arguments, String dangerLevel,
                            String riskDescription, String suggestion, String callerContext,
                            String sensitiveNotice, boolean contentReview, boolean redactionAllowed) {
         this(toolName, arguments, dangerLevel, riskDescription, suggestion, callerContext,
-                sensitiveNotice, contentReview, redactionAllowed, false, null);
+                sensitiveNotice, contentReview, redactionAllowed, false, null, false);
     }
 
     public boolean singleDecisionOnly() {
-        return contentReview || hostExecution || "save_memory".equals(toolName);
+        return contentReview || hostExecution || definitionReview || "save_memory".equals(toolName);
+    }
+
+    public static ApprovalRequest mcpDefinition(String toolName, String arguments, String approvalId,
+                                                 String definition) {
+        return new ApprovalRequest(toolName, arguments, "MCP 定义变化", "第三方工具定义已变化，原批准失效",
+                null, approvalId, definition, false, false, false, null, true);
     }
 
     public String hostConfirmationOptions() {
@@ -83,14 +90,14 @@ public record ApprovalRequest(
         return new ApprovalRequest("execute_command", arguments, "主机执行",
                 "没有操作系统隔离，命令及其子进程可能修改配置或访问网络",
                 null, approvalId, hostNotice,
-                false, false, true, allowRule);
+                false, false, true, allowRule, false);
     }
 
     public static ApprovalRequest projectTrust(String project) {
         return new ApprovalRequest("project_trust", "{}", "项目信任", "构建脚本可能执行任意主机代码",
                 null, project, "是否将此项目设为可信？信任用于项目权限规则；主 Agent 默认离线沙箱，脱离沙箱仍须逐次确认。"
                 + "\n选择否将保存未信任决定，其他主机执行也须逐次确认；硬拒绝和删除确认仍有效。",
-                false, false, true, null);
+                false, false, true, null, false);
     }
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BOX_INNER_WIDTH = 58;

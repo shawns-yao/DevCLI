@@ -14,7 +14,6 @@ import com.devcli.lsp.LspDiagnosticReport;
 import com.devcli.lsp.LspManager;
 import com.devcli.mcp.config.McpToolTrustPolicy;
 import com.devcli.mcp.protocol.McpToolDescriptor;
-import com.devcli.rag.VectorStore;
 import com.devcli.policy.AuditLog;
 import com.devcli.policy.PathGuard;
 import com.devcli.policy.TaskGrant;
@@ -741,6 +740,20 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
         return catalog.mcpToolRequiresPerCallApproval(toolName);
     }
 
+    protected void onMcpToolsChanged(String serverName) { }
+
+    protected final boolean mcpDefinitionNeedsApproval(ToolExecutionPipeline.Context context) {
+        return catalog.definitions.needsApproval(context);
+    }
+
+    protected final void acknowledgeMcpDefinition(ToolExecutionPipeline.Context context) {
+        catalog.definitions.approved(context);
+    }
+
+    protected final String activeMcpDefinitionNotice(ToolExecutionPipeline.Context context) {
+        return catalog.definitionNotice(context);
+    }
+
     protected synchronized String mcpToolApprovalNotice(String toolName) {
         return catalog.mcpToolApprovalNotice(toolName);
     }
@@ -754,11 +767,7 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     public String currentRagIndexEpochSnapshot() {
-        try (VectorStore store = new VectorStore(projectPath)) {
-            return store.currentIndexEpoch();
-        } catch (Exception e) {
-            return "none";
-        }
+        return fileAccess.currentRagIndexEpochSnapshot();
     }
 
     public synchronized void replaceMcpToolsForServer(String serverName, List<McpToolDescriptor> newTools,

@@ -197,6 +197,11 @@ public class HitlToolRegistry extends ToolRegistry {
     }
 
     @Override
+    protected void onMcpToolsChanged(String serverName) {
+        if (hitlHandler != null) hitlHandler.clearApprovedAllForServer(serverName);
+    }
+
+    @Override
     protected ToolOutput reviewToolApproval(ToolExecutionPipeline.Context context, ToolExecutionPipeline.Chain chain) {
         String name = context.name();
         boolean approvalRequired = requiresApproval(name);
@@ -212,6 +217,11 @@ public class HitlToolRegistry extends ToolRegistry {
                 ApprovalGate.resourceValues(name, parsedArgumentsOf(context), approvalPathScope), activeRules,
                 host || currentPermissionMode() == PermissionMode.AUTO);
         if (rules.outcome() == PermissionEvaluator.Outcome.HARD_DENY) return denyPolicy(context, rules.reason());
+
+        if (mcpDefinitionNeedsApproval(context)) {
+            return askOrDeny(context, chain, "MCP 描述、schema 或 annotations 已变化，必须重新单次确认。\n"
+                    + activeMcpDefinitionNotice(context));
+        }
 
         BrowserCheckResult browser = checkBrowserTool(name, context.argumentsJson(), true);
         if (browser.blocked()) return chain.proceed(context);
@@ -466,6 +476,9 @@ public class HitlToolRegistry extends ToolRegistry {
         context.putAttribute(PIPELINE_APPROVAL_ID, approvalId);
         ApprovalRequest request = ApprovalRequest.of(
                 context.name(), originalArguments, null, approvalId, sensitiveNotice);
+        boolean definitionReview = mcpDefinitionNeedsApproval(context);
+        if (definitionReview) request = ApprovalRequest.mcpDefinition(
+                context.name(), originalArguments, approvalId, sensitiveNotice);
         boolean command = toolEffect(context.name()) == ToolEffect.HOST_PROCESS;
         String approvedProject = context.attribute("approval.project", String.class);
         boolean host = command && commandRunsWithoutIsolation(context);
@@ -504,7 +517,9 @@ public class HitlToolRegistry extends ToolRegistry {
                 || (host && result.decision() != ApprovalResult.Decision.APPROVED
                 && result.decision() != ApprovalResult.Decision.APPROVED_PREFIX
                 && !result.isRejected())
-                || (incompleteIntent && result.decision() != ApprovalResult.Decision.APPROVED)) {
+                || (incompleteIntent && result.decision() != ApprovalResult.Decision.APPROVED)
+                || (definitionReview && result.isApproved()
+                && result.decision() != ApprovalResult.Decision.APPROVED)) {
             return ToolOutput.rejected(ToolErrorCode.HITL_REJECTED,
                     "当前审批不支持此决策，未执行");
         }
@@ -569,6 +584,7 @@ public class HitlToolRegistry extends ToolRegistry {
         context.putAttribute(PIPELINE_APPROVAL_ID, approvalId);
         context.putAttribute(PIPELINE_APPROVAL_SOURCE, AuditLog.APPROVER_HITL);
         if (command) context.putAttribute("approval.project", approvedProject);
+        if (definitionReview) acknowledgeMcpDefinition(context);
         return chain.proceed(context);
     }
 

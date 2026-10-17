@@ -77,8 +77,9 @@ class McpDeferredDispatchTest {
                     registry.executeToolOutput("call_mcp_tool", arguments.toString()).errorCode());
             assertEquals(2, calls.get(), "当前 schema 校验失败不得执行目标工具");
             arguments.putObject("arguments").put("body", "updated");
-            assertTrue(registry.executeToolOutput("call_mcp_tool", arguments.toString()).isSuccess());
-            assertEquals(3, calls.get());
+            assertEquals(ToolErrorCode.HITL_REJECTED,
+                    registry.executeToolOutput("call_mcp_tool", arguments.toString()).errorCode());
+            assertEquals(2, calls.get(), "定义变更须人工确认，无审批通道不得执行");
         }
     }
 }

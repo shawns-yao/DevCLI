@@ -1,8 +1,9 @@
 package com.devcli.mcp;
 
 import com.devcli.mcp.protocol.McpToolDescriptor;
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -47,30 +48,39 @@ public record McpToolDiscoveryEntry(
                 Instant.now());
     }
 
-    private static String fingerprint(List<McpToolDescriptor> tools) {
-        StringBuilder payload = new StringBuilder();
-        for (McpToolDescriptor tool : tools) {
-            payload.append(tool.name()).append('\n')
-                    .append(tool.namespacedName()).append('\n')
-                    .append(canonicalJson(tool.inputSchema())).append('\n');
+    /** 历史字段名仍为 schemaFingerprint，指纹覆盖描述、schema 和 annotations 的完整定义。 */
+    public static String fingerprint(List<McpToolDescriptor> tools) {
+        var definitions = MAPPER.createArrayNode();
+        for (McpToolDescriptor tool : tools.stream().sorted(Comparator.comparing(McpToolDescriptor::namespacedName)).toList()) {
+            ObjectNode definition = definitions.addObject();
+            definition.put("name", tool.namespacedName());
+            definition.put("description", tool.description());
+            definition.set("schema", canonical(tool.inputSchema()));
+            definition.set("annotations", MAPPER.valueToTree(tool.annotations()));
         }
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256")
-                    .digest(payload.toString().getBytes(StandardCharsets.UTF_8));
+                    .digest(definitions.toString().getBytes(StandardCharsets.UTF_8));
             return HexFormat.of().formatHex(digest, 0, 6);
         } catch (NoSuchAlgorithmException e) {
-            return Integer.toHexString(payload.toString().hashCode());
+            throw new IllegalStateException("JDK 缺少 SHA-256", e);
         }
     }
 
-    private static String canonicalJson(com.fasterxml.jackson.databind.JsonNode node) {
-        if (node == null) {
-            return "";
+    private static JsonNode canonical(JsonNode node) {
+        if (node == null) return MAPPER.nullNode();
+        if (node.isObject()) {
+            ObjectNode sorted = MAPPER.createObjectNode();
+            var names = new java.util.ArrayList<String>();
+            node.fieldNames().forEachRemaining(names::add);
+            names.stream().sorted().forEach(name -> sorted.set(name, canonical(node.get(name))));
+            return sorted;
         }
-        try {
-            return MAPPER.writeValueAsString(node);
-        } catch (JsonProcessingException e) {
-            return node.toString();
+        if (node.isArray()) {
+            var array = MAPPER.createArrayNode();
+            node.forEach(item -> array.add(canonical(item)));
+            return array;
         }
+        return node;
     }
 }

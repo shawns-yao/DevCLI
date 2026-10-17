@@ -336,13 +336,19 @@ final class ToolAccessContext {
         fork.skillRegistry = registry.skillRegistry;
         fork.skillContextBuffer = registry.skillContextBuffer == null ? null : registry.skillContextBuffer.copy();
         fork.executionEnvironment = registry.executionEnvironment;
-        fork.catalog.mcpTrustPolicies.putAll(registry.catalog.mcpTrustPolicies);
-        fork.catalog.semanticValidators.putAll(registry.catalog.semanticValidators);
-        registry.catalog.mcpTools.values().forEach(registered ->
-                fork.registerContextualMcpToolOutput(
-                        registered.descriptor(), registered.invoker()));
-        fork.catalog.mcpServerLifecycleVersions.putAll(registry.catalog.mcpServerLifecycleVersions);
-        fork.catalog.activatedMcpToolDefinitions.addAll(registry.catalog.activatedMcpToolDefinitions);
+        // 复制同一次发布的定义与执行绑定，不把 fork 物化误报成服务工具变化。
+        synchronized (registry) {
+            fork.catalog.mcpTrustPolicies.putAll(registry.catalog.mcpTrustPolicies);
+            fork.catalog.semanticValidators.putAll(registry.catalog.semanticValidators);
+            registry.catalog.mcpTools.forEach((name, registered) -> {
+                fork.catalog.mcpTools.put(name, registered);
+                fork.catalog.tools.put(name, registry.catalog.tools.get(name));
+            });
+            fork.catalog.mcpServerLifecycleVersions.putAll(registry.catalog.mcpServerLifecycleVersions);
+            fork.catalog.definitions = registry.catalog.definitions;
+            fork.catalog.activatedMcpToolDefinitions.addAll(registry.catalog.activatedMcpToolDefinitions);
+        }
+        fork.invalidateToolSearchIndex();
         return fork;
     }
 }

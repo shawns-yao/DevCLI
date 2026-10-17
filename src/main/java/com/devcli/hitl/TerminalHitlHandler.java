@@ -260,6 +260,7 @@ public class TerminalHitlHandler implements HitlHandler {
     public void clearApprovedAllForServer(String serverName) {
         if (serverName != null) {
             approvedAllByServer.remove(serverName);
+            approvedAllByTool.removeIf(name -> name.startsWith("mcp__" + serverName + "__"));
         }
     }
 

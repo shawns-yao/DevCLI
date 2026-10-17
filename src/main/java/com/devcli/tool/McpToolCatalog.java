@@ -6,13 +6,11 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.devcli.llm.LlmClient;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.core.JsonProcessingException;
+import com.devcli.mcp.McpToolDiscoveryEntry;
+import com.devcli.util.UntrustedContent;
 import com.devcli.mcp.config.McpToolTrustPolicy;
 import com.devcli.mcp.protocol.McpToolDescriptor;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
@@ -23,10 +21,14 @@ import static com.devcli.tool.ToolContract.*;
 /** 工具目录发布与 MCP 生命周期；定义和执行绑定由同一版本管理。 */
 final class McpToolCatalog {
     private final ToolRegistry registry;
-    McpToolCatalog(ToolRegistry registry) { this.registry = registry; }
+    McpToolCatalog(ToolRegistry registry) {
+        this.registry = registry;
+        this.definitions = new McpDefinitionGuard(mcpTools, registry::onMcpToolsChanged);
+    }
     final Map<String, Tool> tools = new ConcurrentHashMap<>();
 
     final Map<String, McpRegisteredTool> mcpTools = new ConcurrentHashMap<>();
+    McpDefinitionGuard definitions;
 
     final Map<String, ToolSemanticValidator.CustomRule> semanticValidators = new ConcurrentHashMap<>();
 
@@ -131,6 +133,12 @@ final class McpToolCatalog {
             return;
         }
         McpRegisteredTool registered = new McpRegisteredTool(descriptor, invoker);
+        McpRegisteredTool previous = mcpTools.get(toolName);
+        if (previous != null && !previous.descriptor().equals(descriptor)) {
+            definitions.changed(descriptor.serverName(), descriptor);
+        } else if (previous == null) {
+            registry.onMcpToolsChanged(descriptor.serverName());
+        }
         mcpTools.put(toolName, registered);
         tools.put(toolName, mcpTool(toolName, descriptor, policy));
         registry.invalidateToolSearchIndex();
@@ -140,7 +148,9 @@ final class McpToolCatalog {
         if (toolName == null || toolName.isBlank()) {
             return;
         }
-        boolean removed = mcpTools.remove(toolName) != null;
+        McpRegisteredTool previous = mcpTools.remove(toolName);
+        if (previous != null) definitions.removed(previous.descriptor().serverName(), toolName);
+        boolean removed = previous != null;
         removed = tools.remove(toolName) != null || removed;
         activatedMcpToolDefinitions.remove(toolName);
         if (removed) {
@@ -171,6 +181,11 @@ final class McpToolCatalog {
             risks.add("openWorld");
         }
         return risks.isEmpty() ? null : "MCP annotations require per-call approval: " + String.join(", ", risks);
+    }
+
+    String definitionNotice(ToolExecutionPipeline.Context context) {
+        var descriptor = context.attribute(McpDefinitionGuard.BINDING, McpToolDescriptor.class);
+        return mcpDescription(descriptor) + "\n参数 schema: " + descriptor.inputSchema();
     }
 
     String mcpToolSnapshot() {
@@ -205,35 +220,8 @@ final class McpToolCatalog {
     }
 
     static String mcpToolSchemaFingerprint(List<McpRegisteredTool> serverTools) {
-        StringBuilder payload = new StringBuilder();
-        for (McpRegisteredTool tool : serverTools) {
-            McpToolDescriptor descriptor = tool.descriptor();
-            payload.append(descriptor.name()).append('\n')
-                    .append(descriptor.namespacedName()).append('\n')
-                    .append(canonicalJson(descriptor.inputSchema())).append('\n');
-        }
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256")
-                    .digest(payload.toString().getBytes(StandardCharsets.UTF_8));
-            StringBuilder hex = new StringBuilder();
-            for (int i = 0; i < 6; i++) {
-                hex.append(String.format(Locale.ROOT, "%02x", digest[i]));
-            }
-            return hex.toString();
-        } catch (NoSuchAlgorithmException e) {
-            return Integer.toHexString(payload.toString().hashCode());
-        }
-    }
-
-    static String canonicalJson(JsonNode node) {
-        if (node == null) {
-            return "";
-        }
-        try {
-            return ToolRegistry.mapper.writeValueAsString(node);
-        } catch (JsonProcessingException e) {
-            return node.toString();
-        }
+        return McpToolDiscoveryEntry.fingerprint(serverTools.stream()
+                .map(McpRegisteredTool::descriptor).toList());
     }
 
     void replaceMcpToolsForServer(String serverName, List<McpToolDescriptor> newTools,
@@ -297,6 +285,19 @@ final class McpToolCatalog {
             pending.add(new PendingMcpTool(toolName, registered, tool));
         }
 
+        for (PendingMcpTool item : pending) {
+            McpRegisteredTool previous = mcpTools.get(item.name());
+            if (previous != null && !previous.descriptor().equals(item.registered().descriptor())) {
+                definitions.changed(serverName, item.registered().descriptor());
+            } else if (previous == null) {
+                registry.onMcpToolsChanged(serverName);
+            }
+        }
+        Set<String> publishedNames = new HashSet<>();
+        for (PendingMcpTool item : pending) publishedNames.add(item.name());
+        for (String name : existing) {
+            if (!publishedNames.contains(name)) definitions.removed(serverName, name);
+        }
         setMcpServerLifecycleVersion(serverName, lifecycleVersion);
         for (String toolName : existing) {
             mcpTools.remove(toolName);
@@ -354,8 +355,12 @@ final class McpToolCatalog {
         String base = descriptor.description() == null || descriptor.description().isBlank()
                 ? "MCP server 提供的外部工具"
                 : descriptor.description();
+        if (base.codePointCount(0, base.length()) > 2000) {
+            base = base.substring(0, base.offsetByCodePoints(0, 2000)) + "…[描述已截断]";
+        }
         String annotations = mcpAnnotationSummary(descriptor.annotations());
-        return base + " (MCP server: " + descriptor.serverName() + ", tool: " + descriptor.name()
+        return "[第三方提供，" + UntrustedContent.UNTRUSTED + "] " + base
+                + " (MCP server: " + descriptor.serverName() + ", tool: " + descriptor.name()
                 + (annotations.isBlank() ? "" : ", annotations: " + annotations)
                 + ")";
     }
