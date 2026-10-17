@@ -86,9 +86,11 @@ final class McpToolCatalog {
 
     void setMcpToolTrustPolicy(String serverName, McpToolTrustPolicy policy) {
         String normalized = normalizeMcpServerName(serverName);
-        mcpTrustPolicies.put(normalized,
-                policy == null ? McpToolTrustPolicy.untrusted() : policy);
-        registry.invalidateToolSearchIndex();
+        McpToolTrustPolicy effective = policy == null ? McpToolTrustPolicy.untrusted() : policy;
+        synchronized (registry) {
+            McpToolTrustPolicy previous = mcpTrustPolicies.put(normalized, effective);
+            if (!effective.equals(previous)) refreshTrustPolicy(normalized);
+        }
     }
 
     void removeMcpToolTrustPolicy(String serverName) {
@@ -96,9 +98,20 @@ final class McpToolCatalog {
         if (normalized == null) {
             return;
         }
-        if (mcpTrustPolicies.remove(normalized) != null) {
-            registry.invalidateToolSearchIndex();
+        synchronized (registry) {
+            if (mcpTrustPolicies.remove(normalized) != null) refreshTrustPolicy(normalized);
         }
+    }
+
+    private void refreshTrustPolicy(String serverName) {
+        // 重新发布能力合同与绑定，让已有 fork 不能保留被撤销的本地授权。
+        List<McpRegisteredTool> existing = mcpTools.values().stream()
+                .filter(tool -> serverName.equals(tool.descriptor().serverName())).toList();
+        for (McpRegisteredTool registered : existing) {
+            registerContextualMcpToolOutput(registered.descriptor(), registered.invoker());
+        }
+        registry.onMcpToolsChanged(serverName);
+        registry.invalidateToolSearchIndex();
     }
 
     /**
@@ -184,7 +197,7 @@ final class McpToolCatalog {
     }
 
     String definitionNotice(ToolExecutionPipeline.Context context) {
-        var descriptor = context.attribute(McpDefinitionGuard.BINDING, McpToolDescriptor.class);
+        var descriptor = context.attribute(McpDefinitionGuard.BINDING, McpRegisteredTool.class).descriptor();
         return mcpDescription(descriptor) + "\n参数 schema: " + descriptor.inputSchema();
     }
 

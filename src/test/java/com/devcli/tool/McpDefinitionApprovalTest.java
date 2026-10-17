@@ -5,6 +5,7 @@ import com.devcli.hitl.ApprovalResult;
 import com.devcli.hitl.HitlHandler;
 import com.devcli.hitl.HitlToolRegistry;
 import com.devcli.mcp.McpToolDiscoveryEntry;
+import com.devcli.mcp.config.McpToolTrustPolicy;
 import com.devcli.mcp.protocol.McpToolDescriptor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -13,6 +14,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -73,6 +75,54 @@ class McpDefinitionApprovalTest {
                 assertTrue(handler.requests.isEmpty());
                 assertEquals(0, calls.get());
             }
+        }
+    }
+
+    @Test
+    void reconnectWithSameDescriptionInvalidatesFrozenInvoker(@TempDir Path project) {
+        RecordingHandler handler = new RecordingHandler();
+        AtomicInteger oldCalls = new AtomicInteger();
+        AtomicInteger newCalls = new AtomicInteger();
+        try (HitlToolRegistry root = new HitlToolRegistry(handler)) {
+            register(root, "unchanged", oldCalls);
+            try (ToolRegistry fork = root.forkForProject(project)) {
+                root.registerMcpToolOutput(descriptor("unchanged"), args -> {
+                    newCalls.incrementAndGet();
+                    return ToolOutput.success("new client");
+                });
+                assertEquals(ToolErrorCode.STALE_TOOL_SNAPSHOT,
+                        fork.executeToolOutput("mcp__sample__read", "{}").errorCode());
+                assertEquals(0, oldCalls.get());
+                assertEquals(0, newCalls.get());
+                assertEquals("new client", root.executeToolOutput("mcp__sample__read", "{}").text());
+                assertEquals(1, newCalls.get());
+            }
+        }
+    }
+
+    @Test
+    void changedLocalTrustRepublishesCapabilitiesAndInvalidatesFork(@TempDir Path project) {
+        RecordingHandler handler = new RecordingHandler();
+        AtomicInteger calls = new AtomicInteger();
+        try (HitlToolRegistry root = new HitlToolRegistry(handler)) {
+            register(root, "read", calls);
+            assertEquals(ToolContract.ToolEffect.EXTERNAL_MUTATION, root.toolEffect("mcp__sample__read"));
+            root.setMcpToolTrustPolicy("sample", new McpToolTrustPolicy(false, Set.of("read"), Set.of()));
+            assertEquals(ToolContract.ToolEffect.READ_ONLY, root.toolEffect("mcp__sample__read"));
+            try (ToolRegistry fork = root.forkForProject(project)) {
+                handler.blanket = true;
+                root.removeMcpToolTrustPolicy("sample");
+                assertFalse(handler.blanket);
+                assertEquals(ToolContract.ToolEffect.EXTERNAL_MUTATION, root.toolEffect("mcp__sample__read"));
+                assertEquals(ToolErrorCode.CAPABILITY_DENIED, root.runWithToolAccess(
+                        ToolContract.ToolAccessScope.READ_ONLY,
+                        () -> root.executeToolOutput("mcp__sample__read", "{}")).errorCode());
+                assertEquals(ToolErrorCode.STALE_TOOL_SNAPSHOT,
+                        fork.executeToolOutput("mcp__sample__read", "{}").errorCode());
+                assertEquals(0, calls.get());
+            }
+            root.setMcpToolTrustPolicy("sample", new McpToolTrustPolicy(false, Set.of(), Set.of("read")));
+            assertFalse(root.hasTool("mcp__sample__read"));
         }
     }
 
