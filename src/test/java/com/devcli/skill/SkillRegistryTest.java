@@ -53,6 +53,22 @@ class SkillRegistryTest {
         Skill skill = all.get(0);
         assertEquals("v-project", skill.version());
         assertEquals(Skill.Source.PROJECT, skill.source());
+        assertTrue(registry.warnings().stream().anyMatch(w -> w.contains("已覆盖 builtin")));
+        assertTrue(registry.warnings().stream().anyMatch(w -> w.contains("已覆盖 user")));
+        assertTrue(SkillIndexFormatter.format(all).contains("[project]"));
+    }
+
+    @Test
+    void similarDescriptionsAreReportedWithoutChangingCatalog(@TempDir Path tempDir) throws IOException {
+        writeSkill(tempDir, "one", "分析数据库查询性能并优化执行计划", "1");
+        writeSkill(tempDir, "two", "分析数据库查询性能并优化执行计划", "1");
+        writeSkill(tempDir, "three", "生成文档和排版报告", "1");
+        SkillRegistry registry = new SkillRegistry(tempDir, null, null, null);
+        registry.reload();
+        assertEquals(3, registry.enabledSkills().size());
+        assertEquals(1, registry.warnings().stream().filter(w -> w.contains("描述相似")).count());
+        registry.reload();
+        assertEquals(1, registry.warnings().stream().filter(w -> w.contains("描述相似")).count());
     }
 
     @Test

@@ -27,7 +27,7 @@ final class SkillCommandHandler {
     static String list(SkillRegistry registry) {
         List<Skill> all = registry.allSkills();
         if (all.isEmpty()) {
-            return "📚 Skills: 未发现可用 skill\n   /skill reload 重新扫描";
+            return "📚 Skills: 未发现可用 skill\n   /skill reload 重新扫描\n" + String.join("\n", registry.warnings());
         }
         List<Skill> enabled = registry.enabledSkills();
         StringBuilder sb = new StringBuilder("📚 Skills（" + all.size() + " 个）\n");
@@ -40,6 +40,7 @@ final class SkillCommandHandler {
                     skill.version() == null ? "" : "v" + skill.version(),
                     abbreviate(skill.description(), 80)));
         }
+        for (String warning : registry.warnings()) sb.append("  注意：").append(warning).append('\n');
         sb.append('\n')
                 .append("提示：\n")
                 .append("  /skill show <name> 看完整 SKILL.md\n")

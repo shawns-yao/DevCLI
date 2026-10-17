@@ -88,6 +88,10 @@ public final class SkillRegistry {
             }
         }
         validateDependencies();
+        SkillDescriptionDiagnostics.inspect(sortedSkills(), (left, right) -> warn("skill_similar_description",
+                "Skill 描述相似: " + left.name() + " (" + left.displaySource() + ") / "
+                        + right.name() + " (" + right.displaySource() + ")；请明确使用与排除场景",
+                right.skillMdPath()));
         generation++;
         catalogSnapshot = new CatalogSnapshot(generation, sortedSkills());
     }
@@ -245,7 +249,12 @@ public final class SkillRegistry {
                 }
                 Skill skill = parseSkill(entry, skillMd, source, shared);
                 if (skill != null) {
-                    skillsByName.put(skill.name(), skill);
+                    Skill replaced = skillsByName.put(skill.name(), skill);
+                    if (replaced != null) {
+                        warn("skill_overridden", "Skill " + skill.name() + " 使用 " + skill.displaySource()
+                                + " " + skill.skillMdPath() + "，已覆盖 " + replaced.displaySource()
+                                + " " + replaced.skillMdPath(), skill.skillMdPath());
+                    }
                 }
             }
         } catch (IOException e) {

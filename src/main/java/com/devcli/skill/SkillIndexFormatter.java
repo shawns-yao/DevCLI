@@ -47,7 +47,7 @@ public final class SkillIndexFormatter {
         for (Skill skill : enabled) {
             String desc = truncateByCodepoint(
                     skill.description().replaceAll("\\s+", " ").trim(), MAX_DESCRIPTION_CODEPOINTS);
-            String line = "- **" + skill.name() + "**：" + desc + '\n';
+            String line = "- **" + skill.name() + "** [" + skill.displaySource() + "]：" + desc + '\n';
             if (MemoryEntry.estimateTokens(sb + line + footer) > safeBudget) {
                 continue;
             }
@@ -56,7 +56,7 @@ public final class SkillIndexFormatter {
         }
         if (included == 0) {
             Skill first = enabled.get(0);
-            String minimal = "## 可用 Skills\n- **" + first.name() + "**\n" + footer;
+            String minimal = "## 可用 Skills\n- **" + first.name() + "** [" + first.displaySource() + "]\n" + footer;
             String text = truncateToTokenBudget(minimal, safeBudget);
             return new FormatResult(text, 1, Math.max(0, enabled.size() - 1),
                     MemoryEntry.estimateTokens(text));
