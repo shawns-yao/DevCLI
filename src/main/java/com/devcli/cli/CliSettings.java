@@ -26,7 +26,7 @@ import static com.devcli.cli.CliDisplay.*;
 final class CliSettings {
     private static final Logger log = LoggerFactory.getLogger(CliSettings.class);
 
-    static final String VERSION = "16.1.0";
+    static final String VERSION = BuildVersion.VALUE;
 
     static final String ENV_FILE = ".env";
 

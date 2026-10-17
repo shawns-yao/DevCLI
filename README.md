@@ -154,7 +154,7 @@ Agent 自身配置单独保护：`.devcli/hooks.json`、`.devcli/mcp.json`、`.d
 一次性无交互运行：
 
 ```bash
-java -jar target/devcli-1.0-SNAPSHOT.jar -p "查找测试入口并说明运行方法"
+java -jar target/devcli-16.1.0-SNAPSHOT.jar -p "查找测试入口并说明运行方法"
 ```
 
 stdout 输出一个 UTF-8 JSON，包含 `status`、`output`、`usage`；诊断写 stderr。使用已有 provider、权限配置、规则和内置工具。需要临时审批的操作拒绝，不等待输入；可提前配置允许规则。退出码：完成 0、失败 1、参数错误 2、取消 130。`status=completed` 仅表示运行正常收尾，任务验收仍看实际输出和工具证据。该入口不装配交互 CLI 的浏览器、MCP 和后台任务服务。

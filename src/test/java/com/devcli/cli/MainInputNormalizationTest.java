@@ -60,7 +60,7 @@ class MainInputNormalizationTest {
         assertTrue(lines.stream().noneMatch(line -> line.contains("PaiCLI")));
         assertTrue(lines.stream().noneMatch(line -> line.contains("DecCLL")));
         assertTrue(lines.stream().noneMatch(line -> line.contains("π")));
-        assertTrue(lines.stream().anyMatch(line -> line.contains("v16.1.0")));
+        assertTrue(lines.stream().anyMatch(line -> line.contains("v" + BuildVersion.VALUE)));
         assertTrue(lines.size() <= 6, "startup must stay compact");
         assertTrue(lines.stream().noneMatch(line -> line.contains("██████╗")));
         assertTrue(lines.stream().noneMatch(line -> line.contains("Tips for getting started")));

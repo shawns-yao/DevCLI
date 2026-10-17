@@ -5,7 +5,8 @@ $utf8 = [Text.UTF8Encoding]::new($false)
 $OutputEncoding = $utf8
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$jarPath = Join-Path $projectRoot 'target\devcli-1.0-SNAPSHOT.jar'
+$projectVersion = ([xml][IO.File]::ReadAllText((Join-Path $projectRoot 'pom.xml'))).project.version
+$jarPath = Join-Path $projectRoot ("target\devcli-$projectVersion.jar")
 $envPath = Join-Path $projectRoot '.env'
 
 $workingDirectory = (Get-Location).Path.TrimEnd('\', '/')
@@ -17,7 +18,7 @@ if ($workingDirectory -in @($profileDirectory, $systemDirectory, $driveRoot)) {
 }
 
 if (-not (Test-Path -LiteralPath $jarPath -PathType Leaf)) {
-    [Console]::Error.WriteLine('DevCLI JAR not found. Run mvn.cmd -DskipTests package in: ' + $projectRoot)
+    [Console]::Error.WriteLine('DevCLI JAR not found. Run .\mvnw.cmd -DskipTests package in: ' + $projectRoot)
     exit 1
 }
 

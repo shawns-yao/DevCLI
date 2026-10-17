@@ -31,7 +31,7 @@ HITL 开启时，未获路径授权或达到批量阈值的删除必须逐次确
 - 定位：面向商业使用的 Java Agent CLI 产品，对标 Claude Code
 - 已交付至第 27 期（ReAct → Plan+DAG → Memory → RAG → Multi-Agent → HITL → 并行工具 → 多模型 → 联网 → MCP 核心 → MCP 高级 → 长上下文 → Chrome DevTools → CDP 会话复用 → Skill → TUI → LSP 诊断 → Side-Git 快照 → Prompt 分层 → Runtime API → 图片输入 → JLine 交互升级 → Agent 加固 → RAG 调用图扩展 → RAG 检索意图 → 滚动摘要裁剪；第 26 期无独立文档）
 - 下一步：sampling / recovery 作为后续增强；OAuth 暂不纳入个人使用优先级
-- Banner 版本：`v16.1.0`，Maven 产物：`devcli-1.0-SNAPSHOT.jar`
+- 版本唯一来源为 `pom.xml`；Banner 与 Maven 产物当前为 `16.1.0-SNAPSHOT`
 
 ## 运行前提
 
@@ -43,15 +43,15 @@ HITL 开启时，未获路径授权或达到批量阈值的删除必须逐次确
 ```bash
 cp .env.example .env
 mvn clean package -DskipTests   # 快速产出可手工验收 jar
-java -jar target/devcli-1.0-SNAPSHOT.jar
-java -jar target/devcli-1.0-SNAPSHOT.jar -p "任务"  # 无交互，stdout 为 UTF-8 JSON
+java -jar target/devcli-16.1.0-SNAPSHOT.jar
+java -jar target/devcli-16.1.0-SNAPSHOT.jar -p "任务"  # 无交互，stdout 为 UTF-8 JSON
 mvn test -Pquick          # 常规回归
 mvn test -Pphase16-smoke  # 终端交互兼容回归
 mvn test -Dtest=XxxTest -DskipTests=false   # 针对性
 mvn test -DskipTests=false                  # 全量回归
 ```
 
-`pom.xml` 的 `<skipTests>` 默认是 `false`，所以裸跑 `mvn clean package` 会连全量测试和 SpotBugs 一起跑；只想拿 jar 就显式加 `-DskipTests`。`target/` 不随仓库分发，手工验收前必须自己构建一次。
+`pom.xml` 的 `<skipTests>` 默认是 `false`，所以裸跑 `mvn clean package` 会跑全量测试；SpotBugs 在 verify 或显式 `spotbugs:check` 时运行。只想拿 jar 就显式加 `-DskipTests`。统一使用仓库 Maven Wrapper，Windows 用 `.\mvnw.cmd`。`target/` 不随仓库分发，手工验收前必须自己构建一次。
 
 Windows + Git Bash 下必须调用 `mvn.cmd`，不要用 `bin/mvn` 这个 shell 脚本：后者拼出的 POSIX 风格 classpath 交给 Windows JVM 会直接报 `找不到或无法加载主类 org.codehaus.plexus.classworlds.launcher.Launcher`。同时确保 `JAVA_HOME` 指向 JDK（本机为 `C:\Download\JDK\JDK-21`）。
 
@@ -321,6 +321,13 @@ Execution Trace 经 `RunEventTraceSink` 写入 `~/.devcli/traces/trace-yyyy-MM-d
 - 工具审计新增可选 `identity`：执行轮次 `taskId`、租约 `stepId`、授权作用域 `grantId`、`invocationId`、逐次审批 `approvalId` 与有界授权摘要。成功事件区分 `task_grant`、`hitl`、`hitl_reused`；能力拒绝也记录调用身份。未提供的身份保持空值，旧日志仍可读取；尚未贯通用户请求、Agent 身份与最终文件 generation，不宣称完整副作用因果链。
 
 ## 修改时的硬规则
+
+### 代码质量
+
+- 企业级指正确、清晰、可验证，不指更多抽象或防御分支。
+- 只为真实外部输入和已发生的错误加校验；内部调用保证的条件不重复检查。不新增未要求的开关、兼容层、降级分支或重试。
+- 替换实现时同一次删除旧路径；交付附 `git diff --stat`，新增显著多于删除时说明原因。
+- 新代码不得新增 SpotBugs 告警，不得超过 1000 行/文件。门禁入口见 `docs/quality-gates.md`。
 
 ### 1. 改行为 → 同步文档
 

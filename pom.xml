@@ -1,22 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
          http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>com.devcli</groupId>
     <artifactId>devcli</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    <version>16.1.0-SNAPSHOT</version>
     <packaging>jar</packaging>
 
     <name>DevCLI</name>
     <description>A simple Java Agent CLI like Claude Code</description>
 
     <properties>
-        <maven.compiler.source>17</maven.compiler.source>
-        <maven.compiler.target>17</maven.compiler.target>
+        <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.build.outputTimestamp>2026-10-17T00:00:00Z</project.build.outputTimestamp>
+        <jacocoArgLine></jacocoArgLine>
         <!-- CI 和本地开发默认跑测试；可用 -DskipTests=true 快速打包 -->
         <skipTests>false</skipTests>
     </properties>
@@ -145,7 +146,36 @@
     </dependencies>
 
     <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <excludes><exclude>devcli-build.properties</exclude></excludes>
+            </resource>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+                <includes><include>devcli-build.properties</include></includes>
+            </resource>
+        </resources>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-clean-plugin</artifactId>
+                <version>3.4.1</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-resources-plugin</artifactId>
+                <version>3.3.1</version>
+                <configuration>
+                    <propertiesEncoding>${project.build.sourceEncoding}</propertiesEncoding>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.14.1</version>
+            </plugin>
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>build-helper-maven-plugin</artifactId>
@@ -179,7 +209,7 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
                 <configuration>
-                    <argLine>-Dfile.encoding=UTF-8</argLine>
+                    <argLine>@{jacocoArgLine} -Dfile.encoding=UTF-8</argLine>
                     <skipTests>${skipTests}</skipTests>
                 </configuration>
             </plugin>
@@ -190,7 +220,9 @@
                 <configuration>
                     <effort>Max</effort>
                     <threshold>Low</threshold>
-                    <failOnError>false</failOnError>
+                    <failOnError>true</failOnError>
+                    <xmlOutput>true</xmlOutput>
+                    <excludeBugsFile>${project.basedir}/Config/quality/spotbugs-baseline.xml</excludeBugsFile>
                 </configuration>
                 <executions>
                     <execution>
@@ -199,6 +231,56 @@
                         </goals>
                     </execution>
                 </executions>
+            </plugin>
+            <plugin>
+                <groupId>com.diffplug.spotless</groupId>
+                <artifactId>spotless-maven-plugin</artifactId>
+                <version>3.1.0</version>
+                <configuration>
+                    <ratchetFrom>35b3951a</ratchetFrom>
+                    <lineEndings>PRESERVE</lineEndings>
+                    <formats>
+                        <format>
+                            <includes>
+                                <include>src/**/*.java</include>
+                                <include>benchmarks/src/**/*.java</include>
+                                <include>pom.xml</include>
+                                <include>.github/**/*.yml</include>
+                            </includes>
+                            <trimTrailingWhitespace/>
+                            <endWithNewline/>
+                        </format>
+                    </formats>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>0.8.14</version>
+                <executions>
+                    <execution>
+                        <id>coverage-agent</id>
+                        <goals><goal>prepare-agent</goal></goals>
+                        <configuration><propertyName>jacocoArgLine</propertyName></configuration>
+                    </execution>
+                    <execution>
+                        <id>coverage-report</id>
+                        <phase>test</phase>
+                        <goals><goal>report</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.owasp</groupId>
+                <artifactId>dependency-check-maven</artifactId>
+                <version>12.1.9</version>
+                <configuration>
+                    <failOnError>true</failOnError>
+                    <failBuildOnCVSS>0</failBuildOnCVSS>
+                    <nvdDatafeedUrl>https://nvd.nist.gov/feeds/json/cve/2.0/nvdcve-2.0-{0}.json.gz</nvdDatafeedUrl>
+                    <dataDirectory>${project.build.directory}/dependency-check-data</dataDirectory>
+                    <formats><format>HTML</format><format>JSON</format></formats>
+                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -247,7 +329,7 @@
                         <artifactId>maven-surefire-plugin</artifactId>
                         <version>3.2.5</version>
                         <configuration>
-                            <argLine>-Dfile.encoding=UTF-8</argLine>
+                            <argLine>@{jacocoArgLine} -Dfile.encoding=UTF-8</argLine>
                             <excludes>
                                 <!-- 慢测试保留给全量 mvn test；日常 quick 回归跳过外部进程 / 网络超时 / 命令超时路径。 -->
                                 <exclude>**/mcp/McpServerManagerTest.java</exclude>
@@ -275,7 +357,7 @@
                         <artifactId>maven-surefire-plugin</artifactId>
                         <version>3.2.5</version>
                         <configuration>
-                            <argLine>-Dfile.encoding=UTF-8</argLine>
+                            <argLine>@{jacocoArgLine} -Dfile.encoding=UTF-8</argLine>
                             <includes>
                                 <include>**/cli/MainInputNormalizationTest.java</include>
                                 <include>**/hitl/SwitchableHitlHandlerTest.java</include>
@@ -302,7 +384,7 @@
                         <artifactId>maven-surefire-plugin</artifactId>
                         <version>3.2.5</version>
                         <configuration>
-                            <argLine>-Dfile.encoding=UTF-8</argLine>
+                            <argLine>@{jacocoArgLine} -Dfile.encoding=UTF-8</argLine>
                             <includes>
                                 <include>**/workspace/ContextVersionLedgerContractTest.java</include>
                                 <include>**/agent/AgentExecutionEngineTest.java</include>

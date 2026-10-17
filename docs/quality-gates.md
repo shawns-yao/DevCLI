@@ -1,49 +1,56 @@
-# 质量门禁与测试范围
+# 代码质量门禁
 
-本文回答一个问题：**这次改动必须跑什么才算过关。**
+正确性靠验证，边界靠明确职责。门禁不要求增加产品功能、抽象层或防御分支。
 
-命令清单见 `AGENTS.md` 的「验证路径」；本文只管「哪些是必须过的门禁、什么时候过」。
+## 命令与覆盖
 
-## 门禁层级
+使用仓库的 Maven Wrapper（3.9.11），JDK 17+；CI 固定 JDK 21。下表以 Unix shell 表示，Windows PowerShell 使用 `.\mvnw.cmd`。
 
-| 层级 | 命令 | 性质 |
+| 门禁 | 命令 | 覆盖范围 |
 | --- | --- | --- |
-| 定向 | `mvn test -Dtest=XxxTest -DskipTests=false` | 开发期快速反馈。**不构成提交依据** |
-| 常规回归 | `mvn test -Pquick` | **每次提交前必须全绿** |
-| 终端交互 | `mvn test -Pphase16-smoke` | 触及终端、渲染、TUI、输入解析时叠加 |
-| 全量 | `mvn test -DskipTests=false` | 跨模块大改、发布前、或需要覆盖 quick 排除项时 |
+| 定向 | `./mvnw test -Dtest=XxxTest` | 开发反馈，不能单独作为提交依据 |
+| quick | `./mvnw test -Pquick` | 每次功能提交前通过 |
+| 终端 | `./mvnw test -Pphase16-smoke` | 终端、渲染、输入解析改动叠加 |
+| 全量 | `./mvnw test` | 跨模块、公共接口、持久化协议、发布前 |
+| 格式 | `./mvnw spotless:check` | CI 检查，不自动改写源码 |
+| 静态检查 | `./mvnw -DskipTests compile spotbugs:check` | 新增 SpotBugs 告警阻断 |
+| 依赖 | `./mvnw dependency-check:check` | 已知漏洞与扫描失败均阻断 |
+| 打包 | `./mvnw package -DskipTests` | 构建 JAR，不代表测试或静态检查通过 |
 
-`-Pquick` 刻意排除 5 个依赖外部进程、网络或命令超时路径的测试类：`McpServerManagerTest`、`StdioTransportTest`、`StreamableHttpTransportTest`、`ToolRegistryTest`、`WebFetcherTest`。
+quick 排除 MCP server 管理、stdio/HTTP transport、ToolRegistry、WebFetcher 的 5 个测试类，以及 `benchmark/`。涉及这些路径时，补跑对应定向或全量测试。真实模型评测不属于 Maven 单元回归。
 
-因此 **quick 全绿不等于全量全绿**。改动落在这些类的覆盖范围内（MCP 传输、工具注册表、网络抓取）时，必须补跑全量或对应定向用例。
+CI 在 Windows、Linux 上各跑 quick 和全量，分别保留 Surefire 与 JaCoCo 报告。静态检查与漏洞检查为独立必需 job；打包依赖这些 job 全部通过。新增 job 后，还需仓库管理员在受保护分支的 required checks 中选中对应检查；仓库文件不能代替远端分支保护设置。
 
-## 改动类型 → 最低门禁
+## SpotBugs
 
-| 改动 | 最低门禁 |
-| --- | --- |
-| 工具契约、审批、能力范围、执行管线 | `-Pquick`，并单独跑 `ToolRegistryTest`、`ToolContractTest` |
-| 委派 / 子 Agent / 预算熔断 | `-Pquick` |
-| 结果缓存、副作用通道、结果尺寸治理 | `-Pquick` |
-| 上下文压缩、滚动摘要、记忆 | `-Pquick` |
-| 终端、渲染、TUI、输入解析 | `-Pquick` + `-Pphase16-smoke` |
-| MCP 传输、工具注册表、网络抓取 | `-Pquick` + 对应定向用例（quick 不含） |
-| 包依赖方向 | `-Pquick`（含 `PackageBoundaryTest`） |
-| 跨包公共 API、协议、持久化格式 | 全量 `mvn test -DskipTests=false` |
+保持现有 4.8.6.6 插件、Max/Low 规则。`failOnError=true`，基线为 `Config/quality/spotbugs-baseline.xml`，由 `35b3951a` 的实测报告提取具体实例哈希与定位信息；不按包、整类或告警类型豁免。
 
-## 为什么定向测试不能代替门禁
+基线只记录存量，不代表存量告警已修复。清理代码时可移除对应条目；不得为通过构建重新生成基线接纳新增问题。修改后出现的新告警必须核实并修复，不能把“可能误报”当作无证据的排除理由。
 
-**2026-09-17 的实证。** 一批工具治理改造先跑了 311 项定向测试，全绿，据此判断「工作区是干净基线」并提交。随后跑完整 `-Pquick`：**2054 项里 17 个失败**，其中 10 个是这批改动引入的。
+本地完整报告为 `target/spotbugsXml.xml`。门禁验证应包含一次能通过的现状和一次被拦截的新增缺陷，不能只验证“配置文件存在”。
 
-原因是样本选错了。那 311 项恰好都落在改动**直接触及**的路径上；真正的回归失败落在改动**波及但定向用例没覆盖**的地方：
+## 格式与文件规模
 
-- 委派工具（`delegate_task` 新增必填字段，旧测试未同步）
-- 结果缓存（改为按任务隔离，旧测试未建立任务身份）
-- 副作用通道、预算熔断（新增熔断原因且优先级更高）
+Spotless 从固定提交 `35b3951a` 开始约束新增或改过的 Java、POM 和 workflow：清理行尾空白、确保文件结束换行，保留现有缩进、换行风格、导入顺序和代码布局。它不是一次全仓风格重排；CI 只运行 `spotless:check`，不运行 `spotless:apply`。完整 Git 历史用于解析固定基线。
 
-这类横切机制的共同点是：**改动它们时，受影响的调用方分散在多个测试类里，而定向用例只会覆盖你自己想到的那几个。**
+Java 生产文件目标为最多 1000 行。拆分按真实职责，不通过删除空行、把多行代码挤在一行、继承外壳或通用 Options 绕过限制。
 
-判断「能不能提交」必须跑项目自己的回归门禁，不能靠定向用例的绿。
+## 覆盖率
 
-## 失败定性
+JaCoCo 0.8.14 在测试进程启动时装载 agent，在 test 阶段生成 `target/site/jacoco/index.html` 和 `jacoco.xml`；所有 Surefire profile 保留 UTF-8 与 agent 参数。没有百分比门槛，也不为凑数增加镜像实现的测试。
 
-某次失败是否由自己引入，用基线对比实测，不要凭印象。完整方法（worktree 回基线、区分「测试陈旧」与「产品回归」、Windows 下 Maven 输出的 GBK 编码处理）见 `AGENTS.md` 「修改时的硬规则」第 8 条。
+报告只描述本次已执行测试覆盖的代码。quick、全量、定向报告分开看；测试替身不证明真实模型或外部服务效果。
+
+## 依赖与可复现构建
+
+Dependabot 每周检查 Maven 和 GitHub Actions。OWASP Dependency-Check 的 CVSS 门槛为 0，不接受已识别漏洞；数据更新失败同样失败，不降级成“通过”。唯一数据源是 NVD 官方按年压缩 feed（包含 modified 更新），不依赖 API Key；使用插件已有的 `.meta` 更新时间检查。扫描缓存和报告放在 `target/`，不提交。
+
+Wrapper 固定 Maven 版本和发行包 SHA-256。POM 固定构建插件与归档时间；只对 `devcli-build.properties` 过滤 Maven 版本，提示词和其他资源不做变量替换。Banner 由该资源读取版本，启动脚本由 POM 读取产物名。字节一致性需在同一 JDK 和依赖环境中验证，不将版本锁定本身描述成已证明所有平台产物完全一致。
+
+官方配置依据：[Maven Wrapper](https://maven.apache.org/tools/wrapper/index.html)、[SpotBugs](https://spotbugs.github.io/spotbugs-maven-plugin/spotbugs-mojo.html)、[Spotless](https://github.com/diffplug/spotless/tree/main/plugin-maven)、[JaCoCo](https://www.jacoco.org/jacoco/trunk/doc/maven.html)、[Dependency-Check](https://dependency-check.github.io/DependencyCheck/dependency-check-maven/configuration.html)。
+
+## 行为证据
+
+固定真实任务必须通过 JAR 的 `-p` 入口执行。模型执行完成、补丁非空、局部测试通过都不等于官方 SWE-bench resolved。公开评测与组件测试的边界见 `benchmark-evaluation.md`。
+
+报告提交时的命令、退出状态、测试数量与跳过项；未执行的 CI 平台、外部扫描或付费模型任务必须明确标注。遇到失败先判断陈旧测试、产品回归或已确认的外部故障，不因测试失败扩大基线或删掉有效用例。
