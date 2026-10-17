@@ -46,6 +46,24 @@ class CodeBuddyMemoryManagerTest {
     }
 
     @Test
+    void rejectsSensitiveNameAndDescriptionBeforePersistingOrIndexing() {
+        LongTermMemory longTermMemory = new LongTermMemory(tempDir.resolve("memory"));
+        try (MemoryManager manager = new MemoryManager(null, 4_096, 128_000, longTermMemory)) {
+            MemoryManager.StoreResult name = manager.storeTopic("global", "api_key=metadata-test-value",
+                    "项目构建经验", "feedback", "测试前准备依赖。", null, false);
+            MemoryManager.StoreResult description = manager.storeTopic("global", "构建经验",
+                    "Bearer metadata-test-value", "feedback", "测试前准备依赖。", null, false);
+
+            assertEquals(LongTermMemory.SaveStatus.REJECTED, name.status());
+            assertEquals(LongTermMemory.SaveStatus.REJECTED, description.status());
+            assertFalse(name.message().contains("metadata-test-value"));
+            assertFalse(description.message().contains("metadata-test-value"));
+            assertEquals(0, longTermMemory.size());
+            assertFalse(longTermMemory.indexContext().contains("metadata-test-value"));
+        }
+    }
+
+    @Test
     void rejectsSensitiveContentAndUnknownScopeWithoutWriting() {
         LongTermMemory longTermMemory = new LongTermMemory(tempDir.resolve("memory"));
         try (MemoryManager manager = new MemoryManager(null, 4_096, 128_000, longTermMemory)) {

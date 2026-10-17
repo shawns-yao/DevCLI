@@ -381,6 +381,7 @@ public class MemoryManager implements AutoCloseable {
     /**
      * 按明确作用域、类型与有效期写入。全局作用域只能由 CLI/工具参数明确选择，
      * 避免项目事实因模型推断被扩大为跨项目记忆。
+     * 主题名、描述和正文共用敏感内容检查，避免索引泄露元数据。
      */
     public StoreResult storeTopic(MemoryScope scope, String name, String description,
                                   String type, String content, Instant expiresAt,
@@ -388,7 +389,8 @@ public class MemoryManager implements AutoCloseable {
         if (content == null || content.isBlank()) {
             return new StoreResult(false, "内容为空，未保存", "");
         }
-        SensitiveDataRedactor.RedactionResult inspection = SensitiveDataRedactor.inspect(content);
+        SensitiveDataRedactor.RedactionResult inspection = SensitiveDataRedactor.inspect(
+                name + "\n" + description + "\n" + content);
         if (inspection.changed()) {
             return new StoreResult(false,
                     "内容包含敏感信息（" + inspection.removedTypesCsv()
