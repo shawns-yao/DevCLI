@@ -72,6 +72,25 @@ class SkillRegistryTest {
     }
 
     @Test
+    void identicalShortDescriptionsDoNotNeedFourTokens(@TempDir Path tempDir) throws IOException {
+        writeSkill(tempDir, "one", "搜索代码", "1");
+        writeSkill(tempDir, "two", "搜索代码", "1");
+        SkillRegistry registry = new SkillRegistry(tempDir, null, null, null);
+        registry.reload();
+        assertEquals(1, registry.warnings().stream().filter(w -> w.contains("描述相似")).count());
+        assertEquals(2, registry.enabledSkills().size());
+    }
+
+    @Test
+    void detectsSimilarMixedChineseAndLatinDescriptions(@TempDir Path tempDir) throws IOException {
+        writeSkill(tempDir, "one", "Java项目接口开发与错误处理", "1");
+        writeSkill(tempDir, "two", "接口开发与错误处理Java项目", "1");
+        SkillRegistry registry = new SkillRegistry(tempDir, null, null, null);
+        registry.reload();
+        assertEquals(1, registry.warnings().stream().filter(w -> w.contains("描述相似")).count());
+    }
+
+    @Test
     void untrustedProjectSkillsAreNotLoadedOrAllowedToShadowUserSkills(@TempDir Path tempDir) throws IOException {
         Path user = tempDir.resolve("user");
         Path project = tempDir.resolve("project");
