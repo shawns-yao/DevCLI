@@ -23,6 +23,10 @@ Log/
 Temp/
 /Test/
 /Data/raw/
+/Data/processed/
+/logs/
+/*.devcli-solo-gate*.json
+/*.devcli-delegate-gate*.json
 
 # 操作系统
 .DS_Store
