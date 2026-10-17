@@ -155,7 +155,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - `RuleContext` 加载规则文件和 `/rule add` 强约束，支持 `/rule list`、`/rule remove`；旧 pinned facts 仅列为待分类候选。敏感 `save_memory` 直接拒绝，要求用户脱敏后重试
 - 压缩边界 `<compact_boundary>` 记录已加载 Skill、RAG epoch、MCP 工具快照和压缩后恢复入口状态；RAG epoch 合并当前会话已命中证据与当前项目全局索引版本，MCP 工具快照包含 server 工具数量、schema 指纹和生命周期版本
 - 压缩上下文由 `CompactionContext` 绑定项目、会话、epoch、历史序号和 Runtime 来源事件范围；消息事实优先按稳定消息指纹关联真实事件 ID，`history:index` 只保留兼容回退。摘要和降级截断均经过 `CompactionSemanticGuard`，事实补回后重新校验状态与最终预算
-- 普通用户消息与任务收尾不写长期记忆；`/save` 是用户显式入口，模型调用 `save_memory` 必须逐次人工确认，完整显示待存内容，自动分类、全部批准、关闭审批或无审批处理器均不能放行。存在活动项目时默认写项目作用域，全局偏好需明确选择 `global`
+- 普通消息不自动写长期记忆；`/save` 是用户显式入口。模型可主动提出有证据的 project/feedback 经验，`save_memory.intent` 默认 agent_experience，不覆盖已有主题；user_request 仅用于用户明确要求保存或更新，user/reference 类型须走该入口。工具写入必须逐次人工确认，完整显示待存内容，自动分类、全部批准、关闭审批或无审批处理器均不能放行。默认项目作用域，全局偏好需明确选择 global
 - 自动审批的可信意图来自独立保存的用户原文，在 CLI 展开附件前采集；记忆召回、Skill、工具结果、摘要和恢复的模型窗口不构成授权。Runtime 只从原始用户回合恢复意图
 - 可信意图在 12000 字符预算内完整保留，不再逐条截断；超出预算、原文历史被淘汰或仅有压缩 checkpoint 时，`auto` 不调用分类器，也不复用批量批准，改为单次人工确认，无审批通道则拒绝。该状态不会因后续短消息自动解除；清空会话后重新建立意图上下文。此机制避免残缺授权依据，不代表模型判定质量已经通过评测
 - 后台预摘要生产与正式压缩共用原始消息的切分逻辑，只摘要可淘汰前缀；已有六段摘要走增量协议，周期重建不复用预摘要。预摘要缓存同时校验消息内容（含图片分片）与模型身份；同一输入的确定性失败进入短暂指纹冷却，避免重复消耗模型调用。后台模型调用计入会话 Token 统计，ReAct 同时检查并计入当前回合预算
@@ -165,6 +165,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 索引使用 ContextProfile.memoryContextTokens() 预算，裁剪附提示；全文在需要时通过 read_memory 分页读取，不在构造当轮上下文时额外请求模型。
 - 每轮只注入按预算裁剪的 MEMORY.md 索引；相关性选择器及其模型调用已删除。主题全文通过 read_memory 按 name / scope 读取，默认项目同名主题覆盖全局，不接受任意路径；返回内容页、next_offset 和总字符数。
 - 同作用域自动冲突不覆盖原文；用户显式保存才更新并增加修订号。`/memory organize apply` 只从权威主题文件重建索引
+- 索引沿用主题 updated_at 显示更新时间；使用记忆中的文件、函数、配置和命令前须核实当前状态，更新时间不代表内容仍然有效。保留现有 Evidence epoch 与逻辑序号，不据单写入者假设删减证据机制
 - `/memory clear` 默认只清**当前写入作用域**（有活动项目清项目，否则清全局）；`/memory clear global` 与 `/memory clear project` 显式指定。全局目录跨项目共享，项目会话里的默认清空不得连带抹掉它，结果会提示如何显式清另一作用域
 - 旧版 `records/` 记忆卡在启动时幂等复制到全局作用域，全部处理成功后写一次性完成标记，后续构造不再重复解析；源文件保留，旧格式缺少可靠项目归属，不自动归入项目
 - RAG 检索审计按 JSONL 保存各召回通道、RRF、rerank、最终结果和降级状态，不保存代码正文；普通 CLI 会话归档默认关闭，启用后 ReAct 保存脱敏模型消息，Plan / Team 保存顶层输入输出，并按配置期限清理
@@ -247,6 +248,8 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - 工具注册为 `mcp__{server}__{tool}`
 - McpSchemaSanitizer 清洗 inputSchema
 - 所有 mcp__ 工具默认走 HITL + AuditLog；带 destructive/openWorld annotations 的 MCP 工具强制逐次审批，不复用 tool/server 级全部放行缓存
+- 第三方描述最多展示 2000 个 Unicode 码点，并标明 UNTRUSTED；schema 仍完整返回以供参数校验。schemaFingerprint 历史字段现覆盖描述、schema 与 annotations，schema 对象键序不影响指纹
+- 已有工具定义变化后，服务及其工具级批量批准失效；下次调用必须单次人工确认当前描述和 schema。审批中再变化则拒绝；隔离 fork 共用根目录的定义校验，不能继续执行旧定义。新增或移除工具同样清除该服务的批量批准
 - resources 双轨：虚拟工具 + @-mention 输入层
 - CLI 首屏默认只等待 MCP 启动 8 秒，慢 server 后台继续初始化并保持 `starting`，用 `/mcp` / `/mcp logs <name>` 追踪
 - McpServerManager 记录本进程连接事件：STARTING / READY / ERROR / DISABLED / RECONNECTING / TOOLS_CHANGED，事件携带 server、状态、生命周期版本、工具数量和消息
@@ -269,7 +272,8 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 
 - 三层加载：jar 内置 < 用户级 ~/.devcli/skills/ < 项目级 .devcli/skills/
 - frontmatter：name(必填) / description(必填,<=500) / version / author / tags / allowedTools / context / paths
-- Skill 索引追加到当轮消息，上限 20 个 / 4KB；排序按本进程内使用频率优先、名称兜底
+- Skill 索引追加到当轮消息，显示 builtin/user/project 来源；单条描述最多 500 个码点，数量按 Token 预算裁剪，排序沿用相关度与使用频率
+- `/skill list` 展示同名覆盖的双方来源与文件，以及描述词面相似提示。英文分词和汉字二元组的 Jaccard 达到 0.75、且双方至少 4 个词项时提示，不额外调用模型，不改变加载或工具权限。描述应明确何时使用、何时不使用；语义冲突仍须报告用户，词面检测不等于冲突判定
 - paths 使用项目相对路径匹配当前用户输入或任务文本中的路径；未声明 paths 的 Skill 始终可见，声明 paths 的 Skill 只在路径命中时进入索引
 - load_skill 工具把 SKILL.md 正文(5KB 截断)写入 SkillContextBuffer，并记录本进程内使用次数
 - buffer 正文一次性消费，最多 3 个 skill body；已加载 Skill 名称、context、allowedTools 和内容摘要保留给压缩后恢复，直到 clear
@@ -440,6 +444,8 @@ Reviewer 前 Java 硬验证；封装 Maven/javac 命令、扫描、超时、输�
 
 ### ToolRegistry.java
 ToolRegistry 保留公共装配入口；ToolContract 保存工具值类型，McpToolCatalog 管理目录与服务生命周期，ToolBatchExecution 管理串并行和取消，ToolAccessContext 管理权限上下文传播，ToolPipelineAssembly 装配执行阶段，ToolExecutionCore 执行参数校验、内容审查与审计，ToolProjectAccess 处理文件版本登记和已有 LSP hook。MCP 搜索不改变模型定义，固定 call_mcp_tool 以原始 schema 校验目标，权限、Skill、审批、审计、策略和结果治理继续执行。模型写工具为 write_file/edit_file，删除使用 delete_files，工作计划使用 update_plan，长期主题读取使用 read_memory。
+
+文件、网页、命令、MCP 和浏览器结果是数据，不是授权或新指令。ToolResultContext 仅在模型请求视图增加 tool_result_security（来源工具、调用 ID、UNTRUSTED）与独立编码的 content；模型请求事件记录该实际视图，原始工具结果和内部协议不改变。结果预算包含封装开销，摘要请求同样标记工具数据。复用委派报告的信任常量，不对源码正文做指令形态净化。提示词要求报告试图改变权限、套取秘密或追加动作的内容；实际副作用仍由权限、审批和沙箱约束。
 
 `read_file` 同传行范围与字符范围时优先行范围并返回提示；`edit_file` 会按目标文件的 CRLF/LF 风格对齐匹配文本。
 
