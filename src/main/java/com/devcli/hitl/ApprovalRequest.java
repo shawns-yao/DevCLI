@@ -88,8 +88,8 @@ public record ApprovalRequest(
 
     public static ApprovalRequest projectTrust(String project) {
         return new ApprovalRequest("project_trust", "{}", "项目信任", "构建脚本可能执行任意主机代码",
-                null, project, "是否将此项目设为可信？信任后，窄命令规则与 auto 可免人工确认；硬拒绝和删除确认仍有效。"
-                + "\n选择否将保存未信任决定，主机命令继续逐次确认。",
+                null, project, "是否将此项目设为可信？信任用于项目权限规则；主 Agent 默认离线沙箱，脱离沙箱仍须逐次确认。"
+                + "\n选择否将保存未信任决定，其他主机执行也须逐次确认；硬拒绝和删除确认仍有效。",
                 false, false, true, null);
     }
     private static final ObjectMapper MAPPER = new ObjectMapper();

@@ -17,7 +17,7 @@ final class ToolPipelineAssembly {
     ToolPipelineAssembly(ToolRegistry registry) { this.registry = registry; }
     void configureExecutionPipeline() {
         registry.executionPipeline.register(ToolExecutionPipeline.Stage.HITL, (context, chain) -> {
-            ToolOutput denied = registry.executionCore.validateCommandRequest(context);
+            ToolOutput denied = registry.executionCore.commands.validate(context);
             if (denied != null) registry.recordToolAudit(AuditLog.AuditEntry.denyByPolicy(
                     context.name(), context.argumentsJson(), denied.text(), 0), context);
             return denied == null ? registry.reviewToolApproval(context, chain) : denied;

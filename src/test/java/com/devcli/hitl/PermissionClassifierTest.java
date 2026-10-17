@@ -16,7 +16,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
-/** 真实工具管线；仅替换分类器和进程后端，不执行外部命令。 */
+/** 隔离任务显式主机后端的分类器路径；仅替换分类器和进程，不执行外部命令。 */
 class PermissionClassifierTest {
     @TempDir Path root;
     private static final String COMMAND = "{\"command\":\"mvn test\"}";
@@ -56,10 +56,15 @@ class PermissionClassifierTest {
         return PermissionRuleSet.parse(deny, ask, allow, List.of());
     }
 
-    @Test void trustedHostCommandUsesClassifierAndTrustedIntent() throws Exception {
+    private com.devcli.tool.ToolOutput isolatedCommand(ToolRegistry tools) {
+        return tools.runWithToolAccess(ToolContract.ToolAccessScope.ISOLATED_PROJECT,
+                () -> tools.executeToolOutput("execute_command", COMMAND));
+    }
+
+    @Test void trustedIsolatedHostCommandUsesClassifierAndTrustedIntent() throws Exception {
         try (var tools = tools(true, r -> PermissionClassifier.Verdict.allow("test"))) {
             tools.withTrustedIntentContext(() -> TrustedIntentContext.render(List.of(new com.devcli.llm.LlmClient.Message("user", "运行测试"))));
-            assertTrue(tools.executeToolOutput("execute_command", COMMAND).isSuccess());
+            assertTrue(isolatedCommand(tools).isSuccess());
             assertEquals(1, classified.get()); assertEquals(0, asked.get()); assertEquals(1, executed.get());
             assertEquals("execute_command", seen.toolName()); assertTrue(seen.intentContext().contains("运行测试"));
         }
@@ -70,7 +75,7 @@ class PermissionClassifierTest {
             tools.withPermissionRules(rules(List.of(), List.of(), List.of("execute_command(mvn test:*)")));
             for (var mode : List.of(PermissionMode.DEFAULT, PermissionMode.AUTO, PermissionMode.DONT_ASK)) {
                 tools.withPermissionMode(mode);
-                assertTrue(tools.executeToolOutput("execute_command", COMMAND).isSuccess());
+                assertTrue(isolatedCommand(tools).isSuccess());
             }
             assertEquals(0, classified.get()); assertEquals(0, asked.get()); assertEquals(3, executed.get());
         }
@@ -79,7 +84,7 @@ class PermissionClassifierTest {
     @Test void broadCommandRulesDoNotShortCircuitAuto() throws Exception {
         try (var tools = tools(true, r -> PermissionClassifier.Verdict.block("no"))) {
             tools.withPermissionRules(rules(List.of(), List.of(), List.of("execute_command(*)", "execute_command(python:*)")));
-            assertEquals(ToolErrorCode.POLICY_DENIED, tools.executeToolOutput("execute_command", COMMAND).errorCode());
+            assertEquals(ToolErrorCode.POLICY_DENIED, isolatedCommand(tools).errorCode());
             assertEquals(1, classified.get()); assertEquals(0, executed.get());
             assertTrue(seen.rules().allow().isEmpty());
         }
@@ -88,9 +93,9 @@ class PermissionClassifierTest {
     @Test void hardDenyAndSoftDenyPrecedeAuto() throws Exception {
         try (var tools = tools(true, r -> PermissionClassifier.Verdict.allow("must not run"))) {
             tools.withPermissionRules(rules(List.of("execute_command"), List.of(), List.of("execute_command(mvn test:*)")));
-            assertEquals(ToolErrorCode.POLICY_DENIED, tools.executeToolOutput("execute_command", COMMAND).errorCode());
+            assertEquals(ToolErrorCode.POLICY_DENIED, isolatedCommand(tools).errorCode());
             tools.withPermissionRules(rules(List.of(), List.of("execute_command"), List.of("execute_command(mvn test:*)")));
-            assertTrue(tools.executeToolOutput("execute_command", COMMAND).isSuccess());
+            assertTrue(isolatedCommand(tools).isSuccess());
             assertNull(approval.commandAllowRule());
             assertEquals(1, asked.get()); assertEquals(0, classified.get()); assertEquals(1, executed.get());
         }
@@ -100,7 +105,7 @@ class PermissionClassifierTest {
         answer = ApprovalResult.approvePrefix();
         try (var tools = tools(false, r -> PermissionClassifier.Verdict.allow("must not run"))) {
             tools.withPermissionRules(rules(List.of(), List.of(), List.of("execute_command(mvn test:*)")));
-            assertEquals(ToolErrorCode.HITL_REJECTED, tools.executeToolOutput("execute_command", COMMAND).errorCode());
+            assertEquals(ToolErrorCode.HITL_REJECTED, isolatedCommand(tools).errorCode());
             assertNull(approval.commandAllowRule());
             assertEquals(1, asked.get()); assertEquals(0, classified.get()); assertEquals(0, executed.get());
         }
@@ -129,8 +134,8 @@ class PermissionClassifierTest {
 
     @Test void threeConsecutiveBlocksExitAutoAndAskCurrentAction() throws Exception {
         try (var tools = tools(true, r -> PermissionClassifier.Verdict.block("no"))) {
-            for (int i = 0; i < 2; i++) assertFalse(tools.executeToolOutput("execute_command", COMMAND).isSuccess());
-            assertTrue(tools.executeToolOutput("execute_command", COMMAND).isSuccess());
+            for (int i = 0; i < 2; i++) assertFalse(isolatedCommand(tools).isSuccess());
+            assertTrue(isolatedCommand(tools).isSuccess());
             assertEquals(PermissionMode.DEFAULT, tools.currentPermissionMode());
             assertEquals(1, asked.get()); assertEquals(1, executed.get());
             assertTrue(approval.sensitiveNotice().contains("连续拦截 3"));
@@ -141,7 +146,7 @@ class PermissionClassifierTest {
         AtomicInteger sequence = new AtomicInteger();
         try (var tools = tools(true, r -> sequence.incrementAndGet() % 2 == 1
                 ? PermissionClassifier.Verdict.block("no") : PermissionClassifier.Verdict.allow("yes"))) {
-            for (int i = 0; i < 39; i++) tools.executeToolOutput("execute_command", COMMAND);
+            for (int i = 0; i < 39; i++) isolatedCommand(tools);
             assertEquals(PermissionMode.DEFAULT, tools.currentPermissionMode());
             assertEquals(1, asked.get()); assertTrue(approval.sensitiveNotice().contains("累计拦截 20"));
         }
@@ -149,7 +154,7 @@ class PermissionClassifierTest {
 
     @Test void classifierFailureRemainsDeniedAndExitsAfterThreshold() throws Exception {
         try (var tools = tools(true, r -> { throw new IOException("offline"); })) {
-            for (int i = 0; i < 3; i++) assertEquals(ToolErrorCode.POLICY_DENIED, tools.executeToolOutput("execute_command", COMMAND).errorCode());
+            for (int i = 0; i < 3; i++) assertEquals(ToolErrorCode.POLICY_DENIED, isolatedCommand(tools).errorCode());
             assertEquals(PermissionMode.DEFAULT, tools.currentPermissionMode());
             assertEquals(0, executed.get()); assertEquals(0, asked.get());
         }
@@ -158,7 +163,7 @@ class PermissionClassifierTest {
     @Test void missingClassifierRejectsCommandsButEditsStillProceed() throws Exception {
         try (var tools = tools(true, r -> PermissionClassifier.Verdict.allow("unused"))) {
             tools.withPermissionClassifier(null);
-            assertEquals(ToolErrorCode.POLICY_DENIED, tools.executeToolOutput("execute_command", COMMAND).errorCode());
+            assertEquals(ToolErrorCode.POLICY_DENIED, isolatedCommand(tools).errorCode());
             assertTrue(tools.executeToolOutput("write_file", "{\"path\":\"a.txt\",\"content\":\"x\"}").isSuccess());
             assertEquals(0, asked.get()); assertEquals(0, executed.get());
         }
@@ -169,7 +174,7 @@ class PermissionClassifierTest {
         answer = ApprovalResult.approveAll();
         try (var tools = tools(true, r -> PermissionClassifier.Verdict.allow("must not run"))) {
             tools.withTrustedIntentContext(() -> { throw new TrustedIntentContext.IncompleteContextException(); });
-            assertEquals(ToolErrorCode.HITL_REJECTED, tools.executeToolOutput("execute_command", COMMAND).errorCode());
+            assertEquals(ToolErrorCode.HITL_REJECTED, isolatedCommand(tools).errorCode());
             assertTrue(approval.hostExecution()); assertNull(approval.commandAllowRule());
             assertEquals(1, asked.get()); assertEquals(0, classified.get()); assertEquals(0, executed.get());
         }
@@ -181,7 +186,8 @@ class PermissionClassifierTest {
             public long decisionTimeoutMillis() { return 120_000; }
         };
         try (var tools = tools(true, classifier)) {
-            var result = tools.executeTools(List.of(new ToolContract.ToolInvocation("limited", "execute_command", COMMAND))).getFirst();
+            var result = tools.runWithToolAccess(ToolContract.ToolAccessScope.ISOLATED_PROJECT,
+                    () -> tools.executeTools(List.of(new ToolContract.ToolInvocation("limited", "execute_command", COMMAND)))).getFirst();
             assertEquals(ToolErrorCode.POLICY_DENIED, result.errorCode());
             assertEquals(0, classified.get()); assertEquals(0, executed.get());
         }
@@ -194,13 +200,13 @@ class PermissionClassifierTest {
             if (index == 3) return PermissionClassifier.Verdict.allow("yes");
             throw new IOException("offline");
         })) {
-            for (int i = 0; i < 5; i++) tools.executeToolOutput("execute_command", COMMAND);
+            for (int i = 0; i < 5; i++) isolatedCommand(tools);
             assertEquals(PermissionMode.AUTO, tools.currentPermissionMode());
             tools.withPermissionClassifier(r -> PermissionClassifier.Verdict.block("no"));
-            tools.executeToolOutput("execute_command", COMMAND);
-            tools.executeToolOutput("execute_command", COMMAND);
+            isolatedCommand(tools);
+            isolatedCommand(tools);
             tools.withPermissionMode(PermissionMode.DEFAULT).withPermissionMode(PermissionMode.AUTO);
-            tools.executeToolOutput("execute_command", COMMAND);
+            isolatedCommand(tools);
             assertEquals(PermissionMode.AUTO, tools.currentPermissionMode());
         }
     }
@@ -212,7 +218,7 @@ class PermissionClassifierTest {
             Files.delete(root.resolve("user/project-permissions.json"));
             Files.delete(root.resolve("user"));
             Files.writeString(root.resolve("user"), "blocked parent");
-            assertEquals(ToolErrorCode.EXECUTION_FAILED, tools.executeToolOutput("execute_command", COMMAND).errorCode());
+            assertEquals(ToolErrorCode.EXECUTION_FAILED, isolatedCommand(tools).errorCode());
             assertEquals(0, executed.get());
         }
     }
@@ -220,9 +226,9 @@ class PermissionClassifierTest {
     @Test void forksShareBlockCounterAndTrust() throws Exception {
         try (var tools = tools(true, r -> PermissionClassifier.Verdict.block("no"));
              ToolRegistry fork = tools.forkForProject(Files.createDirectory(root.resolve("fork")))) {
-            tools.executeToolOutput("execute_command", COMMAND);
-            fork.executeToolOutput("execute_command", COMMAND);
-            tools.executeToolOutput("execute_command", COMMAND);
+            isolatedCommand(tools);
+            isolatedCommand(fork);
+            isolatedCommand(tools);
             assertEquals(PermissionMode.DEFAULT, tools.currentPermissionMode());
             assertEquals(3, classified.get()); assertEquals(1, asked.get());
         }
@@ -232,7 +238,7 @@ class PermissionClassifierTest {
         answer = ApprovalResult.approvePrefix();
         try (var tools = tools(true, r -> PermissionClassifier.Verdict.allow("yes"))) {
             tools.withPermissionMode(PermissionMode.DEFAULT);
-            assertTrue(tools.executeToolOutput("execute_command", COMMAND).isSuccess());
+            assertTrue(isolatedCommand(tools).isSuccess());
             assertEquals("execute_command(mvn test:*)", approval.commandAllowRule());
         }
         answer = ApprovalResult.reject("must not ask");
@@ -240,10 +246,12 @@ class PermissionClassifierTest {
         assertEquals(List.of("execute_command(mvn test:*)"), reopened.allowRules(ProjectPermissionsStore.key(root)));
         assertTrue(reopened.allowRules("another project").isEmpty());
         try (var tools = tools(true, r -> PermissionClassifier.Verdict.block("must not classify"))) {
-            assertTrue(tools.executeCommandOutput("mvn test -Pquick").isSuccess());
+            assertTrue(tools.runWithToolAccess(ToolContract.ToolAccessScope.ISOLATED_PROJECT,
+                    () -> tools.executeCommandOutput("mvn test -Pquick")).isSuccess());
             assertEquals(1, asked.get()); assertEquals(0, classified.get());
             tools.setProjectPath(Files.createDirectory(root.resolve("other")).toString());
-            assertFalse(tools.executeCommandOutput("mvn test -Pquick").isSuccess());
+            assertFalse(tools.runWithToolAccess(ToolContract.ToolAccessScope.ISOLATED_PROJECT,
+                    () -> tools.executeCommandOutput("mvn test -Pquick")).isSuccess());
             assertEquals(2, asked.get()); assertEquals(0, classified.get());
         }
     }

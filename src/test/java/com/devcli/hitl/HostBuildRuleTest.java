@@ -15,12 +15,12 @@ class HostBuildRuleTest {
     @TempDir Path root;
 
     @Test
-    void explicitAllowPassesWhitelistedCommandsWithoutInteractiveApproval() throws Exception {
+    void explicitAllowCannotApproveUnsandboxedMainCommandInDontAskMode() throws Exception {
         AtomicInteger approvals = new AtomicInteger();
         try (var tools = tools(approvals, List.of(), List.of(), List.of("execute_command(mvn test:*)"))) {
             tools.withPermissionMode(PermissionMode.DONT_ASK);
-            var result = tools.executeToolOutput("execute_command", "{\"command\":\"mvn test -Pquick\"}");
-            assertTrue(result.isSuccess(), result.text());
+            var result = tools.executeToolOutput("execute_command", "{\"command\":\"mvn test -Pquick\",\"unsandboxed\":true}");
+            assertEquals(ToolErrorCode.POLICY_DENIED, result.errorCode(), result.text());
             assertEquals(0, approvals.get());
         }
     }

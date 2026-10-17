@@ -129,7 +129,7 @@ READ_ONLY → LOCAL_CONTEXT → PROJECT_MUTATION → HOST_PROCESS → EXTERNAL_M
 
 授权不覆盖硬策略。全局持久规则在 `~/.devcli/config.json` 的 `permissions.allow`；交互启动首次询问当前项目是否可信，决定与项目命令规则保存在 `~/.devcli/project-permissions.json`，不随仓库提交。`/grant write [glob...]`、`/grant net <域名>...` 只授权下一条任务；`/grant all` 仅授权项目写入，commands 子命令已移除。`/grant off` 撤销本轮例外和批量放行缓存；持久规则须由用户在 Agent 工具之外修改。路径 glob 仍拒绝绝对路径与 `..`。
 
-所有模式先执行 `hard_deny` → `soft_deny` → `allow`：硬拒绝不变，soft_deny 询问，allow 直接放行。auto 丢弃过宽命令 allow，主机命令在其他模式下也只接受窄规则。auto / acceptEdits 直接接受项目内 write_file / edit_file；受保护路径、删除阈值、命令删除、回滚、浏览器和 MCP 的逐次确认仍有效。详见 [ADR 0021](docs/adr/0021-统一审批与项目信任.md)。
+所有模式先执行 `hard_deny` → `soft_deny` → `allow`：硬拒绝不变，soft_deny 询问；主 Agent 脱离沙箱的命令始终逐次人工确认，不能由 allow 或 auto 覆盖。真正隔离的命令在硬策略和独立确认要求之后直接执行。auto 丢弃过宽命令 allow，其他主机命令也只接受窄规则。auto / acceptEdits 直接接受项目内 write_file / edit_file；受保护路径、删除阈值、命令删除、回滚、浏览器和 MCP 的逐次确认仍有效。详见 [ADR 0021](docs/adr/0021-统一审批与项目信任.md)、[ADR 0026](docs/adr/0026-主Agent离线命令沙箱与凭据边界.md)。
 
 `web_fetch` 支持 `/grant net` 域名授权（相等或其子域）；scheme、环回和内网拦截始终生效。`web_search` 不按域名授权，两个网络工具仍共用出口限流预算。`revert_turn` 必须人工确认；MCP 的破坏性声明决定逐次确认，可信只读授权不代表服务端没有其他状态变化。
 
@@ -139,13 +139,19 @@ READ_ONLY → LOCAL_CONTEXT → PROJECT_MUTATION → HOST_PROCESS → EXTERNAL_M
 
 受保护路径在策略层拦截，与 HITL 开关无关、也不能被审批放行：`.git` / `.ssh` 整棵目录、`.env` 与 `.env.*`（放行 `.env.example` 这类模板）、`credentials.json` / `service-account.json` / `id_rsa*` / `id_ed25519*` 与 `.pem` / `.key` / `.p12` / `.jks` / `.keystore`。文件写入走 `resolveSafeWritePath`，所以关闭人工审批也不会让凭据或版本库元数据变成可写；`CommandGuard` 另补两条辅助规则拦截删除 `.git` 与重定向写入凭据文件（shell 能绕过文件层围栏）。`target` / `node_modules` 仍只是物化排除项，不是安全边界。
 
-Agent 自身配置单独保护：`.devcli/hooks.json`、`.devcli/mcp.json`、`.devcli/config.json`，以及 `devcli.hooks.file` / `DEVCLI_HOOKS_FILE` 指向的自定义 Hook 文件。共享文件写入入口与 PatchSet 提交前拒绝修改，任务授权、全部批准和关闭审批通道均不能覆盖；快照恢复跳过这些配置并提示。检查覆盖默认用户配置、物理路径别名及隔离工作区对应的主项目路径，普通 `.devcli` 文件和配置示例仍可修改。需要调整时由用户在 Agent 工具之外操作。**这不是操作系统写保护：主机命令、外部 MCP 服务、配置引用的脚本尚未统一限制；没有实现完整防注入或默认命令沙箱。**
+Agent 自身配置单独保护：`.devcli/hooks.json`、`.devcli/mcp.json`、`.devcli/config.json`，以及 `devcli.hooks.file` / `DEVCLI_HOOKS_FILE` 指向的自定义 Hook 文件。共享文件写入入口与 PatchSet 提交前拒绝修改，任务授权、全部批准和关闭审批通道均不能覆盖；快照恢复跳过这些配置并提示。检查覆盖默认用户配置、物理路径别名及隔离工作区对应的主项目路径，普通 `.devcli` 文件和配置示例仍可修改。需要调整时由用户在 Agent 工具之外操作。该文件层保护不能约束明确批准的主机命令、外部 MCP 服务或配置脚本；默认命令沙箱不等于所有外部服务均已隔离，也不代表完整防注入。
 
-可信项目中，`execute_command(mvn test:*)` 等窄 allow 在 default / auto / dontAsk 下直接生效；auto 可分类未决主机命令。未信任项目仍逐次确认。命令审批中的 `[p] 总是允许此命令前缀` 保存当前完整命令前缀到该项目的 `permissions.allow`；未信任、强制单次确认、复合 Shell、解释器通配和敏感命令不提供此选项。信任不是沙箱，构建插件仍可能执行任意主机代码。整数 `timeout`（秒，1–86400）覆盖默认期限，审批、排队与执行均计时，取消传递到进程树。`-p` 只读取既有信任和规则，不询问或自动授信。
+主 Agent 的 `execute_command` 默认在过滤常见凭据的临时工作区和离线沙箱执行，合法文件变更经 PatchSet 回写；构建产物与依赖目录不回写。需要联网或真实 Git 元数据时，明确请求 `unsandboxed=true`，本次人工批准后在真实项目执行，界面与结果标明未使用沙箱。子任务不能请求脱离沙箱；失败不自动退回主机。现有 Docker 后端默认禁网，Windows 原生后端需[显式配置](docs/windows-native-sandbox.md)。当前尚未验证全部 Maven、Git、npm 工作流。
+
+可信项目中其他显式主机子任务仍使用窄规则与 auto；未信任项目逐次确认。`[p] 总是允许此命令前缀` 只在允许记住前缀的审批中提供，不适用于主 Agent 脱离沙箱。整数 `timeout`（秒，1–86400）覆盖默认期限，审批、排队与执行均计时，取消传递到进程树。`-p` 不询问或自动授信，需要人工主机授权的请求拒绝。
+
+主机子进程移除名称含 KEY/TOKEN/SECRET/PASSWORD/PASSWD/CREDENTIAL/AUTH/COOKIE 的环境变量；确需传递时用 `DEVCLI_COMMAND_ENV_ALLOW`（系统属性 `devcli.command.env.allow` 优先）按明确变量名放行，不接受通配符。此配置不向容器注入变量。命令输出在原有配额内整体检查，脱敏后才归档、预览和分页读取；规则无法覆盖所有秘密格式。
+
+沙箱镜像须提前准备，运行时不自动下载。现有默认 Maven 镜像使用 JDK 17、不含 npm；构建本仓库须通过既有 `DEVCLI_COMMAND_SANDBOX_IMAGE` 选择包含 JDK 21 的镜像，其他项目也须提供所需工具及离线依赖。Docker 服务已启动不代表这些依赖已经可用。
 
 `/mode plan` 让只读能力上限持续作用于后续轮次：写入、命令和外部副作用工具既不注入模型也不会执行。与 `/plan` 组合时该轮会被直接拒绝（编排必须写入隔离工作区，跑到中途只会得到一片能力拒绝），并消费掉只读标记。`/mode default` 恢复逐个询问。
 
-`/mode auto` 只分类其余未决动作。分类器接收真实用户消息与结构化工具调用，排除工具结果、Assistant 自述和委派报告。连续拦截 3 次或累计拦截 20 次后退出 auto，并询问当前动作；分类器调用故障仍拒绝，默认连续 3 次故障后回到 default。计数在根注册表与 fork 间共享，手动切换模式重置。提示词仅接受用户级覆盖。定向测试验证审批顺序，不代表模型误判率；主 Agent 默认主机命令沙箱尚未实现。
+`/mode auto` 只分类其余未决动作。分类器接收真实用户消息与结构化工具调用，排除工具结果、Assistant 自述和委派报告。连续拦截 3 次或累计拦截 20 次后退出 auto，并询问当前动作；分类器调用故障仍拒绝，默认连续 3 次故障后回到 default。计数在根注册表与 fork 间共享，手动切换模式重置。提示词仅接受用户级覆盖。主 Agent 隔离命令免分类器，脱离沙箱须本次确认。本轮未运行测试或真实后端验收；既有审批测试不代表模型误判率或沙箱兼容性。
 
 能力范围与任务级授权都随轮次生效并被编排继承：能力范围只能单调收窄（只读 ⊂ 隔离项目 ⊂ 完整），嵌套调用与隔离 fork 都不能放宽外层约束；波次线程池在轮次内新建，因此继承本轮的范围与授权，长生命周期线程池在轮次外创建，不会残留某一轮的约束。
 

@@ -1,7 +1,5 @@
 package com.devcli.tool;
 
-import com.devcli.tool.command.CommandExecutionService;
-import java.nio.file.Path;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.devcli.browser.BrowserAuditMetadata;
@@ -19,7 +17,11 @@ import static com.devcli.tool.ToolContract.*;
 /** 工具执行、参数校验、内容审查和审计实现；注册表保留公共与可覆写入口。 */
 final class ToolExecutionCore {
     private final ToolRegistry registry;
-    ToolExecutionCore(ToolRegistry registry) { this.registry = registry; }
+    final ToolCommandExecution commands;
+    ToolExecutionCore(ToolRegistry registry) {
+        this.registry = registry;
+        this.commands = new ToolCommandExecution(registry);
+    }
     com.devcli.policy.SensitiveContentPolicy.Decision reviewSensitiveContent(
             String tool, com.devcli.policy.SensitiveContentPolicy.Inspection inspection,
             String purpose, String target, boolean redactionAllowed) {
@@ -284,38 +286,6 @@ final class ToolExecutionCore {
                 true);
     }
 
-    ToolOutput executeCommandOutput(String command, long timeoutSeconds, ToolExecutionContext executionContext) {
-        ToolAccessScope scope = registry.currentToolAccessScope();
-        boolean sandboxRequired = scope == ToolAccessScope.ISOLATED_PROJECT;
-        CommandExecutionService service = registry.executionEnvironment.commands();
-        ToolExecutionContext timed = new ToolExecutionContext(executionContext.invocationId(),
-                executionContext.cancellationToken(), executionContext.startedAtNanos(),
-                Math.min(executionContext.deadlineNanos(), executionContext.startedAtNanos()
-                        + TimeUnit.SECONDS.toNanos(timeoutSeconds)));
-        CommandExecutionService.Request request = new CommandExecutionService.Request(
-                command, Path.of(registry.projectPath), timeoutSeconds, sandboxRequired, timed);
-        if (request.executionContext().isCancelled()) {
-            return ToolOutput.cancelled("主机执行审批或排队期间已取消，未启动进程");
-        }
-        if (request.executionContext().remainingNanos() == 0) {
-            return ToolOutput.timedOut("审批或排队期间命令期限已到，未启动进程");
-        }
-        return service.execute(request).toToolOutput();
-    }
-
-    ToolOutput validateCommandRequest(ToolExecutionPipeline.Context context) {
-        if (registry.toolEffect(context.name()) != ToolEffect.HOST_PROCESS) return null;
-        JsonNode args = parseValidatedArguments(context.argumentsJson());
-        long timeout = args.has("timeout") ? args.path("timeout").asLong() : registry.commandTimeoutSeconds;
-        try {
-            registry.executionEnvironment.commands().validateRequest(new CommandExecutionService.Request(
-                    args.path("command").asText(), Path.of(registry.projectPath), timeout,
-                    registry.currentToolAccessScope() == ToolAccessScope.ISOLATED_PROJECT, context.executionContext()));
-            return null;
-        } catch (PolicyException denied) {
-            return ToolOutput.rejected(ToolErrorCode.POLICY_DENIED, denied.getMessage());
-        }
-    }
     /** 返回工具声明的副作用等级；未知工具按外部副作用保守处理。 */
     ToolEffect toolEffect(String name) {
         Tool tool = registry.activeTool(name);

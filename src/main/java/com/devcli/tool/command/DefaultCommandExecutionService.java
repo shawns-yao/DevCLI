@@ -75,11 +75,6 @@ public final class DefaultCommandExecutionService implements CommandExecutionSer
     }
 
     @Override
-    public boolean executesOnHost(boolean sandboxRequired) {
-        return !sandboxRequired || sandboxMode != SandboxMode.DOCKER;
-    }
-
-    @Override
     public boolean providesIsolation(boolean sandboxRequired) {
         return sandboxRequired && (sandboxMode == SandboxMode.DOCKER || sandboxMode == SandboxMode.WINDOWS_NATIVE);
     }

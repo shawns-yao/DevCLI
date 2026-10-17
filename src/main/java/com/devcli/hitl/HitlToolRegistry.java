@@ -200,8 +200,9 @@ public class HitlToolRegistry extends ToolRegistry {
     protected ToolOutput reviewToolApproval(ToolExecutionPipeline.Context context, ToolExecutionPipeline.Chain chain) {
         String name = context.name();
         boolean approvalRequired = requiresApproval(name);
-        boolean host = toolEffect(name) == ToolEffect.HOST_PROCESS && commandExecutesOnHost();
-        if (host) context.putAttribute("approval.project", getProjectPath());
+        boolean command = toolEffect(name) == ToolEffect.HOST_PROCESS;
+        boolean host = command && commandRunsWithoutIsolation(context);
+        if (command) context.putAttribute("approval.project", getProjectPath());
         ApprovalGate.Result gate = ApprovalGate.decide(name, parsedArgumentsOf(context), currentTaskGrant(), approvalPathScope);
         if (gate.decision() == ApprovalGate.Decision.DENY) return denyPolicy(context, gate.reason());
 
@@ -231,12 +232,20 @@ public class HitlToolRegistry extends ToolRegistry {
         }
         if (mcpToolRequiresPerCallApproval(name)) return askOrDeny(context, chain, mcpToolApprovalNotice(name));
         if (rules.outcome() == PermissionEvaluator.Outcome.SOFT_DENY) return askOrDeny(context, chain, rules.reason());
+        if (host && currentToolAccessScope() == com.devcli.tool.ToolContract.ToolAccessScope.FULL) {
+            return askOrDeny(context, chain,
+                    "此命令将脱离沙箱，在真实项目和主机权限下执行；文件、网络不再受沙箱约束，必须本次人工批准。");
+        }
         if (host && !trustedProject()) {
             return askOrDeny(context, chain, "当前项目尚未信任，主机命令仅允许本次确认。构建脚本可能执行任意主机代码。");
         }
         if (authorized) {
             context.putAttribute(PIPELINE_APPROVAL_SOURCE, allowedByRules ? "permission_rule" : "task_grant");
             hitlHandler.onTaskGrantAllow(name, allowedByRules ? rules.reason() : gate.reason());
+            return chain.proceed(context);
+        }
+        if (command && !host) {
+            context.putAttribute(PIPELINE_APPROVAL_SOURCE, "sandbox");
             return chain.proceed(context);
         }
         if (!approvalRequired) return chain.proceed(context);
@@ -455,7 +464,9 @@ public class HitlToolRegistry extends ToolRegistry {
         context.putAttribute(PIPELINE_APPROVAL_ID, approvalId);
         ApprovalRequest request = ApprovalRequest.of(
                 context.name(), originalArguments, null, approvalId, sensitiveNotice);
-        boolean host = toolEffect(context.name()) == ToolEffect.HOST_PROCESS && commandExecutesOnHost();
+        boolean command = toolEffect(context.name()) == ToolEffect.HOST_PROCESS;
+        String approvedProject = context.attribute("approval.project", String.class);
+        boolean host = command && commandRunsWithoutIsolation(context);
         if (host) {
             String rule = trustedProject() && sensitiveNotice == null
                     ? com.devcli.policy.CommandPermissionRules.suggestedRule(parsedArgumentsOf(context).path("command").asText()) : null;
@@ -547,11 +558,15 @@ public class HitlToolRegistry extends ToolRegistry {
                 return validationError;
             }
             context.replaceArguments(effectiveArguments);
+            if (command && host != commandRunsWithoutIsolation(context)) {
+                return ToolOutput.rejected(ToolErrorCode.HITL_REJECTED, "执行环境已改变，请重新提交命令以展示沙箱边界并审批");
+            }
             ToolOutput commandDenial = validateCommandRequest(context);
             if (commandDenial != null) return commandDenial;
         }
         context.putAttribute(PIPELINE_APPROVAL_ID, approvalId);
         context.putAttribute(PIPELINE_APPROVAL_SOURCE, AuditLog.APPROVER_HITL);
+        if (command) context.putAttribute("approval.project", approvedProject);
         return chain.proceed(context);
     }
 

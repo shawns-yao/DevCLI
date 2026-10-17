@@ -80,7 +80,7 @@ class ExecutionEnvironmentTest {
         final List<Path> patchRoots = new ArrayList<>();
         @Override public CommandExecutionService commands() {
             return new CommandExecutionService() {
-                public boolean executesOnHost(boolean required) { return false; }
+                public boolean providesIsolation(boolean required) { return required; }
                 public Result execute(Request request) { operations.add("command"); return Result.completed(0, "ok"); }
             };
         }

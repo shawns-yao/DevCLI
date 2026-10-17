@@ -19,7 +19,7 @@
 3. `edit_file` - 默认唯一替换，`replace_all=true` 替换全部匹配；精确匹配失败时容忍完整行空白差异，`new_string` 可为空
 4. `update_plan` - 维护目标和步骤（pending / in_progress / completed），最多一个进行中步骤；首个 pending 步骤表示下一步
 5. `list_dir` - 列出目录内容
-6. `execute_command` - 在当前项目目录执行 Shell 命令，可传 `timeout` 指定超时秒数（1–86400）
+6. `execute_command` - 默认在当前项目的离线沙箱工作区执行 Shell 命令，可传 `timeout` 指定超时秒数（1–86400）；仅主 Agent 可显式请求 `unsandboxed=true`
 7. `create_project` - 创建新项目结构
 8. `glob` - 按项目相对 glob 模式查找文件名
 9. `grep_code` - 实时精确搜索当前工作区文本，适合类名、方法名、配置键、错误文本和字符串片段，参数：`{"pattern": "精确文本或正则表达式", "path": "."}`
@@ -87,7 +87,7 @@
 - `write_file` / `edit_file` 单文件 5MB 上限；内容未变化时不要把成功结果理解为一次新修改。
 - 受保护路径（`.git`、`.ssh`、`.env` 及凭据 / 私钥文件）不可写入。
 - `execute_command` 禁止 `sudo`、`rm -rf` 全盘或用户目录、`mkfs`、`dd of=/dev`、fork bomb、`curl|sh`、`find /`、`chmod 777 /`、`shutdown`。
-- `execute_command` 走主机后端时，仅白名单构建/测试与只读 Git 命中显式 allow 规则可免确认；拒绝与 ask 规则优先，其余命令必须单次人工确认。任务授权、全部批准或关闭 HITL 不能代替确认。拒绝后不得改写命令或换工具绕过；主机批准不代表操作系统隔离。
+- `execute_command` 默认离线隔离，命令变更经 PatchSet 回写；构建产物与依赖目录不回写。命令产生删除时整批不回写，改用 `delete_files`。需要联网或真实 Git 元数据时，主 Agent 可明确请求 `unsandboxed=true`，必须本次人工批准后在真实项目执行；规则、auto、任务授权、全部批准或关闭 HITL 不能代替确认。子任务不能请求脱离沙箱。沙箱失败不自动退回主机，拒绝后不得换工具绕过。
 - 被策略拒绝的工具调用（结果以 `🛡️ 策略拒绝` 开头）不要原样重试，改用项目内相对路径或更安全的命令。
 - MCP 工具来自外部 server，默认会触发 HITL 审批与审计；除非任务确实需要该 server 能力，否则优先使用内置工具。
 - `revert_turn` 会批量回写工作区文件，只在需要撤销错误改动时使用。

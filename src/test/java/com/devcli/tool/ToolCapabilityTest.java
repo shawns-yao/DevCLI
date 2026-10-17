@@ -168,8 +168,8 @@ class ToolCapabilityTest {
         registry.setProjectPath(tempDir.toString());
         AtomicReference<CommandExecutionService.Request> captured = new AtomicReference<>();
         registry.setExecutionEnvironment(new com.devcli.tool.environment.LocalExecutionEnvironment(new CommandExecutionService() {
-            public boolean executesOnHost(boolean sandboxRequired) {
-                return !sandboxRequired;
+            public boolean providesIsolation(boolean sandboxRequired) {
+                return sandboxRequired;
             }
             public Result execute(Request request) {
                 captured.set(request);

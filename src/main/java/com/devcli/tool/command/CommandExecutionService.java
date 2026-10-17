@@ -12,11 +12,6 @@ import java.nio.file.Path;
 public interface CommandExecutionService {
     Result execute(Request request);
 
-    /** Unknown/custom backends are treated as host execution unless explicitly declared otherwise. */
-    default boolean executesOnHost(boolean sandboxRequired) {
-        return true;
-    }
-
     /** Isolation is independent of execution location; unknown backends fail closed. */
     default boolean providesIsolation(boolean sandboxRequired) {
         return false;

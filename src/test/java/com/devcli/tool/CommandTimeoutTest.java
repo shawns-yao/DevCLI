@@ -34,7 +34,7 @@ class CommandTimeoutTest {
                     java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1200));
                     return Result.completed(0, "finished after default deadline");
                 }
-                public boolean executesOnHost(boolean sandboxRequired) { return false; }
+                public boolean providesIsolation(boolean sandboxRequired) { return sandboxRequired; }
             }));
             var result = tools.executeTools(List.of(new ToolContract.ToolInvocation("longer", "execute_command",
                     "{\"command\":\"mvn test\",\"timeout\":3}")));
@@ -65,7 +65,7 @@ class CommandTimeoutTest {
                 captured.set(request);
                 return Result.completed(0, "test backend");
             }
-            public boolean executesOnHost(boolean sandboxRequired) { return false; }
+            public boolean providesIsolation(boolean sandboxRequired) { return sandboxRequired; }
         }));
         return tools;
     }

@@ -2,9 +2,11 @@
 
 ## 启用范围
 
-这是显式启用的 AppContainer + Job Object 后端，不替换现有工作区。命令仅在请求已经处于 `ISOLATED_PROJECT` 时使用；主 Agent 普通主机命令仍保留原路径和单次审批。默认命令后端仍为 Docker。
+这是显式启用的 AppContainer + Job Object 后端。主 Agent 与隔离子任务均可使用；主 Agent 先创建过滤常见凭据的隔离工作区，变更通过 PatchSet 回写真实项目。默认命令后端仍为 Docker，不自动按操作系统切换。
 
 目标进程默认无网络 capability；工作目录按执行类型授予读写或只读，工具链目录只读，`.git` 拒绝访问。临时目录与用户配置属于独立 AppContainer。模型不能变更这些授权。
+
+本轮采用离线隔离。联网命令只能由主 Agent 明确请求 `unsandboxed=true`，经过本次人工批准后在真实项目执行；界面说明已脱离沙箱，文件与网络不再受隔离限制。失败不自动重试或退回主机。不宣称该出口有域名限制，不新增代理、防火墙规则或 loopback 豁免。参见 ADR 0026。
 
 ## 构建与配置
 
@@ -66,5 +68,6 @@ mvn.cmd test '-Dtest=WindowsNativeSandboxTest,WindowsSandboxMcpTest' "-Ddevcli.w
 - Job 设置为 kill-on-close，不开放 breakaway，限制 64 个进程和合计 1 GiB 提交内存；命令还受调用期限约束，MCP 生命周期由连接关闭控制。
 - 普通退出、超时和取消会清理权限与 profile；启动器被外部强杀可能遗留资源，当前没有自动恢复清扫。遗留的随机身份不会用于新任务。
 - 重解析点、硬链接和 UNC 路径不支持。运行时安装中包含这些结构时必须提供可用的普通文件副本。
+- 主 Agent 的临时工作区不会继承 node_modules、target 等目录，也不回写这些产物；需要的离线依赖必须由现有后端显式提供。`.git` 禁止访问，Git 元数据命令需通过主 Agent 的单次主机授权执行；不能把它描述成已验证兼容全部 Maven、Git、npm 工作流。
 - AppContainer 默认系统资源、内核漏洞和宿主自身权限不由本功能完全隔离。授权目录内仍可能产生错误或恶意代码，必须继续验证再归并。
 - 当前没有磁盘空间配额、CPU 硬限额和全面外部服务代理隔离；不得把内存/进程数限制解释为全部资源隔离。

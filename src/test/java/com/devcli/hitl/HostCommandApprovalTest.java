@@ -34,7 +34,7 @@ class HostCommandApprovalTest {
     }
 
     private String args(String command) throws Exception {
-        return JSON.writeValueAsString(Map.of("command", command));
+        return JSON.writeValueAsString(Map.of("command", command, "unsandboxed", true));
     }
 
     private ToolOutput run(ToolRegistry registry) throws Exception {
@@ -162,13 +162,13 @@ class HostCommandApprovalTest {
         Handler handler = new Handler();
         handler.answer = ignored -> ApprovalResult.reject("no");
         try (var registry = registry(handler)) {
-            String arguments = args("git status --short");
+            String arguments = JSON.writeValueAsString(Map.of("command", "git status --short"));
             ToolOutput result = registry.runWithToolAccess(ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                     () -> registry.executeToolOutput("execute_command", arguments));
             assertEquals(ToolErrorCode.HITL_REJECTED, result.errorCode());
             assertEquals(1, handler.calls);
             assertTrue(handler.request.hostExecution());
-            String forbidden = args(COMMAND);
+            String forbidden = JSON.writeValueAsString(Map.of("command", COMMAND));
             ToolOutput denied = registry.runWithToolAccess(ToolContract.ToolAccessScope.ISOLATED_PROJECT,
                     () -> registry.executeToolOutput("execute_command", forbidden));
             assertEquals(ToolErrorCode.POLICY_DENIED, denied.errorCode());

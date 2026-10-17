@@ -570,25 +570,24 @@ public class ToolRegistry implements AutoCloseable, ToolProvider.ToolContext {
     }
 
     @Override
-    public ToolOutput runApprovedCommand(String command, long timeoutSeconds, ToolExecutionContext executionContext) {
-        return executionCore.executeCommandOutput(command, timeoutSeconds, executionContext);
+    public ToolOutput runApprovedCommand(String command, long timeoutSeconds, boolean unsandboxed, ToolExecutionContext executionContext) {
+        return executionCore.commands.execute(command, timeoutSeconds, unsandboxed, executionContext);
     }
 
-    protected final boolean commandExecutesOnHost() {
-        return executionEnvironment.commands().executesOnHost(
-                currentToolAccessScope() == ToolAccessScope.ISOLATED_PROJECT);
+    protected final boolean commandRunsWithoutIsolation(ToolExecutionPipeline.Context context) {
+        return executionCore.commands.runsWithoutIsolation(context);
     }
 
     /** 所有入口共用审批阶段；基础注册表没有主机审批通道。 */
     protected ToolOutput reviewToolApproval(ToolExecutionPipeline.Context context, ToolExecutionPipeline.Chain chain) {
-        if (toolEffect(context.name()) == ToolEffect.HOST_PROCESS && commandExecutesOnHost()) {
+        if (toolEffect(context.name()) == ToolEffect.HOST_PROCESS && commandRunsWithoutIsolation(context)) {
             return ToolOutput.rejected(ToolErrorCode.HITL_REJECTED, "主机命令没有审批处理器，未启动进程");
         }
         return chain.proceed(context);
     }
 
     protected final ToolOutput validateCommandRequest(ToolExecutionPipeline.Context context) {
-        return executionCore.validateCommandRequest(context);
+        return executionCore.commands.validate(context);
     }
     @Override
     public java.util.function.Consumer<String> memorySaver() { return memorySaver; }

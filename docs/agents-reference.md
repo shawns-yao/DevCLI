@@ -189,13 +189,15 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 - Plan Worker 每次尝试都通过隔离 ToolRegistry 的 `runWithResourceLease(stepId, ...)` 绑定资源租约上下文，并在 finally 中释放；并行工具线程显式继承步骤租约归属。ToolRegistry 统一托管 `ResourceLeaseMaintenance`，project fork 共享同一个定时线程；最后一个注册关闭后停止。默认每 60 秒清理过期租约，可通过 `devcli.resource.lease.cleanup.interval.seconds` / `DEVCLI_RESOURCE_LEASE_CLEANUP_INTERVAL_SECONDS` 调整。
 - Plan 副作用步骤在隔离工作区执行；`ToolEffect` / `ToolAccessScope` 在工具管线中强制限制非隔离任务只能使用只读能力。隔离命令和 Pre-Review 默认通过受限 Docker 执行，无网络且失败关闭；每次执行使用唯一容器名，超时或取消时终止客户端进程树并有界执行 `docker rm -f`；显式 `HOST_WARN` 只允许 Maven 离线执行 `clean/validate/compile/test-compile/test/package/verify`、`javac` 与只读 Git，拒绝命令行指定的任意 Maven 插件和发布阶段，并输出主机风险提示，不自动回退。非默认 Maven 仓库需通过 `DEVCLI_COMMAND_SANDBOX_MAVEN_REPOSITORY` 或系统属性显式指定存在的绝对目录，Docker 仅对 Maven 命令只读挂载，`HOST_WARN` 注入 `maven.repo.local`。PatchSet 逐文件流式哈希，只保留变更内容；JVM 公平锁与跨进程文件锁共同串行提交，锁缓存按活跃使用者计数退役。应用前保存 before/after 哈希和原文件备份；备份限制为当前所有者访问，孤儿日志按 TTL 清理，恢复时提升完成、继续待执行或回滚，失败回滚会报告具体路径。
 - 主机模式推荐名称为 `HOST_RESTRICTED`，上述 `HOST_WARN` 保持兼容，二者策略相同。命令白名单不隔离 Maven 项目插件、构建脚本或 javac 注解处理器，只适合可信项目，不是 Docker 的安全替代。
-- 主机命令和内部编译检查统一经过工具审批，语义和后端硬策略先检查。可信项目中窄 allow 在所有模式下先于分类器生效；未信任项目逐次确认。timeout（秒，1–86400）传入后端和工具期限，审批、排队和执行均计时；取消传递到进程树。审批期间切换项目会拒绝当前调用。
+- 命令和内部编译检查统一经过工具审批，语义和后端硬策略先检查。主 Agent 默认复用过滤凭据的工作区与离线沙箱，完成后经路径、租约、版本闸门和 PatchSet 提交；构建产物与依赖目录不回写。非零退出仍回写合法变更；超时、取消或输出不完整不回写。产生文件删除时整批不回写，改用 delete_files 的明确清单与哈希审批。
+- 主 Agent 的 `unsandboxed=true` 请求在真实项目以主机权限运行，必须逐次人工批准；窄 allow、auto、任务授权和历史批准不能代替确认。子任务不可请求脱离沙箱；主 Agent 配置 HOST_RESTRICTED/HOST_WARN 时同样逐次确认。真正隔离的命令在硬规则、soft_deny 和必须确认的动作之后直接执行，不额外调用分类器。timeout（秒，1–86400）覆盖审批、排队和执行；取消传递到进程树，审批期间切换项目或修改隔离边界均拒绝。详见 ADR 0026。
+- 主机命令和 Docker 客户端继承环境前移除名称含 KEY/TOKEN/SECRET/PASSWORD/PASSWD/CREDENTIAL/AUTH/COOKIE 的变量；`devcli.command.env.allow` / `DEVCLI_COMMAND_ENV_ALLOW` 可按明确变量名额外放行，不向 Docker 容器或原生 AppContainer 传递这些值。命令输出在现有 4 Mi 字符上限内整体检查，脱敏后才落盘、生成摘要预览与 result_ref；跨读取块的密钥和私钥不会因分块漏查。read_file 保留已有完整快照检测和单次内容审批。无法识别任意编码或未知格式的秘密，不把该规则表述为完整 DLP。
 - Windows 的已验证主机白名单命令使用 `cmd.exe` 执行，保留 Maven `-Dname=value` 参数；普通主机命令仍使用 PowerShell。命令指纹保留引号差异，纠正后的命令不会与先前失败调用误合并。
 - 写租约在空闲超时之外增加 600000ms 绝对期限，`DEVCLI_TEAM_LEASE_MAX_LIFETIME_MS` / `devcli.team.lease.max.lifetime.ms` 可调。单调时钟避免墙钟跳变，续租保留首次获取时间，到期重新竞争；清理使用条件删除，不移除并发更新后的租约。
 - 任务授权由 Runtime 绑定项目和唯一作用域；fork 与并行调用共享撤销标记，原授权作用域结束后不再免审批。审计关联执行轮次、步骤、授权、调用与逐次审批，并区分真实审批来源；缺失身份不补造，用户请求、Agent 身份及最终 generation 仍未贯通。
 - 全局持久规则在 `~/.devcli/config.json`；项目信任与命令规则在 `~/.devcli/project-permissions.json`，按真实路径隔离、不提交。交互入口首次询问信任并保存肯定或否定决定，`-p` 只读取已有决定。信任不继承 Skill 授权、不允许全部命令；构建代码仍可能执行任意主机代码。用户可在 Agent 工具之外修改 trusted 或删除 allow 规则。
 - 命令审批 `[p]` 将当前完整命令前缀写入该项目的 permissions.allow；未信任、强制单次确认、解释器通配、Shell 复合语义和敏感命令不提供保存。写入失败不执行。`/grant commands` 已删除；write/net/all（仅写入）仍只作用于下一条任务，off 清空本轮例外及批准缓存。
-- 所有模式统一先执行 hard_deny → soft_deny → allow：分别拒绝、询问、放行。auto 丢弃过宽命令 allow，主机命令在其他模式下也只接受窄规则；Shell 复合语义不能由命令前缀授权。auto / acceptEdits 直接接受项目编辑；独立删除、回滚、浏览器与 MCP 的逐次确认不变。详见 ADR 0021。
+- 所有模式统一先执行 hard_deny → soft_deny → allow：分别拒绝、询问、放行。主 Agent 脱离沙箱的命令始终逐次确认；真正隔离的命令在独立安全要求之后免分类器。auto 丢弃过宽命令 allow，其他主机命令也只接受窄规则；Shell 复合语义不能由命令前缀授权。auto / acceptEdits 直接接受项目编辑；独立删除、回滚、浏览器与 MCP 的逐次确认不变。详见 ADR 0021、0026。
 - auto 只分类剩余未决动作，输入仍限于真实用户消息及结构化调用，排除工具结果和模型自述。连续拦截 3 次或累计 20 次后切换 default 并询问当前动作；分类器缺失、超时、协议错误或预算不足仍拒绝，故障计数独立。根与 fork 共享计数，手动切换模式重置。
 - `PreReviewVerifier` 独立负责 Maven/javac 选择、Java 文件扫描、超时、进程输出解码和失败摘要。Maven 多模块根目录即使没有根级 Java 源码也执行硬检查；Maven 项目固定使用沙箱镜像内置的 `mvn`，复用显式只读本地仓库，不通过 Wrapper 在禁网临时容器中重复下载 Maven 本体。仅按依赖解析、仓库写入、工具链、超时、取消和沙箱故障的精确信号识别环境失败，普通编译错误中的 `cannot access` 仍归为代码失败。编译、测试等确定性失败继续阻断；只有 Pre-Review 硬检查实际执行并通过时，产物 Reviewer 的拒绝、协议错误或 LLM 故障才记录为建议，不触发 Worker 重做。未执行硬检查时 Reviewer 失败关闭。Reviewer 默认 5 轮，可配置为 `[1, 8]`；最后一轮禁用工具并强制输出裁决 JSON。
 - `Planner.replan()` 不是 Agent 循环，没有工具调用权，因此失败后重规划只读取 ExecutionArtifact 的最小结构化产物事实，不读取完整任务 result 作为主要依据。
@@ -210,7 +212,7 @@ scheme 白名单(http/https) / 主机黑名单(localhost/loopback/link-local/sit
 ### HITL Enhancement (Policy Layer)
 
 - `PathGuard`：路径限定在项目根内（绝对路径外逃 / `..` 穿越 / 符号链接逃逸）
-- Agent 配置保护：共享写入口与 PatchSet 预检、写入前拒绝 `.devcli/hooks.json` / `mcp.json` / `config.json` 和自定义 Hook 文件；审批和任务授权不可覆盖。核对默认用户配置、物理别名和隔离工作区的主项目对应路径；快照恢复跳过配置并提示。普通 `.devcli` 文件不受封禁。此处仅为应用层保护，主机命令、外部 MCP 服务及配置引用脚本仍可能绕过，未新增操作系统沙箱或网络出口控制。
+- Agent 配置保护：共享写入口与 PatchSet 预检、写入前拒绝 `.devcli/hooks.json` / `mcp.json` / `config.json` 和自定义 Hook 文件；审批和任务授权不可覆盖。核对默认用户配置、物理别名和隔离工作区的主项目对应路径；快照恢复跳过配置并提示。普通 `.devcli` 文件不受封禁。此处是应用层保护；默认命令沙箱见 ADR 0026，明确批准的主机命令、外部 MCP 服务及配置脚本仍可能绕过文件工具围栏。
 - `CommandGuard`：fast-fail 黑名单（sudo/rm -rf/mkfs/dd/fork bomb/curl|sh 等）
 - `ResourceLimit`：write_file / edit_file 5MB / execute_command 60s + 8KB 输出
 - `AuditLog`：JSONL 字段 timestamp/tool/args/outcome/reason/approver/durationMs

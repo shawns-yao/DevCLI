@@ -62,7 +62,7 @@ public class ApprovalPolicy {
      */
     public static String getRiskDescription(String toolName) {
         return switch (toolName == null ? "" : toolName) {
-            case "execute_command" -> "将在系统上执行 Shell 命令，可能修改文件、安装软件或影响系统状态";
+            case "execute_command" -> "将执行 Shell 命令，可能修改项目文件；具体隔离范围见本次审批";
             case "revert_turn" -> "将按 Side-Git 快照批量恢复工作区文件，可能覆盖当前未保存修改";
             case "write_file" -> "将写入或覆盖文件内容，原有内容将丢失";
             case "edit_file" -> "将精确替换项目文件内容，错误匹配可能破坏现有实现";
