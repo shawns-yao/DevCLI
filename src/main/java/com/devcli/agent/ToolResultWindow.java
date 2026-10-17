@@ -8,6 +8,8 @@ import com.devcli.tool.ToolContract.ToolExecutionResult;
 import com.devcli.tool.ToolResultArtifact;
 import com.devcli.tool.ToolResultArtifactStore;
 import com.devcli.tool.ToolSideChannel;
+import com.devcli.util.UntrustedContent;
+import com.devcli.llm.ToolResultContext;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -38,8 +40,9 @@ final class ToolResultWindow {
             String suffix = "";
             if (!result.imageParts().isEmpty()) suffix = "\n[图片可能因数量、尺寸或上下文预算限制而省略；请缩小后重试]";
             int textBudget = Math.max(0, tokenShare - 32);
-            if (text.length() + suffix.length() > charShare
-                    || MemoryEntry.estimateTokens(text + suffix) > textBudget) {
+            String framed = UntrustedContent.toolResult(result.name(), result.id(), text + suffix);
+            if (framed.length() > charShare
+                    || MemoryEntry.estimateTokens(framed) > textBudget) {
                 ToolResultArtifact artifact = channels.stream().filter(ToolResultArtifact.class::isInstance)
                         .map(ToolResultArtifact.class::cast).findFirst().orElse(null);
                 if (artifact == null && !text.isBlank()) {
@@ -56,12 +59,13 @@ final class ToolResultWindow {
                         : "[result_ref=" + artifact.artifactRef() + ", offset=0]";
                 String header = "[" + result.status() + "/" + result.errorCode() + "；预览不完整]"
                         + reference + suffix + "\n";
-                text = prefix(header + text, charShare, textBudget);
+                text = prefix(header + text, result.name(), result.id(), charShare, textBudget);
             } else {
                 text += suffix;
             }
             List<LlmClient.ContentPart> images = new ArrayList<>();
-            int used = MemoryEntry.estimateTokens(text) + 8;
+            framed = UntrustedContent.toolResult(result.name(), result.id(), text);
+            int used = MemoryEntry.estimateTokens(framed) + 8;
             for (var image : result.imageParts()) {
                 if (imageCount >= MAX_IMAGES || !acceptableImage(image)) continue;
                 // Reserve the existing estimator's maximum plus image-message framing.
@@ -71,11 +75,11 @@ final class ToolResultWindow {
                 imageCount++;
                 used += cost;
             }
-            if (used > tokenShare || text.length() > charShare) {
+            if (used > tokenShare || framed.length() > charShare) {
                 throw new IllegalStateException("工具结果最小协议超出剩余上下文预算");
             }
             tokens -= used;
-            chars -= text.length();
+            chars -= framed.length();
             bounded.add(new ToolExecutionResult(result.id(), result.name(), result.argumentsJson(),
                     text, result.elapsedMillis(), result.status(), result.errorCode(), result.retryable(),
                     images, channels, result.presentation()));
@@ -85,16 +89,18 @@ final class ToolResultWindow {
 
     static int available(LlmClient client, List<LlmClient.Message> history, List<LlmClient.Tool> tools) {
         long remaining = (long) client.maxContextWindow() - client.maxOutputTokens() - 1_024
-                - TokenBudget.estimateMessagesTokens(history) - TokenBudget.estimateToolDefinitionsTokens(tools);
+                - TokenBudget.estimateMessagesTokens(ToolResultContext.render(history))
+                - TokenBudget.estimateToolDefinitionsTokens(tools);
         return (int) Math.max(0, Math.min(MAX_BATCH_TOKENS, remaining));
     }
 
-    private static String prefix(String text, int chars, int tokens) {
+    private static String prefix(String text, String sourceTool, String callId, int chars, int tokens) {
         int low = 0;
         int high = Math.min(text.length(), Math.max(0, chars));
         while (low < high) {
             int middle = (low + high + 1) >>> 1;
-            if (MemoryEntry.estimateTokens(text.substring(0, middle)) <= tokens) low = middle;
+            String framed = UntrustedContent.toolResult(sourceTool, callId, text.substring(0, middle));
+            if (framed.length() <= chars && MemoryEntry.estimateTokens(framed) <= tokens) low = middle;
             else high = middle - 1;
         }
         if (low > 0 && low < text.length() && Character.isHighSurrogate(text.charAt(low - 1))) low--;

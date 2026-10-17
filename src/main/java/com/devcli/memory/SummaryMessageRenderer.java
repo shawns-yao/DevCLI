@@ -47,7 +47,9 @@ final class SummaryMessageRenderer {
             }
         }
         appendImageMetadata(rendered, message);
-        return rendered.toString();
+        return "tool".equals(message.role())
+                ? com.devcli.util.UntrustedContent.toolResult(null, message.toolCallId(), rendered.toString())
+                : rendered.toString();
     }
 
     void appendImageMetadata(StringBuilder rendered, LlmClient.Message message) {

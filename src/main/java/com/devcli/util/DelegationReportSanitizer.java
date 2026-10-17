@@ -45,7 +45,7 @@ public final class DelegationReportSanitizer {
 
         ObjectNode framed = JSON.createObjectNode();
         ObjectNode security = framed.putObject(SECURITY_FIELD);
-        security.put("content_trust", "UNTRUSTED");
+        security.put("content_trust", UntrustedContent.UNTRUSTED);
         security.put("sanitization_enabled", sanitizationEnabled);
         security.put("sanitization_applied", !matchedPatterns.isEmpty());
         ArrayNode patterns = security.putArray("matched_patterns");
@@ -60,7 +60,7 @@ public final class DelegationReportSanitizer {
     private static LinkedHashSet<String> previousMatches(JsonNode security, boolean enabled) {
         LinkedHashSet<String> matches = new LinkedHashSet<>();
         if (!enabled || security == null || !security.isObject()
-                || !"UNTRUSTED".equals(security.path("content_trust").asText())
+                || !UntrustedContent.UNTRUSTED.equals(security.path("content_trust").asText())
                 || !security.path("sanitization_enabled").asBoolean(false)
                 || !security.path("sanitization_applied").asBoolean(false)) {
             return matches;

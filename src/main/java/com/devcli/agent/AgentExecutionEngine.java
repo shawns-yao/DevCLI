@@ -303,8 +303,10 @@ final class AgentExecutionEngine<R> {
                         definitionsCaptured = true;
                     }
                     List<LlmClient.Tool> toolDefinitions = frozenDefinitions;
+                    List<LlmClient.Message> requestMessages = com.devcli.llm.ToolResultContext.render(
+                            delegate.history().messages());
                     eventSink.emit(RunEvent.ModelContext.from(
-                            iteration, delegate.history().messages(), toolDefinitions == null ? List.of() : toolDefinitions));
+                            iteration, requestMessages, toolDefinitions == null ? List.of() : toolDefinitions));
                     if (frozenDefinitions != null && !frozenDefinitions.isEmpty()
                             && (originalDefinitions == null || originalDefinitions.isEmpty())) {
                         // 显式的无工具收尾通过 tool_choice 表达，定义前缀继续保持原样。
@@ -315,7 +317,7 @@ final class AgentExecutionEngine<R> {
                     }
                     requestedToolChoice = contextReferenceGuard.toolChoice(requestedToolChoice);
                     response = llmClient.chat(
-                            delegate.history().messages(),
+                            requestMessages,
                             toolDefinitions,
                             streamListener,
                             requestedToolChoice);

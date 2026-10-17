@@ -107,7 +107,7 @@ final class CompactionSummaryWorkflow {
         // 自动压缩阈值额外预留了维护空间；前缀请求可使用这部分空间，但仍预留完整模型输出。
         int prefixBudget = Math.max(0, context.llmClient.maxContextWindow() - context.llmClient.maxOutputTokens() - 1_024);
         if (context.learnedSummaryInputBudget > 0) prefixBudget = Math.min(prefixBudget, context.learnedSummaryInputBudget);
-        if ((long) TokenBudget.estimateMessagesTokens(request)
+        if ((long) TokenBudget.estimateMessagesTokens(com.devcli.llm.ToolResultContext.render(request))
                 + TokenBudget.estimateToolDefinitionsTokens(tools) > prefixBudget) return null;
         String response = callSummary(request, tools, prefixBudget);
         CompactionSummaryEnvelope envelope = CompactionSummaryEnvelope.parse(response);
@@ -200,6 +200,7 @@ final class CompactionSummaryWorkflow {
 
     String callSummary(List<LlmClient.Message> req, List<LlmClient.Tool> tools,
                                int inputBudget) throws IOException {
+        req = com.devcli.llm.ToolResultContext.render(req);
         if ((long) TokenBudget.estimateMessagesTokens(req)
                 + TokenBudget.estimateToolDefinitionsTokens(tools) > inputBudget) {
             throw new IOException("Summary request exceeds local input budget; original history retained");
