@@ -76,7 +76,7 @@
         <dependency>
             <groupId>org.jline</groupId>
             <artifactId>jline</artifactId>
-            <version>4.0.0</version>
+            <version>4.4.8</version>
             <classifier>jdk11</classifier>
         </dependency>
 
